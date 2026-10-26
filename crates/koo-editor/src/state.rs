@@ -740,11 +740,18 @@ fn services() -> Services {
             None
         }
     };
+    let html = match koo_html::HtmlEngine::new() {
+        Ok(h) => Some(Arc::new(h) as Arc<dyn koo_core::services::HtmlService>),
+        Err(e) => {
+            eprintln!("HTML engine unavailable: {e}");
+            None
+        }
+    };
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
-        html: None,
+        html,
     }
 }
 
