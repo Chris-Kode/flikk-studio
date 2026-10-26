@@ -2,6 +2,7 @@
 
 use koo_core::model::{Timeline, TrackKind};
 use koo_core::{Rate, Time, TrackId};
+use std::collections::HashMap;
 
 pub const HEADER_WIDTH: f32 = 150.;
 pub const RULER_HEIGHT: f32 = 26.;
@@ -14,6 +15,9 @@ pub const MIN_PX_PER_SEC: f32 = 0.5;
 pub const MAX_PX_PER_SEC: f32 = 4000.;
 /// Space below the last track, so the lanes never end flush with the panel.
 pub const BOTTOM_PAD: f32 = 24.;
+/// Track heights a header drag may set.
+pub const MIN_ROW_HEIGHT: f32 = 22.;
+pub const MAX_ROW_HEIGHT: f32 = 160.;
 
 pub fn row_height(kind: TrackKind) -> f32 {
     match kind {
@@ -82,13 +86,17 @@ pub struct Row {
     pub height: f32,
 }
 
-pub fn rows(timeline: &Timeline) -> Vec<Row> {
+/// Rows top to bottom; `heights` holds tracks the user resized.
+pub fn rows(timeline: &Timeline, heights: &HashMap<TrackId, f32>) -> Vec<Row> {
     let mut y = 0.;
     timeline
         .tracks
         .iter()
         .map(|t| {
-            let height = row_height(t.kind);
+            let height = heights
+                .get(&t.id)
+                .copied()
+                .unwrap_or_else(|| row_height(t.kind));
             let row = Row {
                 track: t.id,
                 kind: t.kind,

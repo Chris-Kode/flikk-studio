@@ -26,7 +26,8 @@ pub fn enabled() -> bool {
 }
 
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
-    let demo = project();
+    let mut demo = project();
+    let picks = timeline_fx(&mut demo.project);
     let analysis = interview_analysis(&demo);
     let jobs = vec![
         job(&demo.project.media[0], JobState::Done),
@@ -42,6 +43,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     state.chat = chat;
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![demo.ids.selected];
+    timeline_selection(state, &picks);
     // The demo media are not real files: always use the fake engines.
     state.services.media = Some(Arc::new(FakeMedia));
     state.services.analysis = Some(Arc::new(FakeAnalysis {
@@ -56,6 +58,83 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
         state.workspace = w;
     }
     cx.notify();
+}
+
+// ------------------------------------------------------------- timeline fx
+
+/// Objects [`timeline_selection`] can pick.
+struct TimelinePicks {
+    clips: Vec<ClipId>,
+    transition: Option<(ClipId, koo_core::command::Edge)>,
+}
+
+/// Pro-editing states for the timeline: transitions at a cut and at a clip
+/// head, a retimed clip, a disabled one, a colored and renamed one, an
+/// effect stack, and a generator clip.
+fn timeline_fx(p: &mut Project) -> TimelinePicks {
+    use koo_core::fx::{FxInstance, FxRef, Transition};
+    let secs = Time::from_secs_f64;
+    let city = p
+        .media
+        .iter()
+        .find(|m| m.path.ends_with("broll_city.mp4"))
+        .cloned();
+    let tracks = &mut p.timeline.tracks;
+    let mut picks = TimelinePicks {
+        clips: Vec::new(),
+        transition: None,
+    };
+    if let Some(v1) = tracks.iter_mut().find(|t| t.name == "V1")
+        && v1.clips.len() >= 4
+    {
+        v1.clips[0]
+            .effects
+            .push(FxInstance::new(FxRef::builtin("vignette")));
+        v1.clips[1].transition_in =
+            Some(Transition::new(FxRef::builtin("cross_dissolve"), secs(1.0)));
+        v1.clips[2].color = Some(ClipColor::Orange);
+        v1.clips[2].name = Some("Father's camera".into());
+        v1.clips[3].transition_out =
+            Some(Transition::new(FxRef::builtin("dip_to_color"), secs(1.5)));
+        picks.clips = vec![v1.clips[1].id, v1.clips[2].id];
+        picks.transition = Some((v1.clips[1].id, koo_core::command::Edge::Start));
+    }
+    if let Some(v2) = tracks.iter_mut().find(|t| t.name == "V2")
+        && let Some(first) = v2.clips.first_mut()
+    {
+        // 150 %: the same source in two thirds of the time.
+        first.speed = 1.5;
+        first.duration = first.duration.scale(1. / 1.5);
+        first.transition_in = Some(Transition::new(FxRef::builtin("dip_to_color"), secs(0.6)));
+        first.color = Some(ClipColor::Teal);
+        if let Some(city) = &city {
+            let mut off = media_clip(city, 29.0, 20.0, 4.0, false);
+            off.enabled = false;
+            picks.clips.push(off.id);
+            let at = v2.clips.partition_point(|c| c.start < off.start);
+            v2.clips.insert(at, off);
+        }
+    }
+    if let Some(titles) = tracks.iter_mut().find(|t| t.kind == TrackKind::Title) {
+        let fx = FxInstance::new(FxRef::builtin("lower_third"));
+        let clip = Clip::new(secs(17.0), secs(5.0), ClipContent::Generator { fx });
+        let at = titles.clips.partition_point(|c| c.start < clip.start);
+        titles.clips.insert(at, clip);
+    }
+    picks
+}
+
+/// `KOOEDITOR_DEMO_SELECTION=clips` selects several clips,
+/// `=transition` a transition.
+fn timeline_selection(state: &mut EditorState, picks: &TimelinePicks) {
+    match std::env::var("KOOEDITOR_DEMO_SELECTION").as_deref() {
+        Ok("clips") if !picks.clips.is_empty() => state.selection.clips = picks.clips.clone(),
+        Ok("transition") if picks.transition.is_some() => {
+            state.selection.clips.clear();
+            state.selected_transition = picks.transition;
+        }
+        _ => {}
+    }
 }
 
 // ------------------------------------------------------------------ project
