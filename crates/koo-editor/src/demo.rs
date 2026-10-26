@@ -55,6 +55,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     {
         state.workspace = w;
     }
+    chat_references(state, &demo, cx);
     cx.notify();
 }
 
@@ -603,4 +604,88 @@ fn job(item: &MediaItem, state: JobState) -> JobStatus {
         media: Some(item.id),
         state,
     }
+}
+
+// --------------------------------------------------------- chat references
+
+/// `KOOEDITOR_DEMO_CHAT=1`: an effect and a transition on the selected clip,
+/// a compressor on the music, a sent message with a reference of every
+/// kind, and chips of several kinds waiting in the composer.
+fn chat_references(state: &mut EditorState, demo: &Demo, cx: &mut Context<EditorState>) {
+    use koo_core::audiofx::{AudioFx, AudioFxKind};
+    use koo_core::command::Edge;
+    use koo_core::fx::{FxInstance, FxRef, ParamValue, Transition};
+    if std::env::var("KOOEDITOR_DEMO_CHAT").is_err() {
+        return;
+    }
+    let clip = demo.ids.selected;
+    let mut vignette = FxInstance::new(FxRef::builtin("vignette"));
+    vignette
+        .params
+        .insert("amount".into(), ParamValue::Number(0.35));
+    let commands = [
+        Command::AddEffect {
+            clips: vec![clip],
+            effect: vignette,
+            index: None,
+        },
+        Command::SetTransition {
+            clip,
+            edge: Edge::Start,
+            transition: Some(Transition::new(
+                FxRef::builtin("cross_dissolve"),
+                Time::from_secs_f64(0.5),
+            )),
+        },
+        Command::SetAudioEffects {
+            clip: demo.ids.music,
+            effects: vec![AudioFx::new(AudioFxKind::Compressor)],
+        },
+    ];
+    for command in commands {
+        let _ = state.bus.execute(command, Author::User, "demo");
+    }
+    let p = state.bus.project();
+    let Some((track, c)) = p.timeline.clip(clip) else {
+        return;
+    };
+    let effect = c.effects.last().map(|e| e.id);
+    let media = c.media();
+    let compressor = p
+        .timeline
+        .clip(demo.ids.music)
+        .and_then(|(_, m)| m.audio.effects.first().map(|e| e.id));
+    let (Some(effect), Some(media), Some(compressor)) = (effect, media, compressor) else {
+        return;
+    };
+    let marker = p.timeline.markers[0].id;
+    let bin = p.bins[0].id;
+    let (track_id, name) = (track.id, c.display_name(p));
+    let text = format!(
+        "Warm up @clip {clip} to match @media {media}, lower @effect {clip}/{effect} \
+         and swap @transition {clip}/in for @fx dip_to_color.\n\
+         Ease @effect {}/{compressor} like @audiofx limiter on @track {track_id}, \
+         keep @marker {marker} and @bin {bin}, \
+         tighten @range 0.600-3.400 and start at @time 11.400",
+        demo.ids.music
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    state.chat.push(msg(ChatRole::User, &text, now));
+    state.mention(
+        vec![
+            (format!("@clip {clip}"), name.into()),
+            ("@fx vignette".into(), "Vignette".into()),
+            (format!("@effect {clip}/{effect}"), "Vignette".into()),
+            (
+                "@range 0.600-3.400".into(),
+                "“I never planned to make films.”".into(),
+            ),
+            ("@time 11.400".into(), "0:11.4".into()),
+            ("@audiofx compressor".into(), "Compressor".into()),
+        ],
+        cx,
+    );
 }

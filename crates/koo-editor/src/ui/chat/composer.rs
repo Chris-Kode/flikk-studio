@@ -1,13 +1,16 @@
 //! Message input: Enter sends, Shift+Enter breaks the line, `@` opens the
 //! reference list (inserted as chips) and `/` at the start lists recipes.
+//! Clips, media, FX and transcript words dropped on it, and references
+//! other panels queue with "Add to chat", become chips too.
 
 use super::recipes;
-use super::refs::{self, Reference};
+use super::refs::{self, RefKind, Reference};
 use crate::state::EditorState;
+use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InlineToken, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InlineToken, InputEvent, InputToken, Textarea, TextareaState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -41,7 +44,27 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 enum Suggestion {
     Reference(Reference),
-    Recipe { name: String, title: String },
+    /// Playhead, In/Out or the selection: one or more references at once.
+    Special {
+        kind: RefKind,
+        label: String,
+        detail: String,
+        refs: Vec<(String, SharedString)>,
+    },
+    Recipe {
+        name: String,
+        title: String,
+    },
+}
+
+impl Suggestion {
+    /// The group it's listed under, if any.
+    fn group(&self) -> Option<RefKind> {
+        match self {
+            Self::Reference(r) => Some(r.kind),
+            Self::Special { .. } | Self::Recipe { .. } => None,
+        }
+    }
 }
 
 struct Suggestions {
@@ -55,6 +78,7 @@ pub struct Composer {
     state: Entity<EditorState>,
     input: Entity<TextareaState>,
     suggestions: Option<Suggestions>,
+    list_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -77,12 +101,75 @@ impl Composer {
                 _ => {}
             }),
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe_in(&state, window, |this, state, window, cx| {
+                let refs = state.update(cx, |s, _| s.take_mentions());
+                this.insert_refs(refs, window, cx);
+            }),
         ];
-        Self {
+        let mut this = Self {
             state,
             input,
             suggestions: None,
+            list_scroll: ScrollHandle::new(),
             _subscriptions,
+        };
+        // References queued before the composer existed.
+        let refs = this.state.update(cx, |s, _| s.take_mentions());
+        this.insert_refs(refs, window, cx);
+        this.demo(window, cx);
+        this
+    }
+
+    /// Insert references as chips at the cursor and focus the input.
+    pub fn insert_refs(
+        &mut self,
+        refs: Vec<(String, SharedString)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if refs.is_empty() {
+            return;
+        }
+        self.suggestions = None;
+        self.input.update(cx, |input, cx| {
+            for (text, label) in refs {
+                let value = input.value();
+                let cursor = input.cursor().min(value.len());
+                if value[..cursor]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !c.is_whitespace())
+                {
+                    input.insert(" ", window, cx);
+                }
+                let at = input.cursor();
+                let token = InlineToken::new(text.clone(), text.clone()).with_label(label);
+                if input
+                    .replace_range_with_token(at..at, token, window, cx)
+                    .is_err()
+                {
+                    input.insert(text, window, cx);
+                }
+                input.insert(" ", window, cx);
+            }
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Demo only (`KOOEDITOR_DEMO_CHAT_PICKER=@query`): open the `@` list.
+    fn demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::demo::enabled() {
+            return;
+        }
+        if let Ok(query) = std::env::var("KOOEDITOR_DEMO_CHAT_PICKER") {
+            self.input.update(cx, |input, cx| {
+                let text = format!("Trim {query}");
+                let end = text.len();
+                input.set_value(text, window, cx);
+                input.set_selected_range(end..end, cx);
+            });
+            self.refresh_suggestions(cx);
         }
     }
 
@@ -126,11 +213,14 @@ impl Composer {
         }
         let word = &before[start..];
         let items: Vec<Suggestion> = if let Some(query) = word.strip_prefix('@') {
-            let project = self.state.read(cx).bus.project();
-            refs::search(project, query)
-                .into_iter()
-                .map(Suggestion::Reference)
-                .collect()
+            let state = self.state.read(cx);
+            let mut items = specials(state, query);
+            items.extend(
+                refs::search(state.bus.project(), query)
+                    .into_iter()
+                    .map(Suggestion::Reference),
+            );
+            items
         } else {
             let query = word.strip_prefix('/').filter(|_| start == 0)?;
             recipes::list(self.state.read(cx))
@@ -156,9 +246,8 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             match item {
                 Suggestion::Reference(r) => {
-                    let token =
-                        InlineToken::new(format!("{}:{}", r.kind.word(), r.id), r.token_text())
-                            .with_label(r.label.clone());
+                    let token = InlineToken::new(r.token_text(), r.token_text())
+                        .with_label(r.label.clone());
                     if input
                         .replace_range_with_token(s.range.clone(), token, window, cx)
                         .is_err()
@@ -167,6 +256,22 @@ impl Composer {
                         input.replace(r.token_text(), window, cx);
                     }
                     input.insert(" ", window, cx);
+                }
+                Suggestion::Special { refs, .. } => {
+                    input.set_selected_range(s.range.clone(), cx);
+                    input.replace("", window, cx);
+                    for (text, label) in refs {
+                        let at = input.cursor();
+                        let token =
+                            InlineToken::new(text.clone(), text.clone()).with_label(label.clone());
+                        if input
+                            .replace_range_with_token(at..at, token, window, cx)
+                            .is_err()
+                        {
+                            input.insert(text.clone(), window, cx);
+                        }
+                        input.insert(" ", window, cx);
+                    }
                 }
                 Suggestion::Recipe { name, .. } => {
                     input.set_selected_range(s.range.clone(), cx);
@@ -185,6 +290,11 @@ impl Composer {
         };
         let n = s.items.len() as isize;
         s.selected = (s.selected as isize + delta).rem_euclid(n) as usize;
+        // Rows include a header before each group.
+        let headers = (0..=s.selected)
+            .filter(|&i| starts_group(&s.items, i))
+            .count();
+        self.list_scroll.scroll_to_item(s.selected + headers);
         cx.notify();
         true
     }
@@ -192,17 +302,38 @@ impl Composer {
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggestions.as_ref()?;
         let theme = cx.theme();
-        let rows = s.items.iter().enumerate().map(|(ix, item)| {
-            let (kind, label, detail) = match item {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (ix, item) in s.items.iter().enumerate() {
+            if starts_group(&s.items, ix)
+                && let Some(kind) = item.group()
+            {
+                rows.push(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .pt_1p5()
+                        .pb_0p5()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(kind.title())
+                        .into_any_element(),
+                );
+            }
+            let (icon, label, detail) = match item {
                 Suggestion::Reference(r) => {
-                    (r.kind.word().to_string(), r.label.clone(), r.detail.clone())
+                    (Some(r.kind.icon()), r.label.clone(), r.detail.clone())
                 }
-                Suggestion::Recipe { name, title } => {
-                    (String::new(), format!("/{name}"), title.clone())
-                }
+                Suggestion::Special {
+                    kind,
+                    label,
+                    detail,
+                    ..
+                } => (Some(kind.icon()), label.clone(), detail.clone()),
+                Suggestion::Recipe { name, title } => (None, format!("/{name}"), title.clone()),
             };
-            h_flex()
+            let row = h_flex()
                 .id(("suggestion", ix))
+                .flex_none()
                 .h(px(28.))
                 .px_2()
                 .gap_2()
@@ -211,14 +342,12 @@ impl Composer {
                 .when(ix == s.selected, |el| el.bg(theme.accent))
                 .hover(|el| el.bg(theme.accent))
                 .cursor_pointer()
-                .when(!kind.is_empty(), |el| {
+                .when_some(icon, |el, icon| {
                     el.child(
-                        div()
-                            .w(px(44.))
+                        Icon::new(icon)
+                            .size_3p5()
                             .flex_none()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(kind),
+                            .text_color(theme.muted_foreground),
                     )
                 })
                 .child(div().flex_1().min_w_0().truncate().child(label))
@@ -235,8 +364,9 @@ impl Composer {
                         cx.stop_propagation();
                         this.accept(ix, window, cx)
                     }),
-                )
-        });
+                );
+            rows.push(row.into_any_element());
+        }
         Some(
             deferred(
                 v_flex()
@@ -247,8 +377,9 @@ impl Composer {
                     .right_0()
                     .mb_1()
                     .p_1()
-                    .max_h(px(260.))
+                    .max_h(px(300.))
                     .overflow_y_scroll()
+                    .track_scroll(&self.list_scroll)
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
@@ -267,6 +398,7 @@ impl Render for Composer {
         let busy = self.state.read(cx).agent_busy();
         let empty = self.input.read(cx).value().trim().is_empty();
         let theme = cx.theme();
+        let (ring, drop) = (theme.ring, theme.accent.opacity(0.4));
         let action = if busy {
             Button::new("stop")
                 .icon(IconName::Square)
@@ -317,15 +449,114 @@ impl Render for Composer {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
+                    .drag_over::<RefDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
+                    .drag_over::<MediaDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
+                    .drag_over::<FxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
+                    .drag_over::<AudioFxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
+                    .on_drop(cx.listener(|this, drag: &RefDrag, window, cx| {
+                        this.insert_refs(drag.refs.clone(), window, cx)
+                    }))
+                    .on_drop(cx.listener(|this, drag: &MediaDrag, window, cx| {
+                        let token = format!("@media {}", drag.media);
+                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+                    }))
+                    .on_drop(cx.listener(|this, drag: &FxDrag, window, cx| {
+                        let token = format!("@fx {}", drag.fx);
+                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+                    }))
+                    .on_drop(cx.listener(|this, drag: &AudioFxDrag, window, cx| {
+                        let token = format!("@audiofx {}", drag.kind.name());
+                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+                    }))
                     .child(
                         Textarea::new(&self.input)
                             .appearance(false)
                             .text_sm()
                             .px_1()
-                            .pt_1(),
+                            .pt_1()
+                            .token(|token, _, _| {
+                                let chip = InputToken::new(token);
+                                match RefKind::of_token(token.token().text()) {
+                                    Some(kind) => chip.icon(kind.icon()),
+                                    None => chip,
+                                }
+                            }),
                     )
                     .child(h_flex().px_1p5().pb_1p5().justify_end().child(action)),
             )
             .children(self.render_suggestions(cx))
     }
+}
+
+/// Whether item `ix` opens a new group (and gets a header row).
+fn starts_group(items: &[Suggestion], ix: usize) -> bool {
+    let group = items[ix].group();
+    group.is_some() && (ix == 0 || items[ix - 1].group() != group)
+}
+
+/// Playhead, In/Out (when set) and the selection (when any), matching the
+/// typed query like the other references.
+fn specials(state: &EditorState, query: &str) -> Vec<Suggestion> {
+    let words = refs::query_words(query);
+    let project = state.bus.project();
+    let mut out = Vec::new();
+    let (token, label) = refs::time_token(state.playhead);
+    out.push(Suggestion::Special {
+        kind: RefKind::Time,
+        label: "Playhead".into(),
+        detail: label.clone(),
+        refs: vec![(token, label.into())],
+    });
+    if let Some(range) = state.in_out.filter(|r| !r.is_empty()) {
+        let (token, label) = refs::range_token(range);
+        out.push(Suggestion::Special {
+            kind: RefKind::Range,
+            label: "In/Out".into(),
+            detail: label.clone(),
+            refs: vec![(token, label.into())],
+        });
+    }
+    let mut selected: Vec<(String, SharedString)> = state
+        .selection
+        .clips
+        .iter()
+        .filter_map(|id| project.timeline.clip(*id))
+        .map(|(_, c)| (format!("@clip {}", c.id), c.display_name(project).into()))
+        .collect();
+    if let Some((clip, edge)) = state.selected_transition {
+        let side = match edge {
+            koo_core::command::Edge::Start => "in",
+            koo_core::command::Edge::End => "out",
+        };
+        let token = format!("@transition {clip}/{side}");
+        let resolved = koo_core::query::resolve_project_references(project, &token);
+        if let Some(r) = resolved.first() {
+            let m = refs::describe(project, &token, &r.reference);
+            if m.resolved {
+                selected.push((token, m.label.into()));
+            }
+        }
+    }
+    if !selected.is_empty() {
+        let detail = match selected.as_slice() {
+            [(_, one)] => one.to_string(),
+            many => format!("{} items", many.len()),
+        };
+        out.push(Suggestion::Special {
+            kind: RefKind::Clip,
+            label: "Selection".into(),
+            detail,
+            refs: selected,
+        });
+    }
+    out.retain(|s| match s {
+        Suggestion::Special {
+            kind,
+            label,
+            detail,
+            ..
+        } => refs::matches(&words, &format!("{label} {} {detail}", kind.word())),
+        _ => true,
+    });
+    out
 }

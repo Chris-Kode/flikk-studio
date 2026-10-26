@@ -4,10 +4,13 @@
 
 mod approval;
 mod change_set;
+mod chips;
 mod composer;
+mod context;
 mod quick;
 mod recipes;
 mod refs;
+mod reveal;
 mod tools;
 
 use crate::state::EditorState;
@@ -109,8 +112,13 @@ impl ChatPanel {
         }
     }
 
+    /// Send a message; the agent also gets its references resolved.
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.send_chat(text, cx));
+        self.state.update(cx, |s, cx| {
+            let block =
+                context::references_block(s.bus.project(), s.services.analysis.as_deref(), &text);
+            s.send_chat_with_context(text, block, cx)
+        });
         self.scroller.update(cx, |s, cx| s.scroll_to_end(cx));
     }
 
@@ -380,32 +388,43 @@ impl ChatPanel {
             .get(ix + 1)
             .filter(|m| m.role == ChatRole::User)
             .map(|m| m.text.clone());
-        let text = refs::display(&msg.text, state.bus.project());
+        let text = match msg.role {
+            ChatRole::User => String::new(),
+            ChatRole::Agent => refs::display(&msg.text, state.bus.project()),
+        };
         let busy = state.agent_busy();
         match msg.role {
-            ChatRole::User => Message::new()
-                .alignment(MessageAlignment::End)
-                .content(
-                    MessageContent::new().bubble(
-                        Bubble::new()
-                            .with_variant(BubbleVariant::Muted)
-                            .child(TextView::markdown(
-                                ("chat-text", ix),
-                                // Keep the user's line breaks.
-                                text.replace('\n', "  \n"),
+            ChatRole::User => {
+                Message::new()
+                    .alignment(MessageAlignment::End)
+                    .content(MessageContent::new().bubble(
+                        Bubble::new().with_variant(BubbleVariant::Muted).child(
+                            div().text_sm().child(chips::message_text(
+                                ix,
+                                &msg.text,
+                                &self.state,
+                                cx,
                             )),
-                    ),
-                )
-                .into_any_element(),
+                        ),
+                    ))
+                    .into_any_element()
+            }
             ChatRole::Agent => {
                 let mut content = MessageContent::new().gap_2();
                 if !text.is_empty() {
-                    content = content.child(
-                        div()
-                            .w_full()
-                            .text_sm()
-                            .child(TextView::markdown(("chat-text", ix), text)),
-                    );
+                    let state = self.state.downgrade();
+                    content = content.child(div().w_full().text_sm().child(
+                        TextView::markdown(("chat-text", ix), text).on_link_click(
+                            move |url, _, _, cx| match refs::token_of_link(url) {
+                                Some(token) => {
+                                    if let Some(state) = state.upgrade() {
+                                        reveal::reveal(&state, &token, cx);
+                                    }
+                                }
+                                None => cx.open_url(url),
+                            },
+                        ),
+                    ));
                 }
                 if !msg.choices.is_empty() {
                     content = content.child(h_flex().flex_wrap().gap_1p5().children(
