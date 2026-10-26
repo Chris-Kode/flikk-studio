@@ -177,13 +177,15 @@ All nine streams are merged. What runs today:
   change set → accept); Codex adapter written from its docs, not yet run.
   The editor binary doubles as the MCP server (`koo-editor mcp`).
 * **Store:** projects with undo history, autosave and crash recovery,
-  settings, style profiles, source facts, built-in recipes, per-project
-  chat.
+  settings, style profiles, source facts, built-in recipes, chat
+  sessions per project (each resumes its own backend conversation).
 * **Deliver:** FFmpeg render graph, render queue, SRT/ASS, OTIO, FCPXML,
   frame export.
-* **UI:** all six workspaces, timeline with change-set overlay, viewer
-  with playback, media pool, inspector, transcript/captions, chat with
-  change-set review, agent settings, project menu.
+* **UI:** all six workspaces, timeline with change-set overlay, track
+  add/delete and cut stepping (Up/Down), viewer with playback, media pool
+  with removal, an inspector that shows the selected clip's properties by
+  kind (video, audio, caption, title), transcript/captions, chat sessions
+  with change-set review, agent settings, project menu.
 
 Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor`
 (`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace).

@@ -6,10 +6,14 @@ mod thumbs;
 
 use crate::state::EditorState;
 use crate::ui::MediaDrag;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use crate::ui::timeline::glyph::{Glyph, glyph};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::Command;
@@ -23,6 +27,20 @@ use thumbs::Thumbs;
 
 const POLL: Duration = Duration::from_millis(500);
 
+actions!(media_pool, [RemoveSelected]);
+
+fn bind_keys(cx: &mut App) {
+    static BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if BOUND.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let c = Some("MediaPool");
+    cx.bind_keys([
+        KeyBinding::new("delete", RemoveSelected, c),
+        KeyBinding::new("backspace", RemoveSelected, c),
+    ]);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Layout {
     Grid,
@@ -31,6 +49,7 @@ enum Layout {
 
 pub struct MediaPoolPanel {
     state: Entity<EditorState>,
+    focus: FocusHandle,
     search: Entity<InputState>,
     tag_input: Entity<InputState>,
     bin_input: Entity<InputState>,
@@ -49,6 +68,7 @@ pub struct MediaPoolPanel {
 
 impl MediaPoolPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        bind_keys(cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag"));
         let bin_input = cx.new(|cx| InputState::new(window, cx));
@@ -82,6 +102,7 @@ impl MediaPoolPanel {
             .flatten();
         Self {
             state,
+            focus: cx.focus_handle(),
             search,
             tag_input,
             bin_input,
@@ -144,13 +165,48 @@ impl MediaPoolPanel {
         .detach();
     }
 
-    fn select(&mut self, id: MediaId, open: bool, cx: &mut Context<Self>) {
+    fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
         self.selected = Some(id);
         if open {
             self.state
                 .update(cx, |s, cx| s.set_source_media(Some(id), cx));
         }
         cx.notify();
+    }
+
+    /// Ask, then remove `id` from the project together with its clips.
+    fn confirm_remove(&mut self, id: MediaId, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(item) = state.bus.project().media(id) else {
+            return;
+        };
+        let name = item_name(item);
+        let clips = state.clips_using(id).len();
+        let (state, panel) = (self.state.clone(), cx.entity().downgrade());
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (state, panel) = (state.clone(), panel.clone());
+            let alert = alert
+                .title(format!("Remove “{name}” from the project?"))
+                .ok_text("Remove")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.remove_media(id, cx));
+                    let _ = panel.update(cx, |this, cx| {
+                        if this.selected == Some(id) {
+                            this.selected = None;
+                            cx.notify();
+                        }
+                    });
+                    true
+                });
+            match clips {
+                0 => alert,
+                1 => alert.description("Its clip is removed from the timeline too."),
+                n => alert.description(format!("Its {n} clips are removed from the timeline too.")),
+            }
+        });
     }
 
     fn update_media(&self, item: MediaItem, cx: &mut Context<Self>) {
@@ -418,17 +474,18 @@ impl MediaPoolPanel {
                 })
                 .children(progress.map(|p| progress_bar(p, cx)))
         };
+        let panel = cx.entity();
         let base = div()
             .id(ElementId::Name(format!("media-{id}").into()))
             .rounded_md()
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.list_active))
             .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
-            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                this.select(id, ev.click_count() >= 2, cx)
+            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                this.select(id, ev.click_count() >= 2, window, cx)
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()));
-        match self.layout {
+        let base = match self.layout {
             Layout::Grid => base
                 .w(px(124.))
                 .p_1()
@@ -436,8 +493,7 @@ impl MediaPoolPanel {
                 .flex_col()
                 .gap_1()
                 .child(thumb_box(px(116.)))
-                .child(div().text_xs().truncate().child(name))
-                .into_any_element(),
+                .child(div().text_xs().truncate().child(name)),
             Layout::List => base
                 .h(px(32.))
                 .px_1()
@@ -451,9 +507,23 @@ impl MediaPoolPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .children(item.info.as_ref().map(|i| clock(i.duration))),
-                )
-                .into_any_element(),
-        }
+                ),
+        };
+        base.context_menu(move |menu, _, _| {
+            let (open, remove) = (panel.clone(), panel.clone());
+            menu.item(
+                PopupMenuItem::new("Open in viewer").on_click(move |_, window, cx| {
+                    open.update(cx, |this, cx| this.select(id, true, window, cx))
+                }),
+            )
+            .item(PopupMenuItem::separator())
+            .item(
+                PopupMenuItem::new("Remove from project").on_click(move |_, window, cx| {
+                    remove.update(cx, |this, cx| this.confirm_remove(id, window, cx))
+                }),
+            )
+        })
+        .into_any_element()
     }
 
     fn details(&self, item: &MediaItem, cx: &mut Context<Self>) -> AnyElement {
@@ -484,12 +554,34 @@ impl MediaPoolPanel {
             lines.push(fp.0.chars().take(16).collect::<String>().into());
         }
         let tags = item.tags.clone();
+        let id = item.id;
         v_flex()
             .gap_1()
             .p_2()
             .border_t_1()
             .border_color(theme.border)
-            .child(div().text_sm().truncate().child(item_name(item)))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .truncate()
+                            .child(item_name(item)),
+                    )
+                    .child(
+                        Button::new("remove-media")
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Remove from project")
+                            .child(glyph(Glyph::Trash, px(13.), muted))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_remove(id, window, cx)
+                            })),
+                    ),
+            )
             .children(
                 lines
                     .into_iter()
@@ -540,6 +632,13 @@ impl Render for MediaPoolPanel {
         v_flex()
             .id("media-pool")
             .size_full()
+            .track_focus(&self.focus)
+            .key_context("MediaPool")
+            .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
+                if let Some(id) = this.selected {
+                    this.confirm_remove(id, window, cx);
+                }
+            }))
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.import(paths.paths().to_vec(), cx)

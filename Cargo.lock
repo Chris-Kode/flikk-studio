@@ -3595,7 +3595,9 @@ dependencies = [
  "koo-deliver",
  "koo-media",
  "koo-store",
+ "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

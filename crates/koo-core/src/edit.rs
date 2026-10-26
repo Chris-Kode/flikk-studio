@@ -110,7 +110,11 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             },
         ),
         Command::EditCaption { clip, text, range } => update_clip(tl, *clip, |c| {
-            if let (Some(new), ClipContent::Caption { text: old, .. }) = (text, &mut c.content) {
+            if let (
+                Some(new),
+                ClipContent::Caption { text: old, .. } | ClipContent::Title { text: old, .. },
+            ) = (text, &mut c.content)
+            {
                 *old = new.clone();
             }
             if let Some(r) = range {

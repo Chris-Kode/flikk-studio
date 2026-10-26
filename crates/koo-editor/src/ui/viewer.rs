@@ -10,7 +10,9 @@ mod grade;
 mod player;
 
 use super::timeline::glyph::{Glyph, glyph};
-use super::timeline::{NextFrame, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop};
+use super::timeline::{
+    NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
+};
 use crate::app::TogglePlay;
 use crate::state::EditorState;
 use audio::AudioOut;
@@ -454,6 +456,12 @@ impl Render for ViewerPanel {
                 super::timeline::transport(&this.state, a, cx)
             }))
             .on_action(cx.listener(|this, a: &NextFrame, _, cx| {
+                super::timeline::transport(&this.state, a, cx)
+            }))
+            .on_action(cx.listener(|this, a: &PrevCut, _, cx| {
+                super::timeline::transport(&this.state, a, cx)
+            }))
+            .on_action(cx.listener(|this, a: &NextCut, _, cx| {
                 super::timeline::transport(&this.state, a, cx)
             }))
             .child(program)
