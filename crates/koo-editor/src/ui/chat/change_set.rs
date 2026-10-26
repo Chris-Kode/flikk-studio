@@ -111,10 +111,11 @@ impl ChatPanel {
                 .gap_1()
                 .child(
                     Button::new(("preview", id_hash(id)))
+                        // The eye shows the state, like a track's visibility.
                         .icon(if previewing {
-                            IconName::EyeOff
-                        } else {
                             IconName::Eye
+                        } else {
+                            IconName::EyeOff
                         })
                         .label("Preview")
                         .xsmall()
