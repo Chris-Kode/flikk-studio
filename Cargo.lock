@@ -3503,6 +3503,7 @@ dependencies = [
  "koo-deliver",
  "koo-media",
  "koo-store",
+ "serde_json",
 ]
 
 [[package]]
