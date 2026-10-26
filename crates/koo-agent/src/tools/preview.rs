@@ -158,7 +158,7 @@ pub fn preview_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     .or(main.map(|c| c.duration.as_secs_f64()))
                     .unwrap_or(3.0),
                 inputs: (None, None),
-                from_label: "generated".into(),
+                from_label: "its own".into(),
                 asset,
             }
         }
