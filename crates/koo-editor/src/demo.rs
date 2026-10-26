@@ -26,7 +26,7 @@ pub fn enabled() -> bool {
 }
 
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
-    let demo = project();
+    let demo = color(project());
     let analysis = interview_analysis(&demo);
     let jobs = vec![
         job(&demo.project.media[0], JobState::Done),
@@ -56,6 +56,34 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
         state.workspace = w;
     }
     cx.notify();
+}
+
+// -------------------------------------------------------------------- color
+
+/// A look on the selected clip, so the Color workspace has wheels, curves
+/// and scopes to show.
+fn color(mut demo: Demo) -> Demo {
+    if let Some(clip) = demo
+        .project
+        .timeline
+        .tracks
+        .iter_mut()
+        .flat_map(|t| t.clips.iter_mut())
+        .find(|c| c.id == demo.ids.selected)
+    {
+        let g = &mut clip.grade;
+        g.lift = [0.02, -0.01, 0.05];
+        g.gain = [1.08, 1.0, 0.92];
+        g.saturation = 1.15;
+        g.hue = -6.0;
+        g.shadows = 0.2;
+        g.curves = Curves {
+            master: vec![[0.0, 0.03], [0.25, 0.2], [0.75, 0.82], [1.0, 0.97]],
+            blue: vec![[0.3, 0.34], [0.7, 0.66]],
+            ..Curves::default()
+        };
+    }
+    demo
 }
 
 // ------------------------------------------------------------------ project
