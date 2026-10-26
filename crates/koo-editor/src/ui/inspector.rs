@@ -125,7 +125,7 @@ impl InspectorPanel {
                     commands.push(Command::SetKeyframe {
                         clip: clip.id,
                         property,
-                        at: clip_time(clip, playhead),
+                        at: clip.start + clip_time(clip, playhead),
                         value: v,
                         ease: Default::default(),
                     });

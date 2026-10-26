@@ -72,7 +72,8 @@ impl InspectorPanel {
         } else {
             theme.muted_foreground
         };
-        let (clip_id, value) = (clip.id, value_at(clip, property, at));
+        // Commands take timeline time; keyframes store clip-relative time.
+        let (clip_id, value, when) = (clip.id, value_at(clip, property, at), clip.start + at);
         div()
             .id(SharedString::from(format!("kf-{property:?}")))
             .flex_none()
@@ -100,13 +101,13 @@ impl InspectorPanel {
                         Command::RemoveKeyframe {
                             clip: clip_id,
                             property,
-                            at,
+                            at: when,
                         }
                     } else {
                         Command::SetKeyframe {
                             clip: clip_id,
                             property,
-                            at,
+                            at: when,
                             value,
                             ease: Default::default(),
                         }
@@ -156,7 +157,7 @@ impl InspectorPanel {
                                 vec![Command::RemoveKeyframe {
                                     clip: clip_id,
                                     property,
-                                    at: time,
+                                    at: start + time,
                                 }],
                                 "remove_keyframe",
                                 cx,
