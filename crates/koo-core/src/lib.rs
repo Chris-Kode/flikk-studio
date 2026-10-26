@@ -12,6 +12,7 @@
 pub mod agent;
 pub mod analysis;
 pub mod bus;
+pub mod captions;
 pub mod changeset;
 pub mod command;
 pub mod edit;
