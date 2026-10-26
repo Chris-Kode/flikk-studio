@@ -70,6 +70,9 @@ pub struct EditorState {
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
     pub render_queue: koo_deliver::RenderQueue,
+    // --- library (effects library, inspector, FX code editor)
+    /// FX program open in the code editor; built-ins open read-only.
+    pub editing_fx: Option<koo_core::fx::FxRef>,
 }
 
 impl EditorState {
@@ -113,6 +116,7 @@ impl EditorState {
             focused_change: None,
             selected_transition: None,
             pending_mentions: Vec::new(),
+            editing_fx: None,
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
@@ -1037,6 +1041,17 @@ impl EditorState {
     /// The user's recipes, for `/` completion and the quick-command bar.
     pub fn recipes(&self) -> Vec<koo_core::memory::Recipe> {
         persistence::with_store(|s| s.list_recipes()).unwrap_or_default()
+    }
+}
+
+// --- library (effects library, inspector, FX code editor)
+impl EditorState {
+    /// Open `fx` in the code editor, or close it with `None`.
+    pub fn edit_fx(&mut self, fx: Option<koo_core::fx::FxRef>, cx: &mut Context<Self>) {
+        if self.editing_fx != fx {
+            self.editing_fx = fx;
+            cx.notify();
+        }
     }
 }
 

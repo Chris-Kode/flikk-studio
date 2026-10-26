@@ -17,6 +17,10 @@ pub enum Key {
     Scale,
     Rotation,
     Opacity,
+    /// Crop edge: left, top, right, bottom.
+    Crop(usize),
+    /// The selected transition's length in seconds.
+    TransitionDuration,
     Exposure,
     Contrast,
     Saturation,
@@ -68,6 +72,16 @@ impl Key {
             Key::Scale => s("Scale", 10., 400., 1., 0, 100., 1.),
             Key::Rotation => s("Rotation", -180., 180., 0.5, 1, 1., 0.),
             Key::Opacity => s("Opacity", 0., 100., 1., 0, 100., 1.),
+            Key::Crop(i) => s(
+                ["Left", "Top", "Right", "Bottom"][i.min(3)],
+                0.,
+                100.,
+                0.5,
+                1,
+                100.,
+                0.,
+            ),
+            Key::TransitionDuration => s("Duration", 0.1, 5., 0.05, 2, 1., 1.),
             Key::Exposure => s("Exposure", -4., 4., 0.01, 2, 1., 0.),
             Key::Contrast => s("Contrast", 0., 200., 1., 0, 100., 1.),
             Key::Saturation => s("Saturation", 0., 200., 1., 0, 100., 1.),

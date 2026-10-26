@@ -3,7 +3,8 @@
 
 use crate::state::EditorState;
 use crate::ui::{
-    chat::ChatPanel, deliver::DeliverPanel, inspector::InspectorPanel, media_pool::MediaPoolPanel,
+    chat::ChatPanel, code_editor::CodeEditorPanel, deliver::DeliverPanel,
+    inspector::InspectorPanel, library::LibraryPanel, media_pool::MediaPoolPanel,
     timeline::TimelinePanel, transcript::TranscriptPanel, viewer::ViewerPanel,
 };
 use gpui_kit::component::ActiveTheme as _;
@@ -31,6 +32,13 @@ pub fn bind_keys(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
 
+/// What the Edit workspace's left panel shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeftTab {
+    Media,
+    Effects,
+}
+
 pub struct KooEditor {
     state: Entity<EditorState>,
     timeline: Entity<TimelinePanel>,
@@ -40,6 +48,9 @@ pub struct KooEditor {
     transcript: Entity<TranscriptPanel>,
     deliver: Entity<DeliverPanel>,
     chat: Entity<ChatPanel>,
+    library: Entity<LibraryPanel>,
+    code_editor: Entity<CodeEditorPanel>,
+    left_tab: LeftTab,
     _observe: Subscription,
 }
 
@@ -58,6 +69,12 @@ impl KooEditor {
             transcript: cx.new(|cx| TranscriptPanel::new(state.clone(), window, cx)),
             deliver: cx.new(|cx| DeliverPanel::new(state.clone(), window, cx)),
             chat: cx.new(|cx| ChatPanel::new(state.clone(), window, cx)),
+            library: cx.new(|cx| LibraryPanel::new(state.clone(), window, cx)),
+            code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
+            left_tab: match crate::demo::fx_view().as_deref() {
+                Some("library" | "code") => LeftTab::Effects,
+                _ => LeftTab::Media,
+            },
             state,
             _observe,
         }
@@ -122,25 +139,66 @@ impl KooEditor {
         )
     }
 
+    /// Edit's left panel: media pool or effects library under segmented tabs.
+    fn edit_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = self.left_tab;
+        let border = cx.theme().border;
+        let body: AnyElement = match tab {
+            LeftTab::Media => self.media_pool.clone().into_any_element(),
+            LeftTab::Effects => self.library.clone().into_any_element(),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div().p_1().border_b_1().border_color(border).child(
+                    TabBar::new("edit-left")
+                        .segmented()
+                        .xsmall()
+                        .w_full()
+                        .selected_index(match tab {
+                            LeftTab::Media => 0,
+                            LeftTab::Effects => 1,
+                        })
+                        .child(Tab::new().label("Media").flex_1())
+                        .child(Tab::new().label("Effects").flex_1())
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            this.left_tab = if *ix == 0 {
+                                LeftTab::Media
+                            } else {
+                                LeftTab::Effects
+                            };
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().flex_1().min_h_0().child(body))
+    }
+
     fn workspace(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.state.read(cx).workspace {
-            Workspace::Edit => self
-                .over_timeline(
+            Workspace::Edit => {
+                // The code editor takes the inspector's place while open.
+                let coding = self.state.read(cx).editing_fx.is_some();
+                let (id, right, width): (&'static str, AnyElement, f32) = if coding {
+                    (
+                        "edit-top-code",
+                        self.code_editor.clone().into_any_element(),
+                        460.,
+                    )
+                } else {
+                    ("edit-top", self.inspector.clone().into_any_element(), 300.)
+                };
+                self.over_timeline(
                     "edit",
-                    h_resizable("edit-top")
-                        .child(
-                            resizable_panel()
-                                .size(px(260.))
-                                .child(self.media_pool.clone()),
-                        )
+                    h_resizable(id)
+                        .child(resizable_panel().size(px(260.)).child(self.edit_left(cx)))
                         .child(resizable_panel().child(self.viewer.clone()))
-                        .child(
-                            resizable_panel()
-                                .size(px(280.))
-                                .child(self.inspector.clone()),
-                        ),
+                        .child(resizable_panel().size(px(width)).child(right)),
                 )
-                .into_any_element(),
+                .into_any_element()
+            }
             Workspace::Captions => self
                 .over_timeline(
                     "captions",
