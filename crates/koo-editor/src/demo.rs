@@ -3,7 +3,10 @@
 //! with an accepted and a pending change set, and fake engines, so every
 //! panel can be exercised and screenshotted without real media.
 //! `KOOEDITOR_DEMO_WORKSPACE=<label>` opens that workspace.
+//! `KOOEDITOR_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
+//! media (see [`compose`]).
 
+mod compose;
 mod engines;
 
 use crate::state::EditorState;
@@ -71,6 +74,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     audio_demo_playback(state);
     seed_fx(state, &demo.ids, cx);
     chat_references(state, &demo, cx);
+    compose::seed(state);
     cx.notify();
 }
 
