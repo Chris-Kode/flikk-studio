@@ -12,10 +12,10 @@ mod tools;
 
 use crate::state::EditorState;
 use crate::ui::settings::SettingsPanel;
+use crate::ui::timeline::glyph::{Glyph, glyph};
 use composer::{Composer, ComposerEvent};
 use gpui_kit::component::bubble::{Bubble, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message::{Message, MessageAlignment, MessageContent};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
@@ -62,6 +62,8 @@ pub struct ChatPanel {
     signature: u64,
     /// Chat session the rows show.
     chat: String,
+    /// The chat sessions show in place of the thread.
+    sessions_open: bool,
     /// Change item last revealed for the timeline.
     revealed: Option<(ChangeSetId, ChangeItemId)>,
     render_poll: Option<Task<()>>,
@@ -100,6 +102,7 @@ impl ChatPanel {
             tool_open: HashSet::new(),
             signature,
             chat,
+            sessions_open: false,
             revealed: None,
             render_poll: None,
             _subscriptions,
@@ -199,56 +202,78 @@ impl ChatPanel {
         });
     }
 
-    /// The active chat's title; opens the other sessions, "New chat" and
-    /// "Delete chat".
-    fn session_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.state.clone();
+    /// Chat sessions in place of the thread, most recent first: pick one to
+    /// open it, hover one to delete it.
+    fn render_sessions(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = self.state.read(cx);
-        let busy = s.agent_busy();
         let active = s.active_chat().to_owned();
-        let title = s
-            .chat_sessions()
-            .into_iter()
-            .find(|(id, _)| *id == active)
-            .map_or_else(|| "Untitled".to_owned(), |(_, title)| title);
-        Button::new("chat-sessions")
-            .ghost()
-            .small()
-            .label(title)
-            .dropdown_caret(true)
-            .disabled(busy)
-            .dropdown_menu(move |menu, _, cx| {
-                let s = state.read(cx);
-                let active = s.active_chat().to_owned();
-                let sessions = s.chat_sessions();
-                let empty = s.chat.is_empty();
-                let new = state.clone();
-                let mut menu = menu.item(
-                    PopupMenuItem::new("New chat")
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| new.update(cx, |s, cx| s.new_chat(cx))),
-                );
-                menu = menu.item(PopupMenuItem::separator());
-                for (id, title) in sessions {
-                    let state = state.clone();
-                    let checked = id == active;
-                    menu = menu.item(PopupMenuItem::new(title).checked(checked).on_click(
-                        move |_, _, cx| state.update(cx, |s, cx| s.switch_chat(&id, cx)),
-                    ));
-                }
-                let delete = state.clone();
-                menu.item(PopupMenuItem::separator()).item(
-                    PopupMenuItem::new("Delete chat").on_click(move |_, window, cx| {
-                        Self::confirm_delete(delete.clone(), active.clone(), window, cx)
-                    }),
-                )
-            })
+        let sessions = s.chat_sessions();
+        let theme = cx.theme();
+        let (accent, hover, muted) = (theme.accent, theme.secondary_hover, theme.muted_foreground);
+        v_flex()
+            .id("chat-sessions")
+            .flex_1()
+            .min_h_0()
+            .p_2()
+            .gap_0p5()
+            .overflow_y_scroll()
+            .children(sessions.into_iter().enumerate().map(|(ix, (id, title))| {
+                let current = id == active;
+                let open = {
+                    let id = id.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        this.sessions_open = false;
+                        this.state.update(cx, |s, cx| s.switch_chat(&id, cx));
+                        cx.notify();
+                    })
+                };
+                let delete = cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    Self::confirm_delete(this.state.clone(), id.clone(), window, cx);
+                });
+                h_flex()
+                    .id(("chat-session", ix))
+                    .group("chat-session")
+                    .flex_none()
+                    .h(px(32.))
+                    .pl_2()
+                    .pr_1()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(current, |el| el.bg(accent))
+                    .hover(|el| el.bg(hover))
+                    .on_click(open)
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .child(
+                        div()
+                            .flex_none()
+                            .invisible()
+                            .group_hover("chat-session", |el| el.visible())
+                            .child(
+                                Button::new(("chat-delete", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Delete chat")
+                                    .child(glyph(Glyph::Trash, px(13.), muted))
+                                    .on_click(delete),
+                            ),
+                    )
+            }))
+            .into_any_element()
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let empty = self.state.read(cx).chat.is_empty();
-        let busy = self.state.read(cx).agent_busy();
-        let backend = self.state.read(cx).settings.backend.label();
+        let s = self.state.read(cx);
+        let empty = s.chat.is_empty();
+        let busy = s.agent_busy();
+        let backend = s.settings.backend.label();
+        let title = s
+            .chat_sessions()
+            .into_iter()
+            .find(|(id, _)| id == s.active_chat())
+            .map_or_else(|| "Untitled".to_owned(), |(_, title)| title);
         let theme = cx.theme();
         h_flex()
             .h(px(40.))
@@ -275,7 +300,7 @@ impl ChatPanel {
                             )
                             .tooltip(move |window, cx| Tooltip::new(backend).build(window, cx)),
                     )
-                    .child(self.session_menu(cx)),
+                    .child(div().min_w_0().text_sm().truncate().child(title)),
             )
             .child(
                 h_flex()
@@ -289,7 +314,20 @@ impl ChatPanel {
                             .tooltip("New chat")
                             .disabled(empty || busy)
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.sessions_open = false;
                                 this.state.update(cx, |s, cx| s.new_chat(cx))
+                            })),
+                    )
+                    .child(
+                        Button::new("chat-sessions-toggle")
+                            .icon(IconName::Menu)
+                            .ghost()
+                            .small()
+                            .tooltip("Chats")
+                            .selected(self.sessions_open)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sessions_open = !this.sessions_open;
+                                cx.notify();
                             })),
                     )
                     .child(
@@ -440,8 +478,14 @@ impl Render for ChatPanel {
             .size_full()
             .bg(cx.theme().background)
             .child(self.render_header(cx))
-            .child(self.render_thread(cx))
-            .child(self.render_footer(cx))
+            .map(|el| {
+                if self.sessions_open {
+                    el.child(self.render_sessions(cx))
+                } else {
+                    el.child(self.render_thread(cx))
+                        .child(self.render_footer(cx))
+                }
+            })
     }
 }
 
