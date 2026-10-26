@@ -7,19 +7,24 @@
 //! expressions over `t`) and places it on a transparent canvas. Concat keeps
 //! only the current segment's decoder busy, so long timelines stay cheap.
 //!
-//! Audio: each audible track is a `concat` of silence and clip segments
-//! (`atrim`, gain, fades), then track volume and pan, optional ducking via
-//! `sidechaincompress` keyed by the dialogue tracks, the mix, and optional
-//! `loudnorm`.
+//! Audio: each audible track is a `concat` of silence and clip spans (two
+//! lanes where crossfades overlap), mixed, then track volume, pan and track
+//! effects; optional ducking via `sidechaincompress` keyed by the dialogue
+//! tracks, the mix, and optional `loudnorm`. A span trims its source with
+//! handles, retimes it with `atempo`, runs the clip effects
+//! ([`crate::audio_fx`]) and one `volume` expression for gain or volume
+//! keyframes, fades and equal-power crossfade ramps, following
+//! `koo_core::audiofx` like the viewer's mixer.
 //!
 //! Sources are opened with `movie`/`amovie` inside the graph, so the whole
 //! render is one script file and one input-less ffmpeg invocation.
 
-use crate::captions;
 use crate::ffmpeg::{escape_path, probe_size};
 use crate::keyframes::{Anim, anim, num};
 use crate::preset::{LoudnessTarget, RenderSettings};
+use crate::{audio_fx, captions};
 use anyhow::{Context as _, Result, bail};
+use koo_core::audiofx::{self, Span};
 use koo_core::memory::CaptionStyle;
 use koo_core::model::{Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind};
 use koo_core::time::FLICKS_PER_SECOND;
@@ -136,7 +141,11 @@ pub fn build(project: &Project, spec: &GraphSpec, work_dir: &Path) -> Result<Gra
     } else {
         None
     };
-    let audio = if spec.audio { Some(b.audio()?) } else { None };
+    let audio = if spec.audio {
+        Some(b.audio(work_dir)?)
+    } else {
+        None
+    };
     Ok(Graph {
         script: b.chains.join(";\n") + "\n",
         video,
@@ -464,7 +473,7 @@ impl Builder<'_> {
 
     // ---------------------------------------------------------------- audio
 
-    fn audio(&mut self) -> Result<String> {
+    fn audio(&mut self, work_dir: &Path) -> Result<String> {
         let sr = self.spec.sample_rate;
         let total = self.samples(self.spec.range.end).max(1);
         let tracks: Vec<&Track> = self
@@ -480,7 +489,7 @@ impl Builder<'_> {
             if track.mix.mute || (solo && !track.mix.solo) {
                 continue;
             }
-            if let Some(s) = self.audio_track(track)? {
+            if let Some(s) = self.audio_track(track, work_dir)? {
                 streams.push((track.id, s));
             }
         }
@@ -494,22 +503,18 @@ impl Builder<'_> {
                 let dialogue: Vec<String> = streams.into_iter().map(|(_, s)| s).collect();
                 let key_src = self.mix(dialogue);
                 let (key, voice) = (self.label("key"), self.label("voice"));
-                self.chains
-                    .push(format!("[{key_src}]asplit=2[{key}][{voice}]"));
-                // sidechaincompress has no range control: pick the ratio so
-                // dialogue around -20 dBFS (16.5 dB over the threshold)
-                // pulls the music down by about `reduction_db`.
-                let reduction = d.reduction_db.abs() as f64;
-                let ratio = if reduction >= 16.0 {
-                    20.0
-                } else {
-                    (1.0 / (1.0 - reduction / 16.5)).clamp(1.0, 20.0)
-                };
+                // Padded: sidechaincompress stops when its key ends, which
+                // would cut the music where the dialogue stops.
+                self.chains.push(format!(
+                    "[{key_src}]apad=whole_len={total},asplit=2[{key}][{voice}]"
+                ));
+                let (threshold, ratio) = audiofx::dsp::ducking(d.reduction_db as f64);
                 let attack = (d.attack.as_secs_f64() * 1000.0).clamp(0.01, 2000.0);
                 let release = (d.release.as_secs_f64() * 1000.0).clamp(0.01, 9000.0);
                 let ducked = self.label("ducked");
                 self.chains.push(format!(
-                    "[{music}][{key}]sidechaincompress=threshold=0.015:ratio={}:attack={}:release={}:makeup=1[{ducked}]",
+                    "[{music}][{key}]sidechaincompress=threshold={}:ratio={}:attack={}:release={}:makeup=1:knee=2.828427:detection=rms:link=average[{ducked}]",
+                    num(threshold),
                     num(ratio),
                     num(attack),
                     num(release)
@@ -570,36 +575,52 @@ impl Builder<'_> {
         out
     }
 
-    fn audio_track(&mut self, track: &Track) -> Result<Option<String>> {
-        let mut segments = Vec::new();
-        let mut cursor = 0i64;
-        for clip in &track.clips {
-            let Some(visible) = clip.range().intersect(&self.spec.range) else {
+    /// One track: its clip spans laid out in lanes (a crossfade overlaps two
+    /// spans, so they go to different lanes, each a `concat` of silence and
+    /// segments), mixed, then track volume, pan and track effects.
+    fn audio_track(&mut self, track: &Track, work_dir: &Path) -> Result<Option<String>> {
+        // Per lane: the sample its content reaches, and its segments.
+        let mut lanes: Vec<(i64, Vec<String>)> = Vec::new();
+        for span in audiofx::spans(track) {
+            let Some(visible) = span.range.intersect(&self.spec.range) else {
                 continue;
             };
-            let s0 = self.samples(visible.start).max(cursor);
+            let s0 = self.samples(visible.start);
             let s1 = self.samples(visible.end);
+            let lane = match lanes.iter().position(|(cursor, _)| *cursor <= s0) {
+                Some(i) => i,
+                None if lanes.len() < 2 => {
+                    lanes.push((0, Vec::new()));
+                    lanes.len() - 1
+                }
+                // A third overlap (a transition longer than the clip
+                // between): play it from where the lane is free.
+                None => (0..lanes.len()).min_by_key(|i| lanes[*i].0).unwrap_or(0),
+            };
+            let s0 = s0.max(lanes[lane].0);
             if s1 <= s0 {
                 continue;
             }
-            let Some(segment) = self.audio_segment(clip, visible, s1 - s0)? else {
+            let start = self.sample_time(s0);
+            let Some(segment) = self.audio_segment(&span, start, s1 - s0, work_dir)? else {
                 continue;
             };
+            let cursor = lanes[lane].0;
             if s0 > cursor {
-                let gap = self.label("silence");
-                self.chains.push(format!(
-                    "anullsrc=r={}:cl=stereo,atrim=end_sample={}[{gap}]",
-                    self.spec.sample_rate,
-                    s0 - cursor
-                ));
-                segments.push(gap);
+                let gap = self.silence(s0 - cursor);
+                lanes[lane].1.push(gap);
             }
-            segments.push(segment);
-            cursor = s1;
+            lanes[lane].1.push(segment);
+            lanes[lane].0 = s1;
         }
-        let Some(stream) = self.concat(segments, false) else {
+        let streams: Vec<String> = lanes
+            .into_iter()
+            .filter_map(|(_, segments)| self.concat(segments, false))
+            .collect();
+        if streams.is_empty() {
             return Ok(None);
-        };
+        }
+        let stream = self.mix(streams);
         let mut f: Vec<String> = Vec::new();
         if track.mix.volume_db.abs() > 1e-3 {
             f.push(format!("volume={}dB", num(track.mix.volume_db as f64)));
@@ -609,21 +630,46 @@ impl Builder<'_> {
             let (l, r) = ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0));
             f.push(format!("pan=stereo|c0={}*c0|c1={}*c1", num(l), num(r)));
         }
-        if f.is_empty() {
-            return Ok(Some(stream));
-        }
-        let out = self.label("trackmix");
-        self.chains
-            .push(format!("[{stream}]{}[{out}]", f.join(",")));
+        let stream = if f.is_empty() {
+            stream
+        } else {
+            let out = self.label("trackmix");
+            self.chains
+                .push(format!("[{stream}]{}[{out}]", f.join(",")));
+            out
+        };
+        let sr = self.spec.sample_rate;
+        let out = audio_fx::apply(self, stream, &track.mix.effects, sr, work_dir)?;
         Ok(Some(out))
     }
 
+    fn silence(&mut self, samples: i64) -> String {
+        let gap = self.label("silence");
+        self.chains.push(format!(
+            "anullsrc=r={}:cl=stereo,atrim=end_sample={samples}[{gap}]",
+            self.spec.sample_rate
+        ));
+        gap
+    }
+
+    /// Timeline time of sample `s` (relative to the range start).
+    fn sample_time(&self, s: i64) -> Time {
+        let flicks = s as i128 * FLICKS_PER_SECOND as i128 / self.spec.sample_rate as i128;
+        self.spec.range.start + Time(flicks as i64)
+    }
+
+    /// `samples` samples of `span` from timeline time `start`: the source
+    /// (with handles; silence before the media starts), retimed with
+    /// `atempo`, through the clip's effects, then one `volume` expression
+    /// for gain or volume keyframes, fades and crossfade ramps.
     fn audio_segment(
         &mut self,
-        clip: &Clip,
-        visible: TimeRange,
+        span: &Span,
+        start: Time,
         samples: i64,
+        work_dir: &Path,
     ) -> Result<Option<String>> {
+        let clip = span.clip;
         let ClipContent::Media {
             media,
             source_in,
@@ -643,21 +689,14 @@ impl Builder<'_> {
             bail!("media offline: {}", item.path.display());
         }
         let sr = self.spec.sample_rate;
-        let dur = clip.duration.as_secs_f64();
-        let offset = (visible.start - clip.start).as_secs_f64();
-        let length = visible.duration().as_secs_f64();
-        let fade_in = clip.audio.fade_in.as_secs_f64().clamp(0.0, dur);
-        let fade_out = clip.audio.fade_out.as_secs_f64().clamp(0.0, dur);
-
-        // Fades are in clip time. When the range starts inside the fade-in,
-        // decode from the clip start so the curve is the same, then cut.
-        let from = if offset > 0.0 && offset < fade_in {
-            0.0
-        } else {
-            offset
-        };
-        let s0 = source_in.as_secs_f64() + from;
-        let s1 = source_in.as_secs_f64() + offset + length;
+        let speed = clip.speed.clamp(0.01, 100.0);
+        let length = samples as f64 / sr as f64;
+        // Source time at the segment start; before 0 is silence.
+        let src = source_in.as_secs_f64() + (start - clip.start).as_secs_f64() * speed;
+        let lead = (-src / speed).max(0.0);
+        let s0 = src.max(0.0);
+        // A little extra source so atempo's output never runs short.
+        let s1 = s0 + (length - lead).max(0.0) * speed + 0.1 * speed;
         let mut f = vec![format!(
             "amovie={}:seek_point={}{}",
             escape_path(&item.path),
@@ -669,40 +708,110 @@ impl Builder<'_> {
         f.push(format!(
             "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
         ));
-        if clip.audio.gain_db.abs() > 1e-3 {
-            f.push(format!("volume={}dB", num(clip.audio.gain_db as f64)));
+        f.extend(atempo(speed));
+        let lead_samples = (lead * sr as f64).round() as i64;
+        if lead_samples > 0 {
+            f.push(format!("adelay=delays={lead_samples}S:all=1"));
         }
-        if fade_in > 0.0 && from < fade_in {
-            f.push(format!(
-                "afade=t=in:st=0:d={}:curve=tri",
-                num(fade_in - from)
-            ));
-        }
-        if fade_out > 0.0 {
-            let st = dur - fade_out - from;
-            if st >= 0.0 {
-                f.push(format!(
-                    "afade=t=out:st={}:d={}:curve=tri",
-                    num(st),
-                    num(fade_out)
-                ));
-            } else {
-                f.push(format!(
-                    "afade=t=out:st=0:d={}:curve=tri",
-                    num((fade_out + st).max(0.001))
-                ));
+        let src = self.label("asrc");
+        self.chains.push(format!("{}[{src}]", f.join(",")));
+        let src = audio_fx::apply(self, src, &clip.audio.effects, sr, work_dir)?;
+
+        let mut f = Vec::new();
+        let gain = segment_gain(span, start);
+        match &gain {
+            Anim::Const(g) if (g - 1.0).abs() < 1e-6 => {}
+            Anim::Const(g) => f.push(format!("volume={}", num(*g))),
+            Anim::Expr(_) => {
+                f.push("asetnsamples=n=256:p=0".into());
+                f.push(format!("volume='{}':eval=frame", gain.term()));
             }
-        }
-        if from < offset {
-            f.push(format!("atrim=start={}", num(offset - from)));
-            f.push("asetpts=PTS-STARTPTS".into());
         }
         f.push(format!("apad=whole_len={samples}"));
         f.push(format!("atrim=end_sample={samples}"));
         let out = self.label("aclip");
-        self.chains.push(format!("{}[{out}]", f.join(",")));
+        self.chains.push(format!("[{src}]{}[{out}]", f.join(",")));
         Ok(Some(out))
     }
+}
+
+impl audio_fx::Sink for Builder<'_> {
+    fn label(&mut self, prefix: &str) -> String {
+        Builder::label(self, prefix)
+    }
+
+    fn push(&mut self, chain: String) {
+        self.chains.push(chain);
+    }
+}
+
+/// `atempo` stages for `speed` (each stage takes 0.5..100).
+fn atempo(speed: f64) -> Vec<String> {
+    if (speed - 1.0).abs() < 1e-6 {
+        return Vec::new();
+    }
+    let mut f = Vec::new();
+    let mut rest = speed;
+    while rest < 0.5 {
+        f.push("atempo=0.5".to_string());
+        rest /= 0.5;
+    }
+    f.push(format!("atempo={}", num(rest.min(100.0))));
+    f
+}
+
+/// Linear gain of a segment of `span` starting at timeline time `start`,
+/// over the segment's `t`: volume (gain or keyframes), fades from the
+/// span's edges and equal-power ramps, as in `Span::envelope` and
+/// `Span::volume_db`.
+fn segment_gain(span: &Span, start: Time) -> Anim {
+    let clip = span.clip;
+    let secs = |t: Time| t.as_secs_f64();
+    let mut terms: Vec<String> = Vec::new();
+    let mut constant = 1.0f64;
+    if clip
+        .keyframes
+        .iter()
+        .any(|k| k.property == Property::Volume)
+    {
+        let ct = format!("(t+{})", num(secs(start - clip.start)));
+        match anim(&clip.transform, &clip.keyframes, Property::Volume, &ct) {
+            Anim::Const(v) => constant *= 10f64.powf(v / 20.0),
+            e => terms.push(format!("pow(10,{}/20)", e.term())),
+        }
+    } else {
+        constant *= 10f64.powf(clip.audio.gain_db as f64 / 20.0);
+    }
+    // Span-relative time.
+    let st = format!("(t+{})", num(secs(start - span.range.start)));
+    let fade_in = secs(clip.audio.fade_in);
+    if fade_in > 0.0 {
+        terms.push(format!("clip({st}/{},0,1)", num(fade_in)));
+    }
+    let fade_out = secs(clip.audio.fade_out);
+    if fade_out > 0.0 {
+        terms.push(format!(
+            "clip(({}-{st})/{},0,1)",
+            num(secs(span.range.duration())),
+            num(fade_out)
+        ));
+    }
+    for ramp in &span.ramps {
+        let p = format!(
+            "clip((t+{})/{},0,1)",
+            num(secs(start - ramp.range.start)),
+            num(secs(ramp.range.duration()).max(1e-6))
+        );
+        let f = if ramp.rising { "sin" } else { "cos" };
+        terms.push(format!("{f}({p}*PI/2)"));
+    }
+    if terms.is_empty() {
+        return Anim::Const(constant);
+    }
+    if (constant - 1.0).abs() > 1e-9 {
+        terms.insert(0, num(constant));
+    }
+    Anim::Expr(terms.join("*"))
 }
 
 /// A clip's grade, then the timeline grade over it, as filters (one baked

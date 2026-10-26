@@ -26,7 +26,8 @@ pub fn enabled() -> bool {
 }
 
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
-    let demo = color(project());
+    let mut demo = color(project());
+    audio_demo(&mut demo.project);
     let analysis = interview_analysis(&demo);
     let jobs = vec![
         job(&demo.project.media[0], JobState::Done),
@@ -55,6 +56,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     {
         state.workspace = w;
     }
+    audio_demo_playback(state);
     cx.notify();
 }
 
@@ -84,6 +86,68 @@ fn color(mut demo: Demo) -> Demo {
         };
     }
     demo
+}
+
+// -------------------------------------------------------------------- audio
+
+/// Track inserts on both audio tracks, a cleaned-up first dialogue clip with
+/// a volume dip, for the mixer and the audio inspector.
+fn audio_demo(p: &mut Project) {
+    use koo_core::audiofx::{AudioFx, AudioFxKind};
+    let fx = |kind, params: &[(&str, f64)]| {
+        let mut fx = AudioFx::new(kind);
+        for (name, v) in params {
+            fx.set(name, *v);
+        }
+        fx
+    };
+    let audio: Vec<&mut Track> = p
+        .timeline
+        .tracks
+        .iter_mut()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .collect();
+    let Ok::<[&mut Track; 2], _>([dialog, bed]) = audio.try_into() else {
+        return;
+    };
+    dialog.mix.effects = vec![
+        fx(AudioFxKind::HighPass, &[("freq", 90.)]),
+        fx(
+            AudioFxKind::Compressor,
+            &[("threshold_db", -22.), ("ratio", 3.5), ("makeup_db", 4.)],
+        ),
+        fx(AudioFxKind::DeEsser, &[("amount", 0.4)]),
+    ];
+    bed.mix.effects = vec![
+        fx(
+            AudioFxKind::Equalizer,
+            &[("mid_gain_db", -3.), ("mid_freq", 2500.)],
+        ),
+        fx(AudioFxKind::Limiter, &[("ceiling_db", -2.)]),
+    ];
+    let first = &mut dialog.clips[0];
+    first.audio.effects = vec![
+        fx(
+            AudioFxKind::NoiseReduction,
+            &[("amount_db", 14.), ("floor_db", -48.)],
+        ),
+        fx(
+            AudioFxKind::Equalizer,
+            &[("low_gain_db", -2.), ("high_gain_db", 3.)],
+        ),
+    ];
+    first.keyframes = vec![
+        keyframe(Property::Volume, 1.0, 0.0),
+        keyframe(Property::Volume, 2.5, -6.0),
+        keyframe(Property::Volume, 4.0, 0.0),
+    ];
+}
+
+/// `KOOEDITOR_DEMO_PLAY=1` starts playback, so the meters move.
+fn audio_demo_playback(state: &mut EditorState) {
+    if std::env::var("KOOEDITOR_DEMO_PLAY").is_ok_and(|v| v == "1") {
+        state.playing = true;
+    }
 }
 
 // ------------------------------------------------------------------ project

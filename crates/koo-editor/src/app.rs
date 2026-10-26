@@ -4,7 +4,8 @@
 use crate::state::EditorState;
 use crate::ui::{
     chat::ChatPanel, deliver::DeliverPanel, inspector::InspectorPanel, media_pool::MediaPoolPanel,
-    scopes::ScopesPanel, timeline::TimelinePanel, transcript::TranscriptPanel, viewer::ViewerPanel,
+    mixer::MixerPanel, scopes::ScopesPanel, timeline::TimelinePanel, transcript::TranscriptPanel,
+    viewer::ViewerPanel,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
@@ -41,6 +42,7 @@ pub struct KooEditor {
     deliver: Entity<DeliverPanel>,
     chat: Entity<ChatPanel>,
     scopes: Entity<ScopesPanel>,
+    mixer: Entity<MixerPanel>,
     _observe: Subscription,
 }
 
@@ -60,6 +62,7 @@ impl KooEditor {
             deliver: cx.new(|cx| DeliverPanel::new(state.clone(), window, cx)),
             chat: cx.new(|cx| ChatPanel::new(state.clone(), window, cx)),
             scopes: cx.new(|cx| ScopesPanel::new(state.clone(), window, cx)),
+            mixer: cx.new(|cx| MixerPanel::new(state.clone(), window, cx)),
             state,
             _observe,
         }
@@ -170,12 +173,13 @@ impl KooEditor {
                 .into_any_element(),
             Workspace::Audio => self
                 .over_timeline(
-                    "grade",
-                    h_resizable("grade-top")
+                    "audio",
+                    h_resizable("audio-top")
                         .child(resizable_panel().child(self.viewer.clone()))
+                        .child(resizable_panel().size(px(420.)).child(self.mixer.clone()))
                         .child(
                             resizable_panel()
-                                .size(px(320.))
+                                .size(px(300.))
                                 .child(self.inspector.clone()),
                         ),
                 )
