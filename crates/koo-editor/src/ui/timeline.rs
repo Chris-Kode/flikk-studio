@@ -816,15 +816,34 @@ impl TimelinePanel {
             .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
             .floor_to_frame(rate);
         self.snap = None;
-        let command = Command::InsertClip {
+        let insert = |track| Command::InsertClip {
             media: drag.media,
             source: TimeRange::new(Time::ZERO, len),
             track,
             at,
             mode: InsertMode::Overwrite,
         };
-        self.state.update(cx, |s, cx| {
-            s.edit(command, cx);
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let has_audio = project
+            .media(drag.media)
+            .and_then(|m| m.info.as_ref())
+            .is_some_and(|i| !i.audio.is_empty());
+        // Video with sound lands as a linked pair: the mixer and renderer
+        // read audio from audio tracks only.
+        let linked = match project.timeline.track(track).map(|t| t.kind) {
+            Some(TrackKind::Video | TrackKind::Overlay) if has_audio => {
+                matching_audio_track(&project.timeline, track)
+            }
+            _ => None,
+        };
+        self.state.update(cx, |s, cx| match linked {
+            Some(audio) => {
+                s.edit_batch(vec![insert(track), insert(audio)], "insert_clip", cx);
+            }
+            None => {
+                s.edit(insert(track), cx);
+            }
         });
     }
 
@@ -1425,6 +1444,25 @@ impl TimelinePanel {
                 ),
         )
     }
+}
+
+/// The audio track paired with a video track: V1 ↔ A1, V2 ↔ A2, counting
+/// video tracks up from the one nearest the audio. Falls back to the first
+/// unlocked audio track.
+fn matching_audio_track(timeline: &koo_core::model::Timeline, video: TrackId) -> Option<TrackId> {
+    let videos: Vec<_> = timeline
+        .tracks
+        .iter()
+        .filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay))
+        .rev()
+        .collect();
+    let audios: Vec<_> = timeline
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio && !t.locked)
+        .collect();
+    let rank = videos.iter().position(|t| t.id == video)?;
+    audios.get(rank).or(audios.first()).map(|t| t.id)
 }
 
 fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {
