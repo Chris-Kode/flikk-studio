@@ -515,7 +515,7 @@ fn paint_overlay_item(
         Mark::Removed => {
             // A band, not a box: removed spans of neighbouring clips and
             // tracks merge into one gap.
-            window.paint_quad(fill(rect, c.red.opacity(if emphasis { 0.5 } else { 0.3 })));
+            window.paint_quad(fill(rect, c.red.opacity(if emphasis { 0.6 } else { 0.45 })));
             let edge = if emphasis { 0.95 } else { 0.7 };
             for x in [rect.origin.x, rect.right() - px(1.)] {
                 window.paint_quad(fill(

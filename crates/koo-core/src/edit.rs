@@ -21,7 +21,6 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::EditMarker { .. }
             | Command::RemoveMarker { .. }
             | Command::AddTrack { .. }
-            | Command::AddTrackWithId { .. }
             | Command::SetTrackLocked { .. }
             | Command::ImportMedia { .. }
             | Command::UpdateMedia { .. }
@@ -78,24 +77,6 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             Ok(ops(vec![Op::InsertTrack {
                 index,
                 track: Track::new(*kind, name.clone()),
-            }]))
-        }
-        Command::AddTrackWithId {
-            track,
-            kind,
-            index,
-            name,
-        } => {
-            if tl.track(*track).is_some() {
-                return Err(CoreError::Invalid(format!("track {track} already exists")));
-            }
-            let index = (*index).min(tl.tracks.len());
-            Ok(ops(vec![Op::InsertTrack {
-                index,
-                track: Track {
-                    id: *track,
-                    ..Track::new(*kind, name.clone())
-                },
             }]))
         }
         Command::RemoveTrack { track } => {
