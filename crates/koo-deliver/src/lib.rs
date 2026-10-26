@@ -7,6 +7,7 @@
 
 mod audio_fx;
 pub mod captions;
+mod composed;
 pub mod fcpxml;
 pub mod ffmpeg;
 pub mod frame;
