@@ -33,6 +33,18 @@ use gpui_kit::*;
 use koo_core::agent::ChatRole;
 use koo_core::{ChangeItemId, ChangeSetId};
 use std::collections::HashSet;
+
+/// `text` with every reference token replaced by `@` and its label, for
+/// places that show a message as plain text (chat titles).
+pub(crate) fn plain_text(text: &str, project: &koo_core::model::Project) -> String {
+    refs::segments(text, project)
+        .into_iter()
+        .map(|s| match s {
+            refs::Segment::Text(t) => t.to_owned(),
+            refs::Segment::Ref(m) => format!("@{}", m.label),
+        })
+        .collect()
+}
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Key bindings for the chat: the composer's suggestion keys and the global

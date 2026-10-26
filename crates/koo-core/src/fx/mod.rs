@@ -54,7 +54,9 @@
 //!   current before each frame, and `window.kooRender(time)` is called if
 //!   the page defines it (for canvas or JS-driven drawing).
 //!
-//! Parameters reach the page three ways: `window.koo.params.<name>`; CSS
+//! Parameters reach the page three ways: `window.koo.params.<name>`
+//! (numbers, booleans and strings as they are; colors as `rgba()` strings;
+//! points as `[x, y]` from the top-left; images as `file://` URLs); CSS
 //! custom properties on `:root` (`--<name>`: numbers unitless, colors as
 //! `rgba()`, points as `--<name>-x`/`--<name>-y` in 0..1 from the top-left,
 //! images as `url(...)`); and `{{name}}` in the code, replaced by the value

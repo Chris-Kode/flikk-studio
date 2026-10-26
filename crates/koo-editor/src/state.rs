@@ -487,13 +487,18 @@ impl EditorState {
 
     fn save_chat(&mut self) {
         let id = self.chats.active.clone();
+        let title = self
+            .chat
+            .iter()
+            .find(|m| m.role == ChatRole::User)
+            .map(|m| chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project())));
         let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == id) else {
             return;
         };
         if session.title.is_empty()
-            && let Some(first) = self.chat.iter().find(|m| m.role == ChatRole::User)
+            && let Some(title) = title
         {
-            session.title = chat_title(&first.text);
+            session.title = title;
         }
         if let Some(last) = self.chat.last() {
             session.at = last.at;
@@ -517,7 +522,9 @@ impl EditorState {
                     .flatten();
                 let title = match first {
                     _ if !s.title.is_empty() => s.title.clone(),
-                    Some(m) => chat_title(&m.text),
+                    Some(m) => {
+                        chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project()))
+                    }
                     None => "Untitled".to_owned(),
                 };
                 (s.id.clone(), title)
