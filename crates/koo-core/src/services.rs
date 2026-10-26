@@ -55,12 +55,39 @@ pub struct Collage {
     pub rows: u32,
 }
 
+/// Sequential decode for playback, from a long-lived decoder process.
+pub trait FrameStream: Send {
+    /// Next frame and its source time; `None` at the end of the media.
+    fn next_frame(&mut self) -> ServiceResult<Option<(Time, Frame)>>;
+}
+
+/// Decoded audio: interleaved stereo `f32` at the requested sample rate.
+pub trait PcmStream: Send {
+    /// Fill `out`, returning samples written; 0 at the end of the media.
+    fn read(&mut self, out: &mut [f32]) -> ServiceResult<usize>;
+}
+
 pub trait MediaService: Send + Sync {
     fn probe(&self, path: &Path) -> ServiceResult<MediaInfo>;
     fn fingerprint(&self, path: &Path) -> ServiceResult<Fingerprint>;
     /// One frame of `item` at source time `t`, scaled to fit `max_width`.
     /// Uses the proxy when one exists.
     fn frame(&self, item: &MediaItem, t: Time, max_width: u32) -> ServiceResult<Frame>;
+    /// Frames from source time `from` onward, for real-time playback.
+    fn playback(
+        &self,
+        item: &MediaItem,
+        from: Time,
+        max_width: u32,
+    ) -> ServiceResult<Box<dyn FrameStream>>;
+    /// Audio of `stream` from source time `from` onward.
+    fn audio(
+        &self,
+        item: &MediaItem,
+        stream: u32,
+        from: Time,
+        sample_rate: u32,
+    ) -> ServiceResult<Box<dyn PcmStream>>;
     fn collage(&self, request: &CollageRequest) -> ServiceResult<Collage>;
     /// Peak envelope for drawing, `buckets` values in 0..1 over `range`.
     fn waveform(
