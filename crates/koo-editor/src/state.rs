@@ -733,10 +733,17 @@ fn services() -> Services {
             None
         }
     };
+    let fx = match koo_gpu::GpuFx::new() {
+        Ok(gpu) => Some(Arc::new(gpu) as Arc<dyn koo_core::services::FxService>),
+        Err(e) => {
+            eprintln!("GPU effects unavailable: {e}");
+            None
+        }
+    };
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
-        fx: None,
+        fx,
         html: None,
     }
 }

@@ -20,6 +20,7 @@ koo-media = { path = "crates/koo-media" }
 koo-analysis = { path = "crates/koo-analysis" }
 koo-agent = { path = "crates/koo-agent" }
 koo-deliver = { path = "crates/koo-deliver" }
+koo-gpu = { path = "crates/koo-gpu" }
 
 # whisper.cpp is unusably slow as a CMake Debug build.
 [profile.dev.package.whisper-rs-sys]
