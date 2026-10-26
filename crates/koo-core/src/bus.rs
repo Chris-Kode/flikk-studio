@@ -132,6 +132,23 @@ impl CommandBus {
         }
     }
 
+    /// Resume a saved project with its undo history. Versions continue from
+    /// the history so change-set conflict tracking stays monotonic.
+    pub fn with_history(project: Project, history: History) -> Self {
+        let version = history
+            .undo
+            .iter()
+            .chain(&history.redo)
+            .map(|e| e.version)
+            .max()
+            .unwrap_or(0);
+        Self {
+            history,
+            version,
+            ..Self::new(project)
+        }
+    }
+
     pub fn project(&self) -> &Project {
         &self.project
     }

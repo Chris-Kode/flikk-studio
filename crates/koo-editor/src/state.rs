@@ -37,8 +37,13 @@ pub struct EditorState {
 
 impl EditorState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (project, settings) = persistence::load_or_new();
-        let mut bus = CommandBus::new(project);
+        let persistence::Loaded {
+            project,
+            history,
+            settings,
+            ..
+        } = persistence::load_session();
+        let mut bus = CommandBus::with_history(project, history);
         bus.set_permissions(settings.permissions.clone());
         let pump = cx.spawn(async move |this, cx| {
             loop {
@@ -60,7 +65,7 @@ impl EditorState {
             chat: Vec::new(),
             activity: Vec::new(),
             preview: None,
-            status: None,
+            status: persistence::take_notice(),
             agent: AgentLink::new(),
             _pump: pump,
         }
