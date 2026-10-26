@@ -234,7 +234,7 @@ impl InspectorPanel {
             }
             Key::ClipGain => {
                 label = "set_gain";
-                for clip in clips.iter().filter(|c| is_media(c)) {
+                for clip in sound_clips(tl, &clips) {
                     commands.push(Command::SetGain {
                         clip: clip.id,
                         db: v,
@@ -248,7 +248,7 @@ impl InspectorPanel {
                 } else {
                     Edge::End
                 };
-                for clip in clips.iter().filter(|c| is_media(c)) {
+                for clip in sound_clips(tl, &clips) {
                     commands.push(Command::AddFade {
                         clip: clip.id,
                         edge,
@@ -339,6 +339,20 @@ fn empty(text: &'static str, cx: &App) -> AnyElement {
         .text_color(cx.theme().muted_foreground)
         .child(text)
         .into_any_element()
+}
+
+/// The clips whose sound gain and fades change: the selected media clips,
+/// video ones replaced by their linked audio (the renderer mixes audio
+/// tracks only).
+fn sound_clips<'a>(tl: &'a koo_core::model::Timeline, clips: &'a [Clip]) -> Vec<&'a Clip> {
+    let mut out: Vec<&Clip> = Vec::new();
+    for clip in clips.iter().filter(|c| is_media(c)) {
+        let sound = clip::sound_clip(tl, clip);
+        if !out.iter().any(|c| c.id == sound.id) {
+            out.push(sound);
+        }
+    }
+    out
 }
 
 fn is_media(clip: &Clip) -> bool {

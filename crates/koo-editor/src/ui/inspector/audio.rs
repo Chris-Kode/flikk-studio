@@ -26,7 +26,11 @@ impl InspectorPanel {
             .filter(is_media)
             .collect();
         let mut body = v_flex().gap_4();
-        if let Some(clip) = selected.first() {
+        let tl = &self.project(cx).timeline;
+        let sound = selected
+            .first()
+            .map(|c| super::clip::sound_clip(tl, c).clone());
+        if let Some(clip) = &sound {
             let rows = [
                 (Key::ClipGain, clip.audio.gain_db),
                 (Key::FadeIn, clip.audio.fade_in.as_secs_f64() as f32),

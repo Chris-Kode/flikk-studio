@@ -1,6 +1,7 @@
 //! Edit workspace: the selected clip's properties by kind. Video and
-//! overlays get transform and color, audio gets gain, fades and its track's
-//! mix, captions and titles get their text, timing and style.
+//! overlays get transform and color (and video its linked audio), audio
+//! gets gain, fades and its track's mix, captions and titles get their
+//! text, timing and style.
 
 use super::param::Key;
 use super::{InspectorPanel, section};
@@ -11,7 +12,7 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use koo_core::command::{Command, Edge};
-use koo_core::model::{Clip, ClipContent, Project, Track, TrackKind};
+use koo_core::model::{Clip, ClipContent, Project, Timeline, Track, TrackKind};
 use koo_core::{ClipId, Time, TimeRange, TrackId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,12 +54,13 @@ pub(super) struct ClipTrack {
     pub caption_style: Option<String>,
 }
 
-/// The two tabs of a picture clip.
+/// The tabs of a picture clip; Audio only when it has linked audio.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum PictureTab {
     #[default]
     Video,
     Color,
+    Audio,
 }
 
 impl InspectorPanel {
@@ -145,30 +147,42 @@ impl InspectorPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let media = matches!(clip.content, ClipContent::Media { .. });
-        let tab = if media {
-            self.picture_tab
-        } else {
-            PictureTab::Video
+        let sound = linked_audio(&self.project(cx).timeline, clip).map(|(track, audio)| {
+            let info = ClipTrack {
+                id: track.id,
+                kind: ClipKind::Audio,
+                caption_style: None,
+            };
+            (info, audio.clone())
+        });
+        let mut tabs = vec![(PictureTab::Video, "Video")];
+        if media {
+            tabs.push((PictureTab::Color, "Color"));
+        }
+        if sound.is_some() {
+            tabs.push((PictureTab::Audio, "Audio"));
+        }
+        let tab = Some(self.picture_tab)
+            .filter(|t| tabs.iter().any(|(tab, _)| tab == t))
+            .unwrap_or(PictureTab::Video);
+        let body = match (tab, sound) {
+            (PictureTab::Color, _) => self.color_view(window, cx),
+            (PictureTab::Audio, Some((track, audio))) => {
+                self.clip_audio_view(&track, &audio, window, cx)
+            }
+            _ => self.transform_view(clip, window, cx),
         };
-        let body = match tab {
-            PictureTab::Video => self.transform_view(clip, window, cx),
-            PictureTab::Color => self.color_view(window, cx),
-        };
-        if !media {
+        if tabs.len() == 1 {
             return body;
         }
+        let picked: Vec<PictureTab> = tabs.iter().map(|(t, _)| *t).collect();
         let tabs = TabBar::new("clip-tabs")
             .segmented()
             .xsmall()
-            .selected_index(tab as usize)
-            .child(Tab::new().label("Video"))
-            .child(Tab::new().label("Color"))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.picture_tab = if *ix == 1 {
-                    PictureTab::Color
-                } else {
-                    PictureTab::Video
-                };
+            .selected_index(picked.iter().position(|t| *t == tab).unwrap_or(0))
+            .children(tabs.into_iter().map(|(_, label)| Tab::new().label(label)))
+            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                this.picture_tab = picked.get(*ix).copied().unwrap_or_default();
                 cx.notify();
             }));
         v_flex().gap_3().child(tabs).child(body).into_any_element()
@@ -439,6 +453,45 @@ fn set_caption_style(
             cx,
         );
     }
+}
+
+/// The audio clip dropped with a video clip: same source, same source
+/// offset, on an audio track; the one overlapping it most. Survives blades
+/// and trims, since both halves keep their offset.
+pub(super) fn linked_audio<'a>(tl: &'a Timeline, clip: &Clip) -> Option<(&'a Track, &'a Clip)> {
+    let ClipContent::Media {
+        media, source_in, ..
+    } = &clip.content
+    else {
+        return None;
+    };
+    let offset = *source_in - clip.start;
+    let range = clip.range();
+    tl.tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
+        .filter(|(_, c)| match &c.content {
+            ClipContent::Media {
+                media: m,
+                source_in: s,
+                ..
+            } => m == media && *s - c.start == offset && c.range().overlaps(&range),
+            _ => false,
+        })
+        .max_by_key(|(_, c)| c.end().min(range.end) - c.start.max(range.start))
+}
+
+/// Where a media clip's sound lives: itself on an audio track, else its
+/// linked audio clip when it has one.
+pub(super) fn sound_clip<'a>(tl: &'a Timeline, clip: &'a Clip) -> &'a Clip {
+    let on_audio = tl
+        .clip(clip.id)
+        .is_some_and(|(t, _)| t.kind == TrackKind::Audio);
+    if on_audio {
+        return clip;
+    }
+    linked_audio(tl, clip).map_or(clip, |(_, c)| c)
 }
 
 fn clip_text(project: &Project, clip: ClipId) -> Option<String> {
