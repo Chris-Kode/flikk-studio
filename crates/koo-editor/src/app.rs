@@ -4,7 +4,7 @@
 use crate::state::EditorState;
 use crate::ui::{
     chat::ChatPanel, deliver::DeliverPanel, inspector::InspectorPanel, media_pool::MediaPoolPanel,
-    timeline::TimelinePanel, transcript::TranscriptPanel, viewer::ViewerPanel,
+    mixer::MixerPanel, timeline::TimelinePanel, transcript::TranscriptPanel, viewer::ViewerPanel,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
@@ -40,6 +40,7 @@ pub struct KooEditor {
     transcript: Entity<TranscriptPanel>,
     deliver: Entity<DeliverPanel>,
     chat: Entity<ChatPanel>,
+    mixer: Entity<MixerPanel>,
     _observe: Subscription,
 }
 
@@ -58,6 +59,7 @@ impl KooEditor {
             transcript: cx.new(|cx| TranscriptPanel::new(state.clone(), window, cx)),
             deliver: cx.new(|cx| DeliverPanel::new(state.clone(), window, cx)),
             chat: cx.new(|cx| ChatPanel::new(state.clone(), window, cx)),
+            mixer: cx.new(|cx| MixerPanel::new(state.clone(), window, cx)),
             state,
             _observe,
         }
@@ -153,7 +155,7 @@ impl KooEditor {
                         .child(resizable_panel().child(self.viewer.clone())),
                 )
                 .into_any_element(),
-            Workspace::Color | Workspace::Audio => self
+            Workspace::Color => self
                 .over_timeline(
                     "grade",
                     h_resizable("grade-top")
@@ -161,6 +163,19 @@ impl KooEditor {
                         .child(
                             resizable_panel()
                                 .size(px(320.))
+                                .child(self.inspector.clone()),
+                        ),
+                )
+                .into_any_element(),
+            Workspace::Audio => self
+                .over_timeline(
+                    "audio",
+                    h_resizable("audio-top")
+                        .child(resizable_panel().child(self.viewer.clone()))
+                        .child(resizable_panel().size(px(420.)).child(self.mixer.clone()))
+                        .child(
+                            resizable_panel()
+                                .size(px(300.))
                                 .child(self.inspector.clone()),
                         ),
                 )

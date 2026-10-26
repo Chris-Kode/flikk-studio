@@ -6,6 +6,7 @@ pub mod chat;
 pub mod deliver;
 pub mod inspector;
 pub mod media_pool;
+pub mod mixer;
 pub mod settings;
 pub mod timeline;
 pub mod transcript;
