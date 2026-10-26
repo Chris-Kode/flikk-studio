@@ -47,17 +47,21 @@ impl Waveforms {
         else {
             return (None, None);
         };
+        let Some(item) = project.media(*media) else {
+            return (None, None);
+        };
+        // Stream indices are container indices; default to the first audio stream.
+        let stream = audio_stream
+            .or_else(|| item.info.as_ref()?.audio.first().map(|a| a.index))
+            .unwrap_or(0);
         let key = Key {
             media: *media,
-            stream: audio_stream.unwrap_or(0),
+            stream,
             range: TimeRange::new(*source_in, *source_in + clip.duration),
         };
         if let Some(peaks) = self.peaks.get(&key) {
             return (peaks.clone(), None);
         }
-        let Some(item) = project.media(*media) else {
-            return (None, None);
-        };
         self.peaks.insert(key, None);
         let buckets = ((clip.duration.as_secs_f64() * DENSITY) as usize).clamp(16, MAX_BUCKETS);
         (

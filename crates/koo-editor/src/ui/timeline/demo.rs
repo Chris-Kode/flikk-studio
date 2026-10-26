@@ -81,12 +81,9 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     state.bus = bus;
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![ids.selected];
-    if state.services.media.is_none() {
-        state.services.media = Some(Arc::new(FakeMedia));
-    }
-    if state.services.analysis.is_none() {
-        state.services.analysis = Some(Arc::new(FakeAnalysis));
-    }
+    // The demo media are not real files: always use the fake engines.
+    state.services.media = Some(Arc::new(FakeMedia));
+    state.services.analysis = Some(Arc::new(FakeAnalysis));
     cx.notify();
 }
 
