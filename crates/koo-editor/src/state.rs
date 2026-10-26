@@ -28,7 +28,11 @@ pub struct EditorState {
     pub selection: Selection,
     pub playing: bool,
     pub settings: AgentSettings,
+    /// Messages of the active chat session.
     pub chat: Vec<ChatMessage>,
+    /// Every chat session of the project. The active one's messages are
+    /// edited in `chat` and copied back on save.
+    chats: persistence::Chats,
     pub activity: Vec<ActivityEntry>,
     /// Change set whose draft the viewer plays instead of the committed project.
     pub preview: Option<ChangeSetId>,
@@ -67,7 +71,8 @@ impl EditorState {
             settings,
             ..
         } = persistence::load_session();
-        let chat = persistence::load_chat(project.id);
+        let chats = persistence::load_chats(project.id);
+        let chat = active_messages(&chats);
         let mut bus = CommandBus::with_history(project, history);
         bus.set_permissions(settings.permissions.clone());
         let pump = cx.spawn(async move |this, cx| {
@@ -88,6 +93,7 @@ impl EditorState {
             playing: false,
             settings,
             chat,
+            chats,
             activity: Vec::new(),
             preview: None,
             live: None,
@@ -112,6 +118,7 @@ impl EditorState {
     /// selected style profile and the facts about this project's sources.
     fn load_agent_memory(&mut self) {
         self.agent.set_role(self.settings.role);
+        self.agent.set_chat(&self.chats.active);
         use koo_core::memory::{FactStatus, RuleStatus};
         use koo_store::{FactFilter, RuleFilter};
         let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
@@ -276,6 +283,38 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Clips on the timeline that use `media`.
+    pub fn clips_using(&self, media: koo_core::MediaId) -> Vec<koo_core::ClipId> {
+        self.bus
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter(|c| c.media() == Some(media))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Remove a pool item and its clips, as one undo step.
+    pub fn remove_media(&mut self, media: koo_core::MediaId, cx: &mut Context<Self>) {
+        let clips = self.clips_using(media);
+        let mut commands = Vec::new();
+        if !clips.is_empty() {
+            commands.push(Command::DeleteClips {
+                clips: clips.clone(),
+                ripple: false,
+            });
+        }
+        commands.push(Command::RemoveMedia { media });
+        if self.execute_batch(commands, "remove_media", cx).is_some() {
+            self.selection.clips.retain(|c| !clips.contains(c));
+            if self.source_media == Some(media) {
+                self.source_media = None;
+            }
+        }
+    }
+
     pub fn select_words(
         &mut self,
         words: Option<(koo_core::MediaId, TimeRange)>,
@@ -414,10 +453,114 @@ impl EditorState {
         cx.notify();
     }
 
-    fn save_chat(&self) {
-        if !self.chat.is_empty() {
-            persistence::save_chat(self.bus.project().id, &self.chat);
+    fn save_chat(&mut self) {
+        let id = self.chats.active.clone();
+        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        if session.title.is_empty()
+            && let Some(first) = self.chat.iter().find(|m| m.role == ChatRole::User)
+        {
+            session.title = chat_title(&first.text);
         }
+        if let Some(last) = self.chat.last() {
+            session.at = last.at;
+        }
+        session.messages = self.chat.clone();
+        persistence::save_chats(self.bus.project().id, &self.chats);
+    }
+
+    // ---------------------------------------------------------- chat sessions
+
+    /// Chat sessions, most recent first, as `(id, title)`.
+    pub fn chat_sessions(&self) -> Vec<(String, String)> {
+        let mut sessions: Vec<_> = self.chats.sessions.iter().collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.at));
+        sessions
+            .into_iter()
+            .map(|s| {
+                // The active chat may have messages not saved into it yet.
+                let first = (s.id == self.chats.active)
+                    .then(|| self.chat.iter().find(|m| m.role == ChatRole::User))
+                    .flatten();
+                let title = match first {
+                    _ if !s.title.is_empty() => s.title.clone(),
+                    Some(m) => chat_title(&m.text),
+                    None => "Untitled".to_owned(),
+                };
+                (s.id.clone(), title)
+            })
+            .collect()
+    }
+
+    pub fn active_chat(&self) -> &str {
+        &self.chats.active
+    }
+
+    /// Start a chat with a fresh agent conversation. An empty active chat
+    /// is reused instead of piling up blank ones.
+    pub fn new_chat(&mut self, cx: &mut Context<Self>) {
+        if self.agent_busy() || self.chat.is_empty() {
+            return;
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.chats
+            .sessions
+            .push(persistence::ChatSession::new(id.clone(), now()));
+        self.switch_chat(&id, cx);
+    }
+
+    pub fn switch_chat(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.agent_busy()
+            || id == self.chats.active
+            || !self.chats.sessions.iter().any(|s| s.id == id)
+        {
+            return;
+        }
+        self.save_chat();
+        self.chats.active = id.to_owned();
+        // A chat left without a message has nothing to come back to.
+        self.chats
+            .sessions
+            .retain(|s| s.id == id || !s.messages.is_empty());
+        self.chat = active_messages(&self.chats);
+        self.settled.clear();
+        self.focused_change = None;
+        self.agent.set_chat(id);
+        persistence::save_chats(self.bus.project().id, &self.chats);
+        cx.notify();
+    }
+
+    /// Delete a chat and forget its agent conversation. Deleting the active
+    /// chat opens the most recent other one, or a new empty chat.
+    pub fn delete_chat(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.agent_busy() {
+            return;
+        }
+        let project = self.bus.project().id;
+        if id == self.chats.active {
+            let next = self
+                .chat_sessions()
+                .into_iter()
+                .map(|(id, _)| id)
+                .find(|other| other != id);
+            match next {
+                Some(next) => self.switch_chat(&next, cx),
+                None => {
+                    let fresh = uuid::Uuid::new_v4().simple().to_string();
+                    self.chats
+                        .sessions
+                        .push(persistence::ChatSession::new(fresh.clone(), now()));
+                    self.chat.clear();
+                    self.chats.active = fresh.clone();
+                    self.agent.set_chat(&fresh);
+                }
+            }
+        }
+        self.chats.sessions.retain(|s| s.id != id);
+        koo_agent::session::forget_chat(project, id);
+        persistence::save_chats(project, &self.chats);
+        cx.notify();
     }
 
     // --------------------------------------------------------------- projects
@@ -447,7 +590,8 @@ impl EditorState {
         self.set_playing(false, cx);
         self.agent.cancel();
         self.save_chat();
-        self.chat = persistence::load_chat(loaded.project.id);
+        self.chats = persistence::load_chats(loaded.project.id);
+        self.chat = active_messages(&self.chats);
         self.bus = CommandBus::with_history(loaded.project, loaded.history);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
@@ -708,6 +852,28 @@ fn warning_text(warning: &Warning) -> String {
 
 /// Playback clock resolution.
 const PLAY_TICK: Duration = Duration::from_millis(16);
+
+/// The active session's messages as last saved.
+fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {
+    chats
+        .sessions
+        .iter()
+        .find(|s| s.id == chats.active)
+        .map(|s| s.messages.clone())
+        .unwrap_or_default()
+}
+
+/// A session title from its first message: the first line, shortened.
+fn chat_title(text: &str) -> String {
+    const MAX: usize = 28;
+    let line = text.lines().next().unwrap_or_default().trim();
+    if line.chars().count() <= MAX {
+        line.to_owned()
+    } else {
+        let short: String = line.chars().take(MAX - 1).collect();
+        format!("{}…", short.trim_end())
+    }
+}
 
 fn now() -> i64 {
     std::time::SystemTime::now()

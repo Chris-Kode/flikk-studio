@@ -23,6 +23,9 @@ pub enum Glyph {
     Plus,
     Minus,
     Fit,
+    PrevCut,
+    NextCut,
+    Trash,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -201,6 +204,29 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
             lines(&[(4.5, 8.), (11.5, 8.)], false, window);
             lines(&[(6.5, 6.), (4.5, 8.), (6.5, 10.)], false, window);
             lines(&[(9.5, 6.), (11.5, 8.), (9.5, 10.)], false, window);
+        }
+        Glyph::PrevCut => {
+            lines(&[(3.5, 3.5), (3.5, 12.5)], false, window);
+            fill(&[(12.5, 3.5), (5.5, 8.), (12.5, 12.5)], window);
+        }
+        Glyph::NextCut => {
+            lines(&[(12.5, 3.5), (12.5, 12.5)], false, window);
+            fill(&[(3.5, 3.5), (10.5, 8.), (3.5, 12.5)], window);
+        }
+        Glyph::Trash => {
+            lines(&[(2.5, 4.5), (13.5, 4.5)], false, window);
+            lines(
+                &[(6., 4.5), (6., 2.5), (10., 2.5), (10., 4.5)],
+                false,
+                window,
+            );
+            lines(
+                &[(3.8, 4.5), (4.8, 13.5), (11.2, 13.5), (12.2, 4.5)],
+                false,
+                window,
+            );
+            lines(&[(6.8, 7.), (6.8, 11.)], false, window);
+            lines(&[(9.2, 7.), (9.2, 11.)], false, window);
         }
     }
 }

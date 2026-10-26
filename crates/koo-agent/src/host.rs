@@ -43,6 +43,8 @@ struct Turn {
     author: Author,
     backend: Backend,
     project: koo_core::ProjectId,
+    /// Chat session the turn belongs to; its backend session is resumed.
+    chat: String,
     context: EditorContext,
     settings: AgentSettings,
     /// Kept to re-run once without `--resume` if the session is gone.
@@ -61,6 +63,8 @@ type JobResult = (Reply, String, Value, JobDone);
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
     role: AgentRole,
+    /// Chat session whose backend conversation the next turn continues.
+    chat: String,
     memory: Memory,
     queued: Option<Queued>,
     turn: Option<Turn>,
@@ -85,6 +89,7 @@ impl AgentHost {
         Self {
             bridge: None,
             role: AgentRole::Editor,
+            chat: session::MAIN_CHAT.to_owned(),
             memory: Memory::default(),
             queued: None,
             turn: None,
@@ -109,6 +114,11 @@ impl AgentHost {
 
     pub fn role(&self) -> AgentRole {
         self.role
+    }
+
+    /// Continue chat session `chat` from the next turn on.
+    pub fn set_chat(&mut self, chat: impl Into<String>) {
+        self.chat = chat.into();
     }
 
     /// Recipes available as `/name` commands (the store seeds built-ins).
@@ -247,7 +257,7 @@ impl AgentHost {
         let spec = TurnSpec {
             system_prompt,
             message,
-            resume: session::load(project.id, backend, self.role),
+            resume: session::load(project.id, &self.chat, backend, self.role),
             mcp,
             workdir,
             run_dir,
@@ -268,6 +278,7 @@ impl AgentHost {
             author,
             backend,
             project: project.id,
+            chat: self.chat.clone(),
             context: q.context,
             settings: q.settings,
             spec,
@@ -293,9 +304,13 @@ impl AgentHost {
         };
         for event in running.events.try_iter() {
             match event {
-                BackendEvent::Session(id) => {
-                    session::store(turn.project, turn.backend, role_of(&turn.author), Some(&id))
-                }
+                BackendEvent::Session(id) => session::store(
+                    turn.project,
+                    &turn.chat,
+                    turn.backend,
+                    role_of(&turn.author),
+                    Some(&id),
+                ),
                 BackendEvent::TextDelta(text) => {
                     turn.saw_text = true;
                     if !turn.cancelled {
@@ -312,7 +327,13 @@ impl AgentHost {
         // too and run the turn again fresh.
         let lost = matches!(&turn.finished, Some(Some(e)) if is_lost_session(e));
         if lost && turn.spec.resume.is_some() && !turn.saw_text && !turn.cancelled {
-            session::store(turn.project, turn.backend, role_of(&turn.author), None);
+            session::store(
+                turn.project,
+                &turn.chat,
+                turn.backend,
+                role_of(&turn.author),
+                None,
+            );
             let mut spec = turn.spec.clone();
             spec.resume = None;
             match backend::start(backend::adapter(turn.backend), spec.clone()) {

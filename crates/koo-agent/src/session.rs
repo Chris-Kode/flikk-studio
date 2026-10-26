@@ -1,5 +1,5 @@
-//! Backend session ids, one per project, backend and role, so each project
-//! chat resumes its own conversation. Stored in
+//! Backend session ids, one per project, chat, backend and role, so each
+//! chat session resumes its own conversation. Stored in
 //! `paths::home()/agent/sessions.json`.
 
 use koo_core::ProjectId;
@@ -20,8 +20,12 @@ fn file() -> PathBuf {
     agent_dir().join("sessions.json")
 }
 
-fn key(project: ProjectId, backend: Backend, role: AgentRole) -> String {
-    format!(
+/// The chat every project starts with. It keeps the key format from before
+/// projects had several chats, so existing conversations still resume.
+pub const MAIN_CHAT: &str = "main";
+
+fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
+    let base = format!(
         "{}/{}/{}",
         project.0,
         backend.label().to_lowercase(),
@@ -29,7 +33,12 @@ fn key(project: ProjectId, backend: Backend, role: AgentRole) -> String {
             AgentRole::Editor => "editor",
             AgentRole::Builder => "builder",
         }
-    )
+    );
+    if chat == MAIN_CHAT {
+        base
+    } else {
+        format!("{base}/{chat}")
+    }
 }
 
 fn load_all() -> BTreeMap<String, String> {
@@ -39,19 +48,43 @@ fn load_all() -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-pub fn load(project: ProjectId, backend: Backend, role: AgentRole) -> Option<String> {
-    load_all().remove(&key(project, backend, role))
+pub fn load(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> Option<String> {
+    load_all().remove(&key(project, chat, backend, role))
 }
 
 /// `None` forgets the session (e.g. the backend no longer knows it).
-pub fn store(project: ProjectId, backend: Backend, role: AgentRole, session: Option<&str>) {
+pub fn store(
+    project: ProjectId,
+    chat: &str,
+    backend: Backend,
+    role: AgentRole,
+    session: Option<&str>,
+) {
     let mut all = load_all();
-    let k = key(project, backend, role);
+    let k = key(project, chat, backend, role);
     match session {
         Some(s) => all.insert(k, s.to_owned()),
         None => all.remove(&k),
     };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+    save_all(&all);
+}
+
+/// Forget a deleted chat's sessions on every backend and role.
+pub fn forget_chat(project: ProjectId, chat: &str) {
+    let mut all = load_all();
+    let before = all.len();
+    for backend in [Backend::Claude, Backend::Codex] {
+        for role in [AgentRole::Editor, AgentRole::Builder] {
+            all.remove(&key(project, chat, backend, role));
+        }
+    }
+    if all.len() != before {
+        save_all(&all);
+    }
+}
+
+fn save_all(all: &BTreeMap<String, String>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(all) {
         let tmp = file().with_extension("json.tmp");
         if std::fs::write(&tmp, bytes).is_ok() {
             let _ = std::fs::rename(&tmp, file());

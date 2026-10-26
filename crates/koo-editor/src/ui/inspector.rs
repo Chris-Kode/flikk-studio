@@ -1,14 +1,16 @@
-//! Inspector, contextual by workspace and selection: transform and keyframes
-//! (Edit), primary grade (Color), gain, fades, mixer, loudness and ducking
-//! (Audio).
+//! Inspector, contextual by workspace and selection: the selected clip's
+//! properties by kind (Edit), primary grade (Color), gain, fades, mixer,
+//! loudness and ducking (Audio).
 
 mod audio;
+mod clip;
 mod color;
 mod edit;
 mod param;
 
 use crate::state::EditorState;
-use gpui_kit::component::input::InputState;
+use clip::PictureTab;
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -30,12 +32,50 @@ pub struct InspectorPanel {
     measuring: bool,
     lufs_target: Entity<InputState>,
     peak_target: Entity<InputState>,
-    _observe: Subscription,
+    picture_tab: PictureTab,
+    /// Caption or title text, and the clip it was loaded from.
+    text: Entity<TextareaState>,
+    text_clip: Option<ClipId>,
+    /// Caption or title start and end, and the clip they show.
+    start_field: Entity<InputState>,
+    end_field: Entity<InputState>,
+    timing_clip: Option<ClipId>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl InspectorPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let text = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .submit_on_enter(true)
+        });
+        let start_field = cx.new(|cx| InputState::new(window, cx));
+        let end_field = cx.new(|cx| InputState::new(window, cx));
+        let commit = |ev: &InputEvent| {
+            matches!(
+                ev,
+                InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
+            )
+        };
+        let _subscriptions = vec![
+            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.subscribe(&text, move |this, _, ev: &InputEvent, cx| {
+                if commit(ev) {
+                    this.commit_text(cx);
+                }
+            }),
+            cx.subscribe(&start_field, move |this, _, ev: &InputEvent, cx| {
+                if commit(ev) {
+                    this.commit_timing(Edge::Start, cx);
+                }
+            }),
+            cx.subscribe(&end_field, move |this, _, ev: &InputEvent, cx| {
+                if commit(ev) {
+                    this.commit_timing(Edge::End, cx);
+                }
+            }),
+        ];
         let presets = state.read(cx).presets.clone();
         let lufs_target = cx.new(|cx| {
             InputState::new(window, cx).default_value(param::format_value(presets.loudness_lufs, 1))
@@ -51,7 +91,13 @@ impl InspectorPanel {
             measuring: false,
             lufs_target,
             peak_target,
-            _observe,
+            picture_tab: PictureTab::default(),
+            text,
+            text_clip: None,
+            start_field,
+            end_field,
+            timing_clip: None,
+            _subscriptions,
         }
     }
 
@@ -87,10 +133,6 @@ impl InspectorPanel {
             .iter()
             .filter_map(|id| tl.clip(*id).map(|(_, c)| c.clone()))
             .collect()
-    }
-
-    fn primary(&self, cx: &App) -> Option<Clip> {
-        self.selected_clips(cx).into_iter().next()
     }
 
     fn run(&self, commands: Vec<Command>, label: &str, cx: &mut Context<Self>) {
@@ -192,7 +234,7 @@ impl InspectorPanel {
             }
             Key::ClipGain => {
                 label = "set_gain";
-                for clip in clips.iter().filter(|c| is_media(c)) {
+                for clip in sound_clips(tl, &clips) {
                     commands.push(Command::SetGain {
                         clip: clip.id,
                         db: v,
@@ -206,7 +248,7 @@ impl InspectorPanel {
                 } else {
                     Edge::End
                 };
-                for clip in clips.iter().filter(|c| is_media(c)) {
+                for clip in sound_clips(tl, &clips) {
                     commands.push(Command::AddFade {
                         clip: clip.id,
                         edge,
@@ -297,6 +339,20 @@ fn empty(text: &'static str, cx: &App) -> AnyElement {
         .text_color(cx.theme().muted_foreground)
         .child(text)
         .into_any_element()
+}
+
+/// The clips whose sound gain and fades change: the selected media clips,
+/// video ones replaced by their linked audio (the renderer mixes audio
+/// tracks only).
+fn sound_clips<'a>(tl: &'a koo_core::model::Timeline, clips: &'a [Clip]) -> Vec<&'a Clip> {
+    let mut out: Vec<&Clip> = Vec::new();
+    for clip in clips.iter().filter(|c| is_media(c)) {
+        let sound = clip::sound_clip(tl, clip);
+        if !out.iter().any(|c| c.id == sound.id) {
+            out.push(sound);
+        }
+    }
+    out
 }
 
 fn is_media(clip: &Clip) -> bool {

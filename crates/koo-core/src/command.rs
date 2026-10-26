@@ -205,6 +205,7 @@ pub enum Command {
         text: String,
         speaker: Option<SpeakerId>,
     },
+    /// Retext or retime a caption; titles take the same edits.
     EditCaption {
         clip: ClipId,
         text: Option<String>,

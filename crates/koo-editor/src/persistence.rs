@@ -6,12 +6,14 @@
 //! opened the editor still runs on an in-memory "Untitled" project and
 //! [`take_notice`] says why.
 
+use koo_agent::session::MAIN_CHAT;
 use koo_core::agent::{AgentSettings, ChatMessage};
 use koo_core::bus::CommandBus;
 use koo_core::history::History;
 use koo_core::ids::ProjectId;
 use koo_core::model::Project;
 use koo_store::{Autosaver, OpenedProject, Store};
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
 
 /// Everything needed to start editing a project.
@@ -174,33 +176,90 @@ fn with_session<T>(f: impl FnOnce(&mut Session) -> koo_store::Result<T>) -> Opti
     }
 }
 
-/// One conversation per project (PRD AG1), as JSON beside the project's
-/// other files under `paths::projects()`.
-fn chat_path(project: ProjectId) -> std::path::PathBuf {
+/// A project's chat sessions, as JSON beside the project's other files
+/// under `paths::projects()`.
+fn chats_path(project: ProjectId) -> std::path::PathBuf {
+    koo_core::paths::projects().join(format!("{}.chats.json", project.0.simple()))
+}
+
+/// The single conversation projects had before chat sessions.
+fn legacy_chat_path(project: ProjectId) -> std::path::PathBuf {
     koo_core::paths::projects().join(format!("{}.chat.json", project.0.simple()))
 }
 
-/// The project's chat. Change sets live only in memory, so messages lose
-/// their review card on reload and keep their text.
-pub fn load_chat(project: ProjectId) -> Vec<ChatMessage> {
-    let Ok(bytes) = std::fs::read(chat_path(project)) else {
-        return Vec::new();
-    };
-    let mut chat: Vec<ChatMessage> = serde_json::from_slice(&bytes).unwrap_or_default();
-    for m in &mut chat {
-        m.change_set = None;
-    }
-    chat
+/// One conversation with the agent. Each resumes its own backend session,
+/// so a new chat starts without the context of the others.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    /// Unix seconds of the last message, or of creation.
+    pub at: i64,
+    pub messages: Vec<ChatMessage>,
 }
 
-pub fn save_chat(project: ProjectId, chat: &[ChatMessage]) {
-    let path = chat_path(project);
+impl ChatSession {
+    pub fn new(id: impl Into<String>, at: i64) -> Self {
+        Self {
+            id: id.into(),
+            title: String::new(),
+            at,
+            messages: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Chats {
+    pub active: String,
+    pub sessions: Vec<ChatSession>,
+}
+
+/// The project's chat sessions; never empty. Change sets live only in
+/// memory, so messages lose their review card on reload and keep their text.
+pub fn load_chats(project: ProjectId) -> Chats {
+    let mut chats = std::fs::read(chats_path(project))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Chats>(&bytes).ok())
+        .unwrap_or_else(|| legacy_chats(project));
+    if chats.sessions.is_empty() {
+        chats.sessions.push(ChatSession::new(MAIN_CHAT, 0));
+    }
+    if !chats.sessions.iter().any(|s| s.id == chats.active) {
+        chats.active = chats.sessions[0].id.clone();
+    }
+    for m in chats.sessions.iter_mut().flat_map(|s| &mut s.messages) {
+        m.change_set = None;
+    }
+    chats
+}
+
+/// The pre-sessions chat becomes the main session, which keeps resuming
+/// the same backend conversation.
+fn legacy_chats(project: ProjectId) -> Chats {
+    let messages: Vec<ChatMessage> = std::fs::read(legacy_chat_path(project))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut main = ChatSession::new(MAIN_CHAT, messages.last().map_or(0, |m| m.at));
+    main.messages = messages;
+    Chats {
+        active: main.id.clone(),
+        sessions: vec![main],
+    }
+}
+
+pub fn save_chats(project: ProjectId, chats: &Chats) {
+    let path = chats_path(project);
     let tmp = path.with_extension("json.tmp");
-    let written = serde_json::to_vec(chat)
+    let written = serde_json::to_vec(chats)
         .map_err(std::io::Error::other)
         .and_then(|bytes| std::fs::write(&tmp, bytes))
         .and_then(|()| std::fs::rename(&tmp, &path));
-    if let Err(e) = written {
-        notify(format!("Couldn't save the chat: {e}"));
+    match written {
+        Ok(()) => {
+            let _ = std::fs::remove_file(legacy_chat_path(project));
+        }
+        Err(e) => notify(format!("Couldn't save the chat: {e}")),
     }
 }

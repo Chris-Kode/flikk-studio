@@ -14,6 +14,7 @@ use crate::app::TogglePlay;
 use crate::state::EditorState;
 use glyph::{Glyph, glyph};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{
@@ -22,7 +23,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge, InsertMode};
-use koo_core::model::{ClipContent, MarkerKind, MediaKind, Project, TrackKind, TrackMix};
+use koo_core::model::{ClipContent, MarkerKind, MediaKind, Project, Timeline, TrackKind, TrackMix};
 use koo_core::{ChangeItemId, ChangeSetId, ClipId, Time, TimeRange, TrackId};
 use layout::{EDGE_PX, HEADER_WIDTH, RULER_HEIGHT, Row, SNAP_PX, TOOLBAR_HEIGHT, Viewport};
 use overlay::OverlayItem;
@@ -55,6 +56,8 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomToFit,
+        PrevCut,
+        NextCut,
     ]
 );
 
@@ -91,6 +94,8 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("l", ShuttleForward, c),
             KeyBinding::new("left", PrevFrame, c),
             KeyBinding::new("right", NextFrame, c),
+            KeyBinding::new("up", PrevCut, c),
+            KeyBinding::new("down", NextCut, c),
         ]);
     }
     cx.bind_keys(bindings);
@@ -127,10 +132,104 @@ pub(crate) fn transport(state: &Entity<EditorState>, action: &dyn Action, cx: &m
             };
             s.set_playing(false, cx);
             s.seek(t, cx);
+        } else if any.is::<PrevCut>() || any.is::<NextCut>() {
+            step_cut(s, any.is::<NextCut>(), cx);
         } else if any.is::<TogglePlay>() {
             s.toggle_play(cx);
         }
     });
+}
+
+/// Up/Down. With a clip selected, select the previous or next clip on its
+/// track; otherwise move to the previous or next cut on any track. Either
+/// way the playhead lands on the cut.
+fn step_cut(s: &mut EditorState, forward: bool, cx: &mut Context<EditorState>) {
+    let tl = &s.bus.project().timeline;
+    let selected = s.selection.clips.last().and_then(|id| tl.clip(*id));
+    if let Some((track, clip)) = selected {
+        let i = track
+            .clips
+            .iter()
+            .position(|c| c.id == clip.id)
+            .unwrap_or(0);
+        let next = if forward {
+            track.clips.get(i + 1)
+        } else {
+            i.checked_sub(1).and_then(|i| track.clips.get(i))
+        };
+        if let Some(next) = next {
+            let (id, start) = (next.id, next.start);
+            s.set_playing(false, cx);
+            s.select_clips(vec![id], cx);
+            s.seek(start, cx);
+        }
+        return;
+    }
+    let mut cuts: Vec<Time> = tl
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .flat_map(|c| [c.start, c.end()])
+        .chain([Time::ZERO])
+        .collect();
+    cuts.sort();
+    cuts.dedup();
+    let t = s.playhead;
+    let target = if forward {
+        cuts.into_iter().find(|c| *c > t)
+    } else {
+        cuts.into_iter().rev().find(|c| *c < t)
+    };
+    if let Some(t) = target {
+        s.set_playing(false, cx);
+        s.seek(t, cx);
+    }
+}
+
+/// Where a new track of `kind` goes, and its name: captions on top,
+/// picture tracks above the topmost video track, audio at the bottom.
+fn new_track_slot(tl: &Timeline, kind: TrackKind) -> (usize, String) {
+    let prefix = match kind {
+        TrackKind::Video => "V",
+        TrackKind::Audio => "A",
+        TrackKind::Caption => "C",
+        TrackKind::Title => "T",
+        TrackKind::Overlay => "O",
+    };
+    let mut n = tl.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+    while tl.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
+        n += 1;
+    }
+    let index = match kind {
+        TrackKind::Caption => 0,
+        TrackKind::Audio => tl.tracks.len(),
+        _ => tl
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .or_else(|| tl.tracks.iter().position(|t| t.kind == TrackKind::Audio))
+            .unwrap_or(tl.tracks.len()),
+    };
+    (index, format!("{prefix}{n}"))
+}
+
+/// "Add … track" items, one per kind.
+fn add_track_items(menu: PopupMenu, panel: &Entity<TimelinePanel>) -> PopupMenu {
+    [
+        (TrackKind::Video, "Video track"),
+        (TrackKind::Audio, "Audio track"),
+        (TrackKind::Caption, "Caption track"),
+        (TrackKind::Title, "Title track"),
+        (TrackKind::Overlay, "Overlay track"),
+    ]
+    .into_iter()
+    .fold(menu, |menu, (kind, label)| {
+        let panel = panel.clone();
+        menu.item(
+            PopupMenuItem::new(label)
+                .on_click(move |_, _, cx| panel.update(cx, |this, cx| this.add_track(kind, cx))),
+        )
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -909,6 +1008,43 @@ impl TimelinePanel {
         });
     }
 
+    fn add_track(&mut self, kind: TrackKind, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let (index, name) = new_track_slot(&s.bus.project().timeline, kind);
+            s.edit(Command::AddTrack { kind, index, name }, cx);
+        });
+    }
+
+    /// Delete a track with its clips (one undo step).
+    fn remove_track(&mut self, track: TrackId, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let Some(t) = s.bus.project().timeline.track(track) else {
+                return;
+            };
+            let clips: Vec<ClipId> = t.clips.iter().map(|c| c.id).collect();
+            if s.edit(Command::RemoveTrack { track }, cx).is_some() {
+                let selection = s
+                    .selection
+                    .clips
+                    .iter()
+                    .copied()
+                    .filter(|c| !clips.contains(c))
+                    .collect();
+                s.select_clips(selection, cx);
+            }
+        });
+    }
+
+    /// Scroll so the playhead is in view, e.g. after jumping to a cut.
+    fn reveal_playhead(&mut self, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.get().size.width);
+        let x = self.viewport.x(self.state.read(cx).playhead);
+        if width > 0. && (x < 0. || x > width) {
+            self.viewport.scroll_x = (self.viewport.scroll_x + x - width * 0.3).max(0.);
+            cx.notify();
+        }
+    }
+
     fn toggle_lock(&mut self, track: TrackId, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let Some(t) = s.bus.project().timeline.track(track) else {
@@ -1288,6 +1424,23 @@ impl TimelinePanel {
                     .on_click(cx.listener(|this, _, _, cx| this.add_marker(false, cx))),
             )
             .child(separator())
+            .child(
+                tool("prev-cut", Glyph::PrevCut, false, "Previous cut (Up)").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        transport(&this.state, &PrevCut, cx);
+                        this.reveal_playhead(cx);
+                    },
+                )),
+            )
+            .child(
+                tool("next-cut", Glyph::NextCut, false, "Next cut (Down)").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        transport(&this.state, &NextCut, cx);
+                        this.reveal_playhead(cx);
+                    },
+                )),
+            )
+            .child(separator())
             .child(silence)
             .child(div().flex_1())
             .child(
@@ -1323,8 +1476,11 @@ impl TimelinePanel {
                 .tooltip(tip)
                 .child(glyph(g, px(13.), if on { fg } else { muted.opacity(0.7) }))
         };
+        let panel = cx.entity();
         let children = rows.into_iter().map(|(row, track)| {
             let id = track.id;
+            let locked = track.locked;
+            let panel = panel.clone();
             let audio = track.kind == TrackKind::Audio;
             let dimmed = track.mix.mute || (any_solo && audio && !track.mix.solo);
             let key = |name: &str| SharedString::from(format!("{name}-{}", track.id));
@@ -1335,6 +1491,7 @@ impl TimelinePanel {
                 (false, true) => (Glyph::EyeOff, "Show"),
             };
             h_flex()
+                .id(ElementId::Name(key("header")))
                 .h(px(row.height))
                 .px_2()
                 .gap_0p5()
@@ -1375,6 +1532,18 @@ impl TimelinePanel {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_lock(id, cx))),
                 )
+                .context_menu(move |menu, _, _| {
+                    let remove = panel.clone();
+                    add_track_items(menu, &panel)
+                        .item(PopupMenuItem::separator())
+                        .item(
+                            PopupMenuItem::new("Delete track")
+                                .disabled(locked)
+                                .on_click(move |_, _, cx| {
+                                    remove.update(cx, |this, cx| this.remove_track(id, cx))
+                                }),
+                        )
+                })
         });
         v_flex()
             .flex_none()
@@ -1383,11 +1552,23 @@ impl TimelinePanel {
             .border_r_1()
             .border_color(border)
             .child(
-                div()
+                h_flex()
                     .flex_none()
                     .h(px(RULER_HEIGHT))
+                    .px_1()
                     .border_b_1()
-                    .border_color(border),
+                    .border_color(border)
+                    .child(
+                        Button::new("add-track")
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Add track")
+                            .child(glyph(Glyph::Plus, px(12.), muted))
+                            .dropdown_menu({
+                                let panel = cx.entity();
+                                move |menu, _, _| add_track_items(menu, &panel)
+                            }),
+                    ),
             )
             .child(
                 div().flex_1().min_h_0().overflow_hidden().relative().child(
@@ -1656,6 +1837,14 @@ impl Render for TimelinePanel {
             .on_action(cx.listener(|this, a: &ShuttleStop, _, cx| transport(&this.state, a, cx)))
             .on_action(cx.listener(|this, a: &PrevFrame, _, cx| transport(&this.state, a, cx)))
             .on_action(cx.listener(|this, a: &NextFrame, _, cx| transport(&this.state, a, cx)))
+            .on_action(cx.listener(|this, a: &PrevCut, _, cx| {
+                transport(&this.state, a, cx);
+                this.reveal_playhead(cx);
+            }))
+            .on_action(cx.listener(|this, a: &NextCut, _, cx| {
+                transport(&this.state, a, cx);
+                this.reveal_playhead(cx);
+            }))
             .child(self.toolbar(cx))
             .child(
                 h_flex()

@@ -1,4 +1,5 @@
-//! Edit workspace: transform with per-property keyframe toggles at the
+//! Edit workspace: the selected clip's properties (see `clip.rs`); for
+//! picture clips, transform with per-property keyframe toggles at the
 //! playhead, and the clip's keyframes (PRD E5).
 
 use super::param::{Key, format_value};
@@ -21,10 +22,23 @@ const TRANSFORM: [Key; 5] = [
 ];
 
 impl InspectorPanel {
+    /// The selected clip's properties for its kind, or the sequence format
+    /// when nothing is selected.
     pub(super) fn edit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(clip) = self.primary(cx) else {
-            return self.sequence_view(cx);
-        };
+        match self.primary_on_track(cx) {
+            Some((track, clip)) => self.clip_view(track, clip, window, cx),
+            None => self.sequence_view(cx),
+        }
+    }
+
+    /// Transform with keyframe toggles, then the clip's keyframes.
+    pub(super) fn transform_view(
+        &mut self,
+        clip: &Clip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let clip = clip.clone();
         let state = self.state.read(cx);
         let playhead = state.playhead;
         let frame = state.bus.project().timeline.settings.rate.frame_duration();

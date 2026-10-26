@@ -49,6 +49,11 @@ impl AgentLink {
         self.host.set_role(role);
     }
 
+    /// Chat session whose backend conversation the next turn continues.
+    pub fn set_chat(&mut self, chat: &str) {
+        self.host.set_chat(chat);
+    }
+
     /// Recipes offered as `/name` slash commands.
     pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
         self.host.set_recipes(recipes);

@@ -14,14 +14,16 @@ use crate::state::EditorState;
 use crate::ui::settings::SettingsPanel;
 use composer::{Composer, ComposerEvent};
 use gpui_kit::component::bubble::{Bubble, BubbleVariant};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message::{Message, MessageAlignment, MessageContent};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    StyledExt as _, WindowExt as _, h_flex, v_flex,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -56,6 +58,8 @@ pub struct ChatPanel {
     activity_open: HashSet<usize>,
     /// What the rows were last measured for.
     signature: u64,
+    /// Chat session the rows show.
+    chat: String,
     /// Change item last revealed for the timeline.
     revealed: Option<(ChangeSetId, ChangeItemId)>,
     render_poll: Option<Task<()>>,
@@ -83,6 +87,7 @@ impl ChatPanel {
             }),
         ];
         let signature = signature(state.read(cx));
+        let chat = state.read(cx).active_chat().to_owned();
         Self {
             state,
             composer,
@@ -92,6 +97,7 @@ impl ChatPanel {
             reviews: Default::default(),
             activity_open: HashSet::new(),
             signature,
+            chat,
             revealed: None,
             render_poll: None,
             _subscriptions,
@@ -106,15 +112,20 @@ impl ChatPanel {
     /// Keep the virtual list's rows in step with the conversation: append
     /// new messages, remeasure when streaming text or a card changed.
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
-        let (count, sig) = {
+        let (count, sig, chat) = {
             let s = self.state.read(cx);
-            (s.chat.len(), signature(s))
+            (s.chat.len(), signature(s), s.active_chat().to_owned())
         };
         let changed = sig != self.signature;
         self.signature = sig;
+        let switched = chat != self.chat;
+        self.chat = chat;
         self.scroller.update(cx, |list, cx| {
             let n = list.item_count();
-            if count < n {
+            if switched {
+                list.reset(count, cx);
+                list.scroll_to_end(cx);
+            } else if count < n {
                 list.reset(count, cx);
             } else if count > n {
                 list.append(count - n, cx);
@@ -167,29 +178,115 @@ impl ChatPanel {
         });
     }
 
+    /// Ask before deleting a chat: its conversation can't be brought back.
+    fn confirm_delete(state: Entity<EditorState>, id: String, window: &mut Window, cx: &mut App) {
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (state, id) = (state.clone(), id.clone());
+            alert
+                .title("Delete this chat?")
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.delete_chat(&id, cx));
+                    true
+                })
+        });
+    }
+
+    /// The active chat's title; opens the other sessions, "New chat" and
+    /// "Delete chat".
+    fn session_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        let s = self.state.read(cx);
+        let busy = s.agent_busy();
+        let active = s.active_chat().to_owned();
+        let title = s
+            .chat_sessions()
+            .into_iter()
+            .find(|(id, _)| *id == active)
+            .map_or_else(|| "Untitled".to_owned(), |(_, title)| title);
+        Button::new("chat-sessions")
+            .ghost()
+            .small()
+            .label(title)
+            .dropdown_caret(true)
+            .disabled(busy)
+            .dropdown_menu(move |menu, _, cx| {
+                let s = state.read(cx);
+                let active = s.active_chat().to_owned();
+                let sessions = s.chat_sessions();
+                let empty = s.chat.is_empty();
+                let new = state.clone();
+                let mut menu = menu.item(
+                    PopupMenuItem::new("New chat")
+                        .disabled(empty)
+                        .on_click(move |_, _, cx| new.update(cx, |s, cx| s.new_chat(cx))),
+                );
+                menu = menu.item(PopupMenuItem::separator());
+                for (id, title) in sessions {
+                    let state = state.clone();
+                    let checked = id == active;
+                    menu = menu.item(PopupMenuItem::new(title).checked(checked).on_click(
+                        move |_, _, cx| state.update(cx, |s, cx| s.switch_chat(&id, cx)),
+                    ));
+                }
+                let delete = state.clone();
+                menu.item(PopupMenuItem::separator()).item(
+                    PopupMenuItem::new("Delete chat").on_click(move |_, window, cx| {
+                        Self::confirm_delete(delete.clone(), active.clone(), window, cx)
+                    }),
+                )
+            })
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let empty = self.state.read(cx).chat.is_empty();
+        let busy = self.state.read(cx).agent_busy();
         let backend = self.state.read(cx).settings.backend.label();
+        let theme = cx.theme();
         h_flex()
             .h(px(40.))
             .flex_none()
             .px_3()
+            .gap_2()
             .justify_between()
             .border_b_1()
             .border_color(theme.border)
             .child(
                 h_flex()
-                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .gap_1()
                     .child(
-                        Icon::new(IconName::Bot)
-                            .size_4()
-                            .text_color(theme.muted_foreground),
+                        div()
+                            .id("chat-backend")
+                            .flex_none()
+                            .child(
+                                Icon::new(IconName::Bot)
+                                    .size_4()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .tooltip(move |window, cx| Tooltip::new(backend).build(window, cx)),
                     )
-                    .child(div().text_sm().font_medium().child(backend)),
+                    .child(self.session_menu(cx)),
             )
             .child(
                 h_flex()
+                    .flex_none()
                     .gap_0p5()
+                    .child(
+                        Button::new("chat-new")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .small()
+                            .tooltip("New chat")
+                            .disabled(empty || busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.new_chat(cx))
+                            })),
+                    )
                     .child(
                         Button::new("chat-activity")
                             .icon(IconName::GalleryVerticalEnd)
@@ -361,6 +458,7 @@ impl Render for ChatPanel {
 /// states, previews.
 fn signature(s: &EditorState) -> u64 {
     let mut h = DefaultHasher::new();
+    s.active_chat().hash(&mut h);
     s.chat.len().hash(&mut h);
     s.chat.last().map(|m| m.text.len()).hash(&mut h);
     s.preview.hash(&mut h);
