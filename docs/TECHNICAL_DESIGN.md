@@ -49,6 +49,8 @@ behaviour and this file wins on structure.
 | `koo-analysis` | Background jobs: Whisper transcript, VAD, speakers, shot changes, silences, loudness | core, whisper-rs |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
+| `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
+| `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock | core, tungstenite |
 | `koo-editor` | GPUI app: layout, `EditorState`, panels, wiring of all of the above | all |
 
 Crates other than `koo-editor` depend only on `koo-core`, never on each other.
@@ -187,8 +189,39 @@ All nine streams are merged. What runs today:
   kind (video, audio, caption, title), transcript/captions, chat sessions
   with change-set review, agent settings, project menu.
 
+The pro-editing build-out (§8) is merged on top:
+
+* **FX:** GLSL effects, transitions and generators on the GPU (51
+  built-ins) and HTML/CSS/JS motion graphics (15 templates), with typed,
+  keyframeable parameters; programs written by the user or the agent live
+  in the project and are edited in the FX code editor.
+* **Compositor:** one program frame for the viewer, the export and the
+  agent's view tools; exported frames match the viewer at 38–39 dB PSNR
+  (the yuv420p encode is the limit).
+* **Editing:** transitions on cuts and edges, speed, enable/disable, clip
+  names and colors, crop/flip/blend modes, multi-select, copy/paste/
+  duplicate, nudge, a trim mode (slip, ripple, roll), resizable tracks.
+* **Color:** one grade pipeline in core, baked into a 3D LUT for export;
+  wheels, curves, scopes (waveform, parade, vectorscope, histogram), shot
+  matching, LUT list.
+* **Audio:** clip and track effect inserts matched between preview and
+  export, volume automation, crossfades, retimed audio, meters and a
+  mixer.
+* **Agent:** a tool for every command (71), `create_fx`/`update_fx` with
+  line-numbered compile errors, `preview_fx` to look at a program over
+  time, graded scopes, timecode and frame addressing, and an external MCP
+  bridge (below).
+* **Chat:** drag clips (Alt-drag on the timeline), media, effects,
+  transitions and transcript words into the composer, an `@` picker for
+  every object kind, and a resolved `<references>` block sent with each
+  message.
+
 Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor`
-(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace).
+(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace). More demo
+states: `KOOEDITOR_DEMO_FX=effects|generator|transition|library|code`,
+`KOOEDITOR_DEMO_SELECTION=clips|transition`, `KOOEDITOR_DEMO_CHAT=1`,
+`KOOEDITOR_DEMO_PLAY=1`, and `KOOEDITOR_DEMO_COMPOSE=<seconds>` (every
+compositor feature on real FFmpeg-made media).
 
 ### Known gaps
 
@@ -198,8 +231,20 @@ Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.
-* P1/P2 PRD items (scopes, LUT browser, nested sequences, music playlist
-  UI, voice cleanup, vertical reframing, voice input) are not built.
+* P1/P2 PRD items not yet built: nested sequences, music playlist UI,
+  voice cleanup, vertical reframing, voice input.
+* Mouse and keyboard interactions (drags, drops, context menus,
+  shortcuts) were checked by code review and screenshots of seeded states
+  only: the cloud containers have no input automation.
+* Preview vs export: noise reduction previews with an expander (export
+  uses `afftdn`); the limiter and time-stretch differ slightly in shape.
+* The FX code editor has no syntax highlighting (gpui-kit's `syntect`
+  feature is not vendored). A shader that never returns can stall the GPU.
+* A program an external agent proposes is usable by its later connections
+  only once the user accepts it.
+* If the editor crashes, its headless browser can keep running.
+* CPU fallbacks (no GPU adapter) are slow in debug builds; use release
+  builds on machines without a GPU.
 
 ## 8. Pro editing: FX, shaders and HTML motion graphics
 
@@ -243,6 +288,30 @@ with the same precision as the UI.
   and scope tools all use it; ranges without FX still render through the
   graph. Source pictures come through `compose::Pictures` (single decodes
   or per-layer streams that honour speed).
+
+### Driving the editor from an external agent
+
+While the editor runs it publishes its MCP bridge in
+`paths::home()/bridge.json` (address, token, pid; owner-only). Any MCP
+client can then use the same tools as the built-in agent:
+
+```sh
+claude mcp add koo -- koo-editor mcp          # Claude Code
+```
+
+or for Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.koo]
+command = "koo-editor"
+args = ["mcp"]
+```
+
+External calls act with the agent's current role and permissions. Their
+edits land in an "External agent" change set that goes to review when the
+client disconnects or after 90 s without a call; `ask_user` is not
+available to them. The HTML engine finds Chrome, Chromium, Edge or Brave
+on its own; set `KOOEDITOR_CHROME` to use another build.
 
 ### Streams
 
