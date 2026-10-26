@@ -128,6 +128,7 @@ pub fn build(project: &Project, spec: &GraphSpec, work_dir: &Path) -> Result<Gra
         chains: Vec::new(),
         next: 0,
         sizes: HashMap::new(),
+        work_dir,
     };
     let frames = b.frames(spec.range.end).max(1);
     let video = if spec.video {
@@ -151,6 +152,8 @@ struct Builder<'a> {
     chains: Vec<String>,
     next: usize,
     sizes: HashMap<PathBuf, (u32, u32)>,
+    /// Side files: captions, grade LUTs.
+    work_dir: &'a Path,
 }
 
 /// A picture source for a clip segment.
@@ -292,7 +295,7 @@ impl Builder<'_> {
                 segments.push(self.gap(f0 - cursor));
             }
             let start = self.frame_time(f0);
-            segments.push(self.clip_segment(clip, &picture, start, f1 - f0));
+            segments.push(self.clip_segment(clip, &picture, start, f1 - f0)?);
             cursor = f1;
         }
         Ok(self.concat(segments, true))
@@ -353,7 +356,13 @@ impl Builder<'_> {
 
     /// `frames` frames of `clip` starting at timeline time `start`, on a
     /// transparent canvas.
-    fn clip_segment(&mut self, clip: &Clip, pic: &Picture, start: Time, frames: i64) -> String {
+    fn clip_segment(
+        &mut self,
+        clip: &Clip,
+        pic: &Picture,
+        start: Time,
+        frames: i64,
+    ) -> Result<String> {
         let (w, h, r) = (self.spec.width, self.spec.height, self.rate());
         let fd = 1.0 / self.spec.rate.fps();
         let offset = (start - clip.start).max(Time::ZERO).as_secs_f64();
@@ -385,10 +394,9 @@ impl Builder<'_> {
             f.push("setpts=PTS-STARTPTS".into());
             f.push(format!("fps={r}"));
         }
-        f.extend(grade_filters(&clip.grade));
-        if matches!(clip.content, ClipContent::Media { .. }) {
-            f.extend(grade_filters(&self.project.timeline.grade));
-        }
+        let timeline = matches!(clip.content, ClipContent::Media { .. })
+            .then_some(&self.project.timeline.grade);
+        f.extend(grade_filters(&clip.grade, timeline, self.work_dir)?);
         f.push("format=yuva420p".into());
 
         let (sw, sh) = (pic.size.0.max(1) as f64, pic.size.1.max(1) as f64);
@@ -451,7 +459,7 @@ impl Builder<'_> {
             "[{canvas}][{src}]overlay=x='{x}':y='{y}':eval={}:eof_action=pass:repeatlast=0:format=auto,setsar=1,format=yuva420p[{out}]",
             if animated { "frame" } else { "init" }
         ));
-        out
+        Ok(out)
     }
 
     // ---------------------------------------------------------------- audio
@@ -697,55 +705,10 @@ impl Builder<'_> {
     }
 }
 
-/// Primary grade (PRD K1) as filters; nothing for a neutral grade.
-fn grade_filters(g: &Grade) -> Vec<String> {
-    let mut f = Vec::new();
-    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
-    // Exposure in stops and per-channel gain: a multiply in RGB.
-    let k = 2f32.powf(g.exposure);
-    let gain = [g.gain[0] * k, g.gain[1] * k, g.gain[2] * k];
-    if gain.iter().any(|v| !near(*v, 1.0)) {
-        f.push(format!(
-            "colorchannelmixer=rr={}:gg={}:bb={}",
-            num(gain[0] as f64),
-            num(gain[1] as f64),
-            num(gain[2] as f64)
-        ));
-    }
-    if !near(g.contrast, 1.0) || !near(g.saturation, 1.0) || !near(g.gamma, 1.0) {
-        f.push(format!(
-            "eq=contrast={}:saturation={}:gamma={}",
-            num(g.contrast.clamp(-1000.0, 1000.0) as f64),
-            num(g.saturation.clamp(0.0, 3.0) as f64),
-            num(g.gamma.clamp(0.1, 10.0) as f64)
-        ));
-    }
-    // Temperature/tint: -1..1 (values beyond that are read as percent).
-    let unit = |v: f32| if v.abs() > 1.0 { v / 100.0 } else { v }.clamp(-1.0, 1.0);
-    let (temp, tint) = (unit(g.temperature), unit(g.tint));
-    let lift = g.lift.map(|v| v.clamp(-1.0, 1.0));
-    if !near(temp, 0.0) || !near(tint, 0.0) || lift.iter().any(|v| !near(*v, 0.0)) {
-        f.push(format!(
-            "colorbalance=rs={}:gs={}:bs={}:rm={}:gm={}:bm={}",
-            num(lift[0] as f64),
-            num(lift[1] as f64),
-            num(lift[2] as f64),
-            num((temp * 0.3) as f64),
-            num((-tint * 0.3) as f64),
-            num((-temp * 0.3) as f64)
-        ));
-    }
-    if g.gamma_rgb.iter().any(|v| !near(*v, 1.0)) {
-        let p = g.gamma_rgb.map(|v| 1.0 / v.clamp(0.1, 10.0) as f64);
-        f.push(format!(
-            "lutrgb=r='gammaval({})':g='gammaval({})':b='gammaval({})'",
-            num(p[0]),
-            num(p[1]),
-            num(p[2])
-        ));
-    }
-    if let Some(lut) = &g.lut {
-        f.push(format!("lut3d=file={}", escape_path(lut)));
-    }
-    f
+/// A clip's grade, then the timeline grade over it, as filters (one baked
+/// LUT, see [`crate::grade`]); nothing when both are neutral.
+fn grade_filters(clip: &Grade, timeline: Option<&Grade>, work_dir: &Path) -> Result<Vec<String>> {
+    let mut grades = vec![clip];
+    grades.extend(timeline);
+    crate::grade::filters(&grades, work_dir)
 }

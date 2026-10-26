@@ -9,6 +9,7 @@ pub mod captions;
 pub mod fcpxml;
 pub mod ffmpeg;
 pub mod frame;
+pub mod grade;
 pub mod graph;
 pub mod keyframes;
 pub mod otio;
