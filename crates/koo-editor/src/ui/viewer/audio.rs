@@ -18,7 +18,7 @@
 use crate::ui::mixer::meter::{self, Level};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
-use koo_core::audiofx::dsp::Chain;
+use koo_core::audiofx::dsp::{self, Chain, Curve};
 use koo_core::audiofx::stretch::Stretch;
 use koo_core::audiofx::{self, Ramp};
 use koo_core::model::{Clip, ClipContent, MediaItem, Project, Property, TrackKind};
@@ -252,20 +252,12 @@ struct Mixer {
     rms_coef: f32,
 }
 
-/// Music under dialogue, like the render's `sidechaincompress`: when the
-/// other tracks pass the threshold the music eases down to `reduction`.
+/// Music under dialogue: the music track compressed with the other tracks
+/// as its key, the same curve as the render's `sidechaincompress`.
 struct Duck {
     track: TrackId,
-    reduction: f32,
-    attack: f32,
-    release: f32,
-    /// Smoothed level of the other tracks.
-    level: f32,
-    gain: f32,
+    curve: Curve,
 }
-
-/// Linear threshold of the render's compressor.
-const DUCK_THRESHOLD: f32 = 0.015;
 /// RMS window of the meters.
 const RMS_WINDOW_S: f64 = 0.3;
 
@@ -315,8 +307,6 @@ impl Mixer {
                 }
             })
             .collect();
-        // Per-sample smoothing over a time constant.
-        let coef = |t: Time| (-1. / (t.as_secs_f64().max(1e-4) * rate as f64)).exp() as f32;
         let duck = project.timeline.ducking.as_ref().and_then(|d| {
             let music = buses
                 .iter()
@@ -324,13 +314,11 @@ impl Mixer {
             let others = buses
                 .iter()
                 .any(|b| b.id != d.music_track && !b.sources.is_empty());
+            let (threshold, ratio) = dsp::ducking(d.reduction_db as f64);
+            let ms = |t: Time| t.as_secs_f64() * 1000.;
             (music && others).then(|| Duck {
                 track: d.music_track,
-                reduction: db(-d.reduction_db.abs()),
-                attack: coef(d.attack),
-                release: coef(d.release),
-                level: 0.,
-                gain: 1.,
+                curve: Curve::new(threshold, ratio, ms(d.attack), ms(d.release), rate as f64),
             })
         });
         Self {
@@ -484,18 +472,10 @@ impl Mixer {
                 .iter_mut()
                 .zip(self.music.as_chunks::<2>().0)
             {
-                let key = o[0].abs().max(o[1].abs());
-                let k = if key > d.level { d.attack } else { d.release };
-                d.level = key + (d.level - key) * k;
-                let target = if d.level > DUCK_THRESHOLD {
-                    d.reduction
-                } else {
-                    1.
-                };
-                let k = if target < d.gain { d.attack } else { d.release };
-                d.gain = target + (d.gain - target) * k;
-                o[0] += m[0] * d.gain;
-                o[1] += m[1] * d.gain;
+                let key = (o[0].abs() + o[1].abs()) as f64 / 2.;
+                let g = d.curve.gain(key) as f32;
+                o[0] += m[0] * g;
+                o[1] += m[1] * g;
             }
         } else {
             for (o, m) in out.iter_mut().zip(&self.music) {

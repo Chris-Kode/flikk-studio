@@ -495,22 +495,18 @@ impl Builder<'_> {
                 let dialogue: Vec<String> = streams.into_iter().map(|(_, s)| s).collect();
                 let key_src = self.mix(dialogue);
                 let (key, voice) = (self.label("key"), self.label("voice"));
-                self.chains
-                    .push(format!("[{key_src}]asplit=2[{key}][{voice}]"));
-                // sidechaincompress has no range control: pick the ratio so
-                // dialogue around -20 dBFS (16.5 dB over the threshold)
-                // pulls the music down by about `reduction_db`.
-                let reduction = d.reduction_db.abs() as f64;
-                let ratio = if reduction >= 16.0 {
-                    20.0
-                } else {
-                    (1.0 / (1.0 - reduction / 16.5)).clamp(1.0, 20.0)
-                };
+                // Padded: sidechaincompress stops when its key ends, which
+                // would cut the music where the dialogue stops.
+                self.chains.push(format!(
+                    "[{key_src}]apad=whole_len={total},asplit=2[{key}][{voice}]"
+                ));
+                let (threshold, ratio) = audiofx::dsp::ducking(d.reduction_db as f64);
                 let attack = (d.attack.as_secs_f64() * 1000.0).clamp(0.01, 2000.0);
                 let release = (d.release.as_secs_f64() * 1000.0).clamp(0.01, 9000.0);
                 let ducked = self.label("ducked");
                 self.chains.push(format!(
-                    "[{music}][{key}]sidechaincompress=threshold=0.015:ratio={}:attack={}:release={}:makeup=1[{ducked}]",
+                    "[{music}][{key}]sidechaincompress=threshold={}:ratio={}:attack={}:release={}:makeup=1:knee=2.828427:detection=rms:link=average[{ducked}]",
+                    num(threshold),
                     num(ratio),
                     num(attack),
                     num(release)

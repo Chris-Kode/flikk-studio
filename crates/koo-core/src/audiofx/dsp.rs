@@ -375,6 +375,23 @@ impl Processor for Compressor {
     }
 }
 
+/// Ducking (music under dialogue) as `sidechaincompress` settings:
+/// threshold and ratio for a reduction in dB. It has no range control, so
+/// the ratio is picked so dialogue around -20 dBFS (16.5 dB over the
+/// threshold) pulls the music down by about `reduction_db`.
+pub fn ducking(reduction_db: f64) -> (f64, f64) {
+    let reduction = reduction_db.abs();
+    let ratio = if reduction >= 16.0 {
+        20.0
+    } else {
+        (1.0 / (1.0 - reduction / 16.5)).clamp(1.0, 20.0)
+    };
+    (DUCK_THRESHOLD, ratio)
+}
+
+/// Linear threshold of ducking's compressor.
+pub const DUCK_THRESHOLD: f64 = 0.015;
+
 /// Fixed settings of the gate, shared with the render's `agate`.
 pub const GATE_RATIO: f64 = 10.0;
 /// Deepest gate attenuation, -60 dB.
