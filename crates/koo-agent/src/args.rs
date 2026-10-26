@@ -174,6 +174,15 @@ pub fn parse_time(v: &Value, rate: Rate) -> ToolResultOf<Time> {
         Value::String(s) => time_text(s, rate),
         _ => None,
     };
+    if let (None, Value::String(s)) = (t, v)
+        && s.split(':').count() == 4
+    {
+        return fail(format!(
+            "`{s}` is not a timecode at {} fps: HH:MM:SS:FF with FF 0..{}",
+            rate.rounded_fps(),
+            rate.rounded_fps().saturating_sub(1)
+        ));
+    }
     t.ok_or_else(|| {
         ToolError(
             "times are seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"".into(),

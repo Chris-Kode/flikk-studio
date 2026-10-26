@@ -497,11 +497,30 @@ fn add_generator(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, T
         }
     };
     // HTML motion graphics read as titles; shader pictures as overlays.
-    let (kind, name) = match asset.language {
-        FxLanguage::Html => (TrackKind::Title, "T1"),
-        FxLanguage::Glsl => (TrackKind::Overlay, "O1"),
+    // Without a track: the first of that kind free over the range, else a
+    // new one on top.
+    let (kind, letter) = match asset.language {
+        FxLanguage::Html => (TrackKind::Title, "T"),
+        FxLanguage::Glsl => (TrackKind::Overlay, "O"),
     };
-    let (commands, track) = track_or_new(ctx, args, kind, name)?;
+    let free = p.timeline.tracks.iter().find(|t| {
+        t.kind == kind && !t.locked && !t.clips.iter().any(|c| c.range().overlaps(&range))
+    });
+    let (commands, track) = match (args.has("track"), free) {
+        (false, Some(t)) => (Vec::new(), Some(t.id)),
+        (false, None) => {
+            let n = p.timeline.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+            (
+                vec![Command::AddTrack {
+                    kind,
+                    index: 0,
+                    name: format!("{letter}{n}"),
+                }],
+                None,
+            )
+        }
+        (true, _) => track_or_new(ctx, args, kind, letter)?,
+    };
     let mut done = match track {
         Some(track) => {
             let command = make(inst)(ctx, track)?;

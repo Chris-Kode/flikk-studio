@@ -556,6 +556,13 @@ impl AgentHost {
                     match ctx {
                         Some(mut ctx) => {
                             let mut done = tools::propose(&mut ctx, commands, &reason);
+                            if !done.result.is_error
+                                && let Some(bridge::Content::Text { text }) =
+                                    done.result.content.first_mut()
+                            {
+                                text.push_str("\n\n");
+                                text.push_str(&excerpts.join("\n"));
+                            }
                             done.excerpts = excerpts;
                             done
                         }
