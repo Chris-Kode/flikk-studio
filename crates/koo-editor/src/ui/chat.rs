@@ -3,6 +3,7 @@
 //! activity log and the quick-command bar.
 
 mod activity;
+mod approval;
 mod change_set;
 mod composer;
 mod demo;
@@ -26,6 +27,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::ChatRole;
+use koo_core::{ChangeItemId, ChangeSetId};
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -55,6 +57,9 @@ pub struct ChatPanel {
     activity_open: HashSet<usize>,
     /// What the rows were last measured for.
     signature: u64,
+    /// Change item last revealed for the timeline.
+    revealed: Option<(ChangeSetId, ChangeItemId)>,
+    render_poll: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -71,10 +76,13 @@ impl ChatPanel {
         let count = state.read(cx).chat.len();
         let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), window, cx));
+        quick::register_composer(&composer, cx);
         let settings = cx.new(|cx| SettingsPanel::new(state.clone(), window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |this, _, cx| {
                 this.sync_rows(cx);
+                this.reveal_focused(cx);
+                this.poll_renders(cx);
                 cx.notify();
             }),
             cx.subscribe(&composer, |this, _, event, cx| match event {
@@ -91,6 +99,8 @@ impl ChatPanel {
             reviews: Default::default(),
             activity_open: HashSet::new(),
             signature,
+            revealed: None,
+            render_poll: None,
             _subscriptions,
         }
     }
@@ -118,6 +128,37 @@ impl ChatPanel {
             } else if changed {
                 list.remeasure(cx);
             }
+        });
+    }
+
+    /// The timeline picked a change item: scroll to its card, open the
+    /// review list and highlight the item there.
+    fn reveal_focused(&mut self, cx: &mut Context<Self>) {
+        let focused = self.state.read(cx).focused_change_item();
+        if focused == self.revealed {
+            return;
+        }
+        self.revealed = focused;
+        let Some((set, item)) = focused.filter(|_| self.state.read(cx).focused_change().is_some())
+        else {
+            return;
+        };
+        let Some(ix) = self
+            .state
+            .read(cx)
+            .chat
+            .iter()
+            .rposition(|m| m.change_set == Some(set))
+        else {
+            return;
+        };
+        let review = self.reviews.entry(set).or_default();
+        review.open = true;
+        review.reveal = Some(item);
+        self.show_activity = false;
+        self.scroller.update(cx, |list, cx| {
+            list.remeasure(cx);
+            list.scroll_to_item(ix, cx);
         });
     }
 
@@ -265,6 +306,9 @@ impl ChatPanel {
                 if let Some(set) = msg.change_set {
                     content = content.child(self.render_change_set(set, cx));
                 }
+                if let Some(cards) = self.render_approvals(ix, cx) {
+                    content = content.child(cards);
+                }
                 Message::new().content(content).into_any_element()
             }
         }
@@ -329,6 +373,10 @@ fn signature(s: &EditorState) -> u64 {
     s.chat.last().map(|m| m.text.len()).hash(&mut h);
     s.preview.hash(&mut h);
     s.agent_busy().hash(&mut h);
+    s.focused_change_item().hash(&mut h);
+    for card in &s.approvals {
+        (card.message, card.outcome.is_some()).hash(&mut h);
+    }
     for set in s.bus.change_sets() {
         (set.state as u8).hash(&mut h);
         for item in &set.items {

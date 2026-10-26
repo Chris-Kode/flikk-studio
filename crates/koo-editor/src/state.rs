@@ -2,11 +2,12 @@
 //! its methods instead of touching the bus directly, so every change goes
 //! through the same path whether it came from a button or the agent.
 
-use crate::agent_link::AgentLink;
+use crate::agent_link::{AgentLink, approve};
 use crate::persistence;
 use gpui_kit::*;
+use koo_agent::PendingApproval;
 use koo_core::agent::*;
-use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
+use koo_core::bus::{AcceptReport, AgentRole, Author, CommandBus, Outcome};
 use koo_core::changeset::ChangeItem;
 use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
@@ -45,6 +46,11 @@ pub struct EditorState {
     pub play_speed: f64,
     /// Change item picked on the timeline overlay; the chat panel reveals it.
     pub focused_change: Option<(ChangeSetId, ChangeItemId)>,
+    // --- chat
+    /// Agent requests waiting for, or settled by, the user's approval.
+    pub approvals: Vec<ApprovalCard>,
+    /// Renders approved in the chat. Clones share the queue.
+    pub render_queue: koo_deliver::RenderQueue,
     clock: Option<Task<()>>,
     agent: AgentLink,
     _pump: Task<()>,
@@ -86,6 +92,8 @@ impl EditorState {
             caption_style: 0,
             play_speed: 1.0,
             focused_change: None,
+            approvals: Vec::new(),
+            render_queue: koo_deliver::RenderQueue::new(),
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
@@ -318,6 +326,7 @@ impl EditorState {
                 AgentEvent::Error { message } => self.status = Some(message),
             }
         }
+        self.sync_approvals();
         cx.notify();
     }
 
@@ -329,6 +338,161 @@ impl EditorState {
             change_set,
             at: now(),
         });
+    }
+}
+
+// --- chat
+
+/// An approval request in the thread, under the agent message it came with.
+#[derive(Clone, Debug)]
+pub struct ApprovalCard {
+    pub approval: PendingApproval,
+    /// Index into `EditorState::chat`.
+    pub message: usize,
+    /// `None` while it waits for the user.
+    pub outcome: Option<ApprovalOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApprovalOutcome {
+    Working,
+    Done(String),
+    Rendering { job: koo_core::JobId, file: String },
+    Failed(String),
+    Denied,
+}
+
+impl EditorState {
+    /// Give each new request a card under the current agent message.
+    fn sync_approvals(&mut self) {
+        let new: Vec<PendingApproval> = self
+            .agent
+            .pending_approvals()
+            .iter()
+            .filter(|p| !self.approvals.iter().any(|c| c.approval.id == p.id))
+            .cloned()
+            .collect();
+        for approval in new {
+            if self.chat.last().is_none_or(|m| m.role != ChatRole::Agent) {
+                self.push_agent(String::new(), vec![], None);
+            }
+            self.approvals.push(ApprovalCard {
+                approval,
+                message: self.chat.len() - 1,
+                outcome: None,
+            });
+        }
+    }
+
+    /// Carry out a request (store, render queue, export), then take it off
+    /// the agent's list and tell the agent on its next turn.
+    pub fn approve(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .approvals
+            .iter()
+            .position(|c| c.approval.id == id && c.outcome.is_none())
+        else {
+            return;
+        };
+        let request = self.approvals[ix].approval.request.clone();
+        let summary = request.summary.clone();
+        self.agent.resolve_approval(id);
+        let mut settings = self.settings.clone();
+        let started = approve::start(
+            &request,
+            approve::Inputs {
+                project: self.bus.project(),
+                caption_styles: &self.presets.caption_styles,
+                queue: &self.render_queue,
+                settings: &mut settings,
+            },
+        );
+        if settings != self.settings {
+            self.set_settings(settings, cx);
+        } else {
+            self.load_agent_memory();
+        }
+        let outcome = match started {
+            Ok(approve::Started::Done(line)) => {
+                self.agent.report_outcome(format!("approved: {summary}"));
+                ApprovalOutcome::Done(line)
+            }
+            Ok(approve::Started::Render(job, path)) => {
+                self.agent.report_outcome(format!(
+                    "approved: {summary}; rendering to {}",
+                    path.display()
+                ));
+                ApprovalOutcome::Rendering {
+                    job,
+                    file: approve::file_name(&path),
+                }
+            }
+            Ok(approve::Started::Background(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(file) => {
+                                this.agent
+                                    .report_outcome(format!("approved: {summary}; wrote {file}"));
+                                ApprovalOutcome::Done(file)
+                            }
+                            Err(e) => {
+                                this.agent.report_outcome(format!(
+                                    "approved but failed: {summary}: {e:#}"
+                                ));
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(card) = this.approvals.iter_mut().find(|c| c.approval.id == id)
+                        {
+                            card.outcome = Some(outcome);
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Err(e) => {
+                self.agent
+                    .report_outcome(format!("approved but failed: {summary}: {e:#}"));
+                ApprovalOutcome::Failed(format!("{e:#}"))
+            }
+        };
+        self.approvals[ix].outcome = Some(outcome);
+        cx.notify();
+    }
+
+    pub fn deny(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(card) = self
+            .approvals
+            .iter_mut()
+            .find(|c| c.approval.id == id && c.outcome.is_none())
+        else {
+            return;
+        };
+        card.outcome = Some(ApprovalOutcome::Denied);
+        let summary = card.approval.request.summary.clone();
+        self.agent.resolve_approval(id);
+        self.agent.report_outcome(format!("denied: {summary}"));
+        cx.notify();
+    }
+
+    /// A render started from the chat, as the queue sees it now.
+    pub fn render_job(&self, job: koo_core::JobId) -> Option<koo_deliver::RenderJob> {
+        self.render_queue.jobs().into_iter().find(|j| j.id == job)
+    }
+
+    pub fn agent_role(&self) -> AgentRole {
+        self.agent.role()
+    }
+
+    /// Editor or Builder; the agent switches from its next turn.
+    pub fn set_agent_role(&mut self, role: AgentRole, cx: &mut Context<Self>) {
+        self.agent.set_role(role);
+        cx.notify();
     }
 }
 

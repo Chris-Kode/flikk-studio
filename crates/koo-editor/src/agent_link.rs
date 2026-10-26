@@ -6,7 +6,10 @@
 //! events produced since the last call.
 //!
 //! Everything else (backend subprocess, MCP bridge, tools, prompts) lives in
-//! `koo_agent::AgentHost`; this type adapts it to the editor.
+//! `koo_agent::AgentHost`; this type adapts it to the editor. [`approve`]
+//! carries out the requests the user approves.
+
+pub mod approve;
 
 use koo_agent::{AgentHost, PendingApproval};
 use koo_core::agent::{AgentEvent, AgentSettings, EditorContext};
@@ -46,6 +49,10 @@ impl AgentLink {
         self.host.set_role(role);
     }
 
+    pub fn role(&self) -> AgentRole {
+        self.host.role()
+    }
+
     /// Recipes offered as `/name` slash commands.
     pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
         self.host.set_recipes(recipes);
@@ -65,5 +72,10 @@ impl AgentLink {
     /// performed it) or denied it.
     pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {
         self.host.resolve_approval(id)
+    }
+
+    /// What the user decided, told to the agent at the start of its next turn.
+    pub fn report_outcome(&mut self, outcome: String) {
+        self.host.report_outcome(outcome);
     }
 }
