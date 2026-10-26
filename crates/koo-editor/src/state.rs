@@ -9,8 +9,9 @@ use koo_core::agent::*;
 use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
 use koo_core::command::Command;
 use koo_core::model::Project;
-use koo_core::services::Services;
+use koo_core::services::{AnalysisService, MediaService, Services};
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How often agent output and tool calls are drained on the UI thread.
@@ -55,7 +56,7 @@ impl EditorState {
         });
         Self {
             bus,
-            services: Services::default(),
+            services: services(),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
             in_out: None,
@@ -241,6 +242,22 @@ impl EditorState {
             change_set,
             at: now(),
         });
+    }
+}
+
+/// The engines, wired once per window. Media is optional: without FFmpeg
+/// the editor still opens, and panels degrade quietly.
+fn services() -> Services {
+    let media = match koo_media::FfmpegMedia::new() {
+        Ok(m) => Some(Arc::new(m) as Arc<dyn MediaService>),
+        Err(e) => {
+            eprintln!("media engine unavailable: {e}");
+            None
+        }
+    };
+    Services {
+        media,
+        analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
     }
 }
 

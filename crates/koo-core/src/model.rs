@@ -303,7 +303,9 @@ pub enum ClipContent {
     Media {
         media: MediaId,
         source_in: Time,
-        /// Audio stream index used on audio tracks.
+        /// Audio stream used on audio tracks: the container index
+        /// (`AudioStream::index`). Media services fall back to the n-th
+        /// audio stream when no stream has that index.
         audio_stream: Option<u32>,
     },
     Title {

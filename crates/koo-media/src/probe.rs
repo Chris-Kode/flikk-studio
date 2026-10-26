@@ -136,10 +136,13 @@ fn frame_rate(s: &Value) -> Rate {
         (60, 1),
         (120, 1),
     ];
+    // Closest, not first: 30000/1001 is itself within 0.1% of 30.
+    let off = |std: &Rate| (std.fps() / rate.fps() - 1.0).abs();
     STANDARD
         .iter()
         .map(|&(num, den)| Rate { num, den })
-        .find(|std| (std.fps() / rate.fps() - 1.0).abs() < 0.001)
+        .filter(|std| off(std) < 0.001)
+        .min_by(|a, b| off(a).total_cmp(&off(b)))
         .unwrap_or(rate)
 }
 
