@@ -6,7 +6,7 @@ use crate::agent_link::AgentLink;
 use crate::persistence;
 use gpui_kit::*;
 use koo_core::agent::*;
-use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
+use koo_core::bus::{AcceptReport, AgentRole, Author, CommandBus, Outcome};
 use koo_core::command::Command;
 use koo_core::model::Project;
 use koo_core::services::{AnalysisService, MediaService, Services};
@@ -34,6 +34,9 @@ pub struct EditorState {
     pub status: Option<String>,
     agent: AgentLink,
     _pump: Task<()>,
+    // --- chat
+    /// Mirrors the role last handed to the agent host.
+    agent_role: AgentRole,
 }
 
 impl EditorState {
@@ -69,6 +72,7 @@ impl EditorState {
             status: persistence::take_notice(),
             agent: AgentLink::new(),
             _pump: pump,
+            agent_role: AgentRole::Editor,
         };
         this.load_agent_memory();
         this
@@ -308,4 +312,106 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// --- chat
+
+impl EditorState {
+    pub fn agent_role(&self) -> AgentRole {
+        self.agent_role
+    }
+
+    pub fn set_agent_role(&mut self, role: AgentRole, cx: &mut Context<Self>) {
+        self.agent_role = role;
+        self.agent.set_role(role);
+        cx.notify();
+    }
+
+    /// Memory and deliver requests waiting for the user (PRD "Agent
+    /// configuration": these categories need approval per call).
+    pub fn pending_approvals(&self) -> &[koo_agent::PendingApproval] {
+        self.agent.pending_approvals()
+    }
+
+    pub fn deny_approval(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.agent.resolve_approval(id);
+        cx.notify();
+    }
+
+    /// Perform an approved request and take it off the list.
+    pub fn approve(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(pending) = self.agent.resolve_approval(id) else {
+            return;
+        };
+        let result = self.perform(&pending.request);
+        self.status = result.err();
+        self.load_agent_memory();
+        cx.notify();
+    }
+
+    /// The user's recipes, for `/` completion and the quick-command bar.
+    pub fn recipes(&self) -> Vec<koo_core::memory::Recipe> {
+        persistence::with_store(|s| s.list_recipes()).unwrap_or_default()
+    }
+
+    fn perform(&self, request: &koo_agent::tools::ApprovalRequest) -> Result<(), String> {
+        use koo_core::memory::*;
+        use serde_json::Value;
+        let args = &request.args;
+        let str_of = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default();
+        let saved = match request.tool.as_str() {
+            "save_recipe" => {
+                let recipe = Recipe {
+                    id: koo_core::RecipeId::new(),
+                    name: str_of("name").into(),
+                    description: str_of("description").into(),
+                    params: serde_json::from_value(args["params"].clone()).unwrap_or_default(),
+                    prompt: str_of("prompt").into(),
+                    builtin: false,
+                };
+                persistence::with_store(|s| s.save_recipe(&recipe))
+            }
+            "propose_rule" => {
+                let profile = self
+                    .settings
+                    .style_profile
+                    .ok_or("Pick a style profile before saving rules")?;
+                let rule = StyleRule {
+                    id: koo_core::RuleId::new(),
+                    text: str_of("text").into(),
+                    scope: match str_of("scope") {
+                        "project" => RuleScope::Project {
+                            project: self.bus.project().id,
+                        },
+                        "next_video" => RuleScope::NextVideo,
+                        _ => RuleScope::Global,
+                    },
+                    status: RuleStatus::Approved,
+                    supersedes: None,
+                    created_at: now(),
+                    evidence: serde_json::from_value(args["evidence"].clone()).unwrap_or_default(),
+                };
+                persistence::with_store(|s| s.save_rule(profile, &rule))
+            }
+            "add_source_fact" => {
+                let secs = |v: &Value| v.as_f64().map(Time::from_secs_f64);
+                let range = args
+                    .get("source_range")
+                    .and_then(|r| Some(TimeRange::new(secs(&r["start"])?, secs(&r["end"])?)));
+                let fact = SourceFact {
+                    id: koo_core::FactId::new(),
+                    fingerprint: serde_json::from_value(args["fingerprint"].clone())
+                        .map_err(|e| e.to_string())?,
+                    kind: serde_json::from_value(args["kind"].clone())
+                        .map_err(|e| e.to_string())?,
+                    text: str_of("text").into(),
+                    range,
+                    status: FactStatus::Confirmed,
+                };
+                persistence::with_store(|s| s.save_fact(&fact))
+            }
+            _ => return Err(format!("{} isn't connected yet", request.summary)),
+        };
+        saved.ok_or_else(|| format!("Couldn't save: {}", request.summary))
+    }
 }
