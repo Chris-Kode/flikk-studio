@@ -1,34 +1,10 @@
-//! Keyframe evaluation, both as numbers and as FFmpeg expressions over time.
+//! Keyframes as FFmpeg expressions over time.
 //!
-//! Kept small on purpose: koo-core is getting a shared evaluator, and this
-//! should be swapped for it once that lands. The easing curves here must
-//! match it.
+//! Numbers come from the shared evaluator in `koo_core::query`
+//! (`Clip::value_at`, `Ease::apply`); the expressions here mirror its
+//! curves exactly, so a render matches the viewer.
 
-use koo_core::Time;
 use koo_core::model::{Ease, Keyframe, Property, Transform};
-
-/// Eased progress for `u` in 0..1.
-pub fn ease(ease: Ease, u: f64) -> f64 {
-    let u = u.clamp(0.0, 1.0);
-    match ease {
-        Ease::Linear => u,
-        Ease::EaseInOut => u * u * (3.0 - 2.0 * u),
-        Ease::EaseIn => u * u,
-        Ease::EaseOut => u * (2.0 - u),
-        Ease::Hold => 0.0,
-    }
-}
-
-/// The transform's own value for `property`, used when it has no keyframes.
-pub fn static_value(transform: &Transform, property: Property) -> f32 {
-    match property {
-        Property::PositionX => transform.position[0],
-        Property::PositionY => transform.position[1],
-        Property::Scale => transform.scale,
-        Property::Rotation => transform.rotation_deg,
-        Property::Opacity => transform.opacity,
-    }
-}
 
 /// Keyframes of one property, sorted by time.
 pub fn track(keys: &[Keyframe], property: Property) -> Vec<&Keyframe> {
@@ -37,31 +13,13 @@ pub fn track(keys: &[Keyframe], property: Property) -> Vec<&Keyframe> {
     keys
 }
 
-/// Value of `property` at clip-relative time `t`.
-pub fn value_at(transform: &Transform, keys: &[Keyframe], property: Property, t: Time) -> f32 {
-    let keys = track(keys, property);
-    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-        return static_value(transform, property);
-    };
-    if t <= first.at {
-        return first.value;
-    }
-    if t >= last.at {
-        return last.value;
-    }
-    let i = keys.windows(2).position(|w| t < w[1].at).unwrap_or(0);
-    let (a, b) = (keys[i], keys[i + 1]);
-    let u = (t - a.at).as_secs_f64() / (b.at - a.at).as_secs_f64().max(1e-9);
-    (a.value as f64 + (b.value - a.value) as f64 * ease(a.ease, u)) as f32
-}
-
 /// FFmpeg expression for eased progress, given progress expression `u`.
 fn ease_expr(ease: Ease, u: &str) -> String {
     match ease {
         Ease::Linear => u.to_string(),
-        Ease::EaseInOut => format!("{u}*{u}*(3-2*{u})"),
-        Ease::EaseIn => format!("{u}*{u}"),
-        Ease::EaseOut => format!("{u}*(2-{u})"),
+        Ease::EaseIn => format!("{u}*{u}*{u}"),
+        Ease::EaseOut => format!("1-pow(1-{u},3)"),
+        Ease::EaseInOut => format!("if(lt({u},0.5),4*{u}*{u}*{u},1-pow(2-2*{u},3)/2)"),
         Ease::Hold => "0".into(),
     }
 }
@@ -101,7 +59,7 @@ impl Anim {
 pub fn anim(transform: &Transform, keys: &[Keyframe], property: Property, var: &str) -> Anim {
     let keys = track(keys, property);
     match keys.as_slice() {
-        [] => Anim::Const(static_value(transform, property) as f64),
+        [] => Anim::Const(transform.get(property) as f64),
         [only] => Anim::Const(only.value as f64),
         _ => {
             let last = keys[keys.len() - 1];
