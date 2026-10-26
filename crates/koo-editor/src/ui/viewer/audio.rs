@@ -1,14 +1,14 @@
 //! Program audio through `cpal`: a mixer thread opens a
 //! `MediaService::audio` stream per audible clip as the play position reaches
-//! it, applies clip gain, fades, track volume, pan, mute and solo, and feeds a
-//! short queue drained by the output callback.
+//! it, applies clip gain, fades, track volume, pan, mute, solo and ducking,
+//! and feeds a short queue drained by the output callback.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use koo_core::model::{Clip, MediaItem, Project, TrackKind};
 use koo_core::services::{MediaService, PcmStream};
 use koo_core::time::FLICKS_PER_SECOND;
-use koo_core::{ClipId, Time};
+use koo_core::{ClipId, Time, TrackId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -120,6 +120,7 @@ where
 }
 
 struct Source {
+    track: TrackId,
     clip: Clip,
     item: MediaItem,
     stream: u32,
@@ -138,7 +139,25 @@ struct Mixer {
     /// Frames mixed so far.
     position: u64,
     scratch: Vec<f32>,
+    duck: Option<Duck>,
+    /// The ducked track's block, mixed in after the gain is applied.
+    music: Vec<f32>,
 }
+
+/// Music under dialogue, like the render's `sidechaincompress`: when the
+/// other tracks pass the threshold the music eases down to `reduction`.
+struct Duck {
+    track: TrackId,
+    reduction: f32,
+    attack: f32,
+    release: f32,
+    /// Smoothed level of the other tracks.
+    level: f32,
+    gain: f32,
+}
+
+/// Linear threshold of the render's compressor.
+const DUCK_THRESHOLD: f32 = 0.015;
 
 impl Mixer {
     fn new(media: Arc<dyn MediaService>, project: &Project, from: Time, rate: u32) -> Self {
@@ -159,6 +178,7 @@ impl Mixer {
                         _ => return None,
                     };
                     Some(Source {
+                        track: t.id,
                         clip: c.clone(),
                         item,
                         stream,
@@ -168,7 +188,21 @@ impl Mixer {
                 })
             })
             .filter(|s| s.clip.end() > from)
-            .collect();
+            .collect::<Vec<_>>();
+        // Per-sample smoothing over a time constant.
+        let coef = |t: Time| (-1. / (t.as_secs_f64().max(1e-4) * rate as f64)).exp() as f32;
+        let duck = project.timeline.ducking.as_ref().and_then(|d| {
+            let music = sources.iter().any(|s| s.track == d.music_track);
+            let others = sources.iter().any(|s| s.track != d.music_track);
+            (music && others).then(|| Duck {
+                track: d.music_track,
+                reduction: db(-d.reduction_db.abs()),
+                attack: coef(d.attack),
+                release: coef(d.release),
+                level: 0.,
+                gain: 1.,
+            })
+        });
         Self {
             media,
             sources,
@@ -178,16 +212,21 @@ impl Mixer {
             rate,
             position: 0,
             scratch: Vec::new(),
+            duck,
+            music: Vec::new(),
         }
     }
 
     fn time(&self, frame: u64) -> Time {
-        self.from + Time((frame as i128 * FLICKS_PER_SECOND as i128 / self.rate as i128) as i64)
+        time_at(self.from, self.rate, frame)
     }
 
     /// Mix the next block into `out` (interleaved stereo).
     fn mix(&mut self, out: &mut [f32]) {
         out.fill(0.);
+        self.music.clear();
+        self.music.resize(out.len(), 0.);
+        let ducked = self.duck.as_ref().map(|d| d.track);
         let frames = out.len() / 2;
         let (t0, t1) = (
             self.time(self.position),
@@ -247,15 +286,45 @@ impl Mixer {
             }
             self.scratch[filled..want].fill(0.);
             let (pl, pr) = ((1. - source.pan).min(1.), (1. + source.pan).min(1.));
+            let bus = if ducked == Some(source.track) {
+                &mut self.music
+            } else {
+                &mut *out
+            };
             for i in 0..(end - offset) {
-                let t = self.time(self.position + (offset + i) as u64);
+                let t = time_at(self.from, self.rate, self.position + (offset + i) as u64);
                 let g = source.gain * fade(clip, t);
-                out[(offset + i) * 2] += self.scratch[i * 2] * g * pl;
-                out[(offset + i) * 2 + 1] += self.scratch[i * 2 + 1] * g * pr;
+                bus[(offset + i) * 2] += self.scratch[i * 2] * g * pl;
+                bus[(offset + i) * 2 + 1] += self.scratch[i * 2 + 1] * g * pr;
             }
             if clip.end() <= t1 {
                 self.voices.remove(&id);
                 self.finished.insert(id);
+            }
+        }
+        if let Some(d) = self.duck.as_mut() {
+            for (o, m) in out
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(self.music.as_chunks::<2>().0)
+            {
+                let key = o[0].abs().max(o[1].abs());
+                let k = if key > d.level { d.attack } else { d.release };
+                d.level = key + (d.level - key) * k;
+                let target = if d.level > DUCK_THRESHOLD {
+                    d.reduction
+                } else {
+                    1.
+                };
+                let k = if target < d.gain { d.attack } else { d.release };
+                d.gain = target + (d.gain - target) * k;
+                o[0] += m[0] * d.gain;
+                o[1] += m[1] * d.gain;
+            }
+        } else {
+            for (o, m) in out.iter_mut().zip(&self.music) {
+                *o += m;
             }
         }
         for s in out.iter_mut() {
@@ -263,6 +332,11 @@ impl Mixer {
         }
         self.position += frames as u64;
     }
+}
+
+/// Time of mixed frame `frame` of a mix started at `from`.
+fn time_at(from: Time, rate: u32, frame: u64) -> Time {
+    from + Time((frame as i128 * FLICKS_PER_SECOND as i128 / rate as i128) as i64)
 }
 
 fn db(db: f32) -> f32 {

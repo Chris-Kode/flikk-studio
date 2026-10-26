@@ -1,5 +1,6 @@
 //! One numeric property: a slider plus an optional number field. Values are
-//! committed once, on slider release or Enter/blur, never per pixel of drag.
+//! committed once, on slider release or Enter/blur, never per pixel of drag;
+//! while dragging, the viewer shows the value uncommitted.
 
 use super::InspectorPanel;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -139,6 +140,7 @@ impl Param {
                         p.dragging = true;
                         p.show_field(v.start(), window, cx);
                     }
+                    this.preview(key, v.start() / spec.factor, cx);
                 }
                 SliderEvent::Release(v) => {
                     if let Some(p) = this.params.get_mut(&key) {

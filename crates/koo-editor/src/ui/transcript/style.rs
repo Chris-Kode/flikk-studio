@@ -1,5 +1,5 @@
-//! Caption style presets (PRD C2), kept in `EditorState::presets` until
-//! style profiles are persisted.
+//! Caption style presets (PRD C2), saved with the selected style profile
+//! (`EditorState::edit_presets`).
 
 use super::TranscriptPanel;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,10 +20,14 @@ impl TranscriptPanel {
     pub(super) fn edit_style(&mut self, f: impl FnOnce(&mut CaptionStyle), cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let i = s.caption_style;
-            if let Some(style) = s.presets.caption_styles.get_mut(i) {
-                f(style);
-            }
-            cx.notify();
+            s.edit_presets(
+                |p| {
+                    if let Some(style) = p.caption_styles.get_mut(i) {
+                        f(style);
+                    }
+                },
+                cx,
+            );
         });
     }
 
@@ -31,7 +35,7 @@ impl TranscriptPanel {
         self.state.update(cx, |s, cx| {
             let mut style = s.active_caption_style();
             style.name = format!("Style {}", s.presets.caption_styles.len() + 1);
-            s.presets.caption_styles.push(style);
+            s.edit_presets(|p| p.caption_styles.push(style), cx);
             let i = s.presets.caption_styles.len() - 1;
             s.pick_caption_style(i, cx);
         });

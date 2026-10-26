@@ -111,6 +111,20 @@ impl InspectorPanel {
         if let Some(p) = self.params.get_mut(&key) {
             p.invalidate();
         }
+        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+        let (commands, label) = self.commands(key, v, cx);
+        self.run(commands, label, cx);
+    }
+
+    /// Show a value in the viewer while its slider is dragged.
+    fn preview(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
+        let (commands, _) = self.commands(key, v, cx);
+        self.state.update(cx, |s, cx| s.show_live(&commands, cx));
+    }
+
+    /// The commands that set `key` to `v` on the selection.
+    fn commands(&self, key: Key, v: f32, cx: &App) -> (Vec<Command>, &'static str) {
+        let none = (Vec::new(), "edit");
         let clips = self.selected_clips(cx);
         let state = self.state.read(cx);
         let playhead = state.playhead;
@@ -119,7 +133,9 @@ impl InspectorPanel {
         let mut label = "edit";
         match key {
             Key::PosX | Key::PosY | Key::Scale | Key::Rotation | Key::Opacity => {
-                let Some(clip) = clips.first() else { return };
+                let Some(clip) = clips.first() else {
+                    return none;
+                };
                 let property = property_of(key).unwrap();
                 if clip.keyframes.iter().any(|k| k.property == property) {
                     commands.push(Command::SetKeyframe {
@@ -199,7 +215,9 @@ impl InspectorPanel {
                 }
             }
             Key::Volume(track) | Key::Pan(track) => {
-                let Some(t) = tl.track(track) else { return };
+                let Some(t) = tl.track(track) else {
+                    return none;
+                };
                 let mut mix = t.mix.clone();
                 if matches!(key, Key::Volume(_)) {
                     mix.volume_db = v;
@@ -210,7 +228,7 @@ impl InspectorPanel {
             }
             Key::DuckReduction | Key::DuckAttack | Key::DuckRelease => {
                 let Some(mut d) = tl.ducking.clone() else {
-                    return;
+                    return none;
                 };
                 match key {
                     Key::DuckReduction => d.reduction_db = v,
@@ -220,7 +238,7 @@ impl InspectorPanel {
                 commands.push(Command::SetDucking { ducking: Some(d) });
             }
         }
-        self.run(commands, label, cx);
+        (commands, label)
     }
 
     fn set_ducking(&mut self, ducking: Option<Ducking>, cx: &mut Context<Self>) {

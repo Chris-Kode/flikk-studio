@@ -32,12 +32,15 @@ pub struct EditorState {
     pub activity: Vec<ActivityEntry>,
     /// Change set whose draft the viewer plays instead of the committed project.
     pub preview: Option<ChangeSetId>,
+    /// Uncommitted edit the viewer shows while a control is dragged.
+    live: Option<Project>,
     /// Last error or notice for the status line; cleared on the next action.
     pub status: Option<String>,
     // --- panels
     /// Pool item loaded in the viewer as source (double-click in the pool).
     pub source_media: Option<koo_core::MediaId>,
-    /// Caption styles, loudness and ducking defaults until profiles are wired.
+    /// Caption styles, loudness and ducking defaults of the selected style
+    /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: koo_core::memory::Presets,
     /// Index into `presets.caption_styles` used for new captions.
     pub caption_style: usize,
@@ -87,6 +90,7 @@ impl EditorState {
             chat,
             activity: Vec::new(),
             preview: None,
+            live: None,
             status: persistence::take_notice(),
             source_media: None,
             presets: koo_core::memory::Presets::default(),
@@ -100,6 +104,7 @@ impl EditorState {
             render_queue: koo_deliver::RenderQueue::new(),
         };
         this.load_agent_memory();
+        this.load_presets();
         this
     }
 
@@ -152,13 +157,37 @@ impl EditorState {
         }
     }
 
-    /// What the viewer shows: the previewed change set's draft, or the
-    /// committed project.
+    /// What the viewer shows: a control being dragged, else the previewed
+    /// change set's draft, else the committed project.
     pub fn display_project(&self) -> &Project {
+        if let Some(live) = &self.live {
+            return live;
+        }
         self.preview
             .and_then(|id| self.bus.change_set(id))
             .and_then(|set| set.draft.as_ref())
             .unwrap_or(self.bus.project())
+    }
+
+    /// Show `commands` applied in the viewer without committing them; none
+    /// clears it. Any committed edit clears it too.
+    pub fn show_live(&mut self, commands: &[Command], cx: &mut Context<Self>) {
+        let last = self.live.take();
+        if commands.is_empty() {
+            if last.is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let mut project = self.display_project().clone();
+        let applied = commands.iter().all(|c| {
+            c.plan(&project)
+                .and_then(|plan| koo_core::ops::apply_all(&mut project, &plan.ops))
+                .is_ok()
+        });
+        // Not applicable: keep the last good preview.
+        self.live = if applied { Some(project) } else { last };
+        cx.notify();
     }
 
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {
@@ -214,6 +243,7 @@ impl EditorState {
     }
 
     fn finish<T>(&mut self, result: koo_core::Result<T>, cx: &mut Context<Self>) -> Option<T> {
+        self.live = None;
         self.status = result.as_ref().err().map(|e| e.to_string());
         if result.is_ok() {
             persistence::autosave(&self.bus);
@@ -252,6 +282,60 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.selection.words = words;
+        cx.notify();
+    }
+
+    /// The selected style profile's presets, or the defaults without one.
+    fn load_presets(&mut self) {
+        let mut presets = self
+            .settings
+            .style_profile
+            .and_then(|id| persistence::with_store(|s| s.profile_header(id)).flatten())
+            .map(|profile| profile.presets)
+            .unwrap_or_default();
+        if presets.caption_styles.is_empty() {
+            presets.caption_styles = koo_core::memory::Presets::default().caption_styles;
+        }
+        self.presets = presets;
+        self.caption_style = 0;
+        self.sync_caption_style();
+    }
+
+    /// Change the presets and save them to the selected style profile,
+    /// creating a "Default" profile if there is none yet.
+    pub fn edit_presets(
+        &mut self,
+        f: impl FnOnce(&mut koo_core::memory::Presets),
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.presets.clone();
+        f(&mut self.presets);
+        if self.presets == before {
+            return;
+        }
+        let profile = self
+            .settings
+            .style_profile
+            .filter(|id| {
+                persistence::with_store(|s| s.profile_header(*id))
+                    .flatten()
+                    .is_some()
+            })
+            .or_else(|| persistence::with_store(|s| s.create_profile("Default")).map(|p| p.id));
+        if let Some(id) = profile {
+            persistence::with_store(|s| s.set_presets(id, &self.presets));
+            if self.settings.style_profile != Some(id) {
+                let mut settings = self.settings.clone();
+                settings.style_profile = Some(id);
+                // The profile already holds these presets.
+                persistence::save_settings(&settings);
+                self.settings = settings;
+                self.load_agent_memory();
+            }
+        }
+        if let Some(notice) = persistence::take_notice() {
+            self.status = Some(notice);
+        }
         cx.notify();
     }
 
@@ -375,6 +459,7 @@ impl EditorState {
         self.preview = None;
         self.status = persistence::take_notice();
         self.load_agent_memory();
+        self.load_presets();
         cx.notify();
     }
 
@@ -386,8 +471,12 @@ impl EditorState {
     pub fn set_settings(&mut self, settings: AgentSettings, cx: &mut Context<Self>) {
         self.bus.set_permissions(settings.permissions.clone());
         persistence::save_settings(&settings);
+        let profile_changed = settings.style_profile != self.settings.style_profile;
         self.settings = settings;
         self.load_agent_memory();
+        if profile_changed {
+            self.load_presets();
+        }
         cx.notify();
     }
 

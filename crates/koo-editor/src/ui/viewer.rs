@@ -1,8 +1,9 @@
 //! Program monitor: `EditorState::display_project()` at the playhead, so a
 //! previewed change set shows its draft. Paused frames come from
 //! `MediaService::frame` off-thread (latest request wins); playback streams
-//! frames and mixes audio in background threads. Grades, transforms,
-//! captions and titles are applied for preview.
+//! frames and mixes audio in background threads. Like the render, every
+//! video and overlay layer is composited bottom-up with its grade and
+//! transform, and captions and titles are drawn in their export styles.
 
 mod audio;
 mod grade;
@@ -16,9 +17,11 @@ use audio::AudioOut;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use koo_core::model::{ClipContent, Grade, Project, TrackKind};
+use koo_core::memory::{CaptionPosition, CaptionStyle};
+use koo_core::model::{ClipContent, Project, TrackKind};
 use koo_core::{ChangeSetId, ClipId, Time};
-use player::{Picture, Player, top_clip};
+use koo_deliver::captions;
+use player::{Look, Picture, Player, layers_at};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -34,8 +37,14 @@ const SEEK_JUMP: f64 = 0.35;
 struct PlayKey {
     version: u64,
     preview: Option<ChangeSetId>,
+    /// Items in the previewed change set, which grows without a version.
+    draft: usize,
     width: u32,
 }
+
+/// A paused frame request: width, and per layer its clip, source frame
+/// index and look.
+type Request = (u32, Vec<(ClipId, i64, Look)>);
 
 struct Playback {
     key: PlayKey,
@@ -49,10 +58,10 @@ struct Playback {
 pub struct ViewerPanel {
     state: Entity<EditorState>,
     focus: FocusHandle,
-    picture: Option<Picture>,
-    /// Paused frame last asked for: clip, source frame index, width and
-    /// grade.
-    requested: Option<(ClipId, i64, u32, Grade)>,
+    /// Layers on screen, bottom-up.
+    pictures: Vec<Picture>,
+    /// Paused frame last asked for.
+    requested: Option<Request>,
     generation: u64,
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
@@ -68,7 +77,7 @@ impl ViewerPanel {
         Self {
             state,
             focus: cx.focus_handle(),
-            picture: None,
+            pictures: Vec::new(),
             requested: None,
             generation: 0,
             retired: Vec::new(),
@@ -78,9 +87,15 @@ impl ViewerPanel {
         }
     }
 
-    fn show(&mut self, picture: Option<Picture>) {
-        if let Some(old) = std::mem::replace(&mut self.picture, picture) {
-            self.retired.push(old.image);
+    fn show(&mut self, pictures: Vec<Picture>) {
+        for old in std::mem::replace(&mut self.pictures, pictures) {
+            if !self
+                .pictures
+                .iter()
+                .any(|p| Arc::ptr_eq(&p.image, &old.image))
+            {
+                self.retired.push(old.image);
+            }
         }
     }
 
@@ -96,6 +111,10 @@ impl ViewerPanel {
         let key = PlayKey {
             version: state.bus.version(),
             preview: state.preview,
+            draft: state
+                .preview
+                .and_then(|id| state.bus.change_set(id))
+                .map_or(0, |set| set.items.len()),
             width: self.frame_width.get(),
         };
         let playhead = state.playhead;
@@ -119,67 +138,81 @@ impl ViewerPanel {
         } else if let (Some(p), true) = (self.playback.as_mut(), jumped) {
             p.audio = AudioOut::start(media, p.project.clone(), playhead);
         }
-        let picture = self.playback.as_mut().and_then(|p| {
+        let pictures = self.playback.as_mut().and_then(|p| {
             p.last = playhead;
             p.player.set_target(playhead);
             p.player.take()
         });
-        if let Some(picture) = picture {
-            self.show(picture);
+        if let Some(pictures) = pictures {
+            self.show(pictures);
             self.requested = None;
         }
     }
 
-    /// Paused (or shuttling): fetch the frame under the playhead.
+    /// Paused (or shuttling): fetch every layer under the playhead.
     fn request_frame(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(media) = state.services.media.clone() else {
-            self.show(None);
+            self.show(Vec::new());
             return;
         };
         let project = state.display_project();
         let t = state.playhead;
-        let Some((clip, item)) = top_clip(project, t) else {
-            self.requested = None;
-            self.show(None);
-            return;
-        };
-        let Some(source) = clip.to_source(t) else {
-            return;
-        };
-        let rate = item
-            .info
-            .as_ref()
-            .and_then(|i| i.video.as_ref())
-            .map(|v| v.rate)
-            .unwrap_or(project.timeline.settings.rate);
+        let seq_rate = project.timeline.settings.rate;
         let width = self.frame_width.get();
-        let key = (clip.id, source.to_frame(rate), width, clip.grade.clone());
+        let layers: Vec<_> = layers_at(project, t)
+            .into_iter()
+            .map(|l| {
+                (
+                    l.clip.id,
+                    l.item.into_owned(),
+                    l.source,
+                    Look::of(l.clip, t),
+                )
+            })
+            .collect();
+        let key = (
+            width,
+            layers
+                .iter()
+                .map(|(id, item, source, look)| {
+                    let rate = item
+                        .info
+                        .as_ref()
+                        .and_then(|i| i.video.as_ref())
+                        .map(|v| v.rate)
+                        .unwrap_or(seq_rate);
+                    (*id, source.to_frame(rate), look.clone())
+                })
+                .collect(),
+        );
         if self.requested.as_ref() == Some(&key) {
             return;
         }
-        let grade = clip.grade.clone();
         self.requested = Some(key);
         self.generation += 1;
+        if layers.is_empty() {
+            self.show(Vec::new());
+            return;
+        }
         let generation = self.generation;
-        let (item, clip_id) = (item.clone(), clip.id);
         cx.spawn(async move |this, cx| {
-            let image = cx
+            let pictures = cx
                 .background_executor()
                 .spawn(async move {
-                    media
-                        .frame(&item, source, width)
-                        .ok()
-                        .and_then(|f| player::to_image(&f, Some(&grade)))
+                    layers
+                        .iter()
+                        .filter_map(|(id, item, source, look)| {
+                            let frame = media.frame(item, *source, width).ok()?;
+                            player::picture(*id, &frame, look)
+                        })
+                        .collect()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // Latest request wins: a newer one is on its way.
                 if this.generation == generation {
-                    this.show(image.map(|image| Picture {
-                        clip: clip_id,
-                        image,
-                    }));
+                    this.show(pictures);
                     cx.notify();
                 }
             });
@@ -194,8 +227,8 @@ impl ViewerPanel {
         let t = state.playhead;
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let source = top_clip(project, t).and_then(|(clip, item)| {
-            let at = clip.to_source(t)?;
+        let source = layers_at(project, t).into_iter().last().and_then(|l| {
+            let (at, item) = (l.source, l.item);
             let rate = item
                 .info
                 .as_ref()
@@ -256,30 +289,68 @@ impl Focusable for ViewerPanel {
     }
 }
 
-/// Text drawn over the picture at the playhead: titles and captions.
-struct Lettering {
-    text: SharedString,
-    lower_third: bool,
-    caption: bool,
+/// Where a block of text sits, as the burned-in ASS styles place it.
+#[derive(Clone, Copy)]
+enum Anchor {
+    Top,
+    Middle,
+    Bottom,
+    /// Left-aligned, 6% in and 12% up.
+    LowerThird,
 }
 
-fn lettering(project: &Project, t: Time) -> Vec<Lettering> {
+/// Text drawn over the picture at the playhead, styled like the render
+/// (`koo_deliver::captions::to_ass`): sizes in 1080p units, bold white
+/// with a black outline and a half-transparent shadow.
+struct Lettering {
+    lines: Vec<SharedString>,
+    font: SharedString,
+    size: f32,
+    outline: f32,
+    shadow: f32,
+    anchor: Anchor,
+}
+
+fn lettering(project: &Project, styles: &[CaptionStyle], t: Time) -> Vec<Lettering> {
     let mut out = Vec::new();
     for track in project.timeline.tracks.iter().filter(|t| !t.mix.mute) {
         let Some(clip) = track.clip_at(t) else {
             continue;
         };
         match (&clip.content, track.kind) {
-            (ClipContent::Title { text, template }, _) => out.push(Lettering {
-                text: text.clone().into(),
-                lower_third: template.contains("lower"),
-                caption: false,
-            }),
-            (ClipContent::Caption { text, .. }, TrackKind::Caption) => out.push(Lettering {
-                text: text.clone().into(),
-                lower_third: false,
-                caption: true,
-            }),
+            (ClipContent::Title { text, template }, _) => {
+                let lower = template.contains("lower");
+                out.push(Lettering {
+                    lines: text.lines().map(|l| l.to_string().into()).collect(),
+                    font: "Inter".into(),
+                    size: if lower { 54. } else { 96. },
+                    outline: if lower { 2. } else { 3. },
+                    shadow: 0.,
+                    anchor: if lower {
+                        Anchor::LowerThird
+                    } else {
+                        Anchor::Middle
+                    },
+                });
+            }
+            (ClipContent::Caption { text, .. }, TrackKind::Caption) if !text.trim().is_empty() => {
+                let style = captions::style_for(track, styles);
+                out.push(Lettering {
+                    lines: captions::wrap(text, &style)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    font: style.font.clone().into(),
+                    size: style.size,
+                    outline: style.outline,
+                    shadow: style.shadow,
+                    anchor: match style.position {
+                        CaptionPosition::Top => Anchor::Top,
+                        CaptionPosition::Middle => Anchor::Middle,
+                        CaptionPosition::Bottom => Anchor::Bottom,
+                    },
+                });
+            }
             _ => {}
         }
     }
@@ -301,17 +372,18 @@ impl Render for ViewerPanel {
         let t = state.playhead;
         let settings = project.timeline.settings.clone();
         let aspect = settings.width.max(1) as f32 / settings.height.max(1) as f32;
-        let transform = self.picture.as_ref().and_then(|p| {
-            project.timeline.clip(p.clip).map(|(_, c)| {
-                let mut tr = c.transform_at(t - c.start);
-                tr.opacity = tr.opacity.clamp(0., 1.);
-                tr
+        // Position and scale are placed at paint time; grade, rotation and
+        // opacity are already in the pixels.
+        let layers: Vec<_> = self
+            .pictures
+            .iter()
+            .filter_map(|p| {
+                let (_, c) = project.timeline.clip(p.clip)?;
+                Some((p.clone(), c.transform_at(t - c.start)))
             })
-        });
-        let image = self.picture.as_ref().map(|p| p.image.clone());
-        let letters = lettering(project, t);
-        let theme = cx.theme();
-        let (bg, fg) = (theme.background, theme.foreground);
+            .collect();
+        let letters = lettering(project, &state.presets.caption_styles, t);
+        let bg = cx.theme().background;
         let width_cell = self.frame_width.clone();
 
         let program = canvas(
@@ -327,11 +399,14 @@ impl Render for ViewerPanel {
                 window.paint_quad(fill(bounds, bg));
                 window.paint_quad(fill(frame, black()));
                 window.with_content_mask(Some(ContentMask { bounds: frame }), |window| {
-                    if let (Some(image), Some(tf)) = (image, transform) {
-                        let size = image.size(0);
-                        let img_aspect = size.width.0 as f32 / size.height.0.max(1) as f32;
-                        let base = fit(frame, img_aspect, px(0.));
-                        let scaled = size_scaled(base.size, tf.scale.max(0.));
+                    for (p, tf) in layers {
+                        // Fit the source, grow by the rotation, then scale.
+                        let base = fit(frame, p.aspect, px(0.));
+                        let k = tf.scale.max(0.);
+                        let scaled = size(
+                            base.size.width * (p.grown.0 * k),
+                            base.size.height * (p.grown.1 * k),
+                        );
                         let center = frame.center()
                             + point(
                                 frame.size.width * tf.position[0],
@@ -341,13 +416,12 @@ impl Render for ViewerPanel {
                             point(center.x - scaled.width / 2., center.y - scaled.height / 2.),
                             scaled,
                         );
-                        let _ = window.paint_image(rect, rect, Corners::default(), image, 0, false);
-                        if tf.opacity < 1. {
-                            // The program is composited on black.
-                            window.paint_quad(fill(rect, black().opacity(1. - tf.opacity)));
-                        }
+                        let _ =
+                            window.paint_image(rect, rect, Corners::default(), p.image, 0, false);
                     }
-                    paint_lettering(&letters, frame, fg, window, cx);
+                    for l in &letters {
+                        paint_text(l, frame, window, cx);
+                    }
                 });
             },
         )
@@ -410,66 +484,80 @@ fn fit(bounds: Bounds<Pixels>, aspect: f32, pad: Pixels) -> Bounds<Pixels> {
     )
 }
 
-fn size_scaled(s: Size<Pixels>, k: f32) -> Size<Pixels> {
-    size(s.width * k, s.height * k)
-}
-
-fn paint_lettering(
-    letters: &[Lettering],
-    frame: Bounds<Pixels>,
-    fg: Hsla,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let h = frame.size.height;
-    for l in letters {
-        let font_size = if l.caption {
-            (h * 0.05).max(px(9.))
-        } else if l.lower_third {
-            (h * 0.045).max(px(9.))
-        } else {
-            (h * 0.08).max(px(12.))
+fn paint_text(l: &Lettering, frame: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    let (w, h) = (frame.size.width, frame.size.height);
+    let k = f32::from(h) / 1080.;
+    let font_size = px((l.size * k).max(4.));
+    let line_h = font_size * 1.2;
+    let block = line_h * l.lines.len() as f32;
+    let margin = h * 0.07;
+    let top = match l.anchor {
+        Anchor::Top => frame.top() + margin,
+        Anchor::Middle => frame.center().y - block / 2.,
+        Anchor::Bottom => frame.bottom() - margin - block,
+        Anchor::LowerThird => frame.bottom() - h * 0.12 - block,
+    };
+    let mut font = window.text_style().font();
+    font.family = l.font.clone();
+    font.weight = FontWeight::BOLD;
+    let outline = l.outline * k;
+    let shadow = l.shadow * k;
+    // Outline as copies of the line around the glyphs.
+    let ring: Vec<Point<Pixels>> = if outline > 0. {
+        let steps = if outline > 2. { 16 } else { 8 };
+        (0..steps)
+            .map(|i| {
+                let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                point(px(a.cos() * outline), px(a.sin() * outline))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for (i, text) in l.lines.iter().enumerate() {
+        let line = shape(window, text, font.clone(), font_size, white());
+        let x = match l.anchor {
+            Anchor::LowerThird => frame.origin.x + w * 0.06,
+            _ => frame.center().x - line.width / 2.,
         };
-        let mut font = window.text_style().font();
-        if !l.caption {
-            font.weight = FontWeight::SEMIBOLD;
-        }
-        let run = TextRun {
-            len: l.text.len(),
-            font,
-            color: fg,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let line = window
-            .text_system()
-            .shape_line(l.text.clone(), font_size, &[run], None);
-        let line_h = font_size * 1.3;
-        let w = line.width;
-        let origin = if l.caption {
-            point(frame.center().x - w / 2., frame.bottom() - h * 0.1 - line_h)
-        } else if l.lower_third {
-            point(
-                frame.origin.x + frame.size.width * 0.06,
-                frame.bottom() - h * 0.24,
-            )
-        } else {
-            point(frame.center().x - w / 2., frame.center().y - line_h / 2.)
-        };
-        if l.caption || l.lower_third {
-            let pad = font_size * 0.4;
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        origin - point(pad, pad * 0.4),
-                        size(w + pad * 2., line_h + pad * 0.8),
-                    ),
-                    black().opacity(0.55),
-                )
-                .corner_radii(px(3.)),
+        let origin = point(x, top + line_h * i as f32);
+        if shadow > 0. {
+            let dark = shape(window, text, font.clone(), font_size, black().opacity(0.5));
+            let _ = dark.paint(
+                origin + point(px(shadow), px(shadow)),
+                line_h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
             );
+        }
+        if !ring.is_empty() {
+            let dark = shape(window, text, font.clone(), font_size, black());
+            for offset in &ring {
+                let _ = dark.paint(origin + *offset, line_h, TextAlign::Left, None, window, cx);
+            }
         }
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
+}
+
+fn shape(
+    window: &mut Window,
+    text: &SharedString,
+    font: Font,
+    font_size: Pixels,
+    color: Hsla,
+) -> ShapedLine {
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text.clone(), font_size, &[run], None)
 }

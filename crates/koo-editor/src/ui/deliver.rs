@@ -153,10 +153,9 @@ impl DeliverPanel {
         });
     }
 
-    /// The style profile's caption presets. Defaults until the store
-    /// exposes the active profile.
-    fn caption_styles(&self) -> Vec<CaptionStyle> {
-        Presets::default().caption_styles
+    /// The caption presets edited in the transcript panel.
+    fn caption_styles(&self, cx: &App) -> Vec<CaptionStyle> {
+        self.state.read(cx).presets.caption_styles.clone()
     }
 
     fn loudness_target(&self) -> LoudnessTarget {
@@ -253,7 +252,7 @@ impl DeliverPanel {
             project: self.project(cx),
             settings,
             output: output.clone(),
-            caption_styles: self.caption_styles(),
+            caption_styles: self.caption_styles(cx),
         };
         match self.queue.enqueue(request) {
             Ok(_) => {
@@ -309,7 +308,7 @@ impl DeliverPanel {
             .unwrap_or(name);
         let project = self.project(cx);
         let playhead = self.state.read(cx).playhead;
-        let styles = self.caption_styles();
+        let styles = self.caption_styles(cx);
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut path))) = rx.await else {
