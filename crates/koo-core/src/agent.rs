@@ -121,6 +121,9 @@ pub struct ChatMessage {
     /// Clickable answers for a clarifying question (PRD AG9).
     pub choices: Vec<String>,
     pub change_set: Option<ChangeSetId>,
+    /// Tool calls made in a row, shown stacked in the thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ActivityEntry>,
     /// Unix seconds.
     pub at: i64,
 }
@@ -152,7 +155,7 @@ pub enum AgentEvent {
     },
 }
 
-/// One tool call, as shown in the activity log (PRD AG10, V7).
+/// One tool call, as shown in the chat thread (PRD AG10, V7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActivityEntry {
     pub at: i64,

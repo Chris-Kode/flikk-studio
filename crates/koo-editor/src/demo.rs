@@ -36,11 +36,10 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
 
     let mut bus = CommandBus::new(demo.project.clone());
     bus.set_permissions(state.settings.permissions.clone());
-    let (chat, activity) = agent_history(&mut bus, &demo);
+    let chat = agent_history(&mut bus, &demo);
 
     state.bus = bus;
     state.chat = chat;
-    state.activity = activity;
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![demo.ids.selected];
     // The demo media are not real files: always use the fake engines.
@@ -308,7 +307,7 @@ fn merge_speech(words: &[Word]) -> Vec<TimeRange> {
 
 /// The PRD's example turn, played through the real bus: an accepted lower
 /// third, then a pending set of pause cuts and zooms, and a question.
-fn agent_history(bus: &mut CommandBus, demo: &Demo) -> (Vec<ChatMessage>, Vec<ActivityEntry>) {
+fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -415,6 +414,10 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> (Vec<ChatMessage>, Vec<Ac
     for (command, reason) in items {
         pending = proposed(bus.execute(command, agent.clone(), reason)).or(pending);
     }
+    chat.push(ChatMessage {
+        tools: tools(now),
+        ..msg(ChatRole::Agent, "", now - 402)
+    });
     if let Some(set) = pending {
         bus.close_change_set(set);
         chat.push(msg(
@@ -438,10 +441,10 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> (Vec<ChatMessage>, Vec<Ac
             now - 395,
         )
     });
-    (chat, activity(now))
+    chat
 }
 
-fn activity(now: i64) -> Vec<ActivityEntry> {
+fn tools(now: i64) -> Vec<ActivityEntry> {
     let entry = |at: i64, tool: &str, args, summary: &str| ActivityEntry {
         at,
         tool: tool.into(),
@@ -511,6 +514,7 @@ fn msg(role: ChatRole, text: &str, at: i64) -> ChatMessage {
         text: text.into(),
         choices: vec![],
         change_set: None,
+        tools: vec![],
         at,
     }
 }

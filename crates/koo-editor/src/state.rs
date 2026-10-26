@@ -33,7 +33,6 @@ pub struct EditorState {
     /// Every chat session of the project. The active one's messages are
     /// edited in `chat` and copied back on save.
     chats: persistence::Chats,
-    pub activity: Vec<ActivityEntry>,
     /// Change set whose draft the viewer plays instead of the committed project.
     pub preview: Option<ChangeSetId>,
     /// Uncommitted edit the viewer shows while a control is dragged.
@@ -94,7 +93,6 @@ impl EditorState {
             settings,
             chat,
             chats,
-            activity: Vec::new(),
             preview: None,
             live: None,
             status: persistence::take_notice(),
@@ -444,6 +442,7 @@ impl EditorState {
             text: text.clone(),
             choices: vec![],
             change_set: None,
+            tools: vec![],
             at: now(),
         });
         let context = self.context();
@@ -596,7 +595,6 @@ impl EditorState {
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.settings = loaded.settings;
-        self.activity.clear();
         self.playhead = Time::ZERO;
         self.in_out = None;
         self.selection = Selection::default();
@@ -635,7 +633,8 @@ impl EditorState {
                     Some(m)
                         if m.role == ChatRole::Agent
                             && m.change_set.is_none()
-                            && m.choices.is_empty() =>
+                            && m.choices.is_empty()
+                            && m.tools.is_empty() =>
                     {
                         m.text.push_str(&text)
                     }
@@ -651,7 +650,7 @@ impl EditorState {
                         .unwrap_or_default();
                     self.push_agent(title, vec![], Some(change_set));
                 }
-                AgentEvent::Activity { entry } => self.activity.push(entry),
+                AgentEvent::Activity { entry } => self.push_tool(entry),
                 AgentEvent::TurnDone => self.save_chat(),
                 AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => self.status = Some(message),
@@ -666,8 +665,25 @@ impl EditorState {
             text,
             choices,
             change_set,
+            tools: vec![],
             at: now(),
         });
+    }
+
+    /// Calls in a row stack into one message; anything else in between
+    /// starts a new stack.
+    fn push_tool(&mut self, entry: ActivityEntry) {
+        match self.chat.last_mut() {
+            Some(m) if m.role == ChatRole::Agent && !m.tools.is_empty() => m.tools.push(entry),
+            _ => self.chat.push(ChatMessage {
+                role: ChatRole::Agent,
+                text: String::new(),
+                choices: vec![],
+                change_set: None,
+                tools: vec![entry],
+                at: now(),
+            }),
+        }
     }
 }
 

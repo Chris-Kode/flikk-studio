@@ -1,14 +1,14 @@
 //! Agent chat, docked in every workspace (PRD AG1–AG10): the thread with
-//! streaming replies, choice chips and change-set cards, the composer, the
-//! activity log and the quick-command bar.
+//! streaming replies, tool calls, choice chips and change-set cards, the
+//! composer and the quick-command bar.
 
-mod activity;
 mod approval;
 mod change_set;
 mod composer;
 mod quick;
 mod recipes;
 mod refs;
+mod tools;
 
 use crate::state::EditorState;
 use crate::ui::settings::SettingsPanel;
@@ -53,9 +53,11 @@ pub struct ChatPanel {
     composer: Entity<Composer>,
     scroller: Entity<MessageScrollerState>,
     settings: Entity<SettingsPanel>,
-    show_activity: bool,
     reviews: change_set::Reviews,
-    activity_open: HashSet<usize>,
+    /// Messages whose stack of tool calls is open.
+    tools_open: HashSet<usize>,
+    /// Tool calls (message, call) showing their details.
+    tool_open: HashSet<(usize, usize)>,
     /// What the rows were last measured for.
     signature: u64,
     /// Chat session the rows show.
@@ -93,9 +95,9 @@ impl ChatPanel {
             composer,
             scroller,
             settings,
-            show_activity: false,
             reviews: Default::default(),
-            activity_open: HashSet::new(),
+            tools_open: HashSet::new(),
+            tool_open: HashSet::new(),
             signature,
             chat,
             revealed: None,
@@ -120,6 +122,10 @@ impl ChatPanel {
         self.signature = sig;
         let switched = chat != self.chat;
         self.chat = chat;
+        if switched {
+            self.tools_open.clear();
+            self.tool_open.clear();
+        }
         self.scroller.update(cx, |list, cx| {
             let n = list.item_count();
             if switched {
@@ -159,7 +165,6 @@ impl ChatPanel {
         let review = self.reviews.entry(set).or_default();
         review.open = true;
         review.reveal = Some(item);
-        self.show_activity = false;
         self.scroller.update(cx, |list, cx| {
             list.remeasure(cx);
             list.scroll_to_item(ix, cx);
@@ -288,18 +293,6 @@ impl ChatPanel {
                             })),
                     )
                     .child(
-                        Button::new("chat-activity")
-                            .icon(IconName::GalleryVerticalEnd)
-                            .ghost()
-                            .small()
-                            .selected(self.show_activity)
-                            .tooltip("Activity")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_activity = !this.show_activity;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
                         Button::new("chat-settings")
                             .icon(IconName::Settings)
                             .ghost()
@@ -393,6 +386,9 @@ impl ChatPanel {
                         }),
                     ));
                 }
+                if !msg.tools.is_empty() {
+                    content = content.child(self.render_tools(ix, &msg.tools, cx));
+                }
                 if let Some(set) = msg.change_set {
                     content = content.child(self.render_change_set(set, cx));
                 }
@@ -440,17 +436,12 @@ impl ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = if self.show_activity {
-            self.render_activity(cx)
-        } else {
-            self.render_thread(cx)
-        };
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .child(self.render_header(cx))
-            .child(body)
-            .when(!self.show_activity, |el| el.child(self.render_footer(cx)))
+            .child(self.render_thread(cx))
+            .child(self.render_footer(cx))
     }
 }
 
@@ -460,7 +451,10 @@ fn signature(s: &EditorState) -> u64 {
     let mut h = DefaultHasher::new();
     s.active_chat().hash(&mut h);
     s.chat.len().hash(&mut h);
-    s.chat.last().map(|m| m.text.len()).hash(&mut h);
+    s.chat
+        .last()
+        .map(|m| (m.text.len(), m.tools.len()))
+        .hash(&mut h);
     s.preview.hash(&mut h);
     s.agent_busy().hash(&mut h);
     s.focused_change_item().hash(&mut h);
