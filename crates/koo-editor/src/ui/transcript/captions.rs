@@ -7,10 +7,10 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use koo_core::ClipId;
 use koo_core::captions::{CaptionRules, LOW_CONFIDENCE, group_words};
 use koo_core::command::Command;
 use koo_core::model::{ClipContent, Project, Track, TrackKind};
+use koo_core::{ClipId, TimeRange};
 
 impl TranscriptPanel {
     pub(super) fn generate_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -129,24 +129,101 @@ impl TranscriptPanel {
         cx.notify();
     }
 
-    pub(super) fn captions_view(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// Rebuilds the cached caption rows when the project or transcript
+    /// changed; keeps the scroll position when the row count holds.
+    pub(super) fn refresh_captions(&mut self, cx: &App) {
+        let key = (
+            self.state.read(cx).bus.version(),
+            self.words_key,
+            self.editing,
+        );
+        if self.captions_key == Some(key) {
+            return;
+        }
+        self.captions_key = Some(key);
         let project = self.state.read(cx).bus.project();
-        let playhead = self.state.read(cx).playhead;
-        let rows: Vec<_> = caption_track(project)
+        let rows: Vec<CaptionRow> = caption_track(project)
             .map(|t| {
                 t.clips
                     .iter()
                     .filter_map(|c| match &c.content {
-                        ClipContent::Caption { text, .. } => Some((c.id, c.range(), text.clone())),
+                        ClipContent::Caption { text, .. } => Some(CaptionRow {
+                            id: c.id,
+                            range: c.range(),
+                            text: text.clone().into(),
+                            low: self.low_confidence(c.range()),
+                        }),
                         _ => None,
                     })
                     .collect()
             })
             .unwrap_or_default();
+        if rows.len() == self.captions.len() {
+            self.caption_list.remeasure_items(0..rows.len());
+        } else {
+            self.caption_list.reset(rows.len());
+        }
+        self.captions = rows;
+    }
+
+    /// Whether any word under `range` was recognized with low confidence.
+    fn low_confidence(&self, range: TimeRange) -> bool {
+        // Words are in timeline order: scan only those near the caption.
+        let from = self
+            .words
+            .partition_point(|w| w.timeline.start < range.start)
+            .saturating_sub(1);
+        self.words[from..]
+            .iter()
+            .take_while(|w| w.timeline.start < range.end)
+            .any(|w| w.word.confidence < LOW_CONFIDENCE && w.timeline.overlaps(&range))
+    }
+
+    pub(super) fn captions_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.refresh_captions(cx);
+        let body = if self.captions.is_empty() {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("No captions")
+                .into_any_element()
+        } else {
+            div()
+                .id("captions-list")
+                .flex_1()
+                .min_h_0()
+                .child(
+                    list(
+                        self.caption_list.clone(),
+                        cx.processor(|this, ix: usize, _, cx| this.caption_row(ix, cx)),
+                    )
+                    .size_full(),
+                )
+                .vertical_scrollbar(&self.caption_list)
+                .into_any_element()
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(body)
+            .child(self.style_view(window, cx))
+            .into_any_element()
+    }
+
+    fn caption_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.captions.get(ix) else {
+            return div().into_any_element();
+        };
+        let (id, range) = (row.id, row.range);
+        let playhead = self.state.read(cx).playhead;
         let theme = cx.theme();
         let (muted, active, hover, warn) = (
             theme.muted_foreground,
@@ -154,34 +231,32 @@ impl TranscriptPanel {
             theme.list_hover,
             theme.yellow,
         );
-        let empty = rows.is_empty();
-        let list = rows.into_iter().enumerate().map(|(i, (id, range, text))| {
-            let low = self
-                .words
-                .iter()
-                .any(|w| w.word.confidence < LOW_CONFIDENCE && w.timeline.overlaps(&range));
-            let current = range.contains(playhead);
-            let time = h_flex()
-                .w(px(60.))
-                .flex_none()
-                .gap_1()
-                .text_color(muted)
-                .child(div().size(px(5.)).rounded_full().when(low, |d| d.bg(warn)))
-                .child(crate::ui::media_pool::clock(range.start));
-            if self.editing == Some(id) {
-                return h_flex()
-                    .id(("caption", i))
-                    .min_h(px(28.))
-                    .px_1()
-                    .gap_2()
-                    .text_xs()
-                    .child(time)
-                    .child(div().flex_1().child(Input::new(&self.editor).xsmall()))
-                    .into_any_element();
-            }
-            let edit_text = text.clone();
+        let current = range.contains(playhead);
+        let time = h_flex()
+            .w(px(60.))
+            .flex_none()
+            .gap_1()
+            .text_color(muted)
+            .child(
+                div()
+                    .size(px(5.))
+                    .rounded_full()
+                    .when(row.low, |d| d.bg(warn)),
+            )
+            .child(crate::ui::media_pool::clock(range.start));
+        let item = if self.editing == Some(id) {
             h_flex()
-                .id(("caption", i))
+                .id(("caption", ix))
+                .min_h(px(28.))
+                .px_1()
+                .gap_2()
+                .text_xs()
+                .child(time)
+                .child(div().flex_1().child(Input::new(&self.editor).xsmall()))
+        } else {
+            let edit_text = row.text.to_string();
+            h_flex()
+                .id(("caption", ix))
                 .min_h(px(28.))
                 .px_1()
                 .py_1()
@@ -193,7 +268,7 @@ impl TranscriptPanel {
                 .when(current, |d| d.bg(active))
                 .when(!current, |d| d.hover(|s| s.bg(hover)))
                 .child(time)
-                .child(div().flex_1().min_w_0().child(text))
+                .child(div().flex_1().min_w_0().child(row.text.clone()))
                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                     if ev.click_count() >= 2 {
                         this.start_edit(id, edit_text.clone(), window, cx);
@@ -201,31 +276,17 @@ impl TranscriptPanel {
                         this.state.update(cx, |s, cx| s.seek(range.start, cx));
                     }
                 }))
-                .into_any_element()
-        });
-        let list: Vec<AnyElement> = list.collect();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .id("captions-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .when(empty, |d| {
-                        d.flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("No captions")
-                    })
-                    .when(!empty, |d| d.child(v_flex().px_2().pb_2().children(list))),
-            )
-            .child(self.style_view(window, cx))
-            .into_any_element()
+        };
+        div().px_2().child(item).into_any_element()
     }
+}
+
+/// A caption clip as listed, cached between renders.
+pub(super) struct CaptionRow {
+    id: ClipId,
+    range: TimeRange,
+    text: SharedString,
+    low: bool,
 }
 
 /// The track captions are generated into: the first caption track.

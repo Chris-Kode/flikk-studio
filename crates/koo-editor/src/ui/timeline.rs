@@ -978,7 +978,7 @@ impl TimelinePanel {
     fn scene(&mut self, cx: &mut Context<Self>) -> Scene {
         let colors = Colors::new(cx.theme());
         let state = self.state.read(cx);
-        let project: Project = state.bus.project().clone();
+        let project = state.bus.project();
         let media = state.services.media.clone();
         let selection = state.selection.clips.clone();
         let playhead = state.playhead;
@@ -1042,6 +1042,12 @@ impl TimelinePanel {
 
         let rows = layout::rows(tl);
         let width = f32::from(self.bounds.get().size.width);
+        // Only clips in view are built and painted: a long transcript makes
+        // thousands of captions.
+        let visible = TimeRange::new(
+            self.viewport.time(-SNAP_PX).max(Time::ZERO),
+            self.viewport.time(width + SNAP_PX),
+        );
         let mut requests = Vec::new();
         let tracks = rows
             .iter()
@@ -1050,9 +1056,10 @@ impl TimelinePanel {
                 let clips = track
                     .clips
                     .iter()
+                    .filter(|clip| clip.end() >= visible.start && clip.start <= visible.end)
                     .map(|clip| {
                         let peaks = if track.kind == TrackKind::Audio && media.is_some() {
-                            let (peaks, request) = self.waveforms.lookup(clip, &project);
+                            let (peaks, request) = self.waveforms.lookup(clip, project);
                             requests.extend(request);
                             peaks
                         } else {
@@ -1070,7 +1077,7 @@ impl TimelinePanel {
                         ClipScene {
                             tiles,
                             range: clip.range(),
-                            label: clip_label(clip, &project).into(),
+                            label: clip_label(clip, project).into(),
                             selected: selection.contains(&clip.id),
                             lifted: lifted.contains(&clip.id),
                             peaks,
@@ -1087,6 +1094,45 @@ impl TimelinePanel {
                 }
             })
             .collect();
+
+        let silences = if self.silence_open {
+            let (min, pad) = self.silence_params(cx);
+            self.silences.timeline_silences(project, min, pad)
+        } else {
+            vec![]
+        };
+
+        let blade = match (self.tool, self.hover, &self.drag) {
+            (Tool::Blade, Some(p), None) => {
+                let (x, y) = self.local(p);
+                let row = layout::row_at(&rows, y).map(|r| r.track);
+                let candidates = vec![playhead];
+                let t = self.viewport.time(x);
+                let t = layout::snap(t, &candidates, self.viewport.span(SNAP_PX))
+                    .unwrap_or(t)
+                    .floor_to_frame(tl.settings.rate);
+                (p.y > self.bounds.get().origin.y + px(RULER_HEIGHT)).then_some((t, row))
+            }
+            _ => None,
+        };
+
+        let scene = Scene {
+            viewport: self.viewport,
+            rate: tl.settings.rate,
+            tracks,
+            markers: tl.markers.clone(),
+            in_out,
+            playhead,
+            overlay,
+            focused,
+            hovered: self.hovered_item.map(|(_, i)| i),
+            silences,
+            ghosts,
+            snap: self.snap,
+            blade,
+            drop_row: self.drop_row,
+            colors,
+        };
 
         if let Some(media) = media {
             for request in requests {
@@ -1109,44 +1155,7 @@ impl TimelinePanel {
         self.thumbs.trim_queue(160);
         self.pump_thumbs(cx);
 
-        let silences = if self.silence_open {
-            let (min, pad) = self.silence_params(cx);
-            self.silences.timeline_silences(&project, min, pad)
-        } else {
-            vec![]
-        };
-
-        let blade = match (self.tool, self.hover, &self.drag) {
-            (Tool::Blade, Some(p), None) => {
-                let (x, y) = self.local(p);
-                let row = layout::row_at(&rows, y).map(|r| r.track);
-                let candidates = vec![playhead];
-                let t = self.viewport.time(x);
-                let t = layout::snap(t, &candidates, self.viewport.span(SNAP_PX))
-                    .unwrap_or(t)
-                    .floor_to_frame(tl.settings.rate);
-                (p.y > self.bounds.get().origin.y + px(RULER_HEIGHT)).then_some((t, row))
-            }
-            _ => None,
-        };
-
-        Scene {
-            viewport: self.viewport,
-            rate: tl.settings.rate,
-            tracks,
-            markers: tl.markers.clone(),
-            in_out,
-            playhead,
-            overlay,
-            focused,
-            hovered: self.hovered_item.map(|(_, i)| i),
-            silences,
-            ghosts,
-            snap: self.snap,
-            blade,
-            drop_row: self.drop_row,
-            colors,
-        }
+        scene
     }
 
     /// Visible filmstrip tiles of a video clip.

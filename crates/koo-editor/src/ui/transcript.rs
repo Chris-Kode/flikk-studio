@@ -19,11 +19,24 @@ use koo_core::query::TimelineWord;
 use koo_core::services::JobState;
 use koo_core::{ClipId, Time, TimeRange};
 use std::collections::HashMap;
+use std::ops::Range;
 
 const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A pause this long starts a new paragraph.
 const PARAGRAPH_GAP: Time = Time(705_600_000 * 3 / 2);
+/// Past this many words a paragraph breaks at the next sentence end, and at
+/// twice as many regardless, so each list item stays small.
+const PARAGRAPH_WORDS: usize = 80;
+
+/// Project version and finished analysis jobs.
+type WordsKey = (u64, usize);
+
+/// A run of words drawn as one list item, with its speaker label.
+struct Paragraph {
+    words: Range<usize>,
+    label: Option<String>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -38,7 +51,10 @@ pub struct TranscriptPanel {
     /// Recomputed when the project or analysis changes.
     words: Vec<TimelineWord>,
     speakers: HashMap<koo_core::SpeakerId, String>,
-    words_key: Option<(u64, usize)>,
+    words_key: Option<WordsKey>,
+    paragraphs: Vec<Paragraph>,
+    /// Only the visible paragraphs are laid out.
+    list: ListState,
     /// Word clicked last; the selection runs from here to `head`.
     anchor: Option<usize>,
     head: Option<usize>,
@@ -46,6 +62,10 @@ pub struct TranscriptPanel {
     /// Caption being edited inline, with its editor.
     editing: Option<ClipId>,
     editor: Entity<InputState>,
+    /// Caption rows, rebuilt when this key changes.
+    captions: Vec<captions::CaptionRow>,
+    captions_key: Option<(u64, Option<WordsKey>, Option<ClipId>)>,
+    caption_list: ListState,
     font: Entity<InputState>,
     /// Demo only: open on generated captions.
     demo_captions: bool,
@@ -95,11 +115,16 @@ impl TranscriptPanel {
             words: Vec::new(),
             speakers: HashMap::new(),
             words_key: None,
+            paragraphs: Vec::new(),
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
             anchor: None,
             head: None,
             dragging: false,
             editing: None,
             editor,
+            captions: Vec::new(),
+            captions_key: None,
+            caption_list: ListState::new(0, ListAlignment::Top, px(400.)),
             font,
             demo_captions: crate::demo::enabled()
                 && std::env::var("KOOEDITOR_DEMO_VIEW").is_ok_and(|v| v == "captions"),
@@ -110,7 +135,7 @@ impl TranscriptPanel {
 
     /// Changes with the project and whenever an analysis job finishes, since
     /// new transcripts arrive without a project change.
-    fn current_key(&self, cx: &App) -> Option<(u64, usize)> {
+    fn current_key(&self, cx: &App) -> Option<WordsKey> {
         let state = self.state.read(cx);
         let analysis = state.services.analysis.as_ref()?;
         let done = analysis
@@ -133,6 +158,12 @@ impl TranscriptPanel {
             Some(analysis) => words::timeline_words(state.bus.project(), analysis.as_ref()),
             None => Default::default(),
         };
+        self.paragraphs = paragraphs(&self.words, &self.speakers);
+        if self.list.item_count() == self.paragraphs.len() {
+            self.list.remeasure_items(0..self.paragraphs.len());
+        } else {
+            self.list.reset(self.paragraphs.len());
+        }
         let n = self.words.len();
         self.anchor = self.anchor.filter(|&i| i < n);
         self.head = self.head.filter(|&i| i < n);
@@ -267,13 +298,6 @@ impl TranscriptPanel {
     }
 
     fn transcript_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (muted, selection, accent, warn) = (
-            theme.muted_foreground,
-            theme.selection,
-            theme.accent,
-            theme.yellow,
-        );
         if self.words.is_empty() {
             return div()
                 .flex_1()
@@ -281,80 +305,10 @@ impl TranscriptPanel {
                 .items_center()
                 .justify_center()
                 .text_xs()
-                .text_color(muted)
+                .text_color(cx.theme().muted_foreground)
                 .child("No transcript")
                 .into_any_element();
         }
-        let playhead = self.state.read(cx).playhead;
-        let sel = self.selection();
-        let mut paragraphs: Vec<Div> = Vec::new();
-        let mut line: Vec<AnyElement> = Vec::new();
-        let mut label: Option<String> = None;
-        let flush =
-            |paragraphs: &mut Vec<Div>, line: &mut Vec<AnyElement>, label: Option<String>| {
-                if line.is_empty() {
-                    return;
-                }
-                paragraphs.push(
-                    v_flex()
-                        .gap_0p5()
-                        .children(label.map(|l| {
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(muted)
-                                .child(l)
-                        }))
-                        .child(h_flex().flex_wrap().children(std::mem::take(line))),
-                );
-            };
-        let mut prev: Option<&TimelineWord> = None;
-        let mut prev_speaker = None;
-        for (i, w) in self.words.iter().enumerate() {
-            let speaker = w.word.speaker;
-            let speaker_change = prev.is_some_and(|_| speaker != prev_speaker);
-            let pause = prev.is_some_and(|p| w.timeline.start - p.timeline.end > PARAGRAPH_GAP);
-            if prev.is_none() || speaker_change || pause {
-                flush(&mut paragraphs, &mut line, label.take());
-                label = if prev.is_none() || speaker_change {
-                    speaker.and_then(|s| self.speakers.get(&s).cloned())
-                } else {
-                    None
-                };
-            }
-            prev = Some(w);
-            prev_speaker = speaker;
-            let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
-            let current = w.timeline.contains(playhead);
-            let low = w.word.confidence < LOW_CONFIDENCE;
-            line.push(
-                div()
-                    .id(("word", i))
-                    .px(px(2.5))
-                    .cursor_text()
-                    .when(selected, |d| d.bg(selection))
-                    .when(current && !selected, |d| d.bg(accent))
-                    .when(low, |d| {
-                        d.underline()
-                            .text_decoration_wavy()
-                            .text_decoration_color(warn)
-                    })
-                    .child(w.word.text.clone())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                            this.word_down(i, ev, window, cx)
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                        if ev.pressed_button == Some(MouseButton::Left) {
-                            this.word_drag(i, cx);
-                        }
-                    }))
-                    .into_any_element(),
-            );
-        }
-        flush(&mut paragraphs, &mut line, label);
         div()
             .id("transcript-words")
             .flex_1()
@@ -369,18 +323,115 @@ impl TranscriptPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.drag_end(cx)),
             )
-            .overflow_y_scrollbar()
             .child(
-                v_flex()
-                    .px_3()
-                    .pb_3()
-                    .gap_3()
-                    .text_sm()
-                    .line_height(rems(1.6))
-                    .children(paragraphs),
+                list(
+                    self.list.clone(),
+                    cx.processor(|this, ix: usize, _, cx| this.paragraph(ix, cx)),
+                )
+                .size_full()
+                .text_sm()
+                .line_height(rems(1.6)),
             )
+            .vertical_scrollbar(&self.list)
             .into_any_element()
     }
+
+    fn paragraph(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(p) = self.paragraphs.get(ix) else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme();
+        let (muted, selection, accent, warn) = (
+            theme.muted_foreground,
+            theme.selection,
+            theme.accent,
+            theme.yellow,
+        );
+        let playhead = self.state.read(cx).playhead;
+        let sel = self.selection();
+        let words = p.words.clone().map(|i| {
+            let w = &self.words[i];
+            let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
+            let current = w.timeline.contains(playhead);
+            let low = w.word.confidence < LOW_CONFIDENCE;
+            div()
+                .id(("word", i))
+                .px(px(2.5))
+                .cursor_text()
+                .when(selected, |d| d.bg(selection))
+                .when(current && !selected, |d| d.bg(accent))
+                .when(low, |d| {
+                    d.underline()
+                        .text_decoration_wavy()
+                        .text_decoration_color(warn)
+                })
+                .child(w.word.text.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        this.word_down(i, ev, window, cx)
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        this.word_drag(i, cx);
+                    }
+                }))
+        });
+        v_flex()
+            .px_3()
+            .pb_3()
+            .gap_0p5()
+            .children(p.label.clone().map(|l| {
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(muted)
+                    .child(l)
+            }))
+            .child(h_flex().flex_wrap().children(words))
+            .into_any_element()
+    }
+}
+
+/// Splits the words at speaker changes and long pauses, and long monologues
+/// at sentence ends. Only a speaker change (or the start) carries a label.
+fn paragraphs(
+    words: &[TimelineWord],
+    speakers: &HashMap<koo_core::SpeakerId, String>,
+) -> Vec<Paragraph> {
+    let mut out: Vec<Paragraph> = Vec::new();
+    let mut start = 0;
+    let mut label = None;
+    for (i, w) in words.iter().enumerate() {
+        let speaker = w.word.speaker;
+        let new_speaker = i == 0 || words[i - 1].word.speaker != speaker;
+        let split = i > 0 && {
+            let prev = &words[i - 1];
+            let len = i - start;
+            new_speaker
+                || w.timeline.start - prev.timeline.end > PARAGRAPH_GAP
+                || len >= PARAGRAPH_WORDS * 2
+                || (len >= PARAGRAPH_WORDS && prev.word.text.ends_with(['.', '?', '!']))
+        };
+        if split {
+            out.push(Paragraph {
+                words: start..i,
+                label: label.take(),
+            });
+            start = i;
+        }
+        if new_speaker {
+            label = speaker.and_then(|s| speakers.get(&s).cloned());
+        }
+    }
+    if start < words.len() {
+        out.push(Paragraph {
+            words: start..words.len(),
+            label,
+        });
+    }
+    out
 }
 
 impl Render for TranscriptPanel {
