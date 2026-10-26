@@ -1,9 +1,12 @@
 //! Video scope readings from a frame (waveform, parade, vectorscope and
 //! histogram in numbers), and shot matching from them. The Color workspace
 //! draws the scopes; the agent reads the numbers (`get_scopes`) and asks for
-//! matches (`match_grade`).
+//! matches (`match_grade`). Readings use the same color math as
+//! [`crate::grade`]: Rec. 709 luma, and a chroma measure that scales exactly
+//! with [`Grade::saturation`].
 
-use crate::model::Grade;
+use crate::grade::{self, Curve};
+use crate::model::{Curves, Grade};
 use crate::services::Frame;
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +28,8 @@ pub struct ScopeReadings {
     pub red: Stats,
     pub green: Stats,
     pub blue: Stats,
-    /// HSV saturation.
+    /// Chroma, `max(r, g, b) − min(r, g, b)`: scales linearly with
+    /// [`Grade::saturation`].
     pub saturation: Stats,
     /// Fraction of pixels with luma ≤ 1/255 and ≥ 254/255.
     pub crushed: f32,
@@ -92,15 +96,14 @@ pub fn measure(frame: &Frame) -> ScopeReadings {
             continue;
         }
         let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
-        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let s = if max > 0.0 { (max - min) / max } else { 0.0 };
+        let [kr, kg, kb] = grade::LUMA;
+        let y = kr * r + kg * g + kb * b;
+        let chroma = r.max(g).max(b) - r.min(g).min(b);
         h[0][y.round().clamp(0.0, 255.0) as usize] += 1;
         h[1][p[0] as usize] += 1;
         h[2][p[1] as usize] += 1;
         h[3][p[2] as usize] += 1;
-        h[4][(s * 255.0).round() as usize] += 1;
+        h[4][chroma as usize] += 1;
         crushed += (y <= 1.0) as u64;
         clipped += (y >= 254.0) as u64;
         cb += ((b - y) / 1.8556 / 255.0) as f64;
@@ -131,31 +134,82 @@ pub fn measure(frame: &Frame) -> ScopeReadings {
 }
 
 /// A grade for the target shot that brings its readings toward the
-/// reference's: black and white points through lift and gain per channel,
-/// midtones through gamma, and saturation. Starts from `current`, so a match
-/// refines an existing grade rather than replacing it.
+/// reference's. `target` reads the target graded with `current` (what the
+/// scopes show for it) and `reference` the reference with its own grade.
+///
+/// Curves are the last stage of the grade, so the correction is exact to
+/// compose: each channel gets a monotone curve taking the target's 5th
+/// percentile, median and 95th percentile onto the reference's (contrast
+/// limited to ×0.5..×2), folded with `current`'s curves. Other fields of
+/// `current` are kept.
 pub fn match_grade(reference: &ScopeReadings, target: &ScopeReadings, current: &Grade) -> Grade {
-    let mut g = current.clone();
     let channels = [
         (&reference.red, &target.red),
         (&reference.green, &target.green),
         (&reference.blue, &target.blue),
     ];
-    for (i, (r, t)) in channels.iter().enumerate() {
-        let t_range = (t.p95 - t.p5).max(0.02);
-        let r_range = (r.p95 - r.p5).max(0.02);
-        let gain = (r_range / t_range).clamp(0.5, 2.0);
-        g.gain[i] = (current.gain[i] * gain).clamp(0.25, 4.0);
-        g.lift[i] = (current.lift[i] + (r.p5 - t.p5 * gain)).clamp(-0.5, 0.5);
-        // Midtones: gamma that maps the target's median onto the reference's.
-        let tm = ((t.median - t.p5) / t_range).clamp(0.02, 0.98);
-        let rm = ((r.median - r.p5) / r_range).clamp(0.02, 0.98);
-        let gamma = (rm.ln() / tm.ln()).clamp(0.5, 2.0);
-        g.gamma_rgb[i] = (current.gamma_rgb[i] / gamma).clamp(0.4, 2.5);
-    }
-    if target.saturation.mean > 0.01 {
-        let s = reference.saturation.mean / target.saturation.mean;
-        g.saturation = (current.saturation * s).clamp(0.0, 2.0);
-    }
+    let maps: Vec<Option<Curve>> = channels
+        .iter()
+        .map(|(r, t)| Curve::new(&mapping(r, t)))
+        .collect();
+    let mut g = current.clone();
+    let old = &current.curves;
+    let fold = |points: &[[f32; 2]], i: usize| -> Vec<[f32; 2]> {
+        let chan = Curve::new(points);
+        let master = Curve::new(&old.master);
+        if chan.is_none() && master.is_none() {
+            return mapping(channels[i].0, channels[i].1);
+        }
+        (0..=8)
+            .map(|k| {
+                let x = k as f32 / 8.0;
+                let v = chan.as_ref().map_or(x, |c| c.eval(x));
+                let v = master.as_ref().map_or(v, |c| c.eval(v));
+                [x, maps[i].as_ref().map_or(v, |m| m.eval(v))]
+            })
+            .collect()
+    };
+    g.curves = Curves {
+        master: Vec::new(),
+        red: fold(&old.red, 0),
+        green: fold(&old.green, 1),
+        blue: fold(&old.blue, 2),
+    };
     g
+}
+
+/// Control points taking `t`'s distribution onto `r`'s, end points included.
+fn mapping(r: &Stats, t: &Stats) -> Vec<[f32; 2]> {
+    let t_range = (t.p95 - t.p5).max(0.02);
+    let r_range = (r.p95 - r.p5).max(0.02);
+    let a = (r_range / t_range).clamp(0.5, 2.0);
+    let y = |x: f32| (r.p5 + (x - t.p5) * a).clamp(0.0, 1.0);
+    let mut p = vec![[0.0, y(0.0)], [t.p5, r.p5.clamp(0.0, 1.0)]];
+    // Midtones: where the reference's median sits in its range.
+    let tm = (t.median - t.p5) / t_range;
+    let rm = ((r.median - r.p5) / r_range).clamp(0.0, 1.0);
+    if (0.1..=0.9).contains(&tm) && t.p95 - t.p5 >= 0.05 {
+        p.push([t.median, (r.p5 + rm * t_range * a).clamp(0.0, 1.0)]);
+    }
+    p.push([t.p95, y(t.p95)]);
+    p.push([1.0, y(1.0)]);
+    p.dedup_by(|b, a| b[0] - a[0] < 0.01);
+    // Keep the curve rising.
+    for k in 1..p.len() {
+        p[k][1] = p[k][1].max(p[k - 1][1]);
+    }
+    p
+}
+
+/// Match `target` (graded with `current`) to `reference` (graded with
+/// `reference_grade`): both frames are graded here, then measured.
+pub fn match_frames(
+    reference: &Frame,
+    reference_grade: &Grade,
+    target: &Frame,
+    current: &Grade,
+) -> Grade {
+    let r = measure(&grade::graded(reference, &[reference_grade]));
+    let t = measure(&grade::graded(target, &[current]));
+    match_grade(&r, &t, current)
 }
