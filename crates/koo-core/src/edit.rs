@@ -21,6 +21,8 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::EditMarker { .. }
             | Command::RemoveMarker { .. }
             | Command::AddTrack { .. }
+            | Command::AddTrackWithId { .. }
+            | Command::SetTrackLocked { .. }
             | Command::ImportMedia { .. }
             | Command::UpdateMedia { .. }
             | Command::RemoveMedia { .. }
@@ -76,6 +78,24 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             Ok(ops(vec![Op::InsertTrack {
                 index,
                 track: Track::new(*kind, name.clone()),
+            }]))
+        }
+        Command::AddTrackWithId {
+            track,
+            kind,
+            index,
+            name,
+        } => {
+            if tl.track(*track).is_some() {
+                return Err(CoreError::Invalid(format!("track {track} already exists")));
+            }
+            let index = (*index).min(tl.tracks.len());
+            Ok(ops(vec![Op::InsertTrack {
+                index,
+                track: Track {
+                    id: *track,
+                    ..Track::new(*kind, name.clone())
+                },
             }]))
         }
         Command::RemoveTrack { track } => {
@@ -187,6 +207,19 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             let before = TrackProps::of(t);
             let after = TrackProps {
                 mix: mix.clone(),
+                ..before.clone()
+            };
+            Ok(ops(vec![Op::UpdateTrack {
+                track: *track,
+                before,
+                after,
+            }]))
+        }
+        Command::SetTrackLocked { track, locked } => {
+            let t = tl.track(*track).ok_or(CoreError::TrackNotFound(*track))?;
+            let before = TrackProps::of(t);
+            let after = TrackProps {
+                locked: *locked,
                 ..before.clone()
             };
             Ok(ops(vec![Op::UpdateTrack {

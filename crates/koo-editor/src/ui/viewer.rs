@@ -6,7 +6,6 @@
 
 mod audio;
 mod player;
-mod transform;
 
 use super::timeline::glyph::{Glyph, glyph};
 use super::timeline::{NextFrame, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop};
@@ -138,7 +137,7 @@ impl ViewerPanel {
         };
         let project = state.display_project();
         let t = state.playhead;
-        let Some((_, clip, item)) = top_clip(project, t) else {
+        let Some((clip, item)) = top_clip(project, t) else {
             self.requested = None;
             self.show(None);
             return;
@@ -192,7 +191,7 @@ impl ViewerPanel {
         let t = state.playhead;
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let source = top_clip(project, t).and_then(|(_, clip, item)| {
+        let source = top_clip(project, t).and_then(|(clip, item)| {
             let at = clip.to_source(t)?;
             let rate = item
                 .info
@@ -300,10 +299,11 @@ impl Render for ViewerPanel {
         let settings = project.timeline.settings.clone();
         let aspect = settings.width.max(1) as f32 / settings.height.max(1) as f32;
         let transform = self.picture.as_ref().and_then(|p| {
-            project
-                .timeline
-                .clip(p.clip)
-                .map(|(_, c)| transform::evaluate(c, t))
+            project.timeline.clip(p.clip).map(|(_, c)| {
+                let mut tr = c.transform_at(t - c.start);
+                tr.opacity = tr.opacity.clamp(0., 1.);
+                tr
+            })
         });
         let image = self.picture.as_ref().map(|p| p.image.clone());
         let letters = lettering(project, t);

@@ -4,7 +4,8 @@
 //! time, converted for GPUI off the UI thread.
 
 use gpui_kit::RenderImage;
-use koo_core::model::{Clip, MediaItem, MediaKind, Project, Track, TrackKind};
+use koo_core::model::{Clip, MediaItem, MediaKind, Project};
+use koo_core::query;
 use koo_core::services::{Frame, FrameStream, MediaService};
 use koo_core::{ClipId, Time};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -63,18 +64,11 @@ impl Drop for Player {
     }
 }
 
-/// The topmost visible media clip at `t`: tracks are stored top to bottom.
-pub fn top_clip(project: &Project, t: Time) -> Option<(&Track, &Clip, &MediaItem)> {
-    project
-        .timeline
-        .tracks
-        .iter()
-        .filter(|tr| matches!(tr.kind, TrackKind::Video | TrackKind::Overlay) && !tr.mix.mute)
-        .find_map(|tr| {
-            let clip = tr.clip_at(t)?;
-            let item = project.media(clip.media()?)?;
-            (item.kind != MediaKind::Audio).then_some((tr, clip, item))
-        })
+/// The clip the program monitor shows at `t`, with its pool item.
+pub fn top_clip(project: &Project, t: Time) -> Option<(&Clip, &MediaItem)> {
+    let (_, clip) = query::topmost_video_clip(&project.timeline, t)?;
+    let item = project.media(clip.media()?)?;
+    (item.kind != MediaKind::Audio).then_some((clip, item))
 }
 
 /// RGBA frame → BGRA `RenderImage`.
@@ -106,7 +100,7 @@ fn run(shared: Arc<Shared>, media: Arc<dyn MediaService>, project: Arc<Project>,
     };
     while !shared.stop.load(Ordering::Relaxed) {
         let t = Time(shared.target.load(Ordering::Relaxed));
-        let Some((_, clip, item)) = top_clip(&project, t) else {
+        let Some((clip, item)) = top_clip(&project, t) else {
             if shown.take().is_some() {
                 publish(None);
             }

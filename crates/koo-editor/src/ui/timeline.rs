@@ -22,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge, InsertMode};
-use koo_core::model::{ClipContent, MarkerKind, Project, TrackKind, TrackMix};
+use koo_core::model::{ClipContent, MarkerKind, MediaKind, Project, TrackKind, TrackMix};
 use koo_core::{ChangeItemId, ChangeSetId, ClipId, Time, TimeRange, TrackId};
 use layout::{EDGE_PX, HEADER_WIDTH, RULER_HEIGHT, Row, SNAP_PX, TOOLBAR_HEIGHT, Viewport};
 use overlay::OverlayItem;
@@ -752,7 +752,7 @@ impl TimelinePanel {
     /// Scroll a change item focused elsewhere (the chat) into view.
     fn reveal_focused(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let focused = state.focused_change.map(|(_, i)| i);
+        let focused = state.focused_change_item().map(|(_, i)| i);
         if focused == self.revealed {
             return;
         }
@@ -776,6 +776,10 @@ impl TimelinePanel {
         }
     }
 
+    /// Drop pool media at the pointer. Video with sound lands on the target
+    /// video track and its audio on the matching audio track (added when
+    /// there is none), as one undo step; audio-only media goes to an audio
+    /// track.
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
         self.drop_row = None;
         let p = window.mouse_position();
@@ -785,21 +789,50 @@ impl TimelinePanel {
         let Some(item) = project.media(drag.media) else {
             return;
         };
-        let rows = layout::rows(&project.timeline);
-        let wanted = match item.kind {
-            koo_core::model::MediaKind::Audio => TrackKind::Audio,
-            _ => TrackKind::Video,
+        let tl = &project.timeline;
+        let row = layout::row_at(&layout::rows(tl), y).and_then(|r| tl.track(r.track));
+        let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
+        let has_video = match item.kind {
+            MediaKind::Audio => false,
+            MediaKind::Image => true,
+            MediaKind::Video => item.info.as_ref().is_none_or(|i| i.video.is_some()),
         };
-        let track = layout::row_at(&rows, y).map(|r| r.track).or_else(|| {
-            project
-                .timeline
-                .tracks
+        let of_kind = |kinds: &[TrackKind]| -> Vec<TrackId> {
+            tl.tracks
                 .iter()
-                .find(|t| t.kind == wanted)
+                .filter(|t| kinds.contains(&t.kind))
                 .map(|t| t.id)
-        });
-        let Some(track) = track else {
-            return;
+                .collect()
+        };
+        let video_track = has_video
+            .then(|| {
+                row.filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay))
+                    .map(|t| t.id)
+                    .or_else(|| of_kind(&[TrackKind::Video]).first().copied())
+            })
+            .flatten();
+        let audios = of_kind(&[TrackKind::Audio]);
+        let mut commands = Vec::new();
+        let audio_track = if !has_audio && has_video {
+            None
+        } else if let Some(t) = row.filter(|t| t.kind == TrackKind::Audio) {
+            Some(t.id)
+        } else {
+            // V2 pairs with A2; otherwise the lowest audio track.
+            let lane = video_track
+                .and_then(|v| of_kind(&[TrackKind::Video]).iter().position(|t| *t == v))
+                .unwrap_or(0);
+            let found = audios.get(lane).or(audios.last()).copied();
+            Some(found.unwrap_or_else(|| {
+                let track = TrackId::new();
+                commands.push(Command::AddTrackWithId {
+                    track,
+                    kind: TrackKind::Audio,
+                    index: tl.tracks.len(),
+                    name: format!("A{}", audios.len() + 1),
+                });
+                track
+            }))
         };
         let len = item
             .info
@@ -807,39 +840,29 @@ impl TimelinePanel {
             .map(|i| i.duration)
             .filter(|d| d.0 > 0)
             .unwrap_or(Time::from_secs_f64(5.));
-        let rate = project.timeline.settings.rate;
+        let rate = tl.settings.rate;
+        let media = drag.media;
         let at = self
             .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
             .floor_to_frame(rate);
         self.snap = None;
-        let insert = |track| Command::InsertClip {
-            media: drag.media,
-            source: TimeRange::new(Time::ZERO, len),
-            track,
-            at,
-            mode: InsertMode::Overwrite,
-        };
-        let state = self.state.read(cx);
-        let project = state.bus.project();
-        let has_audio = project
-            .media(drag.media)
-            .and_then(|m| m.info.as_ref())
-            .is_some_and(|i| !i.audio.is_empty());
-        // Video with sound lands as a linked pair: the mixer and renderer
-        // read audio from audio tracks only.
-        let linked = match project.timeline.track(track).map(|t| t.kind) {
-            Some(TrackKind::Video | TrackKind::Overlay) if has_audio => {
-                matching_audio_track(&project.timeline, track)
-            }
-            _ => None,
-        };
-        self.state.update(cx, |s, cx| match linked {
-            Some(audio) => {
-                s.edit_batch(vec![insert(track), insert(audio)], "insert_clip", cx);
-            }
-            None => {
-                s.edit(insert(track), cx);
-            }
+        commands.extend(
+            [video_track, audio_track]
+                .into_iter()
+                .flatten()
+                .map(|track| Command::InsertClip {
+                    media,
+                    source: TimeRange::new(Time::ZERO, len),
+                    track,
+                    at,
+                    mode: InsertMode::Overwrite,
+                }),
+        );
+        if commands.is_empty() {
+            return;
+        }
+        self.state.update(cx, |s, cx| {
+            s.edit_batch(commands, "insert_clip", cx);
         });
     }
 
@@ -909,11 +932,13 @@ impl TimelinePanel {
         });
     }
 
-    fn toggle_lock(&mut self, cx: &mut Context<Self>) {
-        // The command vocabulary has no lock command yet; see the stream summary.
+    fn toggle_lock(&mut self, track: TrackId, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.status = Some(koo_core::CoreError::NotImplemented("lock_track").to_string());
-            cx.notify();
+            let Some(t) = s.bus.project().timeline.track(track) else {
+                return;
+            };
+            let locked = !t.locked;
+            s.edit(Command::SetTrackLocked { track, locked }, cx);
         });
     }
 
@@ -981,7 +1006,7 @@ impl TimelinePanel {
         let selection = state.selection.clips.clone();
         let playhead = state.playhead;
         let in_out = state.in_out;
-        let focused = state.focused_change.map(|(_, i)| i);
+        let focused = state.focused_change().map(|i| i.id);
         let overlay: Vec<OverlayItem> =
             overlay::collect(&project.timeline, state.bus.change_sets());
         let tl = &project.timeline;
@@ -1059,7 +1084,7 @@ impl TimelinePanel {
                         let tiles = match (&media, clip.media().and_then(|m| project.media(m))) {
                             (Some(_), Some(item))
                                 if matches!(track.kind, TrackKind::Video | TrackKind::Overlay)
-                                    && item.kind != koo_core::model::MediaKind::Audio =>
+                                    && item.kind != MediaKind::Audio =>
                             {
                                 self.tiles(clip, item, row, width)
                             }
@@ -1067,7 +1092,6 @@ impl TimelinePanel {
                         };
                         ClipScene {
                             tiles,
-                            id: clip.id,
                             range: clip.range(),
                             label: clip_label(clip, &project).into(),
                             selected: selection.contains(&clip.id),
@@ -1363,7 +1387,7 @@ impl TimelinePanel {
                         track.locked,
                         if track.locked { "Unlock" } else { "Lock" },
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_lock(cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_lock(id, cx))),
                 )
         });
         v_flex()
@@ -1398,17 +1422,15 @@ impl TimelinePanel {
         let (set, item) = self.hovered_item?;
         let p = self.hover?;
         let state = self.state.read(cx);
-        let item = state.bus.change_set(set)?.item(item)?;
+        let hovered = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
+            .into_iter()
+            .find(|i| i.set == set && i.item == item)?;
         let theme = cx.theme();
         let b = self.bounds.get();
         let x = (p.x - b.origin.x + px(14.))
             .min(b.size.width - px(260.))
             .max(px(4.));
-        let warnings = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
-            .into_iter()
-            .find(|i| i.item == item.id)
-            .map(|i| i.warnings)
-            .unwrap_or_default();
+        let warnings = hovered.warnings;
         // Below the pointer, or above it when that would leave the panel.
         let height = px(26. + 18. * warnings.len() as f32);
         let below = p.y - b.origin.y + px(18.);
@@ -1432,7 +1454,7 @@ impl TimelinePanel {
                 .bg(theme.popover)
                 .text_xs()
                 .text_color(theme.popover_foreground)
-                .child(item.reason.clone())
+                .child(hovered.reason)
                 .children(
                     warnings
                         .into_iter()
@@ -1440,25 +1462,6 @@ impl TimelinePanel {
                 ),
         )
     }
-}
-
-/// The audio track paired with a video track: V1 ↔ A1, V2 ↔ A2, counting
-/// video tracks up from the one nearest the audio. Falls back to the first
-/// unlocked audio track.
-fn matching_audio_track(timeline: &koo_core::model::Timeline, video: TrackId) -> Option<TrackId> {
-    let videos: Vec<_> = timeline
-        .tracks
-        .iter()
-        .filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay))
-        .rev()
-        .collect();
-    let audios: Vec<_> = timeline
-        .tracks
-        .iter()
-        .filter(|t| t.kind == TrackKind::Audio && !t.locked)
-        .collect();
-    let rank = videos.iter().position(|t| t.id == video)?;
-    audios.get(rank).or(audios.first()).map(|t| t.id)
 }
 
 fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {

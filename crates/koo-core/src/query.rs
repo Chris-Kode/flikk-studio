@@ -107,12 +107,12 @@ impl Clip {
 
 // ------------------------------------------------------------ what plays at t
 
-/// Clips drawn at timeline time `t`, topmost first: every non-audio track's
-/// clip whose opacity there is above zero.
+/// Clips drawn at timeline time `t`, topmost first: every shown (not muted)
+/// non-audio track's clip whose opacity there is above zero, as rendered.
 pub fn visible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
     tl.tracks
         .iter()
-        .filter(|tr| tr.kind != TrackKind::Audio)
+        .filter(|tr| tr.kind != TrackKind::Audio && !tr.mix.mute)
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
         .filter(|(_, c)| c.value_at(Property::Opacity, t - c.start) > 0.0)
         .collect()

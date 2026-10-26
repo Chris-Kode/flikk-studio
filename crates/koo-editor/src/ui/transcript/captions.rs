@@ -28,7 +28,7 @@ impl TranscriptPanel {
             return;
         }
         let style = self.state.read(cx).active_caption_style();
-        let words: Vec<_> = self.words.iter().map(|w| w.to_word()).collect();
+        let words: Vec<_> = self.words.iter().map(super::words::to_word).collect();
         let phrases = group_words(&words, &CaptionRules::from_style(&style));
         if caption_track(self.state.read(cx).bus.project()).is_none() {
             let added = self.state.update(cx, |s, cx| {
@@ -49,7 +49,13 @@ impl TranscriptPanel {
             return;
         };
         let existing: Vec<ClipId> = track.clips.iter().map(|c| c.id).collect();
-        let mut commands = Vec::with_capacity(phrases.len() + 1);
+        let mut commands = Vec::with_capacity(phrases.len() + 2);
+        if track.caption_style.as_deref() != Some(style.name.as_str()) {
+            commands.push(Command::SetCaptionStyle {
+                track: track.id,
+                style: Some(style.name.clone()),
+            });
+        }
         if !existing.is_empty() {
             commands.push(Command::DeleteClips {
                 clips: existing,
@@ -153,7 +159,7 @@ impl TranscriptPanel {
             let low = self
                 .words
                 .iter()
-                .any(|w| w.confidence < LOW_CONFIDENCE && w.range.overlaps(&range));
+                .any(|w| w.word.confidence < LOW_CONFIDENCE && w.timeline.overlaps(&range));
             let current = range.contains(playhead);
             let time = h_flex()
                 .w(px(60.))

@@ -3,13 +3,12 @@
 //! `Scene` is a snapshot taken in `render`, so painting never touches state.
 
 use super::layout::{self, RULER_HEIGHT, Row, Viewport};
-use super::overlay::OverlayItem;
+use super::overlay::{Mark, OverlayItem};
 use super::waveform;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 use koo_core::model::{Marker, MarkerKind, TrackKind};
-use koo_core::ops::DiffKind;
-use koo_core::{ChangeItemId, ClipId, Rate, Time, TimeRange, TrackId};
+use koo_core::{ChangeItemId, Rate, Time, TimeRange, TrackId};
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -63,7 +62,6 @@ impl Colors {
 }
 
 pub struct ClipScene {
-    pub id: ClipId,
     pub range: TimeRange,
     pub label: SharedString,
     pub selected: bool,
@@ -313,7 +311,7 @@ pub fn overlay_rect(
         left + px(vp.x(item.range.end)),
     );
     let w = (b - a).max(px(3.));
-    if item.kind == DiffKind::Added && item.overlaps {
+    if item.mark == Mark::Added && item.overlaps {
         let h = (row.height * 0.45).max(10.);
         Bounds::new(point(a, top + px(row.height - h - 1.)), size(w, px(h)))
     } else {
@@ -499,8 +497,8 @@ fn paint_overlay_item(
     window: &mut Window,
 ) {
     let border_w = if emphasis { px(2.) } else { px(1.5) };
-    match item.kind {
-        DiffKind::Added => {
+    match item.mark {
+        Mark::Added => {
             let fill_alpha = if emphasis { 0.38 } else { 0.24 };
             window.paint_quad(quad(
                 rect,
@@ -514,19 +512,19 @@ fn paint_overlay_item(
                 paint_stripes(rect, c.green.opacity(0.45), window);
             }
         }
-        DiffKind::Removed => {
-            let fill_alpha = if emphasis { 0.5 } else { 0.36 };
-            window.paint_quad(quad(
-                rect,
-                px(4.),
-                c.red.opacity(fill_alpha),
-                border_w,
-                c.red,
-                BorderStyle::Solid,
-            ));
-            paint_stripes(rect, c.red.opacity(0.35), window);
+        Mark::Removed => {
+            // A band, not a box: removed spans of neighbouring clips and
+            // tracks merge into one gap.
+            window.paint_quad(fill(rect, c.red.opacity(if emphasis { 0.5 } else { 0.3 })));
+            let edge = if emphasis { 0.95 } else { 0.7 };
+            for x in [rect.origin.x, rect.right() - px(1.)] {
+                window.paint_quad(fill(
+                    Bounds::new(point(x, rect.origin.y), size(px(1.), rect.size.height)),
+                    c.red.opacity(edge),
+                ));
+            }
         }
-        DiffKind::Modified => {
+        Mark::Modified => {
             window.paint_quad(quad(
                 rect,
                 px(4.),
@@ -534,6 +532,16 @@ fn paint_overlay_item(
                 border_w,
                 c.yellow,
                 BorderStyle::Solid,
+            ));
+        }
+        Mark::Cut => {
+            let x = rect.origin.x;
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(x - px(0.5), rect.origin.y),
+                    size(border_w, rect.size.height),
+                ),
+                c.red.opacity(if emphasis { 1. } else { 0.8 }),
             ));
         }
     }
@@ -632,10 +640,10 @@ fn paint_ruler(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &
             paint_marker(m.range, color, &vp, ruler, window);
         }
         for item in scene.overlay.iter().filter(|i| i.track.is_none()) {
-            let color = match item.kind {
-                DiffKind::Added => c.green,
-                DiffKind::Removed => c.red,
-                DiffKind::Modified => c.yellow,
+            let color = match item.mark {
+                Mark::Added => c.green,
+                Mark::Removed | Mark::Cut => c.red,
+                Mark::Modified => c.yellow,
             };
             paint_marker(item.range, color, &vp, ruler, window);
         }

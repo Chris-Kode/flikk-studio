@@ -32,8 +32,8 @@ impl TranscriptPanel {
             let mut style = s.active_caption_style();
             style.name = format!("Style {}", s.presets.caption_styles.len() + 1);
             s.presets.caption_styles.push(style);
-            s.caption_style = s.presets.caption_styles.len() - 1;
-            cx.notify();
+            let i = s.presets.caption_styles.len() - 1;
+            s.pick_caption_style(i, cx);
         });
     }
 
@@ -82,10 +82,7 @@ impl TranscriptPanel {
                     .hover(move |s| s.bg(hover))
                     .child(name)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.caption_style = i;
-                            cx.notify();
-                        });
+                        this.state.update(cx, |s, cx| s.pick_caption_style(i, cx));
                     }))
             }))
             .child(
