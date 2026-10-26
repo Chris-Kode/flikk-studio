@@ -7,11 +7,12 @@ use crate::persistence;
 use gpui_kit::*;
 use koo_core::agent::*;
 use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
-use koo_core::command::Command;
+use koo_core::changeset::ChangeItem;
+use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
 use koo_core::services::Services;
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often agent output and tool calls are drained on the UI thread.
 const AGENT_PUMP: Duration = Duration::from_millis(33);
@@ -31,6 +32,12 @@ pub struct EditorState {
     pub preview: Option<ChangeSetId>,
     /// Last error or notice for the status line; cleared on the next action.
     pub status: Option<String>,
+    // --- timeline/viewer
+    /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
+    pub play_speed: f64,
+    /// Change item picked on the timeline overlay; the chat panel reveals it.
+    pub focused_change: Option<(ChangeSetId, ChangeItemId)>,
+    clock: Option<Task<()>>,
     agent: AgentLink,
     _pump: Task<()>,
 }
@@ -61,6 +68,9 @@ impl EditorState {
             activity: Vec::new(),
             preview: None,
             status: None,
+            play_speed: 1.0,
+            focused_change: None,
+            clock: None,
             agent: AgentLink::new(),
             _pump: pump,
         }
@@ -238,6 +248,172 @@ impl EditorState {
         });
     }
 }
+
+// --- timeline/viewer
+impl EditorState {
+    /// Like [`Self::execute`], but reports plan warnings (protected ranges)
+    /// in the status line.
+    pub fn edit(&mut self, command: Command, cx: &mut Context<Self>) -> Option<Outcome> {
+        let outcome = self.execute(command, cx);
+        self.report_warnings(outcome.as_ref());
+        outcome
+    }
+
+    /// Several commands as one undo step, reporting warnings like [`Self::edit`].
+    pub fn edit_batch(
+        &mut self,
+        commands: Vec<Command>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Outcome> {
+        let outcome = self.execute_batch(commands, label, cx);
+        self.report_warnings(outcome.as_ref());
+        outcome
+    }
+
+    fn report_warnings(&mut self, outcome: Option<&Outcome>) {
+        let warnings = match outcome {
+            Some(Outcome::Applied { warnings }) | Some(Outcome::Proposed { warnings, .. }) => {
+                warnings
+            }
+            None => return,
+        };
+        let text: Vec<String> = warnings.iter().map(warning_text).collect();
+        if !text.is_empty() {
+            self.status = Some(text.join(" · "));
+        }
+    }
+
+    /// The change item picked on the timeline, as `(set, item)`.
+    pub fn focused_change_item(&self) -> Option<(ChangeSetId, ChangeItemId)> {
+        self.focused_change
+    }
+
+    /// The picked change item itself, if it still exists.
+    pub fn focused_change(&self) -> Option<&ChangeItem> {
+        let (set, item) = self.focused_change?;
+        self.bus.change_set(set)?.item(item)
+    }
+
+    pub fn focus_change_item(
+        &mut self,
+        item: Option<(ChangeSetId, ChangeItemId)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focused_change != item {
+            self.focused_change = item;
+            cx.notify();
+        }
+    }
+
+    pub fn set_in_out(&mut self, in_out: Option<TimeRange>, cx: &mut Context<Self>) {
+        self.in_out = in_out;
+        cx.notify();
+    }
+
+    /// Mark in at the playhead, keeping the out point when it is still after it.
+    pub fn mark_in(&mut self, cx: &mut Context<Self>) {
+        let t = self.playhead;
+        let end = match self.in_out {
+            Some(r) if r.end > t => r.end,
+            _ => self.bus.project().timeline.duration().max(t),
+        };
+        self.set_in_out(Some(TimeRange::new(t, end)), cx);
+    }
+
+    /// Mark out at the playhead, keeping the in point when it is still before it.
+    pub fn mark_out(&mut self, cx: &mut Context<Self>) {
+        let t = self.playhead;
+        let start = match self.in_out {
+            Some(r) if r.start < t => r.start,
+            _ => Time::ZERO,
+        };
+        self.set_in_out(Some(TimeRange::new(start, t)), cx);
+    }
+
+    pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        let playing = !self.playing;
+        self.play_speed = 1.0;
+        self.set_playing(playing, cx);
+    }
+
+    /// JKL: `speed` 0 stops; otherwise play at that rate (negative = reverse).
+    pub fn shuttle(&mut self, speed: f64, cx: &mut Context<Self>) {
+        if speed == 0.0 {
+            self.set_playing(false, cx);
+        } else {
+            self.play_speed = speed;
+            self.clock = None;
+            self.set_playing(true, cx);
+        }
+    }
+
+    pub fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
+        self.playing = playing;
+        if !playing {
+            self.clock = None;
+            cx.notify();
+            return;
+        }
+        let end = self.display_project().timeline.duration();
+        if self.play_speed > 0.0 && self.playhead >= end {
+            self.playhead = Time::ZERO;
+        }
+        if self.clock.is_none() {
+            self.clock = Some(cx.spawn(async move |this, cx| {
+                let mut last = (Instant::now(), None::<Time>);
+                loop {
+                    cx.background_executor().timer(PLAY_TICK).await;
+                    let alive = this.update(cx, |this, cx| this.tick(&mut last, cx));
+                    if !matches!(alive, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Advance the playhead by the wall time since the last tick. A seek in
+    /// between (the playhead moved elsewhere) restarts from the new position.
+    /// Returns false once playback stopped.
+    fn tick(&mut self, last: &mut (Instant, Option<Time>), cx: &mut Context<Self>) -> bool {
+        if !self.playing {
+            return false;
+        }
+        let now = Instant::now();
+        let elapsed = now.duration_since(last.0).as_secs_f64() * self.play_speed;
+        *last = (now, Some(self.playhead));
+        let Some(from) = last.1.filter(|_| elapsed != 0.0) else {
+            return true;
+        };
+        let end = self.display_project().timeline.duration();
+        let t = from + Time::from_secs_f64(elapsed);
+        let done =
+            (self.play_speed > 0.0 && t >= end) || (self.play_speed < 0.0 && t <= Time::ZERO);
+        self.playhead = t.max(Time::ZERO).min(end);
+        last.1 = Some(self.playhead);
+        if done {
+            self.playing = false;
+            self.clock = None;
+        }
+        cx.notify();
+        !done
+    }
+}
+
+fn warning_text(warning: &Warning) -> String {
+    match warning {
+        Warning::TouchesProtected { note, .. } if note.is_empty() => {
+            "Touches a protected range".to_string()
+        }
+        Warning::TouchesProtected { note, .. } => format!("Touches protected range “{note}”"),
+        Warning::NeedsConfirmation { message } => message.clone(),
+    }
+}
+
+/// Playback clock resolution.
+const PLAY_TICK: Duration = Duration::from_millis(16);
 
 fn now() -> i64 {
     std::time::SystemTime::now()
