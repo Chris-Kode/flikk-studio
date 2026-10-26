@@ -363,8 +363,25 @@ pub enum Reference {
     Clip { clip: ClipId },
     /// "@marker 9c1d2e3f" or "@marker intro hook".
     Marker { marker: MarkerId },
-    /// "@track V1".
+    /// "@track V1" or "@track 3f2a91c0".
     Track { track: TrackId },
+    /// "@media 3f2a91c0" (resolved with the project only).
+    Media { media: MediaId },
+    /// "@bin 3f2a91c0" (resolved with the project only).
+    Bin { bin: BinId },
+    /// "@effect 3f2a91c0/9c1d2e3f": a video or audio effect on a clip.
+    Effect { clip: ClipId, effect: EffectId },
+    /// "@transition 3f2a91c0/in" or ".../out": the clip's transition at
+    /// that edge, which may not be set.
+    Transition {
+        clip: ClipId,
+        edge: crate::command::Edge,
+    },
+    /// "@fx cross_dissolve" (a built-in key) or "@fx 3f2a91c0" (a project
+    /// asset, resolved with the project only).
+    Fx { fx: crate::fx::FxRef },
+    /// "@audiofx compressor": an audio effect kind by its name.
+    AudioFx { kind: crate::audiofx::AudioFxKind },
     /// An `@` mention that names nothing in the timeline, or more than one
     /// thing.
     Unresolved { text: String },
@@ -380,7 +397,20 @@ pub struct ResolvedRef {
 /// Find every time and `@` reference in `text`, in order. Single times need
 /// "at" in front, so ratios like "16:9" are left alone; clock times need a
 /// colon ("SS" alone is not a time). Ids match by prefix of their hex form.
+/// `@range <start>-<end>` and `@time <secs>` (timeline seconds) read as
+/// [`Reference::Range`] and [`Reference::At`]. Media, bins and project FX
+/// need the project: see [`resolve_project_references`].
 pub fn resolve_references(tl: &Timeline, text: &str) -> Vec<ResolvedRef> {
+    resolve(tl, None, text)
+}
+
+/// [`resolve_references`] with the whole project, so `@media`, `@bin` and
+/// project `@fx` tokens resolve too.
+pub fn resolve_project_references(project: &Project, text: &str) -> Vec<ResolvedRef> {
+    resolve(&project.timeline, Some(project), text)
+}
+
+fn resolve(tl: &Timeline, project: Option<&Project>, text: &str) -> Vec<ResolvedRef> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < text.len() {
@@ -390,7 +420,7 @@ pub fn resolve_references(tl: &Timeline, text: &str) -> Vec<ResolvedRef> {
             .next_back()
             .is_none_or(|c| !c.is_alphanumeric() && c != ':' && c != '.');
         let found = if rest.starts_with('@') {
-            parse_mention(tl, rest)
+            parse_mention(tl, rest).or_else(|| parse_fx_mention(tl, project, rest))
         } else if at_boundary {
             parse_time_ref(rest)
         } else {
@@ -537,6 +567,16 @@ fn parse_mention(tl: &Timeline, s: &str) -> Option<(usize, Reference)> {
         if len == 0 {
             return None;
         }
+        if let Some((hex_len, hex)) = hex_token(&body[k..])
+            && let [track] = tl
+                .tracks
+                .iter()
+                .filter(|t| t.id.0.simple().to_string().starts_with(&hex))
+                .map(|t| t.id)
+                .collect::<Vec<_>>()[..]
+        {
+            return Some((1 + k + hex_len, Reference::Track { track }));
+        }
         let name = &body[k..k + len];
         let hits: Vec<TrackId> = tl
             .tracks
@@ -551,6 +591,144 @@ fn parse_mention(tl: &Timeline, s: &str) -> Option<(usize, Reference)> {
         return Some((1 + k + len, reference));
     }
     None
+}
+
+/// The mention kinds added with FX: media, bins, effects, transitions, FX
+/// assets, audio effects, `@range` and `@time`.
+fn parse_fx_mention(
+    tl: &Timeline,
+    project: Option<&Project>,
+    s: &str,
+) -> Option<(usize, Reference)> {
+    use crate::audiofx::AudioFxKind;
+    use crate::command::Edge;
+    let body = &s[1..];
+    let done = |k: usize, len: usize, r: Option<Reference>| {
+        let end = 1 + k + len;
+        Some((end, r.unwrap_or_else(|| unresolved(&s[..end]))))
+    };
+    let clips = || tl.tracks.iter().flat_map(|t| &t.clips);
+    if let Some(k) = keyword(body, "media") {
+        let (len, hex) = hex_token(&body[k..])?;
+        let hit = project.and_then(|p| unique(p.media.iter().map(|m| (m.id, m.id.0)), &hex));
+        return done(k, len, hit.map(|media| Reference::Media { media }));
+    }
+    if let Some(k) = keyword(body, "bin") {
+        let (len, hex) = hex_token(&body[k..])?;
+        let hit = project.and_then(|p| unique(p.bins.iter().map(|b| (b.id, b.id.0)), &hex));
+        return done(k, len, hit.map(|bin| Reference::Bin { bin }));
+    }
+    if let Some(k) = keyword(body, "effect") {
+        let rest = &body[k..];
+        let (clip_len, clip_hex) = hex_token(rest)?;
+        let (fx_len, fx_hex) = hex_token(rest[clip_len..].strip_prefix('/')?)?;
+        let len = clip_len + 1 + fx_len;
+        let hit = clips()
+            .filter(|c| c.id.0.simple().to_string().starts_with(&clip_hex))
+            .collect::<Vec<_>>();
+        let found = match hit[..] {
+            [clip] => unique(
+                clip.effects
+                    .iter()
+                    .map(|e| (e.id, e.id.0))
+                    .chain(clip.audio.effects.iter().map(|e| (e.id, e.id.0))),
+                &fx_hex,
+            )
+            .map(|effect| Reference::Effect {
+                clip: clip.id,
+                effect,
+            }),
+            _ => None,
+        };
+        return done(k, len, found);
+    }
+    if let Some(k) = keyword(body, "transition") {
+        let rest = &body[k..];
+        let (clip_len, clip_hex) = hex_token(rest)?;
+        let side = rest[clip_len..].strip_prefix('/')?;
+        let side_len = word_len(side);
+        let edge = match side[..side_len].to_ascii_lowercase().as_str() {
+            "in" => Edge::Start,
+            "out" => Edge::End,
+            _ => return None,
+        };
+        let clip = unique(clips().map(|c| (c.id, c.id.0)), &clip_hex);
+        return done(
+            k,
+            clip_len + 1 + side_len,
+            clip.map(|clip| Reference::Transition { clip, edge }),
+        );
+    }
+    if let Some(k) = keyword(body, "fx") {
+        let len = word_len(&body[k..]);
+        if len == 0 {
+            return None;
+        }
+        let name = body[k..k + len].to_ascii_lowercase();
+        let builtin = crate::fx::builtins()
+            .iter()
+            .find(|a| matches!(&a.id, crate::fx::FxRef::Builtin(key) if *key == name))
+            .map(|a| a.id.clone());
+        let fx = builtin.or_else(|| {
+            let p = project?;
+            let ids = p.fx.iter().filter_map(|a| match &a.id {
+                crate::fx::FxRef::Project(id) => Some((*id, id.0)),
+                crate::fx::FxRef::Builtin(_) => None,
+            });
+            unique(ids, &name).map(crate::fx::FxRef::Project)
+        });
+        return done(k, len, fx.map(|fx| Reference::Fx { fx }));
+    }
+    if let Some(k) = keyword(body, "audiofx") {
+        let len = word_len(&body[k..]);
+        if len == 0 {
+            return None;
+        }
+        let kind = AudioFxKind::from_name(&body[k..k + len].to_ascii_lowercase());
+        return done(k, len, kind.map(|kind| Reference::AudioFx { kind }));
+    }
+    if let Some(k) = keyword(body, "range") {
+        let rest = &body[k..];
+        let (a_len, start) = seconds(rest)?;
+        let (b_len, end) = seconds(rest[a_len..].strip_prefix('-')?)?;
+        return (end > start).then_some((
+            1 + k + a_len + 1 + b_len,
+            Reference::Range {
+                range: TimeRange::new(start, end),
+            },
+        ));
+    }
+    if let Some(k) = keyword(body, "time") {
+        let (len, time) = seconds(&body[k..])?;
+        return Some((1 + k + len, Reference::At { time }));
+    }
+    None
+}
+
+/// The one id whose hex form starts with `hex`.
+fn unique<T: Copy>(ids: impl Iterator<Item = (T, uuid::Uuid)>, hex: &str) -> Option<T> {
+    let hits: Vec<T> = ids
+        .filter(|(_, u)| u.simple().to_string().starts_with(hex))
+        .map(|(id, _)| id)
+        .collect();
+    match hits[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// Plain seconds such as `12` or `12.345`, ending at a word boundary.
+fn seconds(s: &str) -> Option<(usize, Time)> {
+    let len = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let token = s[..len].trim_end_matches('.');
+    let boundary = s[token.len()..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric());
+    let secs: f64 = token.parse().ok().filter(|v: &f64| v.is_finite())?;
+    boundary.then(|| (token.len(), Time::from_secs_f64(secs)))
 }
 
 fn unresolved(text: &str) -> Reference {

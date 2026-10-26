@@ -1078,3 +1078,35 @@ pub enum ApprovalOutcome {
     Failed(String),
     Denied,
 }
+
+// ------------------------------------------------------------- chat stream
+
+impl EditorState {
+    /// Send `text` as the user's message, like [`Self::send_chat`]; the agent
+    /// also reads `context` after it (the resolved `@` references), which
+    /// the chat neither shows nor stores.
+    pub fn send_chat_with_context(
+        &mut self,
+        text: String,
+        context: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.push(ChatMessage {
+            role: ChatRole::User,
+            text: text.clone(),
+            choices: vec![],
+            change_set: None,
+            tools: vec![],
+            at: now(),
+        });
+        let message = match context {
+            Some(context) => format!("{text}\n\n{context}"),
+            None => text,
+        };
+        let editor = self.context();
+        self.agent.send(message, editor, &self.settings);
+        self.settled.clear();
+        self.save_chat();
+        cx.notify();
+    }
+}
