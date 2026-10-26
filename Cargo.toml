@@ -1,9 +1,26 @@
-[package]
-name = "koo_editor"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.104"
 gpui-kit = "0.8"
-rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+koo-core = { path = "crates/koo-core" }
+koo-store = { path = "crates/koo-store" }
+koo-media = { path = "crates/koo-media" }
+koo-analysis = { path = "crates/koo-analysis" }
+koo-agent = { path = "crates/koo-agent" }
+koo-deliver = { path = "crates/koo-deliver" }
+
+# whisper.cpp is unusably slow as a CMake Debug build.
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3

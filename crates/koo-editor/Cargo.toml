@@ -1,0 +1,17 @@
+[package]
+name = "koo-editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+koo-core.workspace = true
+serde_json.workspace = true
+koo-store.workspace = true
+koo-media.workspace = true
+koo-analysis.workspace = true
+koo-agent.workspace = true
+koo-deliver.workspace = true
+cpal = "0.16"
+image = { version = "0.25", default-features = false }
