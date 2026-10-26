@@ -1,12 +1,19 @@
-//! Inspector, contextual by workspace: in Edit, the selected clip's
-//! properties by kind with its grade and linked audio; in Color and Audio,
-//! the whole timeline's grade, or its mixer, loudness and ducking.
+//! Inspector, contextual by workspace: in Edit, the selected transition, or
+//! the selected clip's properties by kind with its effects, grade and linked
+//! audio; in Color and Audio, the whole timeline's grade, or its mixer,
+//! loudness and ducking.
 
 mod audio;
 mod clip;
 mod color;
+mod controls;
 mod edit;
+mod effects;
+mod generator;
 mod param;
+mod transition;
+
+pub(crate) use clip::sound_clip;
 
 use crate::state::EditorState;
 use clip::PictureTab;
@@ -20,7 +27,7 @@ use koo_core::command::{Command, Edge};
 use koo_core::model::{Clip, ClipContent, Ducking, Project, Property, Track};
 use koo_core::{ClipId, Time};
 use param::{Key, Param};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct InspectorPanel {
     state: Entity<EditorState>,
@@ -40,6 +47,17 @@ pub struct InspectorPanel {
     start_field: Entity<InputState>,
     end_field: Entity<InputState>,
     timing_clip: Option<ClipId>,
+    /// FX parameter controls, by owner and parameter.
+    fx_controls: HashMap<controls::ControlKey, controls::Control>,
+    /// Effects folded to their header.
+    collapsed_fx: HashSet<koo_core::EffectId>,
+    /// Clip name field while renaming, and the clip it renames.
+    name_field: Entity<InputState>,
+    renaming: Option<ClipId>,
+    /// Speed in percent, the clip it shows, and whether a change ripples.
+    speed_field: Entity<InputState>,
+    speed_clip: Option<ClipId>,
+    speed_ripple: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,6 +69,8 @@ impl InspectorPanel {
                 .submit_on_enter(true)
         });
         let start_field = cx.new(|cx| InputState::new(window, cx));
+        let name_field = cx.new(|cx| InputState::new(window, cx));
+        let speed_field = cx.new(|cx| InputState::new(window, cx));
         let end_field = cx.new(|cx| InputState::new(window, cx));
         let commit = |ev: &InputEvent| {
             matches!(
@@ -75,6 +95,16 @@ impl InspectorPanel {
                     this.commit_timing(Edge::End, cx);
                 }
             }),
+            cx.subscribe(&name_field, move |this, _, ev: &InputEvent, cx| {
+                if commit(ev) {
+                    this.commit_rename(cx);
+                }
+            }),
+            cx.subscribe(&speed_field, move |this, _, ev: &InputEvent, cx| {
+                if commit(ev) {
+                    this.commit_speed(cx);
+                }
+            }),
         ];
         let presets = state.read(cx).presets.clone();
         let lufs_target = cx.new(|cx| {
@@ -91,12 +121,22 @@ impl InspectorPanel {
             measuring: false,
             lufs_target,
             peak_target,
-            picture_tab: PictureTab::default(),
+            picture_tab: match crate::demo::fx_view().as_deref() {
+                Some("effects") => PictureTab::Effects,
+                _ => PictureTab::default(),
+            },
             text,
             text_clip: None,
             start_field,
             end_field,
             timing_clip: None,
+            fx_controls: HashMap::new(),
+            collapsed_fx: HashSet::new(),
+            name_field,
+            renaming: None,
+            speed_field,
+            speed_clip: None,
+            speed_ripple: false,
             _subscriptions,
         }
     }
@@ -174,7 +214,7 @@ impl InspectorPanel {
         let mut commands = Vec::new();
         let mut label = "edit";
         match key {
-            Key::PosX | Key::PosY | Key::Scale | Key::Rotation | Key::Opacity => {
+            Key::PosX | Key::PosY | Key::Scale | Key::Rotation | Key::Opacity | Key::Crop(_) => {
                 let Some(clip) = clips.first() else {
                     return none;
                 };
@@ -189,18 +229,34 @@ impl InspectorPanel {
                     });
                 } else {
                     let mut transform = clip.transform.clone();
-                    match key {
-                        Key::PosX => transform.position[0] = v,
-                        Key::PosY => transform.position[1] = v,
-                        Key::Scale => transform.scale = v,
-                        Key::Rotation => transform.rotation_deg = v,
-                        _ => transform.opacity = v,
-                    }
+                    transform.set(property, v);
                     commands.push(Command::SetTransform {
                         clip: clip.id,
                         transform,
                     });
                 }
+            }
+            Key::TransitionDuration => {
+                let Some((clip, edge)) = state.selected_transition else {
+                    return none;
+                };
+                let Some((_, c)) = tl.clip(clip) else {
+                    return none;
+                };
+                let current = match edge {
+                    Edge::Start => c.transition_in.clone(),
+                    Edge::End => c.transition_out.clone(),
+                };
+                let Some(mut transition) = current else {
+                    return none;
+                };
+                transition.duration = Time::from_secs_f64(v as f64);
+                label = "set_transition";
+                commands.push(Command::SetTransition {
+                    clip,
+                    edge,
+                    transition: Some(transition),
+                });
             }
             Key::Exposure
             | Key::Contrast
@@ -362,6 +418,10 @@ fn property_of(key: Key) -> Option<Property> {
         Key::Scale => Property::Scale,
         Key::Rotation => Property::Rotation,
         Key::Opacity => Property::Opacity,
+        Key::Crop(0) => Property::CropLeft,
+        Key::Crop(1) => Property::CropTop,
+        Key::Crop(2) => Property::CropRight,
+        Key::Crop(_) => Property::CropBottom,
         _ => return None,
     })
 }

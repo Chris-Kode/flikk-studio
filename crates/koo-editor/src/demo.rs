@@ -25,6 +25,16 @@ pub fn enabled() -> bool {
     std::env::var("KOOEDITOR_DEMO").is_ok_and(|v| v == "1")
 }
 
+/// `KOOEDITOR_DEMO_FX=effects|generator|transition|library|code`: seed
+/// effects, a generator, a transition and a project program, and open that
+/// view of the library stream's panels.
+pub fn fx_view() -> Option<String> {
+    enabled()
+        .then(|| std::env::var("KOOEDITOR_DEMO_FX").ok())
+        .flatten()
+        .map(|v| v.to_lowercase())
+}
+
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
@@ -57,6 +67,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
         state.workspace = w;
     }
     audio_demo_playback(state);
+    seed_fx(state, &demo.ids, cx);
     cx.notify();
 }
 
@@ -694,5 +705,142 @@ fn job(item: &MediaItem, state: JobState) -> JobStatus {
         label: "Analysis".into(),
         media: Some(item.id),
         state,
+    }
+}
+
+// ---------------------------------------------------------------- effects
+
+/// Effects, a generator, a transition and a project program, applied as
+/// user commands, then the selection the requested view needs.
+fn seed_fx(state: &mut EditorState, ids: &Ids, cx: &mut Context<EditorState>) {
+    use koo_core::command::Edge;
+    use koo_core::fx::*;
+    let Some(view) = fx_view() else {
+        return;
+    };
+    let number = |name: &str, label: &str, min: f64, max: f64, default: f64| ParamSpec {
+        name: name.into(),
+        label: label.into(),
+        kind: ParamKind::Float { min, max },
+        default: ParamValue::Number(default),
+    };
+    let grain = FxAsset {
+        id: FxRef::Project(FxId::new()),
+        name: "Film Grain".into(),
+        kind: FxKind::Effect,
+        language: FxLanguage::Glsl,
+        category: "Stylize".into(),
+        description: "Animated grain with an optional tint.".into(),
+        code: "float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec4 effect(vec2 uv) {
+    vec4 c = getColor(uv);
+    float scale = style == 0 ? 1.0 : 2.5;
+    vec2 cell = floor(uv * iResolution / (size * scale));
+    float n = hash(cell + fract(iTime) * 97.0) - 0.5;
+    vec3 g = mono ? vec3(n) : vec3(n, hash(cell + 3.1) - 0.5, hash(cell + 7.7) - 0.5);
+    vec3 graded = c.rgb + g * amount;
+    return vec4(mix(graded, graded * tint.rgb, tint.a * 0.35), c.a);
+}
+"
+        .into(),
+        params: vec![
+            number("amount", "Amount", 0.0, 1.0, 0.25),
+            number("size", "Size", 0.5, 4.0, 1.5),
+            ParamSpec {
+                name: "mono".into(),
+                label: "Mono".into(),
+                kind: ParamKind::Bool,
+                default: ParamValue::Bool(true),
+            },
+            ParamSpec {
+                name: "tint".into(),
+                label: "Tint".into(),
+                kind: ParamKind::Color,
+                default: ParamValue::List(vec![1.0, 0.82, 0.6, 1.0]),
+            },
+            ParamSpec {
+                name: "style".into(),
+                label: "Style".into(),
+                kind: ParamKind::Choice {
+                    options: vec!["Fine".into(), "Coarse".into()],
+                },
+                default: ParamValue::Text("Fine".into()),
+            },
+        ],
+    };
+    let grain_ref = grain.id.clone();
+    let mut blur = FxInstance::new(FxRef::builtin("gaussian_blur"));
+    for (at, radius) in [(1.0, 0.0), (4.0, 14.0)] {
+        blur.keyframes.push(ParamKeyframe {
+            param: "radius".into(),
+            at: Time::from_secs_f64(at),
+            value: ParamValue::Number(radius),
+            ease: Default::default(),
+        });
+    }
+    let mut grain_fx = FxInstance::new(grain_ref.clone());
+    grain_fx
+        .params
+        .insert("amount".into(), ParamValue::Number(0.35));
+    let mut lower = FxInstance::new(FxRef::builtin("lower_third"));
+    lower
+        .params
+        .insert("name".into(), ParamValue::Text("Maya Okafor".into()));
+    lower
+        .params
+        .insert("role".into(), ParamValue::Text("Director".into()));
+    let generator_range = secs(6.0, 11.0);
+    state.execute_batch(
+        vec![
+            Command::SetFxAsset { asset: grain },
+            Command::AddEffect {
+                clips: vec![ids.selected],
+                effect: blur,
+                index: None,
+            },
+            Command::AddEffect {
+                clips: vec![ids.selected],
+                effect: grain_fx,
+                index: None,
+            },
+            Command::AddGenerator {
+                track: ids.titles,
+                range: generator_range,
+                fx: lower,
+            },
+            Command::SetTransition {
+                clip: ids.pointing[0],
+                edge: Edge::Start,
+                transition: Some(Transition::new(
+                    FxRef::builtin("cross_dissolve"),
+                    Time::from_secs_f64(1.0),
+                )),
+            },
+        ],
+        "demo effects",
+        cx,
+    );
+    let generator = state
+        .bus
+        .project()
+        .timeline
+        .track(ids.titles)
+        .and_then(|t| t.clips.iter().find(|c| c.start == generator_range.start))
+        .map(|c| c.id);
+    match view.as_str() {
+        "generator" => {
+            state.selection.clips = generator.into_iter().collect();
+            state.playhead = Time::from_secs_f64(7.5);
+        }
+        "transition" => {
+            state.selection.clips = vec![ids.pointing[0]];
+            state.selected_transition = Some((ids.pointing[0], Edge::Start));
+            state.playhead = Time::from_secs_f64(11.2);
+        }
+        "code" => state.editing_fx = Some(grain_ref),
+        _ => {}
     }
 }
