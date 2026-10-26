@@ -184,6 +184,8 @@ pub struct TimelinePanel {
     /// Pointer position while over the lanes, in window coordinates.
     hover: Option<Point<Pixels>>,
     hovered_item: Option<(ChangeSetId, ChangeItemId)>,
+    /// Last focused change item scrolled into view.
+    revealed: Option<ChangeItemId>,
     /// Ruler + lanes canvas bounds from the last paint.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     waveforms: Waveforms,
@@ -198,8 +200,11 @@ pub struct TimelinePanel {
 }
 
 impl TimelinePanel {
-    pub fn new(state: Entity<EditorState>, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         bind_keys(cx);
+        let focus = cx.focus_handle();
+        // Transport and editing keys work from the start.
+        window.focus(&focus, cx);
         if demo::enabled() {
             state.update(cx, demo::seed);
         }
@@ -224,8 +229,9 @@ impl TimelinePanel {
         ];
         Self {
             state,
-            focus: cx.focus_handle(),
+            focus,
             viewport: Viewport::default(),
+            revealed: None,
             fitted: false,
             tool: Tool::Select,
             snapping: true,
@@ -745,6 +751,33 @@ impl TimelinePanel {
         self.viewport
             .fit(duration, f32::from(self.bounds.get().size.width));
         cx.notify();
+    }
+
+    /// Scroll a change item focused elsewhere (the chat) into view.
+    fn reveal_focused(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let focused = state.focused_change.map(|(_, i)| i);
+        if focused == self.revealed {
+            return;
+        }
+        self.revealed = focused;
+        let Some(item) = focused else {
+            return;
+        };
+        let range = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
+            .into_iter()
+            .filter(|i| i.item == item)
+            .map(|i| i.range)
+            .reduce(|a, b| TimeRange::new(a.start.min(b.start), a.end.max(b.end)));
+        let width = f32::from(self.bounds.get().size.width);
+        if let Some(r) = range
+            && width > 0.
+        {
+            let (a, b) = (self.viewport.x(r.start), self.viewport.x(r.end));
+            if a < 0. || b > width {
+                self.viewport.scroll_x = (self.viewport.scroll_x + a - width * 0.2).max(0.);
+            }
+        }
     }
 
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
@@ -1356,12 +1389,19 @@ impl TimelinePanel {
         let x = (p.x - b.origin.x + px(14.))
             .min(b.size.width - px(260.))
             .max(px(4.));
-        let y = p.y - b.origin.y + px(18.);
         let warnings = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
             .into_iter()
             .find(|i| i.item == item.id)
             .map(|i| i.warnings)
             .unwrap_or_default();
+        // Below the pointer, or above it when that would leave the panel.
+        let height = px(26. + 18. * warnings.len() as f32);
+        let below = p.y - b.origin.y + px(18.);
+        let y = if below + height > b.size.height {
+            (p.y - b.origin.y - height - px(8.)).max(px(0.))
+        } else {
+            below
+        };
         Some(
             v_flex()
                 .absolute()
@@ -1484,6 +1524,7 @@ impl Render for TimelinePanel {
         if self.silence_open {
             self.request_silences(cx);
         }
+        self.reveal_focused(cx);
 
         let scene = self.scene(cx);
         let cell = self.bounds.clone();

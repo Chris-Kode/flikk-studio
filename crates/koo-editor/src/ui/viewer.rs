@@ -26,6 +26,8 @@ use std::sync::Arc;
 /// Largest frame width requested from the media engine.
 const MAX_FRAME_WIDTH: u32 = 1280;
 const CONTROLS_HEIGHT: f32 = 30.;
+/// A playhead move larger than this between renders is a seek, in seconds.
+const SEEK_JUMP: f64 = 0.35;
 
 /// What a running playback was started from; a change restarts it.
 #[derive(Clone, Copy, PartialEq)]
@@ -33,6 +35,15 @@ struct PlayKey {
     version: u64,
     preview: Option<ChangeSetId>,
     width: u32,
+}
+
+struct Playback {
+    key: PlayKey,
+    player: Player,
+    audio: AudioOut,
+    project: Arc<Project>,
+    /// Playhead at the previous render, to tell seeks from playback.
+    last: Time,
 }
 
 pub struct ViewerPanel {
@@ -44,7 +55,7 @@ pub struct ViewerPanel {
     generation: u64,
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
-    playback: Option<(PlayKey, Player, Option<AudioOut>)>,
+    playback: Option<Playback>,
     /// Width of the program image in device px, from the last layout.
     frame_width: Rc<Cell<u32>>,
     _observe: Subscription,
@@ -87,15 +98,30 @@ impl ViewerPanel {
             width: self.frame_width.get(),
         };
         let playhead = state.playhead;
-        if self.playback.as_ref().is_none_or(|(k, _, _)| *k != key) {
+        // A seek while playing restarts the audio at the new position; video
+        // follows the playhead on its own.
+        let jumped = self
+            .playback
+            .as_ref()
+            .is_some_and(|p| (playhead - p.last).0.abs() > Time::from_secs_f64(SEEK_JUMP).0);
+        if self.playback.as_ref().is_none_or(|p| p.key != key) {
             let project = Arc::new(state.display_project().clone());
             let player = Player::start(media.clone(), project.clone(), playhead, key.width);
-            let audio = AudioOut::start(media, project, playhead);
-            self.playback = Some((key, player, Some(audio)));
+            let audio = AudioOut::start(media, project.clone(), playhead);
+            self.playback = Some(Playback {
+                key,
+                player,
+                audio,
+                project,
+                last: playhead,
+            });
+        } else if let (Some(p), true) = (self.playback.as_mut(), jumped) {
+            p.audio = AudioOut::start(media, p.project.clone(), playhead);
         }
-        let picture = self.playback.as_ref().and_then(|(_, p, _)| {
-            p.set_target(playhead);
-            p.take()
+        let picture = self.playback.as_mut().and_then(|p| {
+            p.last = playhead;
+            p.player.set_target(playhead);
+            p.player.take()
         });
         if let Some(picture) = picture {
             self.show(picture);
