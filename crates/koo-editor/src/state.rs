@@ -54,13 +54,9 @@ pub struct EditorState {
     pub focused_change: Option<(ChangeSetId, ChangeItemId)>,
     /// Transition picked on the timeline: the clip and edge it sits on. The
     /// inspector shows it.
-    // Read once the timeline, inspector and chat streams land; the
-    // coordinator removes these allows at integration.
-    #[allow(dead_code)]
     pub selected_transition: Option<(koo_core::ClipId, koo_core::command::Edge)>,
     /// `@` references waiting for the chat composer ("Add to chat" from the
     /// timeline, inspector, transcript…): token text and chip label.
-    #[allow(dead_code)]
     pending_mentions: Vec<(String, SharedString)>,
     clock: Option<Task<()>>,
     agent: AgentLink,
@@ -290,7 +286,6 @@ impl EditorState {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub fn select_transition(
         &mut self,
         transition: Option<(koo_core::ClipId, koo_core::command::Edge)>,
@@ -302,14 +297,12 @@ impl EditorState {
 
     /// Queue `@` references (token text as the agent reads it, chip label)
     /// for the chat composer, which inserts them as chips.
-    #[allow(dead_code)]
     pub fn mention(&mut self, refs: Vec<(String, SharedString)>, cx: &mut Context<Self>) {
         self.pending_mentions.extend(refs);
         cx.notify();
     }
 
     /// References queued by [`Self::mention`], oldest first.
-    #[allow(dead_code)]
     pub fn take_mentions(&mut self) -> Vec<(String, SharedString)> {
         std::mem::take(&mut self.pending_mentions)
     }

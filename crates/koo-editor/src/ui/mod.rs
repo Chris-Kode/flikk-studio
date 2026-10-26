@@ -34,9 +34,6 @@ impl Render for MediaDrag {
 /// Drag payload for an FX library item: an effect dropped on a clip, a
 /// transition on a cut or clip edge, a generator on a track. The chat takes
 /// any of them as a reference.
-// Used once the timeline, library and chat streams land; the coordinator
-// removes this allow at integration.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FxDrag {
     pub fx: koo_core::fx::FxRef,
@@ -52,9 +49,6 @@ impl Render for FxDrag {
 
 /// Drag payload for an audio effect from the library, dropped on an audio
 /// clip or a track header.
-// Used once the timeline, library and chat streams land; the coordinator
-// removes this allow at integration.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct AudioFxDrag {
     pub kind: koo_core::audiofx::AudioFxKind,
@@ -70,9 +64,6 @@ impl Render for AudioFxDrag {
 /// Drag payload for project objects (clips, markers, tracks, transcript
 /// ranges…) dropped on the chat composer, which inserts them as `@`
 /// references.
-// Used once the timeline, library and chat streams land; the coordinator
-// removes this allow at integration.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct RefDrag {
     /// Reference token text as the agent reads it (e.g. `@clip 3f2a91c0`)
