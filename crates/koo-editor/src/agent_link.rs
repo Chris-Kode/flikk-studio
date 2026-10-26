@@ -8,6 +8,11 @@
 //! Everything else (backend subprocess, MCP bridge, tools, prompts) lives in
 //! `koo_agent::AgentHost`; this type adapts it to the editor. [`approve`]
 //! carries out the requests the user approves.
+//!
+//! The bridge starts with the editor and is published in
+//! `paths::home()/bridge.json`, so external MCP clients can drive it:
+//! `claude mcp add koo -- koo-editor mcp` (or the `koo-mcp` binary) finds
+//! the running editor through that file when `KOO_BRIDGE` is unset.
 
 pub mod approve;
 
@@ -23,9 +28,11 @@ pub struct AgentLink {
 
 impl AgentLink {
     pub fn new() -> Self {
-        Self {
-            host: AgentHost::new(),
+        let mut host = AgentHost::new();
+        if let Err(e) = host.start_bridge() {
+            eprintln!("koo-editor: external agents can't connect: {e}");
         }
+        Self { host }
     }
 
     pub fn is_busy(&self) -> bool {
@@ -79,4 +86,15 @@ impl AgentLink {
     pub fn report_outcome(&mut self, outcome: String) {
         self.host.report_outcome(outcome);
     }
+}
+
+impl Drop for AgentLink {
+    fn drop(&mut self) {
+        self.host.stop_bridge();
+    }
+}
+
+/// Withdraw `bridge.json` when the app quits (the link may not be dropped).
+pub fn unpublish_bridge() {
+    koo_agent::bridge::Discovery::remove_if_ours();
 }

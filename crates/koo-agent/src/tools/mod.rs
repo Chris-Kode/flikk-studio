@@ -9,6 +9,8 @@ mod analysis;
 mod approval;
 pub mod catalog;
 mod edit;
+mod fx;
+mod preview;
 mod read;
 mod view;
 
@@ -38,6 +40,11 @@ pub struct ToolCtx<'a> {
     pub bus: &'a mut CommandBus,
     pub services: &'a Services,
     pub author: Author,
+    /// The role the calls act as (external clients act as the agent's
+    /// current role under their own author).
+    pub role: AgentRole,
+    /// An external MCP client rather than this editor's own turn.
+    pub external: bool,
     pub editor: &'a EditorContext,
     pub settings: &'a AgentSettings,
     pub memory: &'a Memory,
@@ -49,10 +56,7 @@ impl ToolCtx<'_> {
     }
 
     pub fn role(&self) -> AgentRole {
-        match self.author {
-            Author::Agent { role } => role,
-            _ => AgentRole::Editor,
-        }
+        self.role
     }
 }
 
@@ -134,20 +138,27 @@ impl From<Done> for Step {
 pub fn list(bus: &CommandBus, role: AgentRole) -> Vec<Value> {
     catalog()
         .iter()
-        .filter(|t| t.category.is_none_or(|c| visible(bus, role, c)))
+        .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
         .map(ToolSpec::to_mcp)
         .collect()
 }
 
-fn role_allows(role: AgentRole, category: ToolCategory) -> bool {
+/// Builders write FX programs too, but don't put them on the timeline.
+const BUILDER_TOOLS: [&str; 2] = ["create_fx", "update_fx"];
+
+fn role_allows(role: AgentRole, category: ToolCategory, tool: &str) -> bool {
     match role {
         AgentRole::Editor => true,
-        AgentRole::Builder => category.is_read() || category == ToolCategory::ProjectMemory,
+        AgentRole::Builder => {
+            category.is_read()
+                || category == ToolCategory::ProjectMemory
+                || BUILDER_TOOLS.contains(&tool)
+        }
     }
 }
 
-fn visible(bus: &CommandBus, role: AgentRole, category: ToolCategory) -> bool {
-    role_allows(role, category)
+fn visible(bus: &CommandBus, role: AgentRole, category: ToolCategory, tool: &str) -> bool {
+    role_allows(role, category, tool)
         && bus.check(&Author::Agent { role }, category).is_ok()
         && category != ToolCategory::Media
 }
@@ -165,15 +176,22 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         return Err(ToolError(format!("unknown tool `{tool}`")));
     };
     let empty = serde_json::Map::new();
+    let rate = ctx.project().timeline.settings.rate;
     let args = if args.is_null() {
-        Args(&empty)
+        Args(&empty, rate)
     } else {
-        Args::of(args)?
+        Args::of(args, rate)?
     };
     let Some(category) = spec.category else {
+        if ctx.external {
+            return Err(ToolError(
+                "ask_user is for the editor's own chat; ask in your own conversation instead."
+                    .into(),
+            ));
+        }
         return approval::ask_user(&args).map(Into::into);
     };
-    if !role_allows(ctx.role(), category) {
+    if !role_allows(ctx.role(), category, tool) {
         return Err(ToolError(format!(
             "`{tool}` is not available to the {} role",
             match ctx.role() {
@@ -197,6 +215,8 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "list_media" => read::list_media(ctx, &args),
         "get_clip" => read::get_clip(ctx, &args),
         "get_markers" => read::get_markers(ctx, &args),
+        "list_fx" => read::list_fx(ctx, &args),
+        "get_fx" => read::get_fx(ctx, &args),
 
         "search_transcript" => analysis::search_transcript(ctx, &args),
         "get_transcript" => analysis::get_transcript(ctx, &args),
@@ -207,17 +227,33 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "view_range" => view::view_range(ctx, &args, false),
         "view_detail" => view::view_range(ctx, &args, true),
         "view_frame" => view::view_frame(ctx, &args),
-        "get_scopes" => Err(ToolError(
-            "Scopes are not available in this build yet.".into(),
-        )),
+        "get_scopes" => preview::get_scopes(ctx, &args),
+        "preview_fx" => preview::preview_fx(ctx, &args),
         "measure_loudness" => view::measure_loudness(ctx, &args),
 
+        "match_grade" => preview::match_grade(ctx, &args),
+        "create_fx" | "update_fx" => fx::author(ctx, tool, &args),
+        _ if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         _ => edit::serve(ctx, tool, &args),
     }
 }
 
+/// Change sets of external clients are titled so the user knows where they
+/// came from.
+pub const EXTERNAL_PREFIX: &str = "External agent: ";
+
 /// Propose `commands` in order as one tool call's worth of change items.
 pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done {
+    let opens_set =
+        !ctx.bus.change_sets().iter().any(|s| {
+            s.author == ctx.author && s.state == koo_core::changeset::ChangeSetState::Open
+        });
+    let reason = if ctx.external && opens_set {
+        format!("{EXTERNAL_PREFIX}{reason}")
+    } else {
+        reason.to_owned()
+    };
+    let reason = reason.as_str();
     let total = commands.len();
     let mut proposed = 0;
     let mut warnings = Vec::new();

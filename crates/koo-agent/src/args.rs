@@ -1,8 +1,11 @@
-//! Tool arguments at the boundary: times are seconds (`f64`) or `"M:SS.mmm"`
-//! strings, ids are the 8-hex short form shown in results (or a full UUID).
+//! Tool arguments at the boundary. Times are seconds (`f64`), `"M:SS.mmm"`,
+//! timecode `"HH:MM:SS:FF"` or frames `"f:1234"` at the sequence rate (and
+//! `"@time 12.5"` / `"@range 1.000-2.000"` chat tokens). Ids are the 8-hex
+//! short form shown in results, a full UUID, or a chat reference token such
+//! as `@clip 3f2a91c0`.
 
 use koo_core::model::{Project, Track, TrackKind};
-use koo_core::{ClipId, MarkerId, MediaId, SpeakerId, Time, TimeRange, TrackId};
+use koo_core::{ClipId, MarkerId, MediaId, Rate, SpeakerId, Time, TimeRange, TrackId};
 use serde_json::{Map, Value, json};
 use std::fmt::Display;
 use uuid::Uuid;
@@ -23,15 +26,29 @@ pub fn fail<T>(message: impl Into<String>) -> ToolResultOf<T> {
     Err(ToolError(message.into()))
 }
 
-/// Tool arguments with typed accessors.
-pub struct Args<'a>(pub &'a Map<String, Value>);
+/// Tool arguments with typed accessors, and the sequence rate that
+/// timecodes and frame counts are read at.
+pub struct Args<'a>(pub &'a Map<String, Value>, pub Rate);
 
 impl<'a> Args<'a> {
-    pub fn of(value: &'a Value) -> ToolResultOf<Self> {
+    pub fn of(value: &'a Value, rate: Rate) -> ToolResultOf<Self> {
         match value.as_object() {
-            Some(m) => Ok(Args(m)),
+            Some(m) => Ok(Args(m, rate)),
             None => fail("arguments must be an object"),
         }
+    }
+
+    /// A nested object under `key`, read at the same rate.
+    pub fn object(&self, key: &str) -> ToolResultOf<Option<Args<'a>>> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::Object(m)) => Ok(Some(Args(m, self.1))),
+            Some(_) => fail(format!("`{key}` must be an object")),
+        }
+    }
+
+    pub fn value(&self, key: &str) -> Option<&'a Value> {
+        self.get(key)
     }
 
     fn get(&self, key: &str) -> Option<&'a Value> {
@@ -102,8 +119,17 @@ impl<'a> Args<'a> {
 
     pub fn opt_time(&self, key: &str) -> ToolResultOf<Option<Time>> {
         self.get(key)
-            .map(|v| parse_time(v).map_err(|e| ToolError(format!("`{key}`: {}", e.0))))
+            .map(|v| parse_time(v, self.1).map_err(|e| ToolError(format!("`{key}`: {}", e.0))))
             .transpose()
+    }
+
+    /// A length in any time form; negative allowed (deltas).
+    pub fn opt_duration(&self, key: &str) -> ToolResultOf<Option<Time>> {
+        self.opt_time(key)
+    }
+
+    pub fn duration(&self, key: &str) -> ToolResultOf<Time> {
+        self.time(key)
     }
 
     /// `{"start": t, "end": t}` under `key`, or `None` when absent.
@@ -111,8 +137,15 @@ impl<'a> Args<'a> {
         let Some(v) = self.get(key) else {
             return Ok(None);
         };
-        let r = Args::of(v).map_err(|_| ToolError(format!("`{key}` must be {{start, end}}")))?;
-        let range = TimeRange::new(r.time("start")?, r.time("end")?);
+        let range = match v {
+            Value::String(s) => range_token(s, self.1)
+                .ok_or_else(|| ToolError(format!("`{key}` must be {{start, end}}")))?,
+            _ => {
+                let r = Args::of(v, self.1)
+                    .map_err(|_| ToolError(format!("`{key}` must be {{start, end}}")))?;
+                TimeRange::new(r.time("start")?, r.time("end")?)
+            }
+        };
         if range.is_empty() {
             return fail(format!("`{key}` is empty: end must be after start"));
         }
@@ -132,16 +165,69 @@ impl<'a> Args<'a> {
     }
 }
 
-pub fn parse_time(v: &Value) -> ToolResultOf<Time> {
+pub fn parse_time(v: &Value, rate: Rate) -> ToolResultOf<Time> {
     let t = match v {
         Value::Number(n) => n
             .as_f64()
             .filter(|f| f.is_finite())
             .map(Time::from_secs_f64),
-        Value::String(s) => Time::parse_clock(s),
+        Value::String(s) => time_text(s, rate),
         _ => None,
     };
-    t.ok_or_else(|| ToolError("times are seconds or \"M:SS.mmm\"".into()))
+    t.ok_or_else(|| {
+        ToolError(
+            "times are seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"".into(),
+        )
+    })
+}
+
+/// `12.5`, `1:02.500`, `1:02:03.5`, `00:01:02:15` (timecode at `rate`),
+/// `f:1234` (frames at `rate`), `@time 12.5`; a leading `-` negates.
+pub fn time_text(text: &str, rate: Rate) -> Option<Time> {
+    let mut s = text.trim();
+    if let Some(rest) = s.strip_prefix("@time") {
+        s = rest.trim();
+    }
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, s),
+    };
+    let t = if let Some(frames) = s.strip_prefix("f:").or_else(|| s.strip_prefix("F:")) {
+        Time::from_frame(frames.trim().parse::<i64>().ok()?, rate)
+    } else if s.split(':').count() == 4 {
+        let parts: Vec<i64> = s
+            .split(':')
+            .map(|p| p.trim().parse::<i64>().ok())
+            .collect::<Option<_>>()?;
+        let fps = rate.rounded_fps() as i64;
+        if parts[3] >= fps || parts[1] >= 60 || parts[2] >= 60 {
+            return None;
+        }
+        let frames = ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * fps + parts[3];
+        Time::from_frame(frames, rate)
+    } else {
+        Time::parse_clock(s)?
+    };
+    Some(if neg { -t } else { t })
+}
+
+/// `@range 1.000-2.000` (or the same without the `@range`), any time form
+/// on either side of the dash.
+pub fn range_token(text: &str, rate: Rate) -> Option<TimeRange> {
+    let s = text.trim();
+    let s = s.strip_prefix("@range").map(str::trim).unwrap_or(s);
+    // Split on the dash between the two times, not a sign.
+    let ix = s
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| *c == '-' || *c == '–')
+        .map(|(i, _)| i)?;
+    let dash = s[ix..].chars().next()?.len_utf8();
+    let range = TimeRange::new(
+        time_text(&s[..ix], rate)?,
+        time_text(&s[ix + dash..], rate)?,
+    );
+    (!range.is_empty()).then_some(range)
 }
 
 /// Seconds rounded to the millisecond, the form results use.
@@ -157,8 +243,21 @@ pub fn short(id: impl Display) -> String {
     id.to_string()
 }
 
+/// The id part of a chat reference token: `@clip 3f2a91c0` → `3f2a91c0`.
+/// Other text is returned trimmed.
+pub fn strip_token(text: &str) -> &str {
+    let t = text.trim();
+    match t.strip_prefix('@') {
+        Some(rest) => match rest.split_once(char::is_whitespace) {
+            Some((_, id)) => id.trim(),
+            None => rest,
+        },
+        None => t,
+    }
+}
+
 fn matches_id(uuid: &Uuid, text: &str) -> bool {
-    let text = text.trim().trim_start_matches('@').to_ascii_lowercase();
+    let text = strip_token(text).to_ascii_lowercase();
     if text.len() < 4 {
         return false;
     }
@@ -174,7 +273,10 @@ fn pick<T: Copy>(kind: &str, text: &str, found: Vec<T>) -> ToolResultOf<T> {
     }
 }
 
+/// A clip by id; `@effect <clip>/<effect>` and `@transition <clip>/in`
+/// tokens name their clip too.
 pub fn clip_id(project: &Project, text: &str) -> ToolResultOf<ClipId> {
+    let text = strip_token(text).split('/').next().unwrap_or_default();
     let found = project
         .timeline
         .tracks
@@ -198,7 +300,7 @@ pub fn media_id(project: &Project, text: &str) -> ToolResultOf<MediaId> {
             matches_id(&m.id.0, text)
                 || m.path
                     .file_name()
-                    .is_some_and(|n| n.to_string_lossy() == text)
+                    .is_some_and(|n| n.to_string_lossy() == strip_token(text))
         })
         .map(|m| m.id)
         .collect();
@@ -208,9 +310,10 @@ pub fn media_id(project: &Project, text: &str) -> ToolResultOf<MediaId> {
 /// By id or by name ("V1").
 pub fn track_id(project: &Project, text: &str) -> ToolResultOf<TrackId> {
     let tracks = &project.timeline.tracks;
+    let text = strip_token(text);
     let by_name: Vec<_> = tracks
         .iter()
-        .filter(|t| t.name.eq_ignore_ascii_case(text.trim()))
+        .filter(|t| t.name.eq_ignore_ascii_case(text))
         .map(|t| t.id)
         .collect();
     if !by_name.is_empty() {

@@ -11,6 +11,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+const INSTRUCTIONS: &str = "Tools of the koo-editor project that is open. Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"; ids are the 8-character ids the tools return. Edits are proposals: they collect in a change set the user reviews in the editor. Effects, transitions and generators are GLSL or HTML programs: list_fx, then reuse one or create_fx, preview_fx to look at it, iterate, then apply.";
+
 /// Newest first; the first is offered when the client asks for something else.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
@@ -44,11 +46,16 @@ fn reply_error(out: &Out, id: Value, code: i64, message: &str) {
 }
 
 /// Run the server until stdin closes. Reads the editor address and token
-/// from [`bridge::ENV_ADDR`] and [`bridge::ENV_TOKEN`].
+/// from [`bridge::ENV_ADDR`] and [`bridge::ENV_TOKEN`] (set when the
+/// editor's own agent launches it), else from the `bridge.json` a running
+/// editor publishes (an external client such as Claude Code or Codex).
 pub fn run() -> anyhow::Result<()> {
-    let addr = std::env::var(bridge::ENV_ADDR)
-        .map_err(|_| anyhow::anyhow!("{} is not set", bridge::ENV_ADDR))?;
-    let token = std::env::var(bridge::ENV_TOKEN).unwrap_or_default();
+    // Without the variables, `bridge.json` is read at connect time: the
+    // editor may start (or restart) after this server.
+    let fixed = std::env::var(bridge::ENV_ADDR)
+        .ok()
+        .filter(|a| !a.is_empty())
+        .map(|addr| (addr, std::env::var(bridge::ENV_TOKEN).unwrap_or_default()));
     let out: Out = Arc::new(Mutex::new(io::stdout()));
     let waiting: Waiting = Arc::default();
 
@@ -86,13 +93,28 @@ pub fn run() -> anyhow::Result<()> {
                         "protocolVersion": version,
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": { "name": "koo", "title": "koo-editor", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": "Tools of the koo-editor project that is open. Times are seconds or \"M:SS.mmm\" on the timeline; ids are the 8-character ids the tools return."
+                        "instructions": INSTRUCTIONS
                     }),
                 );
             }
             "ping" => reply(&out, id, json!({})),
             "tools/list" | "tools/call" => {
                 if editor.is_none() {
+                    let found = fixed
+                        .clone()
+                        .or_else(|| bridge::Discovery::read().map(|d| (d.addr, d.token)));
+                    let Some((addr, token)) = found else {
+                        reply_error(
+                            &out,
+                            id,
+                            -32603,
+                            &format!(
+                                "koo-editor is not running (no {})",
+                                bridge::Discovery::path().display()
+                            ),
+                        );
+                        continue;
+                    };
                     match connect(&addr, &token, out.clone(), waiting.clone()) {
                         Ok(stream) => editor = Some(stream),
                         Err(e) => {

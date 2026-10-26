@@ -6,11 +6,20 @@
 //! the end of the turn the host emits `ChangeSetReady` if it has items, then
 //! `TurnDone`.
 //!
+//! External MCP clients (Claude Code, Codex… running `koo-editor mcp`
+//! against the published `bridge.json`) are served between and during
+//! turns. They act as the agent's current role with the same permissions,
+//! under their own author, so their proposals collect in a separate
+//! "External agent" change set. That set is offered for review when the
+//! client disconnects or after [`EXTERNAL_IDLE`] without a call (a client
+//! usually stays connected for its whole session, so the pause between
+//! bursts of work is what ends one); later calls open a new set.
+//!
 //! [`send`]: AgentHost::send
 //! [`pump`]: AgentHost::pump
 
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
-use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Reply};
+use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
 use crate::{prompt, recipes, session};
 use koo_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
@@ -19,8 +28,31 @@ use koo_core::changeset::ChangeSetState;
 use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+/// Quiet time after which an external client's change set goes to review.
+pub const EXTERNAL_IDLE: Duration = Duration::from_secs(90);
+
+/// The author external clients' proposals are made under.
+pub fn external_author() -> Author {
+    Author::Recipe {
+        name: "External agent".into(),
+    }
+}
+
+/// External clients connected now and when one last called.
+#[derive(Default)]
+struct External {
+    connections: HashSet<u64>,
+    last_call: Option<Instant>,
+    jobs: usize,
+    /// Editor context and settings of the latest turn, used for their calls.
+    context: EditorContext,
+    settings: AgentSettings,
+}
 
 /// A memory or deliver request waiting for the user. Approving it is the
 /// UI's job (through the store or deliver crate); the agent was already
@@ -58,7 +90,7 @@ struct Turn {
     saw_text: bool,
 }
 
-type JobResult = (Reply, String, Value, JobDone);
+type JobResult = (Origin, Reply, String, Value, JobDone);
 
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
@@ -75,6 +107,7 @@ pub struct AgentHost {
     next_approval: u64,
     /// What became of approval requests, told to the agent on its next turn.
     outcomes: Vec<String>,
+    external: External,
 }
 
 impl Default for AgentHost {
@@ -99,6 +132,23 @@ impl AgentHost {
             approvals: Vec::new(),
             next_approval: 1,
             outcomes: Vec::new(),
+            external: External::default(),
+        }
+    }
+
+    /// Start the bridge now (rather than with the first turn) and publish
+    /// it in `bridge.json`, so external MCP clients can reach the editor.
+    pub fn start_bridge(&mut self) -> std::io::Result<PathBuf> {
+        if self.bridge.is_none() {
+            self.bridge = Some(BridgeServer::start()?);
+        }
+        self.bridge.as_mut().unwrap().publish()
+    }
+
+    /// Withdraw `bridge.json` (on exit; best-effort).
+    pub fn stop_bridge(&mut self) {
+        if let Some(b) = self.bridge.as_mut() {
+            b.unpublish();
         }
     }
 
@@ -141,6 +191,8 @@ impl AgentHost {
             });
             return;
         }
+        self.external.context = context.clone();
+        self.external.settings = settings.clone();
         self.queued = Some(Queued {
             message,
             context,
@@ -186,6 +238,7 @@ impl AgentHost {
         self.drain_jobs(bus, services);
         self.drain_backend();
         self.maybe_finish(bus);
+        self.maybe_close_external(bus);
         std::mem::take(&mut self.events)
     }
 
@@ -376,13 +429,27 @@ impl AgentHost {
         let Some(bridge) = self.bridge.as_ref() else {
             return;
         };
-        for Incoming { request, reply } in bridge.drain() {
-            match request {
-                IncomingKind::List => {
+        for Incoming {
+            origin,
+            request,
+            reply,
+        } in bridge.drain()
+        {
+            match (origin, request) {
+                (_, IncomingKind::Closed) => {
+                    if let Origin::External(id) = origin {
+                        self.external.connections.remove(&id);
+                    }
+                }
+                (Origin::Turn, IncomingKind::List) => {
                     let role = self.turn.as_ref().map_or(self.role, |t| role_of(&t.author));
                     reply.tools(tools::list(bus, role));
                 }
-                IncomingKind::Call { tool, args } => {
+                (Origin::External(id), IncomingKind::List) => {
+                    self.external.connections.insert(id);
+                    reply.tools(tools::list(bus, self.role));
+                }
+                (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;
@@ -391,6 +458,8 @@ impl AgentHost {
                         bus,
                         services,
                         author: turn.author.clone(),
+                        role: role_of(&turn.author),
+                        external: false,
                         editor: &turn.context,
                         settings: &turn.settings,
                         memory: &self.memory,
@@ -399,11 +468,28 @@ impl AgentHost {
                         Step::Done(done) => self.finish_call(reply, tool, args, *done),
                         Step::Job(job) => {
                             turn.jobs += 1;
-                            let tx = self.jobs_tx.clone();
-                            std::thread::spawn(move || {
-                                let out = job();
-                                let _ = tx.send((reply, tool, args, out));
-                            });
+                            self.spawn_job(origin, reply, tool, args, job);
+                        }
+                    }
+                }
+                (Origin::External(id), IncomingKind::Call { tool, args }) => {
+                    self.external.connections.insert(id);
+                    self.external.last_call = Some(Instant::now());
+                    let mut ctx = ToolCtx {
+                        bus,
+                        services,
+                        author: external_author(),
+                        role: self.role,
+                        external: true,
+                        editor: &self.external.context,
+                        settings: &self.external.settings,
+                        memory: &self.memory,
+                    };
+                    match tools::serve(&mut ctx, &tool, &args) {
+                        Step::Done(done) => self.finish_call(reply, tool, args, *done),
+                        Step::Job(job) => {
+                            self.external.jobs += 1;
+                            self.spawn_job(origin, reply, tool, args, job);
                         }
                     }
                 }
@@ -411,11 +497,27 @@ impl AgentHost {
         }
     }
 
+    fn spawn_job(&self, origin: Origin, reply: Reply, tool: String, args: Value, job: tools::Job) {
+        let tx = self.jobs_tx.clone();
+        std::thread::spawn(move || {
+            let out = job();
+            let _ = tx.send((origin, reply, tool, args, out));
+        });
+    }
+
     fn drain_jobs(&mut self, bus: &mut CommandBus, services: &Services) {
         let results: Vec<_> = self.jobs_rx.try_iter().collect();
-        for (reply, tool, args, out) in results {
-            if let Some(turn) = self.turn.as_mut() {
-                turn.jobs = turn.jobs.saturating_sub(1);
+        for (origin, reply, tool, args, out) in results {
+            match origin {
+                Origin::Turn => {
+                    if let Some(turn) = self.turn.as_mut() {
+                        turn.jobs = turn.jobs.saturating_sub(1);
+                    }
+                }
+                Origin::External(_) => {
+                    self.external.jobs = self.external.jobs.saturating_sub(1);
+                    self.external.last_call = Some(Instant::now());
+                }
             }
             let done = match out {
                 JobDone::Done(done) => done,
@@ -423,25 +525,59 @@ impl AgentHost {
                     commands,
                     reason,
                     excerpts,
-                } => match self.turn.as_ref().filter(|t| !t.cancelled) {
-                    Some(turn) => {
-                        let mut ctx = ToolCtx {
-                            bus,
+                } => {
+                    let ctx = match origin {
+                        Origin::Turn => {
+                            self.turn
+                                .as_ref()
+                                .filter(|t| !t.cancelled)
+                                .map(|turn| ToolCtx {
+                                    bus: &mut *bus,
+                                    services,
+                                    author: turn.author.clone(),
+                                    role: role_of(&turn.author),
+                                    external: false,
+                                    editor: &turn.context,
+                                    settings: &turn.settings,
+                                    memory: &self.memory,
+                                })
+                        }
+                        Origin::External(_) => Some(ToolCtx {
+                            bus: &mut *bus,
                             services,
-                            author: turn.author.clone(),
-                            editor: &turn.context,
-                            settings: &turn.settings,
+                            author: external_author(),
+                            role: self.role,
+                            external: true,
+                            editor: &self.external.context,
+                            settings: &self.external.settings,
                             memory: &self.memory,
-                        };
-                        let mut done = tools::propose(&mut ctx, commands, &reason);
-                        done.excerpts = excerpts;
-                        done
+                        }),
+                    };
+                    match ctx {
+                        Some(mut ctx) => {
+                            let mut done = tools::propose(&mut ctx, commands, &reason);
+                            done.excerpts = excerpts;
+                            done
+                        }
+                        None => Done::error("The turn was cancelled."),
                     }
-                    None => Done::error("The turn was cancelled."),
-                },
+                }
             };
             self.finish_call(reply, tool, args, done);
         }
+    }
+
+    /// Offer the external set for review once its clients are gone or quiet.
+    fn maybe_close_external(&mut self, bus: &mut CommandBus) {
+        let ext = &mut self.external;
+        let Some(last) = ext.last_call else {
+            return;
+        };
+        if ext.jobs > 0 || (!ext.connections.is_empty() && last.elapsed() < EXTERNAL_IDLE) {
+            return;
+        }
+        ext.last_call = None;
+        close_open_sets(bus, &external_author(), &mut self.events);
     }
 
     fn finish_call(&mut self, reply: Reply, tool: String, args: Value, done: Done) {
