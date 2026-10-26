@@ -1,10 +1,11 @@
 //! Program monitor: `EditorState::display_project()` at the playhead, so a
 //! previewed change set shows its draft. Paused frames come from
 //! `MediaService::frame` off-thread (latest request wins); playback streams
-//! frames and mixes audio in background threads. Transforms, captions and
-//! titles are applied for preview.
+//! frames and mixes audio in background threads. Grades, transforms,
+//! captions and titles are applied for preview.
 
 mod audio;
+mod grade;
 mod player;
 
 use super::timeline::glyph::{Glyph, glyph};
@@ -15,7 +16,7 @@ use audio::AudioOut;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use koo_core::model::{ClipContent, Project, TrackKind};
+use koo_core::model::{ClipContent, Grade, Project, TrackKind};
 use koo_core::{ChangeSetId, ClipId, Time};
 use player::{Picture, Player, top_clip};
 use std::cell::Cell;
@@ -49,8 +50,9 @@ pub struct ViewerPanel {
     state: Entity<EditorState>,
     focus: FocusHandle,
     picture: Option<Picture>,
-    /// Paused frame last asked for: clip and source frame index.
-    requested: Option<(ClipId, i64, u32)>,
+    /// Paused frame last asked for: clip, source frame index, width and
+    /// grade.
+    requested: Option<(ClipId, i64, u32, Grade)>,
     generation: u64,
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
@@ -152,10 +154,11 @@ impl ViewerPanel {
             .map(|v| v.rate)
             .unwrap_or(project.timeline.settings.rate);
         let width = self.frame_width.get();
-        let key = (clip.id, source.to_frame(rate), width);
-        if self.requested == Some(key) {
+        let key = (clip.id, source.to_frame(rate), width, clip.grade.clone());
+        if self.requested.as_ref() == Some(&key) {
             return;
         }
+        let grade = clip.grade.clone();
         self.requested = Some(key);
         self.generation += 1;
         let generation = self.generation;
@@ -167,7 +170,7 @@ impl ViewerPanel {
                     media
                         .frame(&item, source, width)
                         .ok()
-                        .and_then(|f| player::to_image(&f))
+                        .and_then(|f| player::to_image(&f, Some(&grade)))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -386,7 +389,7 @@ impl Render for ViewerPanel {
 
 /// A decoded frame as a GPUI image, for other panels' thumbnails.
 pub(crate) fn frame_image(frame: &koo_core::services::Frame) -> Option<Arc<RenderImage>> {
-    player::to_image(frame)
+    player::to_image(frame, None)
 }
 
 /// The largest rect of `aspect` centered in `bounds`, inset by `pad`.

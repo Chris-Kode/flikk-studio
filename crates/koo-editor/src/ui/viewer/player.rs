@@ -3,8 +3,9 @@
 //! clip, reopens it at cuts or jumps, and publishes the frame for the current
 //! time, converted for GPUI off the UI thread.
 
+use super::grade;
 use gpui_kit::RenderImage;
-use koo_core::model::{Clip, MediaItem, MediaKind, Project};
+use koo_core::model::{Clip, Grade, MediaItem, MediaKind, Project};
 use koo_core::query;
 use koo_core::services::{Frame, FrameStream, MediaService};
 use koo_core::{ClipId, Time};
@@ -71,9 +72,12 @@ pub fn top_clip(project: &Project, t: Time) -> Option<(&Clip, &MediaItem)> {
     (item.kind != MediaKind::Audio).then_some((clip, item))
 }
 
-/// RGBA frame → BGRA `RenderImage`.
-pub fn to_image(frame: &Frame) -> Option<Arc<RenderImage>> {
+/// RGBA frame → BGRA `RenderImage`, graded when `grade` is given.
+pub fn to_image(frame: &Frame, grade: Option<&Grade>) -> Option<Arc<RenderImage>> {
     let mut bgra = frame.rgba.to_vec();
+    if let Some(g) = grade {
+        grade::apply(&mut bgra, g);
+    }
     for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
@@ -145,7 +149,7 @@ fn run(shared: Arc<Shared>, media: Arc<dyn MediaService>, project: Arc<Project>,
         }
         if let (Some(f), Some(at)) = (newest, o.position)
             && shown != Some((clip.id, at))
-            && let Some(image) = to_image(&f)
+            && let Some(image) = to_image(&f, Some(&clip.grade))
         {
             shown = Some((clip.id, at));
             publish(Some(Picture {
