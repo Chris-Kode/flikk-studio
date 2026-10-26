@@ -54,6 +54,10 @@ pub struct AgentSettings {
     /// Language for chat replies and captions; `None` follows the source.
     pub language: Option<String>,
     pub style_profile: Option<RuleId>,
+    /// Editor (editing, captions, color, audio) or Builder (effects and
+    /// recipes in a sandbox); both run on `backend`.
+    #[serde(default)]
+    pub role: crate::bus::AgentRole,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

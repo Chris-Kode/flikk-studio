@@ -257,6 +257,51 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Make preset `index` the active caption style and save its name on
+    /// the first caption track, so the choice travels with the project.
+    pub fn pick_caption_style(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.caption_style = index;
+        let name = self
+            .presets
+            .caption_styles
+            .get(index)
+            .map(|s| s.name.clone());
+        let track = self
+            .bus
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .find(|t| t.kind == koo_core::model::TrackKind::Caption);
+        match track {
+            Some(t) if name.is_some() && t.caption_style != name => {
+                let track = t.id;
+                self.execute(Command::SetCaptionStyle { track, style: name }, cx);
+            }
+            _ => cx.notify(),
+        }
+    }
+
+    /// Follow the caption track's saved style, e.g. after a project loads.
+    pub fn sync_caption_style(&mut self) {
+        let saved = self
+            .bus
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .find(|t| t.kind == koo_core::model::TrackKind::Caption)
+            .and_then(|t| t.caption_style.as_deref());
+        if let Some(i) = saved.and_then(|name| {
+            self.presets
+                .caption_styles
+                .iter()
+                .position(|s| s.name == name)
+        }) {
+            self.caption_style = i;
+        }
+    }
+
     /// The caption style new captions use.
     pub fn active_caption_style(&self) -> koo_core::memory::CaptionStyle {
         self.presets

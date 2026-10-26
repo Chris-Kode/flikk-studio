@@ -161,6 +161,11 @@ pub enum Command {
     RemoveTrack {
         track: TrackId,
     },
+    /// Locked tracks refuse edits until unlocked.
+    SetTrackLocked {
+        track: TrackId,
+        locked: bool,
+    },
 
     // ---- transform (E5)
     SetTransform {
@@ -291,7 +296,8 @@ impl Command {
             | EditMarker { .. }
             | RemoveMarker { .. }
             | AddTrack { .. }
-            | RemoveTrack { .. } => ToolCategory::EditTimeline,
+            | RemoveTrack { .. }
+            | SetTrackLocked { .. } => ToolCategory::EditTimeline,
             SetTransform { .. } | AddZoom { .. } | SetKeyframe { .. } | RemoveKeyframe { .. } => {
                 ToolCategory::Transform
             }

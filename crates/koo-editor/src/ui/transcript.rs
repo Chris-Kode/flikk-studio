@@ -15,9 +15,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::captions::LOW_CONFIDENCE;
 use koo_core::command::Command;
+use koo_core::query::TimelineWord;
 use koo_core::services::JobState;
 use koo_core::{ClipId, Time, TimeRange};
-use words::TimelineWord;
+use std::collections::HashMap;
 
 const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -36,6 +37,7 @@ pub struct TranscriptPanel {
     view: View,
     /// Recomputed when the project or analysis changes.
     words: Vec<TimelineWord>,
+    speakers: HashMap<koo_core::SpeakerId, String>,
     words_key: Option<(u64, usize)>,
     /// Word clicked last; the selection runs from here to `head`.
     anchor: Option<usize>,
@@ -91,6 +93,7 @@ impl TranscriptPanel {
             focus: cx.focus_handle(),
             view: View::Transcript,
             words: Vec::new(),
+            speakers: HashMap::new(),
             words_key: None,
             anchor: None,
             head: None,
@@ -118,16 +121,17 @@ impl TranscriptPanel {
         Some((state.bus.version(), done))
     }
 
-    fn refresh_words(&mut self, cx: &App) {
+    fn refresh_words(&mut self, cx: &mut App) {
         let key = self.current_key(cx);
         if key == self.words_key {
             return;
         }
         self.words_key = key;
+        self.state.update(cx, |s, _| s.sync_caption_style());
         let state = self.state.read(cx);
-        self.words = match &state.services.analysis {
+        (self.words, self.speakers) = match &state.services.analysis {
             Some(analysis) => words::timeline_words(state.bus.project(), analysis.as_ref()),
-            None => Vec::new(),
+            None => Default::default(),
         };
         let n = self.words.len();
         self.anchor = self.anchor.filter(|&i| i < n);
@@ -169,7 +173,7 @@ impl TranscriptPanel {
             self.anchor = Some(i);
             self.head = None;
             self.dragging = true;
-            let t = self.words[i].range.start;
+            let t = self.words[i].timeline.start;
             self.state.update(cx, |s, cx| s.seek(t, cx));
         }
         self.publish_selection(cx);
@@ -208,7 +212,7 @@ impl TranscriptPanel {
         if commands.is_empty() {
             return;
         }
-        let at = self.words[a].range.start;
+        let at = self.words[a].timeline.start;
         self.anchor = None;
         self.head = None;
         self.state.update(cx, |s, cx| {
@@ -307,21 +311,22 @@ impl TranscriptPanel {
         let mut prev: Option<&TimelineWord> = None;
         let mut prev_speaker = None;
         for (i, w) in self.words.iter().enumerate() {
-            let speaker_change = prev.is_some_and(|_| w.speaker != prev_speaker);
-            let pause = prev.is_some_and(|p| w.range.start - p.range.end > PARAGRAPH_GAP);
+            let speaker = w.word.speaker;
+            let speaker_change = prev.is_some_and(|_| speaker != prev_speaker);
+            let pause = prev.is_some_and(|p| w.timeline.start - p.timeline.end > PARAGRAPH_GAP);
             if prev.is_none() || speaker_change || pause {
                 flush(&mut paragraphs, &mut line, label.take());
                 label = if prev.is_none() || speaker_change {
-                    w.speaker_label.clone()
+                    speaker.and_then(|s| self.speakers.get(&s).cloned())
                 } else {
                     None
                 };
             }
             prev = Some(w);
-            prev_speaker = w.speaker;
+            prev_speaker = speaker;
             let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
-            let current = w.range.contains(playhead);
-            let low = w.confidence < LOW_CONFIDENCE;
+            let current = w.timeline.contains(playhead);
+            let low = w.word.confidence < LOW_CONFIDENCE;
             line.push(
                 div()
                     .id(("word", i))
@@ -334,7 +339,7 @@ impl TranscriptPanel {
                             .text_decoration_wavy()
                             .text_decoration_color(warn)
                     })
-                    .child(w.text.clone())
+                    .child(w.word.text.clone())
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
