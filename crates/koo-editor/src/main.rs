@@ -3,6 +3,7 @@
 
 mod agent_link;
 mod app;
+mod demo;
 mod persistence;
 mod state;
 mod ui;

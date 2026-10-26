@@ -160,3 +160,41 @@ listed. The coordinator session merges the branches. To keep merges clean:
 then the panels that use them. After each merge, the coordinator runs the
 full check suite; wiring (`EditorState.services`, removing the temporary
 `#![allow(dead_code)]` in `main.rs`) happens last.
+
+## 7. Status
+
+All nine streams are merged. What runs today:
+
+* **Editing:** every PRD edit command plans through the bus, with undo,
+  change sets, protected-range warnings and conflict-safe accept.
+* **Media:** FFmpeg probe, fingerprint, frames, playback/audio streams,
+  proxies, 6 × 5 collages (cached) and waveforms.
+* **Analysis:** background jobs, VAD, silences, shot changes, loudness;
+  Whisper transcription behind the default `whisper` feature. The model
+  downloads to `paths::models()` on first use, or set
+  `KOOEDITOR_WHISPER_MODEL`.
+* **Agent:** `claude -p` verified end to end (collage → proposals → one
+  change set → accept); Codex adapter written from its docs, not yet run.
+  The editor binary doubles as the MCP server (`koo-editor mcp`).
+* **Store:** projects with undo history, autosave and crash recovery,
+  settings, style profiles, source facts, built-in recipes, per-project
+  chat.
+* **Deliver:** FFmpeg render graph, render queue, SRT/ASS, OTIO, FCPXML,
+  frame export.
+* **UI:** all six workspaces, timeline with change-set overlay, viewer
+  with playback, media pool, inspector, transcript/captions, chat with
+  change-set review, agent settings, project menu.
+
+Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor`
+(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace).
+
+### Known gaps
+
+* Pending change sets are in memory only; they don't survive a restart.
+* Codex backend untested; Whisper untested in the cloud container (its
+  network blocks the model download).
+* No GPU video surface yet: the viewer paints decoded RGBA frames (the
+  PRD's GPUI video spike is still open), and Windows/macOS builds haven't
+  been run.
+* P1/P2 PRD items (scopes, LUT browser, nested sequences, music playlist
+  UI, voice cleanup, vertical reframing, voice input) are not built.

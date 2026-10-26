@@ -2,7 +2,7 @@
 //! type a one-off request or start a recipe. Both go through `send_chat`.
 
 use super::composer::Composer;
-use super::recipes::RECIPES;
+use super::recipes;
 use crate::state::EditorState;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::{IconName, IndexPath, WindowExt as _};
@@ -89,14 +89,13 @@ impl QuickCommand {
         }
     }
 
-    fn recipes(&self) -> Vec<(&'static str, &'static str)> {
+    fn recipes(&self, cx: &App) -> Vec<(String, String)> {
         let q = self.query.trim().trim_start_matches('/').to_lowercase();
-        RECIPES
-            .iter()
+        recipes::list(self.state.read(cx))
+            .into_iter()
             .filter(|(name, title)| {
                 q.is_empty() || name.contains(&q) || title.to_lowercase().contains(&q)
             })
-            .copied()
             .collect()
     }
 
@@ -107,7 +106,7 @@ impl QuickCommand {
 
 impl Render for QuickCommand {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let recipes = self.recipes();
+        let recipes = self.recipes(cx);
         let request = self.has_request().then(|| self.query.clone());
         let mut palette = Command::new(&self.command)
             .placeholder("Ask the agent or pick a recipe")

@@ -49,10 +49,6 @@ impl AgentLink {
         self.host.set_role(role);
     }
 
-    pub fn role(&self) -> AgentRole {
-        self.host.role()
-    }
-
     /// Recipes offered as `/name` slash commands.
     pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
         self.host.set_recipes(recipes);

@@ -115,7 +115,7 @@ fn save_rule(args: &Value, project: &Project, settings: &mut AgentSettings) -> R
         s.save_rule(profile, &rule)?;
         s.set_rule_status(rule.id, RuleStatus::Approved)
     })?;
-    Ok(Started::Done("Saved to the style profile".into()))
+    Ok(Started::Done("Saved".into()))
 }
 
 fn find_rule(rules: &[StyleRule], short: &str) -> Option<RuleId> {
@@ -142,7 +142,7 @@ fn save_fact(args: &Value) -> Result<Started> {
         status: FactStatus::Confirmed,
     };
     store(|s| s.save_fact(&fact))?;
-    Ok(Started::Done("Saved as a source fact".into()))
+    Ok(Started::Done("Saved".into()))
 }
 
 fn save_recipe(args: &Value) -> Result<Started> {
@@ -165,7 +165,7 @@ fn save_recipe(args: &Value) -> Result<Started> {
         name: name.clone(),
     };
     store(|s| s.save_recipe(&recipe))?;
-    Ok(Started::Done(format!("Saved as /{name}")))
+    Ok(Started::Done("Saved".into()))
 }
 
 /// A recipe parameter, as a bare name or `{name, description, default}`.

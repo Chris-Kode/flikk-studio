@@ -6,7 +6,6 @@ mod activity;
 mod approval;
 mod change_set;
 mod composer;
-mod demo;
 mod quick;
 mod recipes;
 mod refs;
@@ -66,12 +65,6 @@ pub struct ChatPanel {
 impl ChatPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         init(cx);
-        if demo::enabled() {
-            state.update(cx, |s, cx| {
-                demo::seed(s);
-                cx.notify();
-            });
-        }
         quick::register(&state, cx);
         let count = state.read(cx).chat.len();
         let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
@@ -306,9 +299,6 @@ impl ChatPanel {
                 if let Some(set) = msg.change_set {
                     content = content.child(self.render_change_set(set, cx));
                 }
-                if let Some(cards) = self.render_approvals(ix, cx) {
-                    content = content.child(cards);
-                }
                 Message::new().content(content).into_any_element()
             }
         }
@@ -318,9 +308,11 @@ impl ChatPanel {
         let state = self.state.read(cx);
         let busy = state.agent_busy();
         let status = state.status.clone();
+        let approvals = self.render_approvals(cx);
         let theme = cx.theme();
         v_flex()
             .flex_none()
+            .children(approvals)
             .when(busy, |el| {
                 el.child(
                     h_flex()
@@ -374,9 +366,6 @@ fn signature(s: &EditorState) -> u64 {
     s.preview.hash(&mut h);
     s.agent_busy().hash(&mut h);
     s.focused_change_item().hash(&mut h);
-    for card in &s.approvals {
-        (card.message, card.outcome.is_some()).hash(&mut h);
-    }
     for set in s.bus.change_sets() {
         (set.state as u8).hash(&mut h);
         for item in &set.items {

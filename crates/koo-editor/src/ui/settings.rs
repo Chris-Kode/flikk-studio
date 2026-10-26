@@ -17,7 +17,6 @@ use koo_core::bus::{AgentRole, Permission, Permissions};
 use koo_core::command::ToolCategory;
 
 const BACKENDS: [Backend; 2] = [Backend::Claude, Backend::Codex];
-
 const ROLES: [(AgentRole, &str); 2] = [
     (AgentRole::Editor, "Editor"),
     (AgentRole::Builder, "Builder"),
@@ -231,28 +230,17 @@ impl Render for SettingsPanel {
             .iter()
             .position(|b| *b == settings.backend)
             .unwrap_or(0);
+        let role_ix = ROLES
+            .iter()
+            .position(|(r, _)| *r == self.state.read(cx).agent_role())
+            .unwrap_or(0);
         let differs = settings.permissions != Permissions::default();
-        let role = self.state.read(cx).agent_role();
-        let role_ix = ROLES.iter().position(|(r, _)| *r == role).unwrap_or(0);
         v_flex()
             .id("agent-settings")
             .size_full()
             .gap_6()
             .pb_6()
             .overflow_y_scroll()
-            .child(
-                self.section("Role", cx).child(
-                    TabBar::new("role")
-                        .segmented()
-                        .small()
-                        .selected_index(role_ix)
-                        .children(ROLES.iter().map(|(_, label)| Tab::new().label(*label)))
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            let role = ROLES[*ix].0;
-                            this.state.update(cx, |s, cx| s.set_agent_role(role, cx));
-                        })),
-                ),
-            )
             .child(
                 self.section("Backend", cx).child(
                     TabBar::new("backend")
@@ -263,6 +251,19 @@ impl Render for SettingsPanel {
                         .on_click(cx.listener(|this, ix: &usize, _, cx| {
                             let backend = BACKENDS[*ix];
                             this.update(cx, |s| s.backend = backend);
+                        })),
+                ),
+            )
+            .child(
+                self.section("Role", cx).child(
+                    TabBar::new("role")
+                        .segmented()
+                        .small()
+                        .selected_index(role_ix)
+                        .children(ROLES.iter().map(|(_, label)| Tab::new().label(*label)))
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            let role = ROLES[*ix].0;
+                            this.state.update(cx, |s, cx| s.set_agent_role(role, cx));
                         })),
                 ),
             )

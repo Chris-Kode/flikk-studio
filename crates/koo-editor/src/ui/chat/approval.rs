@@ -1,15 +1,16 @@
-//! Approval cards (PRD: project/memory and deliver tools ask first): one
-//! line per request under the agent message that made it, Approve / Deny,
-//! then the outcome in place of the buttons.
+//! Approval cards (PRD: project/memory and deliver tools ask first), above
+//! the composer: one line per request with Approve / Deny, then what came of
+//! it in place of the buttons until the user's next message.
 
 use super::ChatPanel;
-use crate::state::{ApprovalCard, ApprovalOutcome, EditorState};
+use crate::state::{ApprovalOutcome, EditorState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_agent::PendingApproval;
 use koo_core::command::ToolCategory;
 use koo_deliver::RenderState;
 use std::time::Duration;
@@ -17,32 +18,34 @@ use std::time::Duration;
 const RENDER_POLL: Duration = Duration::from_millis(250);
 
 impl ChatPanel {
-    pub(super) fn render_approvals(&self, ix: usize, cx: &mut Context<Self>) -> Option<Div> {
-        let cards: Vec<ApprovalCard> = self
-            .state
-            .read(cx)
-            .approvals
+    pub(super) fn render_approvals(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let state = self.state.read(cx);
+        let cards: Vec<(PendingApproval, Option<ApprovalOutcome>)> = state
+            .settled
             .iter()
-            .filter(|c| c.message == ix)
-            .cloned()
+            .map(|(p, o)| (p.clone(), Some(o.clone())))
+            .chain(state.pending_approvals().iter().map(|p| (p.clone(), None)))
             .collect();
-        (!cards.is_empty()).then(|| {
-            v_flex()
-                .w_full()
-                .gap_1()
-                .children(cards.iter().map(|c| self.render_approval(c, cx)))
-        })
+        cards
+            .iter()
+            .map(|(p, o)| self.render_approval(p, o.as_ref(), cx))
+            .collect()
     }
 
-    fn render_approval(&self, card: &ApprovalCard, cx: &mut Context<Self>) -> AnyElement {
-        let id = card.approval.id;
-        let request = &card.approval.request;
+    fn render_approval(
+        &self,
+        approval: &PendingApproval,
+        outcome: Option<&ApprovalOutcome>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = approval.id;
+        let request = &approval.request;
         let summary: SharedString = request.summary.clone().into();
         let icon = match request.category {
             ToolCategory::Deliver => IconName::File,
             _ => IconName::BookOpen,
         };
-        let trailing = match &card.outcome {
+        let trailing = match outcome {
             None => h_flex()
                 .flex_none()
                 .gap_1()
@@ -52,7 +55,7 @@ impl ChatPanel {
                         .xsmall()
                         .ghost()
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.deny(id, cx))
+                            this.state.update(cx, |s, cx| s.deny_approval(id, cx))
                         })),
                 )
                 .child(
@@ -69,7 +72,8 @@ impl ChatPanel {
         };
         let theme = cx.theme();
         h_flex()
-            .w_full()
+            .mx_2()
+            .mt_1()
             .min_h(px(36.))
             .pl_3()
             .pr_1p5()
@@ -79,7 +83,7 @@ impl ChatPanel {
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary.opacity(0.4))
-            .text_sm()
+            .text_xs()
             .child(
                 Icon::new(icon)
                     .size_3p5()
@@ -91,7 +95,7 @@ impl ChatPanel {
                     .id(("approval", id as usize))
                     .flex_1()
                     .min_w_0()
-                    .map(|el| match card.outcome {
+                    .map(|el| match outcome {
                         // Readable in full before deciding.
                         None => el.line_clamp(2),
                         Some(_) => el.truncate().text_color(theme.muted_foreground),
@@ -125,8 +129,8 @@ impl ChatPanel {
 }
 
 fn rendering(state: &EditorState) -> bool {
-    state.approvals.iter().any(|c| match &c.outcome {
-        Some(ApprovalOutcome::Rendering { job, .. }) => state
+    state.settled.iter().any(|(_, outcome)| match outcome {
+        ApprovalOutcome::Rendering { job, .. } => state
             .render_job(*job)
             .is_some_and(|j| !j.state.is_finished()),
         _ => false,
