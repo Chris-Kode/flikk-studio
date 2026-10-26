@@ -1,0 +1,9 @@
+[package]
+name = "koo_editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+gpui-kit = "0.8"
+rusqlite = { version = "0.41", features = ["bundled"] }
