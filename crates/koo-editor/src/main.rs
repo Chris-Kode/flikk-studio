@@ -1,5 +1,4 @@
-// Hooks in state.rs and the panel stubs are used as the work streams land.
-// Remove once every panel is wired.
+// Temporary: removed by the integration pass that wires the remaining hooks.
 #![allow(dead_code)]
 
 mod agent_link;
