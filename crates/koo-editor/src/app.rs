@@ -124,10 +124,6 @@ impl KooEditor {
 
     fn workspace(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.state.read(cx).workspace {
-            Workspace::Media => h_resizable("media")
-                .child(resizable_panel().child(self.media_pool.clone()))
-                .child(resizable_panel().size(px(520.)).child(self.viewer.clone()))
-                .into_any_element(),
             Workspace::Edit => self
                 .over_timeline(
                     "edit",

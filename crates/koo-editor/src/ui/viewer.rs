@@ -169,7 +169,7 @@ impl ViewerPanel {
                     l.clip.id,
                     l.item.into_owned(),
                     l.source,
-                    Look::of(l.clip, t),
+                    Look::of(l.clip, t, project),
                 )
             })
             .collect();

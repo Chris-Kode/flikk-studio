@@ -105,6 +105,9 @@ pub struct Timeline {
     pub tracks: Vec<Track>,
     pub markers: Vec<Marker>,
     pub ducking: Option<Ducking>,
+    /// Applied to every media picture after its own grade.
+    #[serde(default)]
+    pub grade: Grade,
 }
 
 impl Default for Timeline {
@@ -118,6 +121,7 @@ impl Default for Timeline {
             ],
             markers: Vec::new(),
             ducking: None,
+            grade: Grade::default(),
         }
     }
 }

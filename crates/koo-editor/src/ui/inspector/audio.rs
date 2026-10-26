@@ -1,4 +1,4 @@
-//! Audio workspace: clip gain and fades, track mixer, loudness with
+//! Audio workspace, for the whole timeline: track mixer, loudness with
 //! normalize, and ducking (PRD A1–A3).
 
 use super::param::{Key, format_value};
@@ -19,30 +19,17 @@ use koo_core::{ClipId, Time, TimeRange};
 use std::path::PathBuf;
 
 impl InspectorPanel {
-    pub(super) fn audio_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let selected: Vec<Clip> = self
-            .selected_clips(cx)
-            .into_iter()
-            .filter(is_media)
-            .collect();
-        let mut body = v_flex().gap_4();
-        let tl = &self.project(cx).timeline;
-        let sound = selected
-            .first()
-            .map(|c| super::clip::sound_clip(tl, c).clone());
-        if let Some(clip) = &sound {
-            let rows = [
-                (Key::ClipGain, clip.audio.gain_db),
-                (Key::FadeIn, clip.audio.fade_in.as_secs_f64() as f32),
-                (Key::FadeOut, clip.audio.fade_out.as_secs_f64() as f32),
-            ]
-            .map(|(key, v)| self.param(key, v, window, cx).row(cx));
-            body = body.child(section("Clip", cx).children(rows));
-        }
-        body.child(self.mixer(window, cx))
-            .child(self.loudness_view(&selected, cx))
+    /// Whole-timeline sound: track mixer, loudness with normalize, ducking.
+    pub(super) fn timeline_audio_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        v_flex()
+            .gap_4()
+            .child(self.mixer(window, cx))
+            .child(self.loudness_view(cx))
             .child(self.ducking_view(window, cx))
-            .into_any_element()
     }
 
     fn mixer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -111,12 +98,8 @@ impl InspectorPanel {
         section("Mixer", cx).children(rows)
     }
 
-    /// Clips the loudness readout covers: the selection, else every media
-    /// clip on an audio track.
-    fn loudness_scope(&self, selected: &[Clip], cx: &App) -> Vec<Clip> {
-        if !selected.is_empty() {
-            return selected.to_vec();
-        }
+    /// Clips the loudness readout covers: every media clip on an audio track.
+    fn loudness_scope(&self, cx: &App) -> Vec<Clip> {
         audio_tracks(self.project(cx))
             .into_iter()
             .flat_map(|t| t.clips)
@@ -124,8 +107,8 @@ impl InspectorPanel {
             .collect()
     }
 
-    fn loudness_view(&self, selected: &[Clip], cx: &mut Context<Self>) -> Div {
-        let scope = self.loudness_scope(selected, cx);
+    fn loudness_view(&self, cx: &mut Context<Self>) -> Div {
+        let scope = self.loudness_scope(cx);
         let reading = combined(&scope, &self.loudness);
         let has_service = self.state.read(cx).services.analysis.is_some();
         let theme = cx.theme();
@@ -183,12 +166,7 @@ impl InspectorPanel {
     }
 
     fn measure(&mut self, cx: &mut Context<Self>) {
-        let selected: Vec<Clip> = self
-            .selected_clips(cx)
-            .into_iter()
-            .filter(is_media)
-            .collect();
-        let scope = self.loudness_scope(&selected, cx);
+        let scope = self.loudness_scope(cx);
         let state = self.state.read(cx);
         let Some(analysis) = state.services.analysis.clone() else {
             return;
@@ -225,41 +203,26 @@ impl InspectorPanel {
         .detach();
     }
 
-    /// One batch of `SetGain`: a selection is normalized clip by clip, the
-    /// timeline as a whole.
+    /// One batch of `SetGain` that moves the timeline as a whole.
     fn normalize(&mut self, cx: &mut Context<Self>) {
         let target = self.lufs_target.read(cx).value().trim().parse::<f32>();
         let peak = self.peak_target.read(cx).value().trim().parse::<f32>();
         let presets = &self.state.read(cx).presets;
         let target = target.unwrap_or(presets.loudness_lufs);
         let peak = peak.unwrap_or(presets.true_peak_db);
-        let selected: Vec<Clip> = self
-            .selected_clips(cx)
-            .into_iter()
-            .filter(is_media)
+        let scope = self.loudness_scope(cx);
+        let Some(all) = combined(&scope, &self.loudness) else {
+            return;
+        };
+        let delta = (target - all.integrated_lufs).min(peak - all.true_peak_db);
+        let commands = scope
+            .iter()
+            .filter(|c| self.loudness.contains_key(&c.id))
+            .map(|c| Command::SetGain {
+                clip: c.id,
+                db: c.audio.gain_db + delta,
+            })
             .collect();
-        let measured = |c: &Clip| self.loudness.get(&c.id).copied();
-        let mut commands = Vec::new();
-        if selected.is_empty() {
-            let scope = self.loudness_scope(&selected, cx);
-            let Some(all) = combined(&scope, &self.loudness) else {
-                return;
-            };
-            let delta = (target - all.integrated_lufs).min(peak - all.true_peak_db);
-            for c in scope.iter().filter(|c| measured(c).is_some()) {
-                commands.push(Command::SetGain {
-                    clip: c.id,
-                    db: c.audio.gain_db + delta,
-                });
-            }
-        } else {
-            for c in &selected {
-                if let Some(l) = measured(c) {
-                    let db = (target - l.integrated_lufs).min(peak - l.true_peak_db);
-                    commands.push(Command::SetGain { clip: c.id, db });
-                }
-            }
-        }
         self.run(commands, "normalize", cx);
     }
 

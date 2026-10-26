@@ -38,15 +38,22 @@ pub struct Layer<'a> {
 #[derive(Clone, PartialEq)]
 pub struct Look {
     pub grade: Grade,
+    /// The timeline grade, after the clip's; neutral for overlay assets.
+    pub timeline: Grade,
     pub rotation: f32,
     pub opacity: f32,
 }
 
 impl Look {
-    pub fn of(clip: &Clip, t: Time) -> Self {
+    pub fn of(clip: &Clip, t: Time, project: &Project) -> Self {
         let tf = clip.transform_at(t - clip.start);
+        let timeline = match clip.content {
+            ClipContent::Media { .. } => project.timeline.grade.clone(),
+            _ => Grade::default(),
+        };
         Self {
             grade: clip.grade.clone(),
+            timeline,
             rotation: tf.rotation_deg,
             opacity: tf.opacity.clamp(0., 1.),
         }
@@ -173,6 +180,7 @@ pub fn picture(clip: ClipId, frame: &Frame, look: &Look) -> Option<Picture> {
     let (w, h) = (frame.width.max(1), frame.height.max(1));
     let mut rgba = frame.rgba.to_vec();
     grade::apply(&mut rgba, &look.grade);
+    grade::apply(&mut rgba, &look.timeline);
     if look.opacity < 1. {
         for px in rgba.as_chunks_mut::<4>().0 {
             px[3] = (px[3] as f32 * look.opacity).round() as u8;
@@ -287,7 +295,7 @@ fn run(shared: Arc<Shared>, media: Arc<dyn MediaService>, project: Arc<Project>,
                     _ => break,
                 }
             }
-            let look = Look::of(clip, t);
+            let look = Look::of(clip, t, &project);
             let stale = fresh || o.shown.as_ref().is_none_or(|(l, _)| *l != look);
             if let (true, Some(f)) = (stale, &o.frame)
                 && let Some(p) = picture(clip.id, f, &look)

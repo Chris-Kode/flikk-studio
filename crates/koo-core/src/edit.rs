@@ -157,6 +157,10 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             let grade = find_clip(tl, *from)?.1.grade.clone();
             update_clips(tl, to, |c| c.grade = grade.clone())
         }
+        Command::SetTimelineGrade { grade } => Ok(ops(vec![Op::SetTimelineGrade {
+            before: tl.grade.clone(),
+            after: grade.clone(),
+        }])),
 
         Command::SetGain { clip, db } => update_clip(tl, *clip, |c| c.audio.gain_db = *db),
         Command::AddFade {

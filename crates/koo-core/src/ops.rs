@@ -76,6 +76,10 @@ pub enum Op {
         before: Option<Ducking>,
         after: Option<Ducking>,
     },
+    SetTimelineGrade {
+        before: Grade,
+        after: Grade,
+    },
     AddMedia {
         media: MediaItem,
     },
@@ -156,6 +160,10 @@ impl Op {
                 after: before,
             },
             Op::SetDucking { before, after } => Op::SetDucking {
+                before: after,
+                after: before,
+            },
+            Op::SetTimelineGrade { before, after } => Op::SetTimelineGrade {
                 before: after,
                 after: before,
             },
@@ -273,6 +281,12 @@ impl Op {
                     return Err(CoreError::Conflict);
                 }
                 timeline.ducking = after.clone();
+            }
+            Op::SetTimelineGrade { before, after } => {
+                if timeline.grade != *before {
+                    return Err(CoreError::Conflict);
+                }
+                timeline.grade = after.clone();
             }
             Op::AddMedia { media } => {
                 if project.media(media.id).is_some() {

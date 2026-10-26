@@ -148,6 +148,9 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             }
             out
         }
+        "set_timeline_grade" => vec![Command::SetTimelineGrade {
+            grade: merge_grade(ctx.project().timeline.grade.clone(), args)?,
+        }],
         "apply_lut" => {
             let p = ctx.project();
             vec![Command::ApplyLut {

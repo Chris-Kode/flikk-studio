@@ -384,6 +384,9 @@ impl Builder<'_> {
             f.push(format!("fps={r}"));
         }
         f.extend(grade_filters(&clip.grade));
+        if matches!(clip.content, ClipContent::Media { .. }) {
+            f.extend(grade_filters(&self.project.timeline.grade));
+        }
         f.push("format=yuva420p".into());
 
         let (sw, sh) = (pic.size.0.max(1) as f64, pic.size.1.max(1) as f64);

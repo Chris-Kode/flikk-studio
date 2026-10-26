@@ -1,4 +1,4 @@
-//! Edit workspace: the selected clip's properties (see `clip.rs`); for
+//! The selected clip's properties (see `clip.rs`); for
 //! picture clips, transform with per-property keyframe toggles at the
 //! playhead, and the clip's keyframes (PRD E5).
 

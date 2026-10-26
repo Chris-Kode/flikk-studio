@@ -1,6 +1,6 @@
-//! Inspector, contextual by workspace and selection: the selected clip's
-//! properties by kind (Edit), primary grade (Color), gain, fades, mixer,
-//! loudness and ducking (Audio).
+//! Inspector, contextual by workspace: in Edit, the selected clip's
+//! properties by kind with its grade and linked audio; in Color and Audio,
+//! the whole timeline's grade, or its mixer, loudness and ducking.
 
 mod audio;
 mod clip;
@@ -211,25 +211,21 @@ impl InspectorPanel {
             | Key::Lift(_)
             | Key::GammaRgb(_)
             | Key::Gain(_) => {
-                label = "set_grade";
-                for clip in clips.iter().filter(|c| is_media(c)) {
-                    let mut grade = clip.grade.clone();
-                    match key {
-                        Key::Exposure => grade.exposure = v,
-                        Key::Contrast => grade.contrast = v,
-                        Key::Saturation => grade.saturation = v,
-                        Key::Gamma => grade.gamma = v,
-                        Key::Temperature => grade.temperature = v,
-                        Key::Tint => grade.tint = v,
-                        Key::Lift(i) => grade.lift[i] = v,
-                        Key::GammaRgb(i) => grade.gamma_rgb[i] = v,
-                        Key::Gain(i) => grade.gain[i] = v,
-                        _ => {}
+                if state.workspace == Workspace::Color {
+                    label = "set_timeline_grade";
+                    let mut grade = tl.grade.clone();
+                    color::set_grade_value(&mut grade, key, v);
+                    commands.push(Command::SetTimelineGrade { grade });
+                } else {
+                    label = "set_grade";
+                    for clip in clips.iter().filter(|c| is_media(c)) {
+                        let mut grade = clip.grade.clone();
+                        color::set_grade_value(&mut grade, key, v);
+                        commands.push(Command::SetGrade {
+                            clips: vec![clip.id],
+                            grade,
+                        });
                     }
-                    commands.push(Command::SetGrade {
-                        clips: vec![clip.id],
-                        grade,
-                    });
                 }
             }
             Key::ClipGain => {
@@ -291,8 +287,8 @@ impl InspectorPanel {
 impl Render for InspectorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.state.read(cx).workspace {
-            Workspace::Color => self.color_view(window, cx),
-            Workspace::Audio => self.audio_view(window, cx),
+            Workspace::Color => self.timeline_color_view(window, cx),
+            Workspace::Audio => self.timeline_audio_view(window, cx).into_any_element(),
             _ => self.edit_view(window, cx),
         };
         div()

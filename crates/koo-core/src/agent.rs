@@ -63,7 +63,6 @@ pub struct AgentSettings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Workspace {
-    Media,
     #[default]
     Edit,
     Captions,
@@ -73,8 +72,7 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 6] = [
-        Self::Media,
+    pub const ALL: [Workspace; 5] = [
         Self::Edit,
         Self::Captions,
         Self::Color,
@@ -84,7 +82,6 @@ impl Workspace {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Media => "Media",
             Self::Edit => "Edit",
             Self::Captions => "Captions",
             Self::Color => "Color",

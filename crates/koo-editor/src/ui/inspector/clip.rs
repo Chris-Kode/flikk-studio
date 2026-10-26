@@ -1,4 +1,4 @@
-//! Edit workspace: the selected clip's properties by kind. Video and
+//! The selected clip's properties by kind. Video and
 //! overlays get transform and color (and video its linked audio), audio
 //! gets gain, fades and its track's mix, captions and titles get their
 //! text, timing and style.

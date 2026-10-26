@@ -231,6 +231,9 @@ pub enum Command {
         from: ClipId,
         to: Vec<ClipId>,
     },
+    SetTimelineGrade {
+        grade: Grade,
+    },
 
     // ---- audio (A1, A3, A4)
     SetGain {
@@ -305,7 +308,9 @@ impl Command {
             SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
                 ToolCategory::Captions
             }
-            SetGrade { .. } | ApplyLut { .. } | CopyGrade { .. } => ToolCategory::Color,
+            SetGrade { .. } | ApplyLut { .. } | CopyGrade { .. } | SetTimelineGrade { .. } => {
+                ToolCategory::Color
+            }
             SetGain { .. }
             | AddFade { .. }
             | SetTrackMix { .. }

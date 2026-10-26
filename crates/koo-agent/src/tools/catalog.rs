@@ -361,6 +361,26 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "set_timeline_grade",
+            Some(Color),
+            "Propose a grade for the whole timeline, applied over every media clip's own grade. Only the values given change.",
+            object(
+                json!({
+                    "exposure": number("Stops, 0 = neutral"),
+                    "contrast": number("1 = neutral"),
+                    "saturation": number("1 = neutral"),
+                    "gamma": number("1 = neutral"),
+                    "temperature": number("0 = neutral, negative cooler"),
+                    "tint": number("0 = neutral, negative greener"),
+                    "lift": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 0 = neutral" },
+                    "gamma_rgb": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
+                    "gain": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "apply_lut",
             Some(Color),
             "Propose a LUT file on clips; omit `lut` to remove it.",

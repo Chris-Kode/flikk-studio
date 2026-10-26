@@ -69,6 +69,15 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
     v
 }
 
+fn grade_json(g: &Grade) -> Value {
+    json!({
+        "exposure": g.exposure, "contrast": g.contrast, "saturation": g.saturation,
+        "gamma": g.gamma, "temperature": g.temperature, "tint": g.tint,
+        "lift": g.lift, "gamma_rgb": g.gamma_rgb, "gain": g.gain,
+        "lut": g.lut.as_ref().map(|p| p.display().to_string()),
+    })
+}
+
 fn marker_json(m: &koo_core::model::Marker) -> Value {
     let mut v = json!({
         "id": short(m.id),
@@ -149,6 +158,9 @@ pub fn get_timeline(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             "music_track": tl.track(d.music_track).map(|t| t.name.clone()),
             "reduction_db": d.reduction_db,
         });
+    }
+    if tl.grade != Grade::default() {
+        out["grade"] = grade_json(&tl.grade);
     }
     if truncated {
         out["truncated"] = json!(format!(
@@ -284,13 +296,7 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             })
         })
         .collect();
-    let g = &clip.grade;
-    v["grade"] = json!({
-        "exposure": g.exposure, "contrast": g.contrast, "saturation": g.saturation,
-        "gamma": g.gamma, "temperature": g.temperature, "tint": g.tint,
-        "lift": g.lift, "gamma_rgb": g.gamma_rgb, "gain": g.gain,
-        "lut": g.lut.as_ref().map(|p| p.display().to_string()),
-    });
+    v["grade"] = grade_json(&clip.grade);
     v["audio"] = json!({
         "gain_db": clip.audio.gain_db,
         "fade_in": secs(clip.audio.fade_in),
