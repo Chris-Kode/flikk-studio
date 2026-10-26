@@ -284,15 +284,6 @@ impl InspectorPanel {
                     }
                 }
             }
-            Key::ClipGain => {
-                label = "set_gain";
-                for clip in sound_clips(tl, &clips) {
-                    commands.push(Command::SetGain {
-                        clip: clip.id,
-                        db: v,
-                    });
-                }
-            }
             Key::FadeIn | Key::FadeOut => {
                 label = "add_fade";
                 let edge = if key == Key::FadeIn {

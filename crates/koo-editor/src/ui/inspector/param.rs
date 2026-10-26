@@ -30,7 +30,6 @@ pub enum Key {
     Lift(usize),
     GammaRgb(usize),
     Gain(usize),
-    ClipGain,
     FadeIn,
     FadeOut,
     Volume(TrackId),
@@ -100,7 +99,6 @@ impl Key {
                 field: false,
                 ..s("Gain", 0., 200., 0.5, 1, 100., 1.)
             },
-            Key::ClipGain => s("Gain", -24., 24., 0.1, 1, 1., 0.),
             Key::FadeIn => s("Fade in", 0., 10., 0.05, 2, 1., 0.),
             Key::FadeOut => s("Fade out", 0., 10., 0.05, 2, 1., 0.),
             Key::Volume(_) => Spec {

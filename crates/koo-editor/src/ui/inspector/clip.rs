@@ -7,6 +7,7 @@
 use super::param::{Key, format_value};
 use super::{InspectorPanel, section};
 use crate::ui::library::{FxGlyph, fx_glyph};
+use crate::ui::mixer::clip::ClipAudioFx;
 use crate::ui::timeline::glyph::{Glyph, glyph};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, Textarea};
@@ -447,8 +448,15 @@ impl InspectorPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Volume (with keyframes) and the effect stack, as in the Audio
+        // workspace.
+        let state = self.state.clone();
+        let fx = window.use_keyed_state("edit-clip-audio-fx", cx, move |_, cx| {
+            ClipAudioFx::new(state, cx)
+        });
+        let id = clip.id;
+        fx.update(cx, |f, cx| f.set_clip(Some(id), cx));
         let rows = [
-            (Key::ClipGain, clip.audio.gain_db),
             (Key::FadeIn, clip.audio.fade_in.as_secs_f64() as f32),
             (Key::FadeOut, clip.audio.fade_out.as_secs_f64() as f32),
         ]
@@ -466,7 +474,8 @@ impl InspectorPanel {
         .map(|(key, v)| self.param(key, v, window, cx).row(cx));
         v_flex()
             .gap_4()
-            .child(section("Clip", cx).children(rows))
+            .child(fx)
+            .child(section("Fades", cx).children(rows))
             .child(section("Track", cx).children(track_rows))
             .into_any_element()
     }
