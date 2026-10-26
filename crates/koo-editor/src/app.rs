@@ -7,6 +7,9 @@ use crate::ui::{
     timeline::TimelinePanel, transcript::TranscriptPanel, viewer::ViewerPanel,
 };
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::*;
@@ -58,6 +61,39 @@ impl KooEditor {
             state,
             _observe,
         }
+    }
+
+    /// Project name; opens recent projects and "New project".
+    fn project_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        let name = state.read(cx).bus.project().name.clone();
+        Button::new("project")
+            .ghost()
+            .small()
+            .label(name)
+            .dropdown_menu(move |menu, _, cx| {
+                let current = state.read(cx).bus.project().id;
+                let new = state.clone();
+                let mut menu =
+                    menu.item(PopupMenuItem::new("New project").on_click(move |_, _, cx| {
+                        new.update(cx, |s, cx| s.new_project(cx));
+                    }));
+                let projects = state.read(cx).projects();
+                if !projects.is_empty() {
+                    menu = menu.item(PopupMenuItem::separator());
+                }
+                for p in projects {
+                    let state = state.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(p.name)
+                            .checked(p.id == current)
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.open_project(p.id, cx))
+                            }),
+                    );
+                }
+                menu
+            })
     }
 
     fn workspace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -159,12 +195,24 @@ impl Render for KooEditor {
                 cx.listener(|this, _: &Redo, _, cx| this.state.update(cx, |s, cx| s.redo(cx))),
             )
             .child(
+                // Project menu on the left; workspaces stay centred.
                 div()
+                    .relative()
                     .flex()
                     .justify_center()
                     .py_1()
                     .border_b_1()
                     .border_color(border)
+                    .child(
+                        div()
+                            .absolute()
+                            .left_2()
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
+                            .child(self.project_menu(cx)),
+                    )
                     .child(self.workspace_tabs(cx)),
             )
             .child(

@@ -58,6 +58,7 @@ impl EditorState {
             settings,
             ..
         } = persistence::load_session();
+        let chat = persistence::load_chat(project.id);
         let mut bus = CommandBus::with_history(project, history);
         bus.set_permissions(settings.permissions.clone());
         let pump = cx.spawn(async move |this, cx| {
@@ -77,7 +78,7 @@ impl EditorState {
             selection: Selection::default(),
             playing: false,
             settings,
-            chat: Vec::new(),
+            chat,
             activity: Vec::new(),
             preview: None,
             status: persistence::take_notice(),
@@ -270,6 +271,55 @@ impl EditorState {
         });
         let context = self.context();
         self.agent.send(text, context, &self.settings);
+        self.save_chat();
+        cx.notify();
+    }
+
+    fn save_chat(&self) {
+        if !self.chat.is_empty() {
+            persistence::save_chat(self.bus.project().id, &self.chat);
+        }
+    }
+
+    // --------------------------------------------------------------- projects
+
+    /// Saved projects, most recent first.
+    pub fn projects(&self) -> Vec<koo_store::ProjectSummary> {
+        persistence::with_store(|s| s.list_projects()).unwrap_or_default()
+    }
+
+    pub fn open_project(&mut self, id: koo_core::ProjectId, cx: &mut Context<Self>) {
+        if id != self.bus.project().id
+            && let Some(loaded) = persistence::open_project(id)
+        {
+            self.switch_to(loaded, cx);
+        }
+    }
+
+    pub fn new_project(&mut self, cx: &mut Context<Self>) {
+        let n = self.projects().len() + 1;
+        if let Some(loaded) = persistence::new_project(&format!("Untitled {n}")) {
+            self.switch_to(loaded, cx);
+        }
+    }
+
+    /// Replace everything tied to the open project; engines stay.
+    fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
+        self.set_playing(false, cx);
+        self.agent.cancel();
+        self.save_chat();
+        self.chat = persistence::load_chat(loaded.project.id);
+        self.bus = CommandBus::with_history(loaded.project, loaded.history);
+        self.bus
+            .set_permissions(loaded.settings.permissions.clone());
+        self.settings = loaded.settings;
+        self.activity.clear();
+        self.playhead = Time::ZERO;
+        self.in_out = None;
+        self.selection = Selection::default();
+        self.preview = None;
+        self.status = persistence::take_notice();
+        self.load_agent_memory();
         cx.notify();
     }
 
@@ -314,7 +364,8 @@ impl EditorState {
                     self.push_agent(title, vec![], Some(change_set));
                 }
                 AgentEvent::Activity { entry } => self.activity.push(entry),
-                AgentEvent::Progress { .. } | AgentEvent::TurnDone => {}
+                AgentEvent::TurnDone => self.save_chat(),
+                AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => self.status = Some(message),
             }
         }
