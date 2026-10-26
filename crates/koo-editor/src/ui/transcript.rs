@@ -98,7 +98,7 @@ impl TranscriptPanel {
             editing: None,
             editor,
             font,
-            demo_captions: crate::ui::media_pool::demo::enabled()
+            demo_captions: crate::demo::enabled()
                 && std::env::var("KOOEDITOR_DEMO_VIEW").is_ok_and(|v| v == "captions"),
             _subscriptions,
             _poll,

@@ -5,7 +5,6 @@
 mod activity;
 mod change_set;
 mod composer;
-mod demo;
 mod quick;
 mod recipes;
 mod refs;
@@ -61,12 +60,6 @@ pub struct ChatPanel {
 impl ChatPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         init(cx);
-        if demo::enabled() {
-            state.update(cx, |s, cx| {
-                demo::seed(s);
-                cx.notify();
-            });
-        }
         quick::register(&state, cx);
         let count = state.read(cx).chat.len();
         let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));

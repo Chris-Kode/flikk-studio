@@ -43,6 +43,9 @@ pub struct KooEditor {
 impl KooEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(EditorState::new);
+        if crate::demo::enabled() {
+            state.update(cx, crate::demo::seed);
+        }
         let _observe = cx.observe(&state, |_, _, cx| cx.notify());
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),

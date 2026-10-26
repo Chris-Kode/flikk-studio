@@ -2,7 +2,6 @@
 //! ruler and lanes, select/move/trim/blade with snapping, markers, in/out,
 //! JKL, the pending change-set overlay and the silence tool.
 
-mod demo;
 pub(crate) mod glyph;
 mod layout;
 mod overlay;
@@ -205,9 +204,6 @@ impl TimelinePanel {
         let focus = cx.focus_handle();
         // Transport and editing keys work from the start.
         window.focus(&focus, cx);
-        if demo::enabled() {
-            state.update(cx, demo::seed);
-        }
         let _observe = cx.observe(&state, |_, _, cx| cx.notify());
         let silence_min = cx.new(|_| {
             SliderState::new()
