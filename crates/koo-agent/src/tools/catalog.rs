@@ -1,7 +1,10 @@
 //! One JSON schema per tool (PRD "Agent tool API"). Times are timeline
-//! seconds; strings like "1:02.500" are accepted too.
+//! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
+//! "f:3750" are accepted too.
 
+use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
+use koo_core::model::{BlendMode, ClipColor, Property};
 use serde_json::{Value, json};
 
 pub struct ToolSpec {
@@ -25,8 +28,9 @@ impl ToolSpec {
     }
 }
 
+/// Seconds, "M:SS.mmm", timecode "HH:MM:SS:FF" or frames "f:1234".
 fn time(desc: &str) -> Value {
-    json!({ "type": "number", "description": desc })
+    json!({ "type": ["number", "string"], "description": desc })
 }
 
 fn range(desc: &str) -> Value {
@@ -34,10 +38,73 @@ fn range(desc: &str) -> Value {
         "type": "object",
         "description": desc,
         "properties": {
-            "start": { "type": "number", "description": "Seconds" },
-            "end": { "type": "number", "description": "Seconds" }
+            "start": time("Seconds or a time string"),
+            "end": time("Seconds or a time string")
         },
         "required": ["start", "end"]
+    })
+}
+
+fn boolean(desc: &str) -> Value {
+    json!({ "type": "boolean", "description": desc })
+}
+
+fn numbers(n: usize, desc: &str) -> Value {
+    json!({ "type": "array", "items": { "type": "number" }, "minItems": n, "maxItems": n, "description": desc })
+}
+
+fn params(desc: &str) -> Value {
+    json!({ "type": "object", "description": desc, "additionalProperties": true })
+}
+
+fn curve(desc: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "description": desc
+    })
+}
+
+/// Grade fields shared by `set_primary` and `set_timeline_grade`.
+fn grade_props(mut props: Value) -> Value {
+    let rgb = |d: &str| json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": d });
+    let extra = json!({
+        "exposure": number("Stops, 0 = neutral"),
+        "contrast": number("1 = neutral"),
+        "saturation": number("1 = neutral"),
+        "gamma": number("1 = neutral"),
+        "temperature": number("0 = neutral, negative cooler"),
+        "tint": number("0 = neutral, negative greener"),
+        "lift": rgb("[r, g, b], 0 = neutral"),
+        "gamma_rgb": rgb("[r, g, b], 1 = neutral"),
+        "gain": rgb("[r, g, b], 1 = neutral"),
+        "offset": rgb("[r, g, b] added to every channel, 0 = neutral"),
+        "shadows": number("-1..1, 0 = neutral"),
+        "highlights": number("-1..1, 0 = neutral"),
+        "hue": number("Hue rotation in degrees, 0 = neutral"),
+        "master": curve("Master curve points [[in, out], …] in 0..1; [] resets"),
+        "red": curve("Red curve points"),
+        "green": curve("Green curve points"),
+        "blue": curve("Blue curve points"),
+        "reason": reason()
+    });
+    if let (Some(p), Some(e)) = (props.as_object_mut(), extra.as_object()) {
+        p.extend(e.clone());
+    }
+    props
+}
+
+fn audio_effect_item() -> Value {
+    let kinds: Vec<_> = AudioFxKind::ALL.iter().map(|k| k.name()).collect();
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "enum": kinds },
+            "params": params("Parameter name → number (list_fx kind=audio)"),
+            "enabled": { "type": "boolean" },
+            "id": string("Keep an existing effect's id")
+        },
+        "required": ["kind"]
     })
 }
 
@@ -83,6 +150,21 @@ pub fn catalog() -> Vec<ToolSpec> {
     use ToolCategory::*;
     let eases = &["linear", "ease_in_out", "ease_in", "ease_out", "hold"];
     let edges = &["start", "end"];
+    let properties: Vec<&str> = Property::ALL.iter().map(|p| p.name()).collect();
+    let blends: Vec<String> = BlendMode::ALL
+        .iter()
+        .map(|b| super::edit::blend_name(*b))
+        .collect();
+    let blends: Vec<&str> = blends.iter().map(String::as_str).collect();
+    let mut colors: Vec<String> = ClipColor::ALL
+        .iter()
+        .map(|c| c.label().to_lowercase())
+        .collect();
+    colors.push("none".into());
+    let colors: Vec<&str> = colors.iter().map(String::as_str).collect();
+    let audio_kinds: Vec<&str> = AudioFxKind::ALL.iter().map(|k| k.name()).collect();
+    let fx_kinds = &["effect", "transition", "generator"];
+    let aligns = &["center", "start_on_cut", "end_on_cut"];
     vec![
         // ---- read project
         spec(
@@ -106,7 +188,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_clip",
             Some(ReadProject),
-            "Everything about one clip: source, transform, keyframes, grade, audio.",
+            "Everything about one clip: source, name, color, speed, enabled, transform (crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
             object(json!({ "clip": string("Clip id") }), &["clip"]),
         ),
         spec(
@@ -114,6 +196,30 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(ReadProject),
             "Markers and protected ranges overlapping a range (default: whole timeline).",
             object(json!({ "range": range("Timeline range") }), &[]),
+        ),
+        spec(
+            "list_fx",
+            Some(ReadProject),
+            "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text.",
+            object(
+                json!({
+                    "kind": one_of(&["effect", "transition", "generator", "audio"], "Only this kind"),
+                    "language": one_of(&["glsl", "html"], "Only this language"),
+                    "category": string("Library group, e.g. Blur"),
+                    "text": string("Words in the name or description"),
+                    "params": boolean("Include full parameter specs (types, ranges, defaults); default names only")
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "get_fx",
+            Some(ReadProject),
+            "One FX program: its code, parameter specs and the clips that use it. Read a built-in before writing a similar one.",
+            object(
+                json!({ "fx": string("Built-in key, project id or `@fx` token") }),
+                &["fx"],
+            ),
         ),
         // ---- read analysis
         spec(
@@ -180,8 +286,32 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_scopes",
             Some(View),
-            "Waveform, vectorscope and histogram readings of a clip.",
-            object(json!({ "clip": string("Clip id") }), &["clip"]),
+            "Scope readings of one frame in numbers: luma and RGB levels (min, 5th percentile, mean, median, 95th, max), saturation, crushed and clipped fractions, color cast and a luma histogram. Source picture, before grades.",
+            object(
+                json!({
+                    "clip": string("Clip id (default: the topmost video clip at `t`)"),
+                    "t": time("Timeline time (default: the clip's middle, or the playhead)")
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "preview_fx",
+            Some(View),
+            "Look at an FX program over time: one collage of 8–12 timestamped frames. Generators render alone; effects run on a frame of `clip` (or a test card); transitions blend `from` → `to` clips (or two test cards) at several progress values. Use it after create_fx or update_fx, and before applying.",
+            object(
+                json!({
+                    "fx": string("Built-in key, project id or `@fx` token"),
+                    "clip": string("Effect: clip whose frame to process (its own instance's values are used). Generator: a generator clip to take values from. Transition: the outgoing clip"),
+                    "from": string("Transition: outgoing clip (its last frame)"),
+                    "to": string("Transition: incoming clip (its first frame)"),
+                    "at": time("Effect: timeline time of the input frame (default: the clip's middle)"),
+                    "params": params("Parameter overrides, name → value"),
+                    "duration": time("Program clock length (default: the clip's or transition's, else 3 s / 1 s)"),
+                    "frames": number("Frames in the collage, 2–16 (default 9)")
+                }),
+                &["fx"],
+            ),
         ),
         spec(
             "measure_loudness",
@@ -244,7 +374,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                 json!({
                     "clip": string("Clip id"),
                     "edge": one_of(edges, "Which edge"),
-                    "delta": number("Seconds; positive = later"),
+                    "delta": time("Seconds or a time string; positive = later"),
                     "ripple": { "type": "boolean", "description": "Shift later clips to keep them attached (default false)" },
                     "reason": reason()
                 }),
@@ -264,6 +394,62 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "reason": reason()
                 }),
                 &["note"],
+            ),
+        ),
+        spec(
+            "set_speed",
+            Some(EditTimeline),
+            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "speed": number("1 = normal, 0.01–100"),
+                    "ripple": boolean("Move later clips to follow the new length (default false: stop at the next clip)"),
+                    "reason": reason()
+                }),
+                &["clip", "speed"],
+            ),
+        ),
+        spec(
+            "set_clips_enabled",
+            Some(EditTimeline),
+            "Propose disabling (or enabling) clips: disabled clips stay on the timeline but are not seen or heard.",
+            object(
+                json!({ "clips": strings("Clip ids"), "enabled": boolean("false disables"), "reason": reason() }),
+                &["clips", "enabled"],
+            ),
+        ),
+        spec(
+            "rename_clip",
+            Some(EditTimeline),
+            "Propose a label for a clip on the timeline; omit `name` to restore the source name.",
+            object(
+                json!({ "clip": string("Clip id"), "name": string("New label"), "reason": reason() }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "set_clip_color",
+            Some(EditTimeline),
+            "Propose a color label for clips.",
+            object(
+                json!({ "clips": strings("Clip ids"), "color": one_of(&colors, "Color, or none"), "reason": reason() }),
+                &["clips", "color"],
+            ),
+        ),
+        spec(
+            "duplicate_clips",
+            Some(EditTimeline),
+            "Propose copies of clips (with their effects, keyframes and grade) at a time: the earliest lands at `at`, the others keep their offsets.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "at": time("Where the earliest copy starts (default: right after the last original)"),
+                    "track": string("Put every copy on this track (default: each on its own track)"),
+                    "mode": one_of(&["overwrite", "insert"], "overwrite replaces what is underneath (default); insert pushes later clips right"),
+                    "reason": reason()
+                }),
+                &["clips"],
             ),
         ),
         // ---- transform
@@ -290,13 +476,46 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "property": one_of(&["position_x", "position_y", "scale", "rotation", "opacity"], "Property"),
+                    "property": one_of(&properties, "Property; crop_* are fractions 0..1, volume is clip gain in dB"),
                     "at": time("Timeline seconds, inside the clip"),
                     "value": number("Value"),
                     "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
                     "reason": reason()
                 }),
                 &["clip", "property", "at", "value"],
+            ),
+        ),
+        spec(
+            "remove_keyframe",
+            Some(Transform),
+            "Propose removing a clip property keyframe at a timeline time.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "property": one_of(&properties, "Property"),
+                    "at": time("Timeline time of the keyframe"),
+                    "reason": reason()
+                }),
+                &["clip", "property", "at"],
+            ),
+        ),
+        spec(
+            "set_transform",
+            Some(Transform),
+            "Propose a clip's static transform. Only the values given change.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "position": numbers(2, "[x, y] offset, (0, 0) = centered"),
+                    "scale": number("1 = fit"),
+                    "rotation": number("Degrees"),
+                    "opacity": number("0..1"),
+                    "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
+                    "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
+                    "blend": one_of(&blends, "Composite mode over the tracks below"),
+                    "reason": reason()
+                }),
+                &["clip"],
             ),
         ),
         // ---- captions and titles
@@ -342,21 +561,9 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_primary",
             Some(Color),
-            "Propose primary correction on clips. Only the values given change.",
+            "Propose primary correction on clips. Only the values given change; curves given replace that channel's curve.",
             object(
-                json!({
-                    "clips": strings("Clip ids"),
-                    "exposure": number("Stops, 0 = neutral"),
-                    "contrast": number("1 = neutral"),
-                    "saturation": number("1 = neutral"),
-                    "gamma": number("1 = neutral"),
-                    "temperature": number("0 = neutral, negative cooler"),
-                    "tint": number("0 = neutral, negative greener"),
-                    "lift": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 0 = neutral" },
-                    "gamma_rgb": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
-                    "gain": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
-                    "reason": reason()
-                }),
+                grade_props(json!({ "clips": strings("Clip ids") })),
                 &["clips"],
             ),
         ),
@@ -364,17 +571,19 @@ pub fn catalog() -> Vec<ToolSpec> {
             "set_timeline_grade",
             Some(Color),
             "Propose a grade for the whole timeline, applied over every media clip's own grade. Only the values given change.",
+            object(grade_props(json!({})), &[]),
+        ),
+        spec(
+            "set_curves",
+            Some(Color),
+            "Propose custom curves on clips (or the timeline grade when `clips` is omitted). Points are [input, output] in 0..1; channels given replace that curve, [] resets it.",
             object(
                 json!({
-                    "exposure": number("Stops, 0 = neutral"),
-                    "contrast": number("1 = neutral"),
-                    "saturation": number("1 = neutral"),
-                    "gamma": number("1 = neutral"),
-                    "temperature": number("0 = neutral, negative cooler"),
-                    "tint": number("0 = neutral, negative greener"),
-                    "lift": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 0 = neutral" },
-                    "gamma_rgb": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
-                    "gain": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b], 1 = neutral" },
+                    "clips": strings("Clip ids (default: the timeline grade)"),
+                    "master": curve("Master curve"),
+                    "red": curve("Red curve"),
+                    "green": curve("Green curve"),
+                    "blue": curve("Blue curve"),
                     "reason": reason()
                 }),
                 &[],
@@ -401,9 +610,14 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "match_grade",
             Some(Color),
-            "Propose grades that match clips to a reference clip.",
+            "Measure a reference frame and each clip's middle frame, then propose grades (lift, gain, gamma per channel, saturation) that bring the clips' levels to the reference's.",
             object(
-                json!({ "reference": string("Clip id"), "clips": strings("Clip ids"), "reason": reason() }),
+                json!({
+                    "reference": string("Clip id"),
+                    "t": time("Timeline time of the reference frame (default: its middle)"),
+                    "clips": strings("Clip ids to match"),
+                    "reason": reason()
+                }),
                 &["reference", "clips"],
             ),
         ),
@@ -422,7 +636,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Audio),
             "Propose an audio fade at a clip's start or end.",
             object(
-                json!({ "clip": string("Clip id"), "edge": one_of(edges, "Which edge"), "duration": number("Seconds"), "reason": reason() }),
+                json!({ "clip": string("Clip id"), "edge": one_of(edges, "Which edge"), "duration": time("Seconds or a time string"), "reason": reason() }),
                 &["clip", "edge", "duration"],
             ),
         ),
@@ -471,6 +685,223 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({ "media": string("Media id"), "at": time("Timeline seconds"), "track": string("Audio track (default: last audio track)"), "reason": reason() }),
                 &["media", "at"],
+            ),
+        ),
+        spec(
+            "set_audio_effects",
+            Some(Audio),
+            "Propose a clip's (or a track's) whole audio effect chain, in order. Give `id` on an item to keep an existing effect.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "track": string("Track name or id (track inserts, after clip effects)"),
+                    "effects": { "type": "array", "items": audio_effect_item(), "description": "The chain, first applied first" },
+                    "reason": reason()
+                }),
+                &["effects"],
+            ),
+        ),
+        spec(
+            "add_audio_effect",
+            Some(Audio),
+            "Propose one audio effect on a clip or a track.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "track": string("Track name or id"),
+                    "kind": one_of(&audio_kinds, "Processor"),
+                    "params": params("Parameter name → number (list_fx kind=audio for names and ranges)"),
+                    "index": number("Position in the chain (default: last)"),
+                    "reason": reason()
+                }),
+                &["kind"],
+            ),
+        ),
+        spec(
+            "remove_audio_effect",
+            Some(Audio),
+            "Propose removing an audio effect from a clip or a track.",
+            object(
+                json!({ "clip": string("Clip id"), "track": string("Track name or id"), "effect": string("Audio effect id"), "reason": reason() }),
+                &["effect"],
+            ),
+        ),
+        // ---- effects, transitions, generators
+        spec(
+            "add_effect",
+            Some(Effects),
+            "Propose a video effect on clips' effect stacks (applied after the grade, before the transform). Returns each new effect's `@effect clip/effect` reference.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "fx": string("Effect: built-in key, project id or `@fx` token"),
+                    "params": params("Parameter name → value; omitted ones keep their defaults"),
+                    "index": number("Position in the stack (default: last)"),
+                    "enabled": boolean("Default true"),
+                    "reason": reason()
+                }),
+                &["clips", "fx"],
+            ),
+        ),
+        spec(
+            "set_effect",
+            Some(Effects),
+            "Propose new parameter values (merged over the current ones) or enabled state for an effect on a clip.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id or `@effect clip/effect`"),
+                    "params": params("Parameter name → value"),
+                    "reset_params": boolean("Start from the defaults instead of merging"),
+                    "enabled": boolean("Bypass with false"),
+                    "reason": reason()
+                }),
+                &["clip", "effect"],
+            ),
+        ),
+        spec(
+            "remove_effect",
+            Some(Effects),
+            "Propose removing an effect from a clip.",
+            object(
+                json!({ "clip": string("Clip id"), "effect": string("Effect id"), "reason": reason() }),
+                &["clip", "effect"],
+            ),
+        ),
+        spec(
+            "move_effect",
+            Some(Effects),
+            "Propose moving an effect within a clip's stack (0 = applied first).",
+            object(
+                json!({ "clip": string("Clip id"), "effect": string("Effect id"), "index": number("New position"), "reason": reason() }),
+                &["clip", "effect", "index"],
+            ),
+        ),
+        spec(
+            "set_effect_keyframe",
+            Some(Effects),
+            "Propose a keyframe on a parameter of a clip effect, of a generator clip (`effect`: generator) or of a transition (`effect`: in or out). Values ease into the next keyframe.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id, `generator`, `in`, `out`, or an `@effect`/`@transition` token"),
+                    "param": string("Parameter name"),
+                    "at": time("Timeline time"),
+                    "value": { "description": "Number, bool, [r, g, b, a], [x, y] or text, as the parameter takes" },
+                    "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
+                    "reason": reason()
+                }),
+                &["clip", "effect", "param", "at", "value"],
+            ),
+        ),
+        spec(
+            "remove_effect_keyframe",
+            Some(Effects),
+            "Propose removing an effect parameter keyframe at a timeline time.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id, `generator`, `in` or `out`"),
+                    "param": string("Parameter name"),
+                    "at": time("Timeline time of the keyframe"),
+                    "reason": reason()
+                }),
+                &["clip", "effect", "param", "at"],
+            ),
+        ),
+        spec(
+            "set_transition",
+            Some(Effects),
+            "Propose a transition at a clip's start (from the clip before it, or from nothing) or end. Without `fx`, changes the transition already there.",
+            object(
+                json!({
+                    "clip": string("Clip id or `@transition clip/in|out`"),
+                    "edge": one_of(edges, "start = transition in, end = transition out"),
+                    "fx": string("Transition: built-in key (e.g. cross_dissolve), project id or `@fx` token"),
+                    "duration": time("Length (default 0.5 s, or the current one)"),
+                    "align": one_of(aligns, "Where it sits at a cut (default center)"),
+                    "params": params("Parameter name → value"),
+                    "reason": reason()
+                }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "remove_transition",
+            Some(Effects),
+            "Propose removing a clip's transition in or out.",
+            object(
+                json!({ "clip": string("Clip id or `@transition` token"), "edge": one_of(edges, "start or end"), "reason": reason() }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "add_generator",
+            Some(Effects),
+            "Propose a generator clip (shader background or HTML motion graphic: title, lower third, callout) over a range. Without `track` it goes on the first title track (HTML) or overlay track (GLSL), created if missing.",
+            object(
+                json!({
+                    "fx": string("Generator: built-in key, project id or `@fx` token"),
+                    "range": range("Timeline range"),
+                    "track": string("Video, overlay or title track name or id"),
+                    "params": params("Parameter name → value"),
+                    "reason": reason()
+                }),
+                &["fx", "range"],
+            ),
+        ),
+        spec(
+            "set_generator",
+            Some(Effects),
+            "Propose new parameter values (merged) for a generator clip, or swap its program.",
+            object(
+                json!({
+                    "clip": string("Generator clip id"),
+                    "fx": string("Another generator to use instead"),
+                    "params": params("Parameter name → value"),
+                    "reset_params": boolean("Start from the defaults instead of merging"),
+                    "reason": reason()
+                }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "create_fx",
+            Some(Effects),
+            "Write a new effect, transition or generator for this project in GLSL (or HTML for generators). It is validated and compiled first; on errors nothing is saved and you get them line by line. On success it is proposed and usable by its id at once.",
+            object(
+                json!({
+                    "name": string("Name in the library"),
+                    "kind": one_of(fx_kinds, "What it is"),
+                    "language": one_of(&["glsl", "html"], "Default glsl; html for generators only"),
+                    "code": string("GLSL defining vec4 effect/transition/generate(vec2 uv), or an HTML document"),
+                    "params": {
+                        "type": "array",
+                        "description": "Parameters: {name, type: float|int|bool|color|point|text|choice|image, default, label?, min?, max?, options?}",
+                        "items": { "type": "object", "properties": { "name": { "type": "string" }, "type": { "type": "string" } }, "required": ["name", "type"] }
+                    },
+                    "category": string("Library group, e.g. Stylize"),
+                    "description": string("One line"),
+                    "reason": reason()
+                }),
+                &["name", "kind", "code"],
+            ),
+        ),
+        spec(
+            "update_fx",
+            Some(Effects),
+            "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow.",
+            object(
+                json!({
+                    "fx": string("Project program id or `@fx` token"),
+                    "name": string("New name"),
+                    "code": string("New code"),
+                    "params": { "type": "array", "description": "Replaces the parameter list (same shape as create_fx)", "items": { "type": "object" } },
+                    "category": string("Library group"),
+                    "description": string("One line"),
+                    "reason": reason()
+                }),
+                &["fx"],
             ),
         ),
         // ---- overlays

@@ -24,8 +24,11 @@ fn main() {
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
             app::bind_keys(cx);
             ui::chat::init(cx);
-            cx.on_app_quit(|_| async { persistence::shutdown() })
-                .detach();
+            cx.on_app_quit(|_| async {
+                agent_link::unpublish_bridge();
+                persistence::shutdown()
+            })
+            .detach();
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,

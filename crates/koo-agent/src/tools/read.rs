@@ -1,8 +1,12 @@
 //! Read-project tools. Results carry only the slice asked for.
 
+use super::edit::blend_name;
+use super::fx::{asset_json, fx_asset, instance_json, kind_name as fx_kind, param_spec_json};
 use super::{Done, Step, ToolCtx};
 use crate::args::{Args, ToolError, clip_id, kind_name, range_json, secs, short};
-use koo_core::model::{Clip, ClipContent, Grade, MarkerKind, Project, Track, Transform};
+use koo_core::audiofx::{AudioFx, AudioFxKind};
+use koo_core::fx::{self, FxKind, FxLanguage};
+use koo_core::model::{Clip, ClipContent, Curves, Grade, MarkerKind, Project, Track, Transform};
 use koo_core::{Time, TimeRange};
 use serde_json::{Value, json};
 
@@ -70,16 +74,71 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
     if clip.grade != Grade::default() {
         v["graded"] = json!(true);
     }
+    if let Some(name) = &clip.name {
+        v["label"] = json!(name);
+    }
+    if let Some(c) = clip.color {
+        v["color"] = json!(c.label().to_lowercase());
+    }
+    if !clip.enabled {
+        v["enabled"] = json!(false);
+    }
+    if clip.speed != 1.0 {
+        v["speed"] = json!(clip.speed);
+    }
+    if !clip.effects.is_empty() {
+        v["effects"] = clip
+            .effects
+            .iter()
+            .map(|e| json!(format!("{} {}", e.fx, e.id)))
+            .collect();
+    }
+    if let Some(t) = &clip.transition_in {
+        v["transition_in"] = json!(format!("{} {}", t.fx.fx, secs(t.duration)));
+    }
+    if let Some(t) = &clip.transition_out {
+        v["transition_out"] = json!(format!("{} {}", t.fx.fx, secs(t.duration)));
+    }
+    if !clip.audio.effects.is_empty() {
+        v["audio_effects"] = json!(clip.audio.effects.len());
+    }
     v
 }
 
+fn curves_json(c: &Curves) -> Value {
+    json!({ "master": c.master, "red": c.red, "green": c.green, "blue": c.blue })
+}
+
 fn grade_json(g: &Grade) -> Value {
-    json!({
+    let mut v = json!({
         "exposure": g.exposure, "contrast": g.contrast, "saturation": g.saturation,
         "gamma": g.gamma, "temperature": g.temperature, "tint": g.tint,
         "lift": g.lift, "gamma_rgb": g.gamma_rgb, "gain": g.gain,
+        "offset": g.offset, "shadows": g.shadows, "highlights": g.highlights, "hue": g.hue,
         "lut": g.lut.as_ref().map(|p| p.display().to_string()),
-    })
+    });
+    if !g.curves.is_identity() {
+        v["curves"] = curves_json(&g.curves);
+    }
+    v
+}
+
+pub fn audio_fx_json(list: &[AudioFx]) -> Value {
+    list.iter()
+        .map(|f| {
+            let values: serde_json::Map<String, Value> = f
+                .kind
+                .params()
+                .iter()
+                .map(|p| (p.name.clone(), json!(f.value(&p.name))))
+                .collect();
+            let mut v = json!({ "id": short(f.id), "kind": f.kind.name(), "params": values });
+            if !f.enabled {
+                v["enabled"] = json!(false);
+            }
+            v
+        })
+        .collect()
 }
 
 fn marker_json(m: &koo_core::model::Marker) -> Value {
@@ -114,6 +173,9 @@ fn track_json(t: &Track) -> Value {
     }
     if t.mix.volume_db != 0.0 {
         v["volume_db"] = json!(t.mix.volume_db);
+    }
+    if !t.mix.effects.is_empty() {
+        v["audio_effects"] = audio_fx_json(&t.mix.effects);
     }
     v
 }
@@ -282,12 +344,62 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     {
         v["audio_stream"] = json!(s);
     }
+    let tf = &clip.transform;
     v["transform"] = json!({
-        "position": clip.transform.position,
-        "scale": clip.transform.scale,
-        "rotation_deg": clip.transform.rotation_deg,
-        "opacity": clip.transform.opacity,
+        "position": tf.position,
+        "scale": tf.scale,
+        "rotation": tf.rotation_deg,
+        "opacity": tf.opacity,
+        "crop": tf.crop,
+        "flip": tf.flip,
+        "blend": blend_name(tf.blend),
     });
+    v["speed"] = json!(clip.speed);
+    v["enabled"] = json!(clip.enabled);
+    v["effects"] = clip
+        .effects
+        .iter()
+        .map(|e| instance_json(project, e, clip.start))
+        .collect();
+    let track_ref = project.timeline.track(track.id);
+    for (key, edge, t) in [
+        ("transition_in", "in", &clip.transition_in),
+        ("transition_out", "out", &clip.transition_out),
+    ] {
+        if let Some(t) = t {
+            // Where it actually plays, resolved against the neighbours.
+            let placed = track_ref.and_then(|tr| {
+                fx::transitions(tr)
+                    .into_iter()
+                    .find(|p| p.transition.fx.id == t.fx.id)
+                    .map(|p| range_json(p.range))
+            });
+            let origin = placed
+                .as_ref()
+                .and_then(|r| r["start"].as_f64())
+                .map(Time::from_secs_f64)
+                .unwrap_or(clip.start);
+            let mut j = instance_json(project, &t.fx, origin);
+            j["ref"] = json!(format!("@transition {}/{edge}", clip.id));
+            j["duration"] = secs(t.duration);
+            j["align"] = json!(t.align);
+            if let Some(r) = placed {
+                j["plays"] = r;
+            }
+            v[key] = j;
+        }
+    }
+    if let ClipContent::Generator { fx } = &clip.content {
+        let mut values = serde_json::Map::new();
+        if let Some(asset) = fx::asset(project, &fx.fx) {
+            for (k, val) in fx.values_at(asset, Time::ZERO) {
+                values.insert(k, json!(val));
+            }
+        }
+        let mut j = instance_json(project, fx, clip.start);
+        j["values_at_start"] = Value::Object(values);
+        v["generator"] = j;
+    }
     v["keyframes"] = clip
         .keyframes
         .iter()
@@ -305,6 +417,7 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         "gain_db": clip.audio.gain_db,
         "fade_in": secs(clip.audio.fade_in),
         "fade_out": secs(clip.audio.fade_out),
+        "effects": audio_fx_json(&clip.audio.effects),
     });
     Ok(Done::json(format!("clip {id}"), &v).into())
 }
@@ -321,4 +434,74 @@ pub fn get_markers(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .collect();
     let n = markers.len();
     Ok(Done::json(format!("{n} markers"), &json!({ "markers": markers })).into())
+}
+
+pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
+    let project = ctx.project();
+    let kind = args.opt_str("kind")?;
+    let language = args.opt_str("language")?;
+    let category = args.opt_str("category")?.map(str::to_lowercase);
+    let text = args.opt_str("text")?.map(str::to_lowercase);
+    let specs = args.opt_bool("params")?.unwrap_or(false);
+    let wanted_kind = match kind {
+        None | Some("audio") => None,
+        Some("effect") => Some(FxKind::Effect),
+        Some("transition") => Some(FxKind::Transition),
+        Some("generator") => Some(FxKind::Generator),
+        Some(k) => return Err(ToolError(format!("unknown kind `{k}`"))),
+    };
+    let wanted_language = match language {
+        None => None,
+        Some("glsl") => Some(FxLanguage::Glsl),
+        Some("html") => Some(FxLanguage::Html),
+        Some(l) => return Err(ToolError(format!("unknown language `{l}`"))),
+    };
+    let matches_text = |hay: &[&str]| {
+        text.as_ref()
+            .is_none_or(|t| hay.iter().any(|h| h.to_lowercase().contains(t.as_str())))
+    };
+    let programs: Vec<Value> = if kind == Some("audio") {
+        Vec::new()
+    } else {
+        fx::library(project)
+            .filter(|a| wanted_kind.is_none_or(|k| a.kind == k))
+            .filter(|a| wanted_language.is_none_or(|l| a.language == l))
+            .filter(|a| {
+                category
+                    .as_ref()
+                    .is_none_or(|c| a.category.to_lowercase() == *c)
+            })
+            .filter(|a| matches_text(&[&a.name, &a.description, &a.category, &a.id.to_string()]))
+            .map(|a| asset_json(project, a, false, specs))
+            .collect()
+    };
+    let audio: Vec<Value> = if kind.is_none_or(|k| k == "audio") && language.is_none() {
+        AudioFxKind::ALL
+            .into_iter()
+            .filter(|k| matches_text(&[k.name(), k.label()]))
+            .map(|k| {
+                let params: Vec<Value> = if specs {
+                    k.params().iter().map(param_spec_json).collect()
+                } else {
+                    k.params().iter().map(|p| json!(p.name)).collect()
+                };
+                json!({ "kind": k.name(), "name": k.label(), "params": params })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let n = programs.len() + audio.len();
+    let mut out = json!({ "programs": programs });
+    if !audio.is_empty() {
+        out["audio_effects"] = json!(audio);
+    }
+    Ok(Done::json(format!("{n} effects"), &out).into())
+}
+
+pub fn get_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
+    let project = ctx.project();
+    let asset = fx_asset(project, args.str("fx")?, None)?;
+    let v = asset_json(project, asset, true, true);
+    Ok(Done::json(format!("{} {}", fx_kind(asset.kind), asset.id), &v).into())
 }

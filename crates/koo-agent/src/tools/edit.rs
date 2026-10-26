@@ -4,9 +4,14 @@ use super::analysis::timeline_words;
 use super::view::audio_segments;
 use super::{Done, Job, JobDone, Step, ToolCtx, propose};
 use crate::args::*;
-use koo_core::command::{Command, Edge, InsertMode};
+use koo_core::audiofx::{AudioFx, AudioFxKind};
+use koo_core::command::{Command, Edge, InsertMode, PlacedClip};
+use koo_core::fx::ParamKind;
 use koo_core::memory::Presets;
-use koo_core::model::{ClipContent, Ducking, Ease, Grade, MarkerKind, Property, TrackKind};
+use koo_core::model::{
+    BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Grade, MarkerKind, Property,
+    TrackKind, Transform,
+};
 use koo_core::{Time, TimeRange, TrackId};
 use serde_json::Value;
 
@@ -38,7 +43,7 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "trim" => vec![Command::Trim {
             clip: clip_id(ctx.project(), args.str("clip")?)?,
             edge: edge(args)?,
-            delta: Time::from_secs_f64(args.f64("delta")?),
+            delta: args.duration("delta")?,
             ripple: args.opt_bool("ripple")?.unwrap_or(false),
         }],
         "add_marker" => {
@@ -84,14 +89,7 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "set_keyframe" => {
             let p = ctx.project();
             let clip = clip_id(p, args.str("clip")?)?;
-            let property = match args.str("property")? {
-                "position_x" => Property::PositionX,
-                "position_y" => Property::PositionY,
-                "scale" => Property::Scale,
-                "rotation" => Property::Rotation,
-                "opacity" => Property::Opacity,
-                other => return Err(ToolError(format!("unknown property `{other}`"))),
-            };
+            let property = property(args)?;
             vec![Command::SetKeyframe {
                 clip,
                 property,
@@ -100,6 +98,76 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 value: args.f64("value")? as f32,
                 ease: ease(args)?.unwrap_or_default(),
             }]
+        }
+
+        "remove_keyframe" => {
+            let p = ctx.project();
+            vec![Command::RemoveKeyframe {
+                clip: clip_id(p, args.str("clip")?)?,
+                property: property(args)?,
+                at: args.time("at")?,
+            }]
+        }
+        "set_transform" => {
+            let p = ctx.project();
+            let clip = clip_id(p, args.str("clip")?)?;
+            let current = p
+                .timeline
+                .clip(clip)
+                .map(|(_, c)| c.transform.clone())
+                .unwrap_or_default();
+            vec![Command::SetTransform {
+                clip,
+                transform: merge_transform(current, args)?,
+            }]
+        }
+
+        "set_speed" => {
+            let speed = args.f64("speed")?;
+            if !(0.01..=100.0).contains(&speed) {
+                return Err(ToolError("`speed` is 0.01..100 (1 = normal)".into()));
+            }
+            vec![Command::SetSpeed {
+                clip: clip_id(ctx.project(), args.str("clip")?)?,
+                speed,
+                ripple: args.opt_bool("ripple")?.unwrap_or(false),
+            }]
+        }
+        "set_clips_enabled" => vec![Command::SetClipsEnabled {
+            clips: some_clips(ctx, args)?,
+            enabled: args
+                .opt_bool("enabled")?
+                .ok_or_else(|| ToolError("`enabled` is required".into()))?,
+        }],
+        "rename_clip" => vec![Command::RenameClip {
+            clip: clip_id(ctx.project(), args.str("clip")?)?,
+            name: args
+                .opt_str("name")?
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned),
+        }],
+        "set_clip_color" => {
+            let color = match args.opt_str("color")?.map(str::trim) {
+                None | Some("none") | Some("") => None,
+                Some(name) => Some(
+                    ClipColor::ALL
+                        .into_iter()
+                        .find(|c| c.label().eq_ignore_ascii_case(name))
+                        .ok_or_else(|| ToolError(format!("unknown color `{name}`")))?,
+                ),
+            };
+            vec![Command::SetClipColor {
+                clips: some_clips(ctx, args)?,
+                color,
+            }]
+        }
+        "duplicate_clips" => duplicate_clips(ctx, args)?,
+
+        "set_curves" => set_curves(ctx, args)?,
+
+        "set_audio_effects" | "add_audio_effect" | "remove_audio_effect" => {
+            audio_effects(ctx, tool, args)?
         }
 
         "generate_captions" => return generate_captions(ctx, args, &reason),
@@ -122,7 +190,12 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "apply_title" => {
             let (mut commands, track) = track_or_new(ctx, args, TrackKind::Title, "T1")?;
             let Some(track) = track else {
-                return Ok(propose_then(ctx, commands, &reason, args, TrackKind::Title).into());
+                return Ok(
+                    propose_then(ctx, commands, &reason, TrackKind::Title, |_, t| {
+                        title(args, t)
+                    })
+                    .into(),
+                );
             };
             commands.push(title(args, track)?);
             commands
@@ -165,11 +238,6 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 to: clip_ids(p, &args.strings("to")?)?,
             }]
         }
-        "match_grade" => {
-            return Err(ToolError(
-                "Shot matching needs scopes, which are not available in this build yet. Use view_frame and set_primary instead.".into(),
-            ));
-        }
 
         "set_gain" => vec![Command::SetGain {
             clip: clip_id(ctx.project(), args.str("clip")?)?,
@@ -178,7 +246,7 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "add_fade" => vec![Command::AddFade {
             clip: clip_id(ctx.project(), args.str("clip")?)?,
             edge: edge(args)?,
-            duration: Time::from_secs_f64(args.f64("duration")?.max(0.0)),
+            duration: args.duration("duration")?.max(Time::ZERO),
         }],
         "set_ducking" => {
             let ducking = match args.opt_str("music_track")? {
@@ -235,7 +303,12 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "add_overlay" => {
             let (mut commands, track) = track_or_new(ctx, args, TrackKind::Overlay, "O1")?;
             let Some(track) = track else {
-                return Ok(propose_then(ctx, commands, &reason, args, TrackKind::Overlay).into());
+                return Ok(
+                    propose_then(ctx, commands, &reason, TrackKind::Overlay, |ctx, t| {
+                        overlay(ctx, args, t)
+                    })
+                    .into(),
+                );
             };
             commands.push(overlay(ctx, args, track)?);
             commands
@@ -246,15 +319,35 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
     Ok(propose(ctx, commands, &reason).into())
 }
 
-fn edge(args: &Args) -> ToolResultOf<Edge> {
+pub(super) fn edge(args: &Args) -> ToolResultOf<Edge> {
     match args.str("edge")? {
-        "start" => Ok(Edge::Start),
-        "end" => Ok(Edge::End),
+        "start" | "in" => Ok(Edge::Start),
+        "end" | "out" => Ok(Edge::End),
         e => fail(format!("`edge` is start or end, not `{e}`")),
     }
 }
 
-fn ease(args: &Args) -> ToolResultOf<Option<Ease>> {
+fn property(args: &Args) -> ToolResultOf<Property> {
+    let name = args.str("property")?;
+    Property::from_name(name).ok_or_else(|| {
+        let names: Vec<_> = Property::ALL.iter().map(|p| p.name()).collect();
+        ToolError(format!(
+            "unknown property `{name}`; one of {}",
+            names.join(", ")
+        ))
+    })
+}
+
+/// `clips`, required and non-empty.
+fn some_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<koo_core::ClipId>> {
+    let clips = clip_ids(ctx.project(), &args.strings("clips")?)?;
+    if clips.is_empty() {
+        return fail("`clips` is empty");
+    }
+    Ok(clips)
+}
+
+pub(super) fn ease(args: &Args) -> ToolResultOf<Option<Ease>> {
     Ok(match args.opt_str("ease")? {
         None => None,
         Some("linear") => Some(Ease::Linear),
@@ -312,7 +405,7 @@ fn insert_clip(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
 /// The given track, the first of `kind`, or (when there is none) an
 /// `AddTrack` command and `None`: the caller proposes it first and looks
 /// the new track up in the draft.
-fn track_or_new(
+pub(super) fn track_or_new(
     ctx: &ToolCtx,
     args: &Args,
     kind: TrackKind,
@@ -335,13 +428,13 @@ fn track_or_new(
     ))
 }
 
-/// Propose the new track, then the title or overlay on it.
-fn propose_then(
+/// Propose the new track, then what `make` puts on it.
+pub(super) fn propose_then(
     ctx: &mut ToolCtx,
     add_track: Vec<Command>,
     reason: &str,
-    args: &Args,
     kind: TrackKind,
+    make: impl FnOnce(&ToolCtx, TrackId) -> ToolResultOf<Command>,
 ) -> Done {
     let first = propose(ctx, add_track, reason);
     if first.result.is_error {
@@ -350,11 +443,7 @@ fn propose_then(
     let Some(track) = first_track(ctx.project(), kind).map(|t| t.id) else {
         return Done::error("could not create the track");
     };
-    let command = match kind {
-        TrackKind::Title => title(args, track),
-        _ => overlay(ctx, args, track),
-    };
-    match command {
+    match make(ctx, track) {
         Ok(c) => {
             let mut done = propose(ctx, vec![c], reason);
             done.summary = format!("new {} track + {}", kind_name(kind), done.summary);
@@ -392,16 +481,288 @@ fn overlay(ctx: &ToolCtx, args: &Args, track: TrackId) -> ToolResultOf<Command> 
     })
 }
 
-fn rgb(args: &Args, key: &str, current: [f32; 3]) -> ToolResultOf<[f32; 3]> {
-    match args.0.get(key) {
-        None | Some(Value::Null) => Ok(current),
-        Some(Value::Array(v)) if v.len() == 3 && v.iter().all(Value::is_number) => Ok([
-            v[0].as_f64().unwrap_or_default() as f32,
-            v[1].as_f64().unwrap_or_default() as f32,
-            v[2].as_f64().unwrap_or_default() as f32,
-        ]),
-        Some(_) => fail(format!("`{key}` is [r, g, b]")),
+fn numbers<const N: usize>(
+    args: &Args,
+    key: &str,
+    current: [f32; N],
+    shape: &str,
+) -> ToolResultOf<[f32; N]> {
+    match args.value(key) {
+        None => Ok(current),
+        Some(Value::Array(v)) if v.len() == N && v.iter().all(Value::is_number) => {
+            let mut out = [0.0; N];
+            for (o, x) in out.iter_mut().zip(v) {
+                *o = x.as_f64().unwrap_or_default() as f32;
+            }
+            Ok(out)
+        }
+        Some(_) => fail(format!("`{key}` is {shape}")),
     }
+}
+
+fn rgb(args: &Args, key: &str, current: [f32; 3]) -> ToolResultOf<[f32; 3]> {
+    numbers(args, key, current, "[r, g, b]")
+}
+
+fn merge_transform(mut t: Transform, args: &Args) -> ToolResultOf<Transform> {
+    t.position = numbers(args, "position", t.position, "[x, y]")?;
+    if let Some(v) = args.opt_f64("scale")? {
+        t.scale = v as f32;
+    }
+    if let Some(v) = args.opt_f64("rotation")? {
+        t.rotation_deg = v as f32;
+    }
+    if let Some(v) = args.opt_f64("opacity")? {
+        t.opacity = v.clamp(0.0, 1.0) as f32;
+    }
+    t.crop = numbers(
+        args,
+        "crop",
+        t.crop,
+        "[left, top, right, bottom], each 0..1",
+    )?
+    .map(|c| c.clamp(0.0, 1.0));
+    match args.value("flip") {
+        None => {}
+        Some(Value::Array(v)) if v.len() == 2 && v.iter().all(Value::is_boolean) => {
+            t.flip = [v[0].as_bool() == Some(true), v[1].as_bool() == Some(true)];
+        }
+        Some(_) => return fail("`flip` is [horizontal, vertical] booleans"),
+    }
+    if let Some(name) = args.opt_str("blend")? {
+        t.blend = BlendMode::ALL
+            .into_iter()
+            .find(|b| blend_name(*b) == name)
+            .ok_or_else(|| ToolError(format!("unknown blend mode `{name}`")))?;
+    }
+    Ok(t)
+}
+
+pub(super) fn blend_name(b: BlendMode) -> String {
+    serde_json::to_value(b)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Copies of clips at a new time (the earliest lands at `at`, the others
+/// keep their offsets), on their own tracks or one target track.
+fn duplicate_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
+    let p = ctx.project();
+    let ids = some_clips(ctx, args)?;
+    let target = args.opt_str("track")?.map(|t| track_id(p, t)).transpose()?;
+    let found: Vec<_> = ids
+        .iter()
+        .filter_map(|id| p.timeline.clip(*id))
+        .map(|(t, c)| (t.id, c.clone()))
+        .collect();
+    let earliest = found.iter().map(|(_, c)| c.start).min().unwrap_or_default();
+    let at = match args.opt_time("at")? {
+        Some(t) => t,
+        // Right after the last of them.
+        None => found.iter().map(|(_, c)| c.end()).max().unwrap_or_default(),
+    };
+    let mode = match args.opt_str("mode")? {
+        None | Some("overwrite") => InsertMode::Overwrite,
+        Some("insert") => InsertMode::Insert,
+        Some(m) => return fail(format!("unknown mode `{m}`")),
+    };
+    let clips = found
+        .into_iter()
+        .map(|(track, mut clip)| {
+            clip.start = at + (clip.start - earliest);
+            PlacedClip {
+                track: target.unwrap_or(track),
+                clip,
+            }
+        })
+        .collect();
+    Ok(vec![Command::PlaceClips { clips, mode }])
+}
+
+/// `[[x, y], …]` control points in 0..1, sorted by input.
+fn curve(args: &Args, key: &str, current: &[[f32; 2]]) -> ToolResultOf<Vec<[f32; 2]>> {
+    let Some(v) = args.value(key) else {
+        return Ok(current.to_vec());
+    };
+    let shape = || {
+        ToolError(format!(
+            "`{key}` is a list of [input, output] points in 0..1"
+        ))
+    };
+    let mut points = v
+        .as_array()
+        .ok_or_else(shape)?
+        .iter()
+        .map(|p| match p.as_array().map(Vec::as_slice) {
+            Some([x, y]) => Some([
+                x.as_f64()?.clamp(0.0, 1.0) as f32,
+                y.as_f64()?.clamp(0.0, 1.0) as f32,
+            ]),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(shape)?;
+    points.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    Ok(points)
+}
+
+fn merge_curves(mut c: Curves, args: &Args) -> ToolResultOf<Curves> {
+    c.master = curve(args, "master", &c.master)?;
+    c.red = curve(args, "red", &c.red)?;
+    c.green = curve(args, "green", &c.green)?;
+    c.blue = curve(args, "blue", &c.blue)?;
+    Ok(c)
+}
+
+fn set_curves(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
+    let p = ctx.project();
+    let clips = clip_ids(p, &args.strings("clips")?)?;
+    if clips.is_empty() {
+        let mut grade = p.timeline.grade.clone();
+        grade.curves = merge_curves(grade.curves, args)?;
+        return Ok(vec![Command::SetTimelineGrade { grade }]);
+    }
+    clips
+        .into_iter()
+        .map(|id| {
+            let mut grade = p
+                .timeline
+                .clip(id)
+                .map(|(_, c)| c.grade.clone())
+                .unwrap_or_default();
+            grade.curves = merge_curves(grade.curves, args)?;
+            Ok(Command::SetGrade {
+                clips: vec![id],
+                grade,
+            })
+        })
+        .collect()
+}
+
+/// `{kind, params, enabled, id?}` → an audio effect; `id` keeps an existing
+/// one's identity.
+fn audio_fx(v: &Value, current: &[AudioFx]) -> ToolResultOf<AudioFx> {
+    let bad = || ToolError("an audio effect is {kind, params?, enabled?, id?}".into());
+    let obj = v.as_object().ok_or_else(bad)?;
+    let kind_name = obj.get("kind").and_then(Value::as_str).ok_or_else(bad)?;
+    let kind = AudioFxKind::from_name(kind_name)
+        .ok_or_else(|| ToolError(format!("unknown audio effect `{kind_name}`")))?;
+    let existing = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| find_audio_fx(current, id));
+    let mut fx = existing.cloned().unwrap_or_else(|| AudioFx::new(kind));
+    fx.kind = kind;
+    if let Some(e) = obj.get("enabled").and_then(Value::as_bool) {
+        fx.enabled = e;
+    }
+    if let Some(params) = obj.get("params") {
+        let params = params
+            .as_object()
+            .ok_or_else(|| ToolError("`params` is {name: number}".into()))?;
+        let specs = kind.params();
+        for (name, value) in params {
+            let Some(spec) = specs.iter().find(|s| &s.name == name) else {
+                let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
+                return fail(format!(
+                    "{kind_name} has no parameter `{name}`; it has {}",
+                    names.join(", ")
+                ));
+            };
+            let v = value
+                .as_f64()
+                .ok_or_else(|| ToolError(format!("`{name}` must be a number")))?;
+            let v = match spec.kind {
+                ParamKind::Float { min, max } => v.clamp(min, max),
+                _ => v,
+            };
+            fx.params.insert(name.clone(), v);
+        }
+    }
+    Ok(fx)
+}
+
+fn find_audio_fx<'a>(list: &'a [AudioFx], text: &str) -> Option<&'a AudioFx> {
+    let text = strip_token(text);
+    let text = text.rsplit('/').next().unwrap_or(text).to_ascii_lowercase();
+    list.iter()
+        .find(|f| text.len() >= 4 && f.id.0.simple().to_string().starts_with(&text))
+}
+
+/// Clip audio effects (`SetAudioEffects`) or a track's inserts
+/// (`SetTrackMix`), replaced, added to or removed from.
+fn audio_effects(ctx: &ToolCtx, tool: &str, args: &Args) -> ToolResultOf<Vec<Command>> {
+    let p = ctx.project();
+    enum Target {
+        Clip(koo_core::ClipId),
+        Track(TrackId),
+    }
+    let (target, current) = match (args.opt_str("clip")?, args.opt_str("track")?) {
+        (Some(c), None) => {
+            let id = clip_id(p, c)?;
+            let (_, clip) = p
+                .timeline
+                .clip(id)
+                .ok_or_else(|| ToolError("clip not found".into()))?;
+            (Target::Clip(id), clip.audio.effects.clone())
+        }
+        (None, Some(t)) => {
+            let id = track_id(p, t)?;
+            let track = p
+                .timeline
+                .track(id)
+                .ok_or_else(|| ToolError("track not found".into()))?;
+            (Target::Track(id), track.mix.effects.clone())
+        }
+        _ => return fail("give `clip` or `track`"),
+    };
+    let effects = match tool {
+        "set_audio_effects" => {
+            let list = args
+                .value("effects")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ToolError("`effects` is a list".into()))?;
+            list.iter()
+                .map(|v| audio_fx(v, &current))
+                .collect::<ToolResultOf<Vec<_>>>()?
+        }
+        "add_audio_effect" => {
+            let mut spec = serde_json::Map::new();
+            spec.insert("kind".into(), Value::String(args.str("kind")?.to_owned()));
+            if let Some(params) = args.value("params") {
+                spec.insert("params".into(), params.clone());
+            }
+            let fx = audio_fx(&Value::Object(spec), &[])?;
+            let mut list = current;
+            let at = args
+                .opt_f64("index")?
+                .map(|i| i.max(0.0) as usize)
+                .unwrap_or(list.len())
+                .min(list.len());
+            list.insert(at, fx);
+            list
+        }
+        _ => {
+            let effect = args.str("effect")?;
+            let id = find_audio_fx(&current, effect)
+                .map(|f| f.id)
+                .ok_or_else(|| ToolError(format!("no audio effect `{effect}` there")))?;
+            current.into_iter().filter(|f| f.id != id).collect()
+        }
+    };
+    Ok(vec![match target {
+        Target::Clip(clip) => Command::SetAudioEffects { clip, effects },
+        Target::Track(track) => {
+            let mut mix = p
+                .timeline
+                .track(track)
+                .map(|t| t.mix.clone())
+                .unwrap_or_default();
+            mix.effects = effects;
+            Command::SetTrackMix { track, mix }
+        }
+    }])
 }
 
 fn merge_grade(mut g: Grade, args: &Args) -> ToolResultOf<Grade> {
@@ -417,6 +778,11 @@ fn merge_grade(mut g: Grade, args: &Args) -> ToolResultOf<Grade> {
     g.lift = rgb(args, "lift", g.lift)?;
     g.gamma_rgb = rgb(args, "gamma_rgb", g.gamma_rgb)?;
     g.gain = rgb(args, "gain", g.gain)?;
+    g.offset = rgb(args, "offset", g.offset)?;
+    g.shadows = f("shadows", g.shadows)?;
+    g.highlights = f("highlights", g.highlights)?;
+    g.hue = f("hue", g.hue)?;
+    g.curves = merge_curves(g.curves, args)?;
     Ok(g)
 }
 

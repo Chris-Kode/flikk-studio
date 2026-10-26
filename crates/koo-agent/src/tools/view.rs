@@ -40,7 +40,7 @@ fn sample_at(project: &Project, t: Time) -> Option<SamplePoint> {
         })
 }
 
-fn image_content(path: &Path) -> Result<Content, ToolError> {
+pub(super) fn image_content(path: &Path) -> Result<Content, ToolError> {
     let bytes = std::fs::read(path).map_err(|e| ToolError(format!("reading the image: {e}")))?;
     Ok(Content::Image {
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -180,7 +180,7 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 }
 
 /// PNG under `paths::cache()/agent/frames`, kept for the activity log.
-fn save_png(frame: &Frame) -> Result<PathBuf, ToolError> {
+pub(super) fn save_png(frame: &Frame) -> Result<PathBuf, ToolError> {
     let dir = paths::cache().join("agent").join("frames");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
