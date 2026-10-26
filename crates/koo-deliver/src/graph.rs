@@ -6,6 +6,9 @@
 //! seek, `trim`/`setpts`), grades it, scales/rotates/fades it (keyframes as
 //! expressions over `t`) and places it on a transparent canvas. Concat keeps
 //! only the current segment's decoder busy, so long timelines stay cheap.
+//! Disabled clips are skipped. Ranges that use effects, generators,
+//! transitions, blend modes, crop, flip or speed are composited by
+//! `koo_core::compose` instead and piped in ([`GraphSpec::piped`]).
 //!
 //! Audio: each audible track is a `concat` of silence and clip spans (two
 //! lanes where crossfades overlap), mixed, then track volume, pan and track
@@ -46,6 +49,10 @@ pub struct GraphSpec {
     pub burn_captions: bool,
     pub caption_styles: Vec<CaptionStyle>,
     pub loudnorm: Option<Loudnorm>,
+    /// The picture arrives composited on input 0 (RGBA frames from
+    /// `koo_core::compose`, see [`crate::composed`]); the graph only burns
+    /// in captions and builds the audio.
+    pub piped: bool,
 }
 
 impl GraphSpec {
@@ -64,6 +71,7 @@ impl GraphSpec {
             burn_captions: settings.burn_captions,
             caption_styles: styles.to_vec(),
             loudnorm: None,
+            piped: false,
         }
     }
 }
@@ -237,9 +245,15 @@ impl Builder<'_> {
     fn video(&mut self, frames: i64, work_dir: &Path) -> Result<String> {
         let (w, h, r) = (self.spec.width, self.spec.height, self.rate());
         let mut cur = self.label("base");
-        self.chains.push(format!(
-            "color=c=black:s={w}x{h}:r={r},trim=end_frame={frames},setsar=1,format=yuv420p[{cur}]"
-        ));
+        if self.spec.piped {
+            self.chains.push(format!(
+                "[0:v]trim=end_frame={frames},setsar=1,format=yuv420p[{cur}]"
+            ));
+        } else {
+            self.chains.push(format!(
+                "color=c=black:s={w}x{h}:r={r},trim=end_frame={frames},setsar=1,format=yuv420p[{cur}]"
+            ));
+        }
         let tracks: Vec<&Track> = self
             .project
             .timeline
@@ -247,6 +261,7 @@ impl Builder<'_> {
             .iter()
             .rev()
             .filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay) && !t.mix.mute)
+            .filter(|_| !self.spec.piped)
             .collect();
         for track in tracks {
             if let Some(stream) = self.video_track(track)? {
@@ -288,7 +303,7 @@ impl Builder<'_> {
     fn video_track(&mut self, track: &Track) -> Result<Option<String>> {
         let mut segments = Vec::new();
         let mut cursor = 0i64;
-        for clip in &track.clips {
+        for clip in track.clips.iter().filter(|c| c.enabled) {
             let Some(visible) = clip.range().intersect(&self.spec.range) else {
                 continue;
             };

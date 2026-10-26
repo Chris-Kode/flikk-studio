@@ -1,12 +1,13 @@
 //! Program monitor: `EditorState::display_project()` at the playhead, so a
-//! previewed change set shows its draft. Paused frames come from
-//! `MediaService::frame` off-thread (latest request wins); playback streams
-//! frames and mixes audio in background threads. Like the render, every
-//! video and overlay layer is composited bottom-up with its grade and
-//! transform, and captions and titles are drawn in their export styles.
+//! previewed change set shows its draft. The picture is the program frame
+//! from `koo_core::compose`, the same compositor the render and the agent
+//! use (effects, transitions, generators, blend modes, grades, transforms):
+//! paused frames are composed off-thread from single decodes (one at a
+//! time, the latest request wins), playback composes from streams and
+//! mixes audio in background threads. Captions and titles are drawn on top
+//! in their export styles.
 
 mod audio;
-mod grade;
 mod player;
 
 use super::timeline::glyph::{Glyph, glyph};
@@ -19,11 +20,14 @@ use audio::AudioOut;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+use koo_core::compose::{self, Stills};
 use koo_core::memory::{CaptionPosition, CaptionStyle};
 use koo_core::model::{ClipContent, Project, TrackKind};
-use koo_core::{ChangeSetId, ClipId, Time};
+use koo_core::query::topmost_video_clip;
+use koo_core::services::Services;
+use koo_core::{ChangeSetId, Time};
 use koo_deliver::captions;
-use player::{Look, Picture, Player, layers_at};
+use player::Player;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -44,9 +48,20 @@ struct PlayKey {
     width: u32,
 }
 
-/// A paused frame request: width, and per layer its clip, source frame
-/// index and look.
-type Request = (u32, Vec<(ClipId, i64, Look)>);
+/// A paused frame: what it shows and the sequence frame index.
+#[derive(Clone, Copy, PartialEq)]
+struct Request {
+    key: PlayKey,
+    frame: i64,
+}
+
+/// A paused frame to compose off the UI thread.
+struct Job {
+    project: Arc<Project>,
+    services: Services,
+    t: Time,
+    width: u32,
+}
 
 struct Playback {
     key: PlayKey,
@@ -60,11 +75,16 @@ struct Playback {
 pub struct ViewerPanel {
     state: Entity<EditorState>,
     focus: FocusHandle,
-    /// Layers on screen, bottom-up.
-    pictures: Vec<Picture>,
+    /// The program picture on screen.
+    picture: Option<Arc<RenderImage>>,
     /// Paused frame last asked for.
     requested: Option<Request>,
-    generation: u64,
+    /// The project paused frames are composed from, by key.
+    snapshot: Option<(PlayKey, Arc<Project>)>,
+    /// A paused frame is being composed.
+    composing: bool,
+    /// The newest paused frame asked for while composing.
+    pending: Option<Job>,
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
     playback: Option<Playback>,
@@ -79,9 +99,11 @@ impl ViewerPanel {
         Self {
             state,
             focus: cx.focus_handle(),
-            pictures: Vec::new(),
+            picture: None,
             requested: None,
-            generation: 0,
+            snapshot: None,
+            composing: false,
+            pending: None,
             retired: Vec::new(),
             playback: None,
             frame_width: Rc::new(Cell::new(640)),
@@ -89,28 +111,16 @@ impl ViewerPanel {
         }
     }
 
-    fn show(&mut self, pictures: Vec<Picture>) {
-        for old in std::mem::replace(&mut self.pictures, pictures) {
-            if !self
-                .pictures
-                .iter()
-                .any(|p| Arc::ptr_eq(&p.image, &old.image))
-            {
-                self.retired.push(old.image);
-            }
+    fn show(&mut self, picture: Option<Arc<RenderImage>>) {
+        if let Some(old) = std::mem::replace(&mut self.picture, picture) {
+            self.retired.push(old);
         }
     }
 
-    /// Start, follow or stop the playback threads, and pick up their frames.
-    fn sync_playback(&mut self, cx: &mut Context<Self>) {
+    /// What the picture depends on besides the playhead.
+    fn key(&self, cx: &App) -> PlayKey {
         let state = self.state.read(cx);
-        let media = state.services.media.clone();
-        let realtime = state.playing && state.play_speed == 1.0;
-        let (Some(media), true) = (media, realtime) else {
-            self.playback = None;
-            return;
-        };
-        let key = PlayKey {
+        PlayKey {
             version: state.bus.version(),
             preview: state.preview,
             draft: state
@@ -118,6 +128,18 @@ impl ViewerPanel {
                 .and_then(|id| state.bus.change_set(id))
                 .map_or(0, |set| set.items.len()),
             width: self.frame_width.get(),
+        }
+    }
+
+    /// Start, follow or stop the playback threads, and pick up their frames.
+    fn sync_playback(&mut self, cx: &mut Context<Self>) {
+        let key = self.key(cx);
+        let state = self.state.read(cx);
+        let media = state.services.media.clone();
+        let realtime = state.playing && state.play_speed == 1.0;
+        let (Some(media), true) = (media, realtime) else {
+            self.playback = None;
+            return;
         };
         let playhead = state.playhead;
         // A seek while playing restarts the audio at the new position; video
@@ -128,7 +150,8 @@ impl ViewerPanel {
             .is_some_and(|p| (playhead - p.last).0.abs() > Time::from_secs_f64(SEEK_JUMP).0);
         if self.playback.as_ref().is_none_or(|p| p.key != key) {
             let project = Arc::new(state.display_project().clone());
-            let player = Player::start(media.clone(), project.clone(), playhead, key.width);
+            let player =
+                Player::start(state.services.clone(), project.clone(), playhead, key.width);
             let audio = AudioOut::start(media, project.clone(), playhead);
             self.playback = Some(Playback {
                 key,
@@ -140,83 +163,75 @@ impl ViewerPanel {
         } else if let (Some(p), true) = (self.playback.as_mut(), jumped) {
             p.audio = AudioOut::start(media, p.project.clone(), playhead);
         }
-        let pictures = self.playback.as_mut().and_then(|p| {
+        let picture = self.playback.as_mut().and_then(|p| {
             p.last = playhead;
             p.player.set_target(playhead);
             p.player.take()
         });
-        if let Some(pictures) = pictures {
-            self.show(pictures);
+        if let Some(picture) = picture {
+            self.show(Some(picture));
             self.requested = None;
         }
     }
 
-    /// Paused (or shuttling): fetch every layer under the playhead.
+    /// Paused (or shuttling): compose the frame under the playhead.
     fn request_frame(&mut self, cx: &mut Context<Self>) {
+        let key = self.key(cx);
         let state = self.state.read(cx);
-        let Some(media) = state.services.media.clone() else {
-            self.show(Vec::new());
-            return;
-        };
-        let project = state.display_project();
         let t = state.playhead;
-        let seq_rate = project.timeline.settings.rate;
-        let width = self.frame_width.get();
-        let layers: Vec<_> = layers_at(project, t)
-            .into_iter()
-            .map(|l| {
-                (
-                    l.clip.id,
-                    l.item.into_owned(),
-                    l.source,
-                    Look::of(l.clip, t, project),
-                )
-            })
-            .collect();
-        let key = (
-            width,
-            layers
-                .iter()
-                .map(|(id, item, source, look)| {
-                    let rate = item
-                        .info
-                        .as_ref()
-                        .and_then(|i| i.video.as_ref())
-                        .map(|v| v.rate)
-                        .unwrap_or(seq_rate);
-                    (*id, source.to_frame(rate), look.clone())
-                })
-                .collect(),
-        );
-        if self.requested.as_ref() == Some(&key) {
+        let rate = state.display_project().timeline.settings.rate;
+        let request = Request {
+            key,
+            frame: t.to_frame(rate),
+        };
+        if self.requested == Some(request) {
             return;
         }
-        self.requested = Some(key);
-        self.generation += 1;
-        if layers.is_empty() {
-            self.show(Vec::new());
-            return;
+        self.requested = Some(request);
+        let project = match &self.snapshot {
+            Some((k, project)) if *k == key => project.clone(),
+            _ => {
+                let project = Arc::new(state.display_project().clone());
+                self.snapshot = Some((key, project.clone()));
+                project
+            }
+        };
+        let job = Job {
+            project,
+            services: state.services.clone(),
+            t: Time::from_frame(request.frame, rate),
+            width: key.width,
+        };
+        if self.composing {
+            self.pending = Some(job);
+        } else {
+            self.compose(job, cx);
         }
-        let generation = self.generation;
+    }
+
+    fn compose(&mut self, job: Job, cx: &mut Context<Self>) {
+        self.composing = true;
         cx.spawn(async move |this, cx| {
-            let pictures = cx
+            let picture = cx
                 .background_executor()
                 .spawn(async move {
-                    layers
-                        .iter()
-                        .filter_map(|(id, item, source, look)| {
-                            let frame = media.frame(item, *source, width).ok()?;
-                            player::picture(*id, &frame, look)
-                        })
-                        .collect()
+                    let size = compose::size_for_width(&job.project, job.width);
+                    let mut stills = Stills::new(job.services.media.clone(), job.width);
+                    let frame =
+                        compose::program(&job.project, job.t, size, &job.services, &mut stills);
+                    player::to_image(&frame)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                // Latest request wins: a newer one is on its way.
-                if this.generation == generation {
-                    this.show(pictures);
-                    cx.notify();
+                this.composing = false;
+                if this.playback.is_none() {
+                    this.show(picture);
                 }
+                // Latest request wins: compose the newest one asked for meanwhile.
+                if let Some(next) = this.pending.take() {
+                    this.compose(next, cx);
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -229,8 +244,9 @@ impl ViewerPanel {
         let t = state.playhead;
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let source = layers_at(project, t).into_iter().last().and_then(|l| {
-            let (at, item) = (l.source, l.item);
+        let source = topmost_video_clip(&project.timeline, t).and_then(|(_, clip)| {
+            let at = clip.to_source(t)?;
+            let item = project.media(clip.media()?)?;
             let rate = item
                 .info
                 .as_ref()
@@ -374,16 +390,7 @@ impl Render for ViewerPanel {
         let t = state.playhead;
         let settings = project.timeline.settings.clone();
         let aspect = settings.width.max(1) as f32 / settings.height.max(1) as f32;
-        // Position and scale are placed at paint time; grade, rotation and
-        // opacity are already in the pixels.
-        let layers: Vec<_> = self
-            .pictures
-            .iter()
-            .filter_map(|p| {
-                let (_, c) = project.timeline.clip(p.clip)?;
-                Some((p.clone(), c.transform_at(t - c.start)))
-            })
-            .collect();
+        let picture = self.picture.clone();
         let letters = lettering(project, &state.presets.caption_styles, t);
         let bg = cx.theme().background;
         let width_cell = self.frame_width.clone();
@@ -401,25 +408,9 @@ impl Render for ViewerPanel {
                 window.paint_quad(fill(bounds, bg));
                 window.paint_quad(fill(frame, black()));
                 window.with_content_mask(Some(ContentMask { bounds: frame }), |window| {
-                    for (p, tf) in layers {
-                        // Fit the source, grow by the rotation, then scale.
-                        let base = fit(frame, p.aspect, px(0.));
-                        let k = tf.scale.max(0.);
-                        let scaled = size(
-                            base.size.width * (p.grown.0 * k),
-                            base.size.height * (p.grown.1 * k),
-                        );
-                        let center = frame.center()
-                            + point(
-                                frame.size.width * tf.position[0],
-                                frame.size.height * tf.position[1],
-                            );
-                        let rect = Bounds::new(
-                            point(center.x - scaled.width / 2., center.y - scaled.height / 2.),
-                            scaled,
-                        );
+                    if let Some(image) = picture {
                         let _ =
-                            window.paint_image(rect, rect, Corners::default(), p.image, 0, false);
+                            window.paint_image(frame, frame, Corners::default(), image, 0, false);
                     }
                     for l in &letters {
                         paint_text(l, frame, window, cx);
@@ -471,7 +462,7 @@ impl Render for ViewerPanel {
 
 /// A decoded frame as a GPUI image, for other panels' thumbnails.
 pub(crate) fn frame_image(frame: &koo_core::services::Frame) -> Option<Arc<RenderImage>> {
-    player::to_image(frame, None)
+    player::to_image(frame)
 }
 
 /// The largest rect of `aspect` centered in `bounds`, inset by `pad`.

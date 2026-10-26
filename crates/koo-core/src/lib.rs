@@ -16,6 +16,7 @@ pub mod bus;
 pub mod captions;
 pub mod changeset;
 pub mod command;
+pub mod compose;
 pub mod edit;
 pub mod error;
 pub mod fx;

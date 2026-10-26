@@ -253,6 +253,7 @@ impl DeliverPanel {
             settings,
             output: output.clone(),
             caption_styles: self.caption_styles(cx),
+            services: self.state.read(cx).services.clone(),
         };
         match self.queue.enqueue(request) {
             Ok(_) => {
@@ -309,6 +310,7 @@ impl DeliverPanel {
         let project = self.project(cx);
         let playhead = self.state.read(cx).playhead;
         let styles = self.caption_styles(cx);
+        let services = self.state.read(cx).services.clone();
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut path))) = rx.await else {
@@ -326,7 +328,7 @@ impl DeliverPanel {
                         Export::Otio => koo_deliver::export_otio(&project, &path),
                         Export::Fcpxml => koo_deliver::export_fcpxml(&project, &path),
                         Export::Still => {
-                            koo_deliver::export_frame(&project, playhead, &styles, &path)
+                            koo_deliver::export_frame(&project, playhead, &styles, &services, &path)
                         }
                     }
                 })

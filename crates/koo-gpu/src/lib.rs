@@ -13,12 +13,14 @@
 //! their code, kind and parameter layout (compile errors too, so a broken
 //! shader is not recompiled every frame); Image parameters are cached by
 //! path and modification time; textures and buffers are pooled by size.
+//! Layer compositing for the program frame lives in [`composite`].
 
+mod composite;
 mod wrap;
 
 use anyhow::Context as _;
 use koo_core::fx::{FxAsset, FxKind, FxLanguage, ParamKind};
-use koo_core::services::{Frame, FxCall, FxService, ServiceError, ServiceResult};
+use koo_core::services::{CompositeLayer, Frame, FxCall, FxService, ServiceError, ServiceResult};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -54,6 +56,7 @@ pub struct GpuFx {
     blank: wgpu::TextureView,
     uniform_align: u64,
     max_size: u32,
+    compositor: composite::Compositor,
     state: Mutex<State>,
 }
 
@@ -119,6 +122,7 @@ impl GpuFx {
         let blank = upload(&device, &queue, 1, 1, &[0, 0, 0, 0])
             .create_view(&wgpu::TextureViewDescriptor::default());
         Ok(Self {
+            compositor: composite::Compositor::new(&device),
             uniform_align: limits.min_uniform_buffer_offset_alignment as u64,
             max_size: limits.max_texture_dimension_2d,
             device,
@@ -441,7 +445,6 @@ impl GpuFx {
         targets: &[&wgpu::Texture],
     ) -> ServiceResult<Frame> {
         let last = targets.last().expect("at least one pass");
-        let (width, height) = (last.width(), last.height());
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         // All uniform blocks in one buffer, one aligned slot per pass.
@@ -464,18 +467,6 @@ impl GpuFx {
             self.queue
                 .write_buffer(&uniforms, slot * i as u64, &p.uniforms);
         }
-
-        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let size = row as u64 * height as u64;
-        if state.readback.as_ref().is_none_or(|b| b.size() < size) {
-            state.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("koo-gpu readback"),
-                size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        let readback = state.readback.clone().expect("just created");
 
         let mut encoder = self
             .device
@@ -543,8 +534,33 @@ impl GpuFx {
             rpass.set_bind_group(0, &bind_group, &[]);
             rpass.draw(0..3, 0..1);
         }
+        self.read_back(state, encoder, last, scope)
+    }
+
+    /// Copy `texture` out after the commands in `encoder`, submit, check
+    /// `scope` for errors and wait for the pixels.
+    fn read_back(
+        &self,
+        state: &mut State,
+        mut encoder: wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        scope: wgpu::ErrorScopeGuard,
+    ) -> ServiceResult<Frame> {
+        let (width, height) = (texture.width(), texture.height());
+        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let size = row as u64 * height as u64;
+        if state.readback.as_ref().is_none_or(|b| b.size() < size) {
+            state.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("koo-gpu readback"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let readback = state.readback.clone().expect("just created");
+
         encoder.copy_texture_to_buffer(
-            last.as_image_copy(),
+            texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -777,5 +793,16 @@ impl FxService for GpuFx {
         let result = self.run(&mut state, std::slice::from_ref(&pass), &[&output]);
         Self::give_back(&mut state, [output]);
         result
+    }
+
+    /// One pass per layer on the GPU; matches the CPU reference.
+    fn composite(
+        &self,
+        width: u32,
+        height: u32,
+        background: [u8; 4],
+        layers: &[CompositeLayer<'_>],
+    ) -> ServiceResult<Frame> {
+        self.composite_layers(width, height, background, layers)
     }
 }

@@ -286,7 +286,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_scopes",
             Some(View),
-            "Scope readings of one frame in numbers: luma and RGB levels (min, 5th percentile, mean, median, 95th, max), saturation, crushed and clipped fractions, color cast and a luma histogram. Source picture, before grades.",
+            "Scope readings of one frame in numbers: luma and RGB levels (min, 5th percentile, mean, median, 95th, max), saturation, crushed and clipped fractions, color cast and a luma histogram. The clip's picture with its grades and effects, before its transform.",
             object(
                 json!({
                     "clip": string("Clip id (default: the topmost video clip at `t`)"),

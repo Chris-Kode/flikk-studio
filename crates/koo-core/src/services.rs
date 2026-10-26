@@ -4,7 +4,7 @@
 use crate::analysis::{Analysis, Loudness};
 use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MediaId};
-use crate::model::{Fingerprint, MediaInfo, MediaItem};
+use crate::model::{BlendMode, Fingerprint, MediaInfo, MediaItem};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -159,6 +159,62 @@ pub trait FxService: Send + Sync {
     fn transition(&self, from: &Frame, to: &Frame, call: &FxCall<'_>) -> ServiceResult<Frame>;
     /// Render a generator program at `width` × `height`.
     fn generate(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame>;
+    /// Draw `layers` bottom-up onto a `width` × `height` canvas filled with
+    /// `background` (straight RGBA8). The default is the CPU reference,
+    /// [`crate::compose::composite_cpu`]; engines must match it.
+    fn composite(
+        &self,
+        width: u32,
+        height: u32,
+        background: [u8; 4],
+        layers: &[CompositeLayer<'_>],
+    ) -> ServiceResult<Frame> {
+        Ok(crate::compose::composite_cpu(
+            width, height, background, layers,
+        ))
+    }
+}
+
+/// Where a picture lands on a canvas, in canvas pixels (y down).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// Centre of the picture.
+    pub center: [f32; 2],
+    /// Drawn size of the whole (uncropped) picture before rotation.
+    pub size: [f32; 2],
+    /// Clockwise, around the centre.
+    pub rotation_deg: f32,
+    /// Fractions of the picture cut away, [left, top, right, bottom], in
+    /// the picture's own (unflipped) coordinates.
+    pub crop: [f32; 4],
+    /// Mirror horizontally / vertically.
+    pub flip: [bool; 2],
+    pub opacity: f32,
+    pub blend: BlendMode,
+}
+
+impl Placement {
+    /// The picture stretched over a whole `width` × `height` canvas.
+    pub fn fill(width: u32, height: u32) -> Self {
+        Self {
+            center: [width as f32 / 2.0, height as f32 / 2.0],
+            size: [width as f32, height as f32],
+            rotation_deg: 0.0,
+            crop: [0.0; 4],
+            flip: [false; 2],
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+        }
+    }
+}
+
+/// One picture for [`FxService::composite`]: sampled bilinearly with
+/// premultiplied alpha, transparent outside the picture and its crop, then
+/// blended per [`BlendMode`].
+#[derive(Clone, Copy, Debug)]
+pub struct CompositeLayer<'a> {
+    pub frame: &'a Frame,
+    pub placement: Placement,
 }
 
 /// HTML generators in a headless browser (`koo-html`).
@@ -179,4 +235,16 @@ pub struct Services {
     pub analysis: Option<Arc<dyn AnalysisService>>,
     pub fx: Option<Arc<dyn FxService>>,
     pub html: Option<Arc<dyn HtmlService>>,
+}
+
+impl std::fmt::Debug for Services {
+    /// Which engines are wired.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Services")
+            .field("media", &self.media.is_some())
+            .field("analysis", &self.analysis.is_some())
+            .field("fx", &self.fx.is_some())
+            .field("html", &self.html.is_some())
+            .finish()
+    }
 }

@@ -233,9 +233,16 @@ with the same precision as the UI.
   effects on clips and tracks (`audiofx.rs`); crop and volume keyframes;
   `PlaceClips` for paste/duplicate; scope readings and shot matching
   (`scopes.rs`).
-* **Compositor (next wave):** one program-frame compositor in core, used by
-  the viewer, the export and the agent's view tools, so effects,
-  transitions, generators and blend modes look the same everywhere.
+* **Compositor:** `koo_core::compose::program` draws the program at a
+  time (picture → clip and timeline grade → effect stack in sequence
+  pixels → transform with crop/flip → blend mode; transitions blend each
+  side's own canvas), with `FxService::composite` doing placement and
+  blending (wgpu in `koo-gpu`, CPU reference in core). The viewer (paused
+  and playing), frame export, renders that use FX (piped as raw RGBA into
+  the FFmpeg graph, which keeps captions and audio) and the agent's view
+  and scope tools all use it; ranges without FX still render through the
+  graph. Source pictures come through `compose::Pictures` (single decodes
+  or per-layer streams that honour speed).
 
 ### Streams
 

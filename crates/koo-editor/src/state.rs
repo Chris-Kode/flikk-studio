@@ -987,6 +987,7 @@ impl EditorState {
                 project: self.bus.project(),
                 caption_styles: &self.presets.caption_styles,
                 queue: &self.render_queue,
+                services: &self.services,
                 settings: &mut settings,
             },
         );

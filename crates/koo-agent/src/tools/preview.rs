@@ -3,8 +3,11 @@
 //! reads a frame's levels and `match_grade` proposes grades from them. All
 //! decoding and rendering runs off-thread on owned copies.
 //!
-//! Frames are the source picture: no grade and no clip effects are applied
-//! until the compositor lands in core.
+//! A clip's picture comes from `koo_core::compose`: graded (clip, then
+//! timeline) and through its effect stack, before its transform, as the
+//! viewer and the render show it. An effect previewed on a clip gets the
+//! picture its stack feeds it; shot matching compares source pictures under
+//! their clip grades (`scopes::match_frames`).
 
 use super::fx::{fx_asset, kind_name, preview_values};
 use super::view::{image_content, save_png};
@@ -12,7 +15,9 @@ use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::*;
 use crate::bridge::{Content, ToolResult};
 use koo_core::command::Command;
+use koo_core::compose::{self, Stills};
 use koo_core::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage};
+use koo_core::grade;
 use koo_core::model::{Clip, ClipContent, Grade, MediaItem, Project};
 use koo_core::query::topmost_video_clip;
 use koo_core::scopes::{self, ScopeReadings, Stats};
@@ -23,7 +28,7 @@ use std::sync::Arc;
 
 const TILE_WIDTH: u32 = 384;
 const SCOPE_WIDTH: u32 = 960;
-const UNGRADED: &str = "Frames are the source picture, before grades and clip effects.";
+const LAYER: &str = "Frames are the clip's picture with its grade, the timeline grade and its effects, before its transform.";
 
 /// A picture to feed a program, resolved on the UI thread.
 #[derive(Clone)]
@@ -31,6 +36,14 @@ enum Source {
     Media {
         item: MediaItem,
         at: Time,
+    },
+    /// A clip's composited picture: graded, through the first `effects`
+    /// entries of its stack (all when `None`).
+    Layer {
+        project: Arc<Project>,
+        clip: ClipId,
+        at: Time,
+        effects: Option<usize>,
     },
     Generator {
         asset: FxAsset,
@@ -58,6 +71,24 @@ fn clip_source(project: &Project, clip: &Clip, t: Time) -> Option<Source> {
         }),
         _ => None,
     }
+}
+
+/// The composited picture of `clip` at timeline time `t` (clamped inside
+/// the clip), through its first `effects` effects (all when `None`).
+fn layer_source(project: &Project, clip: &Clip, t: Time, effects: Option<usize>) -> Option<Source> {
+    let t = t.clamp(clip.start, clip.end() - Time(1).min(clip.duration));
+    if matches!(
+        clip.content,
+        ClipContent::Title { .. } | ClipContent::Caption { .. }
+    ) {
+        return None;
+    }
+    Some(Source::Layer {
+        project: Arc::new(project.clone()),
+        clip: clip.id,
+        at: t,
+        effects,
+    })
 }
 
 fn render_source(
@@ -88,6 +119,17 @@ fn render_source(
                 canvas,
             };
             generate(services, &call, size)?
+        }
+        Source::Layer {
+            project,
+            clip,
+            at,
+            effects,
+        } => {
+            let (_, c) = project.timeline.clip(*clip).ok_or("the clip is gone")?;
+            let mut stills = Stills::new(services.media.clone(), size.0);
+            compose::clip_picture(project, c, *at, size, services, &mut stills, *effects)
+                .ok_or("the clip has no picture (missing media or engine)")?
         }
         Source::Card(which) => test_card(*which, size),
     };
@@ -169,7 +211,9 @@ pub fn preview_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     let at = args
                         .opt_time("at")?
                         .unwrap_or(c.start + Time(c.duration.0 / 2));
-                    Some(clip_source(p, c, at).ok_or_else(|| {
+                    // What the stack feeds this effect: the effects before it.
+                    let before = c.effects.iter().position(|e| e.fx == asset.id);
+                    Some(layer_source(p, c, at, before).ok_or_else(|| {
                         ToolError(format!("{} has no picture to preview on", c.id))
                     })?)
                 }
@@ -189,11 +233,11 @@ pub fn preview_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             let from = clip("from")?.or(main);
             let to = clip("to")?;
             let from_src = match from {
-                Some(c) => clip_source(p, c, c.end()),
+                Some(c) => layer_source(p, c, c.end(), None),
                 None => None,
             };
             let to_src = match to {
-                Some(c) => clip_source(p, c, c.start),
+                Some(c) => layer_source(p, c, c.start, None),
                 None => None,
             };
             let base = main.and_then(|c| {
@@ -398,7 +442,7 @@ fn scope_target<'a>(
 pub fn get_scopes(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let p = ctx.project();
     let (clip, t) = scope_target(ctx, args, "clip")?;
-    let source = clip_source(p, clip, t)
+    let source = layer_source(p, clip, t, None)
         .ok_or_else(|| ToolError(format!("{} has no picture to measure", clip.id)))?;
     let id = clip.id;
     let services = ctx.services.clone();
@@ -414,7 +458,7 @@ pub fn get_scopes(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 v["clip"] = json!(id.to_string());
                 v["t"] = secs(t);
                 v["note"] = json!(format!(
-                    "{UNGRADED} Values are 0..1; cast is the vectorscope's centre (Cb, Cr), away from 0 means a color cast."
+                    "{LAYER} Values are 0..1; cast is the vectorscope's centre (Cb, Cr), away from 0 means a color cast."
                 ));
                 JobDone::Done(Done::json(format!("scopes {id} at {t}"), &v))
             }
@@ -429,6 +473,7 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let (reference, t) = scope_target(ctx, args, "reference")?;
     let reference_src = clip_source(p, reference, t)
         .ok_or_else(|| ToolError(format!("{} has no picture", reference.id)))?;
+    let reference_grade = reference.grade.clone();
     let targets: Vec<(ClipId, Source, Grade)> = clip_ids(p, &args.strings("clips")?)?
         .into_iter()
         .map(|id| {
@@ -455,9 +500,8 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let canvas = (p.timeline.settings.width, p.timeline.settings.height);
     let size = (480, (480 * canvas.1 as u64 / canvas.0.max(1) as u64) as u32);
     let job: Job = Box::new(move || {
-        let measure =
-            |s: &Source| render_source(&services, s, canvas, size).map(|f| scopes::measure(&f));
-        let reference = match measure(&reference_src) {
+        let render = |s: &Source| render_source(&services, s, canvas, size);
+        let reference = match render(&reference_src) {
             Ok(r) => r,
             Err(e) => {
                 return JobDone::Done(Done::error(format!(
@@ -465,15 +509,18 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 )));
             }
         };
+        let median = |f: &Frame, g: &Grade| scopes::measure(&grade::graded(f, &[g])).luma.median;
+        let reference_median = median(&reference, &reference_grade);
         let mut commands = Vec::new();
         let mut excerpts = Vec::new();
         for (id, src, current) in &targets {
-            match measure(src) {
-                Ok(r) => {
-                    let grade = scopes::match_grade(&reference, &r, current);
+            match render(src) {
+                Ok(frame) => {
+                    let grade = scopes::match_frames(&reference, &reference_grade, &frame, current);
                     excerpts.push(format!(
                         "{id}: luma median {:.3} → reference {:.3}",
-                        r.luma.median, reference.luma.median
+                        median(&frame, current),
+                        reference_median
                     ));
                     commands.push(Command::SetGrade {
                         clips: vec![*id],
@@ -489,7 +536,9 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 excerpts.join("; ")
             )));
         }
-        excerpts.push(UNGRADED.into());
+        excerpts.push(
+            "Matched source pictures under their clip grades; the timeline grade and effects apply on top of both.".into(),
+        );
         JobDone::Propose {
             commands,
             reason,
@@ -501,7 +550,7 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 
 // ------------------------------------------------------------------ images
 
-fn columns(n: usize) -> usize {
+pub(super) fn columns(n: usize) -> usize {
     match n {
         0..=3 => n.max(1),
         4 => 2,
@@ -586,7 +635,7 @@ const BAND: u32 = 20;
 
 /// Tiles in a grid on a dark background, alpha over a checkerboard, each
 /// with its label in a band below.
-fn collage(tiles: &[(Frame, String)], (tw, th): (u32, u32)) -> Frame {
+pub(super) fn collage(tiles: &[(Frame, String)], (tw, th): (u32, u32)) -> Frame {
     let cols = columns(tiles.len()) as u32;
     let rows = (tiles.len() as u32).div_ceil(cols);
     let cell_h = th + BAND;
