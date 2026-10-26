@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 koo-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

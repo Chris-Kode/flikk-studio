@@ -3340,6 +3340,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "koo-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
