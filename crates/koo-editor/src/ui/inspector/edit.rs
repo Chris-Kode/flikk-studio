@@ -34,7 +34,7 @@ impl InspectorPanel {
         let mut rows = Vec::new();
         for key in TRANSFORM {
             let property = property_of(key).unwrap();
-            let value = value_at(&clip, property, at);
+            let value = clip.value_at(property, at);
             let row = self.param(key, value, window, cx).row(cx);
             let toggle = self.key_toggle(&clip, property, at, frame, inside, cx);
             rows.push(row.child(toggle));
@@ -73,7 +73,7 @@ impl InspectorPanel {
             theme.muted_foreground
         };
         // Commands take timeline time; keyframes store clip-relative time.
-        let (clip_id, value, when) = (clip.id, value_at(clip, property, at), clip.start + at);
+        let (clip_id, value, when) = (clip.id, clip.value_at(property, at), clip.start + at);
         div()
             .id(SharedString::from(format!("kf-{property:?}")))
             .flex_none()
@@ -199,41 +199,4 @@ fn transform_key(p: Property) -> Key {
         Property::Rotation => Key::Rotation,
         Property::Opacity => Key::Opacity,
     }
-}
-
-/// Property value at clip-relative `at`: the base transform, or a linear
-/// read of its keyframes (easing is the core stream's evaluator's job).
-fn value_at(clip: &Clip, property: Property, at: Time) -> f32 {
-    let t = &clip.transform;
-    let base = match property {
-        Property::PositionX => t.position[0],
-        Property::PositionY => t.position[1],
-        Property::Scale => t.scale,
-        Property::Rotation => t.rotation_deg,
-        Property::Opacity => t.opacity,
-    };
-    let mut keys: Vec<&Keyframe> = clip
-        .keyframes
-        .iter()
-        .filter(|k| k.property == property)
-        .collect();
-    keys.sort_by_key(|k| k.at);
-    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-        return base;
-    };
-    if at <= first.at {
-        return first.value;
-    }
-    if at >= last.at {
-        return last.value;
-    }
-    for pair in keys.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        if a.at <= at && at <= b.at {
-            let span = (b.at - a.at).0.max(1) as f32;
-            let f = (at - a.at).0 as f32 / span;
-            return a.value + (b.value - a.value) * f;
-        }
-    }
-    base
 }

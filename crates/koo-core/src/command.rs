@@ -161,6 +161,19 @@ pub enum Command {
     RemoveTrack {
         track: TrackId,
     },
+    /// [`Command::AddTrack`] with a caller-chosen id, so later commands in
+    /// the same batch can fill the new track.
+    AddTrackWithId {
+        track: TrackId,
+        kind: TrackKind,
+        index: usize,
+        name: String,
+    },
+    /// Locked tracks refuse edits until unlocked.
+    SetTrackLocked {
+        track: TrackId,
+        locked: bool,
+    },
 
     // ---- transform (E5)
     SetTransform {
@@ -291,7 +304,9 @@ impl Command {
             | EditMarker { .. }
             | RemoveMarker { .. }
             | AddTrack { .. }
-            | RemoveTrack { .. } => ToolCategory::EditTimeline,
+            | RemoveTrack { .. }
+            | AddTrackWithId { .. }
+            | SetTrackLocked { .. } => ToolCategory::EditTimeline,
             SetTransform { .. } | AddZoom { .. } | SetKeyframe { .. } | RemoveKeyframe { .. } => {
                 ToolCategory::Transform
             }
