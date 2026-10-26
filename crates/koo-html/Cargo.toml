@@ -1,0 +1,12 @@
+[package]
+name = "koo-html"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+koo-core.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+png = "0.18"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
