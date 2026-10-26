@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 koo-core.workspace = true
+serde_json.workspace = true
 koo-store.workspace = true
 koo-media.workspace = true
 koo-analysis.workspace = true
