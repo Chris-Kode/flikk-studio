@@ -6,7 +6,7 @@
 //! opened the editor still runs on an in-memory "Untitled" project and
 //! [`take_notice`] says why.
 
-use koo_core::agent::AgentSettings;
+use koo_core::agent::{AgentSettings, ChatMessage};
 use koo_core::bus::CommandBus;
 use koo_core::history::History;
 use koo_core::ids::ProjectId;
@@ -19,8 +19,6 @@ pub struct Loaded {
     pub project: Project,
     pub history: History,
     pub settings: AgentSettings,
-    /// Unsaved changes from a crashed session were restored.
-    pub recovered: bool,
 }
 
 struct Session {
@@ -29,8 +27,6 @@ struct Session {
     project: ProjectId,
     /// Bus version of the last snapshot handed to the autosaver.
     saved_version: Option<u64>,
-    /// History loaded with the project, until the bus takes it.
-    history: Option<History>,
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -49,11 +45,6 @@ pub fn take_notice() -> Option<String> {
     NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-pub fn load_or_new() -> (Project, AgentSettings) {
-    let loaded = load_session();
-    (loaded.project, loaded.settings)
-}
-
 /// Open the last project (recovering a crashed session's autosave), or
 /// create "Untitled". Also starts the autosaver.
 pub fn load_session() -> Loaded {
@@ -65,7 +56,6 @@ pub fn load_session() -> Loaded {
                 project: Project::new("Untitled"),
                 history: History::default(),
                 settings: AgentSettings::default(),
-                recovered: false,
             }
         }
     }
@@ -85,7 +75,6 @@ fn try_load() -> koo_store::Result<Loaded> {
         autosaver,
         project: loaded.project.id,
         saved_version: None,
-        history: Some(loaded.history.clone()),
     });
     Ok(loaded)
 }
@@ -98,17 +87,7 @@ fn loaded(store: &Store, opened: OpenedProject) -> koo_store::Result<Loaded> {
         settings: store.load_settings(opened.project.id)?,
         project: opened.project,
         history: opened.history,
-        recovered: opened.recovered,
     })
-}
-
-/// The undo history loaded by [`load_or_new`], once. Pass it to the bus
-/// (`CommandBus::with_history`) so undo survives restarts.
-pub fn take_loaded_history() -> History {
-    session()
-        .as_mut()
-        .and_then(|s| s.history.take())
-        .unwrap_or_default()
 }
 
 /// Queue a snapshot of the bus for the background writer. Cheap: skips
@@ -124,7 +103,6 @@ pub fn autosave(bus: &CommandBus) {
     }
     s.project = project.id;
     s.saved_version = Some(bus.version());
-    s.history = None;
     s.autosaver.save(project.clone(), bus.history().clone());
 }
 
@@ -180,7 +158,6 @@ fn switch(s: &mut Session, opened: OpenedProject) -> koo_store::Result<Loaded> {
     let loaded = loaded(&s.store, opened)?;
     s.project = loaded.project.id;
     s.saved_version = None;
-    s.history = None;
     Ok(loaded)
 }
 
@@ -215,5 +192,36 @@ fn with_session<T>(f: impl FnOnce(&mut Session) -> koo_store::Result<T>) -> Opti
             notify(format!("{e:#}"));
             None
         }
+    }
+}
+
+/// One conversation per project (PRD AG1), as JSON beside the project's
+/// other files under `paths::projects()`.
+fn chat_path(project: ProjectId) -> std::path::PathBuf {
+    koo_core::paths::projects().join(format!("{}.chat.json", project.0.simple()))
+}
+
+/// The project's chat. Change sets live only in memory, so messages lose
+/// their review card on reload and keep their text.
+pub fn load_chat(project: ProjectId) -> Vec<ChatMessage> {
+    let Ok(bytes) = std::fs::read(chat_path(project)) else {
+        return Vec::new();
+    };
+    let mut chat: Vec<ChatMessage> = serde_json::from_slice(&bytes).unwrap_or_default();
+    for m in &mut chat {
+        m.change_set = None;
+    }
+    chat
+}
+
+pub fn save_chat(project: ProjectId, chat: &[ChatMessage]) {
+    let path = chat_path(project);
+    let tmp = path.with_extension("json.tmp");
+    let written = serde_json::to_vec(chat)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(&tmp, bytes))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        notify(format!("Couldn't save the chat: {e}"));
     }
 }

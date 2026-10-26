@@ -2,7 +2,6 @@
 //! ruler and lanes, select/move/trim/blade with snapping, markers, in/out,
 //! JKL, the pending change-set overlay and the silence tool.
 
-mod demo;
 pub(crate) mod glyph;
 mod layout;
 mod overlay;
@@ -205,9 +204,6 @@ impl TimelinePanel {
         let focus = cx.focus_handle();
         // Transport and editing keys work from the start.
         window.focus(&focus, cx);
-        if demo::enabled() {
-            state.update(cx, demo::seed);
-        }
         let _observe = cx.observe(&state, |_, _, cx| cx.notify());
         let silence_min = cx.new(|_| {
             SliderState::new()
@@ -780,10 +776,6 @@ impl TimelinePanel {
         }
     }
 
-    /// Drop pool media at the pointer. Video with sound lands on the target
-    /// video track and its audio on the matching audio track (added when
-    /// there is none), as one undo step; audio-only media goes to an audio
-    /// track.
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
         self.drop_row = None;
         let p = window.mouse_position();
@@ -793,50 +785,21 @@ impl TimelinePanel {
         let Some(item) = project.media(drag.media) else {
             return;
         };
-        let tl = &project.timeline;
-        let row = layout::row_at(&layout::rows(tl), y).and_then(|r| tl.track(r.track));
-        let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
-        let has_video = match item.kind {
-            MediaKind::Audio => false,
-            MediaKind::Image => true,
-            MediaKind::Video => item.info.as_ref().is_none_or(|i| i.video.is_some()),
+        let rows = layout::rows(&project.timeline);
+        let wanted = match item.kind {
+            koo_core::model::MediaKind::Audio => TrackKind::Audio,
+            _ => TrackKind::Video,
         };
-        let of_kind = |kinds: &[TrackKind]| -> Vec<TrackId> {
-            tl.tracks
+        let track = layout::row_at(&rows, y).map(|r| r.track).or_else(|| {
+            project
+                .timeline
+                .tracks
                 .iter()
-                .filter(|t| kinds.contains(&t.kind))
+                .find(|t| t.kind == wanted)
                 .map(|t| t.id)
-                .collect()
-        };
-        let video_track = has_video
-            .then(|| {
-                row.filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay))
-                    .map(|t| t.id)
-                    .or_else(|| of_kind(&[TrackKind::Video]).first().copied())
-            })
-            .flatten();
-        let audios = of_kind(&[TrackKind::Audio]);
-        let mut commands = Vec::new();
-        let audio_track = if !has_audio && has_video {
-            None
-        } else if let Some(t) = row.filter(|t| t.kind == TrackKind::Audio) {
-            Some(t.id)
-        } else {
-            // V2 pairs with A2; otherwise the lowest audio track.
-            let lane = video_track
-                .and_then(|v| of_kind(&[TrackKind::Video]).iter().position(|t| *t == v))
-                .unwrap_or(0);
-            let found = audios.get(lane).or(audios.last()).copied();
-            Some(found.unwrap_or_else(|| {
-                let track = TrackId::new();
-                commands.push(Command::AddTrackWithId {
-                    track,
-                    kind: TrackKind::Audio,
-                    index: tl.tracks.len(),
-                    name: format!("A{}", audios.len() + 1),
-                });
-                track
-            }))
+        });
+        let Some(track) = track else {
+            return;
         };
         let len = item
             .info
@@ -844,29 +807,39 @@ impl TimelinePanel {
             .map(|i| i.duration)
             .filter(|d| d.0 > 0)
             .unwrap_or(Time::from_secs_f64(5.));
-        let rate = tl.settings.rate;
-        let media = drag.media;
+        let rate = project.timeline.settings.rate;
         let at = self
             .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
             .floor_to_frame(rate);
         self.snap = None;
-        commands.extend(
-            [video_track, audio_track]
-                .into_iter()
-                .flatten()
-                .map(|track| Command::InsertClip {
-                    media,
-                    source: TimeRange::new(Time::ZERO, len),
-                    track,
-                    at,
-                    mode: InsertMode::Overwrite,
-                }),
-        );
-        if commands.is_empty() {
-            return;
-        }
-        self.state.update(cx, |s, cx| {
-            s.edit_batch(commands, "insert_clip", cx);
+        let insert = |track| Command::InsertClip {
+            media: drag.media,
+            source: TimeRange::new(Time::ZERO, len),
+            track,
+            at,
+            mode: InsertMode::Overwrite,
+        };
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let has_audio = project
+            .media(drag.media)
+            .and_then(|m| m.info.as_ref())
+            .is_some_and(|i| !i.audio.is_empty());
+        // Video with sound lands as a linked pair: the mixer and renderer
+        // read audio from audio tracks only.
+        let linked = match project.timeline.track(track).map(|t| t.kind) {
+            Some(TrackKind::Video | TrackKind::Overlay) if has_audio => {
+                matching_audio_track(&project.timeline, track)
+            }
+            _ => None,
+        };
+        self.state.update(cx, |s, cx| match linked {
+            Some(audio) => {
+                s.edit_batch(vec![insert(track), insert(audio)], "insert_clip", cx);
+            }
+            None => {
+                s.edit(insert(track), cx);
+            }
         });
     }
 
@@ -1466,6 +1439,25 @@ impl TimelinePanel {
                 ),
         )
     }
+}
+
+/// The audio track paired with a video track: V1 ↔ A1, V2 ↔ A2, counting
+/// video tracks up from the one nearest the audio. Falls back to the first
+/// unlocked audio track.
+fn matching_audio_track(timeline: &koo_core::model::Timeline, video: TrackId) -> Option<TrackId> {
+    let videos: Vec<_> = timeline
+        .tracks
+        .iter()
+        .filter(|t| matches!(t.kind, TrackKind::Video | TrackKind::Overlay))
+        .rev()
+        .collect();
+    let audios: Vec<_> = timeline
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio && !t.locked)
+        .collect();
+    let rank = videos.iter().position(|t| t.id == video)?;
+    audios.get(rank).or(audios.first()).map(|t| t.id)
 }
 
 fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {

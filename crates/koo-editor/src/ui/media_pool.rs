@@ -1,7 +1,6 @@
 //! Media pool (PRD M1–M4): import, bins, search, tags, thumbnails, analysis
 //! progress, source info, and dragging items onto the timeline.
 
-pub(crate) mod demo;
 mod import;
 mod thumbs;
 
@@ -50,12 +49,6 @@ pub struct MediaPoolPanel {
 
 impl MediaPoolPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        if demo::enabled() {
-            state.update(cx, |s, cx| {
-                demo::seed(s);
-                cx.notify();
-            });
-        }
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag"));
         let bin_input = cx.new(|cx| InputState::new(window, cx));
@@ -84,7 +77,7 @@ impl MediaPoolPanel {
                 }
             }
         });
-        let selected = demo::enabled()
+        let selected = crate::demo::enabled()
             .then(|| state.read(cx).bus.project().media.first().map(|m| m.id))
             .flatten();
         Self {

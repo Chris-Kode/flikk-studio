@@ -5,7 +5,6 @@
 mod activity;
 mod change_set;
 mod composer;
-mod demo;
 mod quick;
 mod recipes;
 mod refs;
@@ -61,12 +60,6 @@ pub struct ChatPanel {
 impl ChatPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         init(cx);
-        if demo::enabled() {
-            state.update(cx, |s, cx| {
-                demo::seed(s);
-                cx.notify();
-            });
-        }
         quick::register(&state, cx);
         let count = state.read(cx).chat.len();
         let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
@@ -274,9 +267,54 @@ impl ChatPanel {
         let state = self.state.read(cx);
         let busy = state.agent_busy();
         let status = state.status.clone();
+        let approvals: Vec<(u64, String)> = state
+            .pending_approvals()
+            .iter()
+            .map(|a| (a.id, a.request.summary.clone()))
+            .collect();
         let theme = cx.theme();
+        let approvals = approvals.into_iter().map(|(id, summary)| {
+            h_flex()
+                .mx_2()
+                .mt_1()
+                .pl_3()
+                .pr_1p5()
+                .py_1p5()
+                .gap_2()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary.opacity(0.4))
+                .text_xs()
+                .child(
+                    Icon::new(IconName::Info)
+                        .size_3p5()
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(div().flex_1().min_w_0().line_clamp(2).child(summary))
+                .child(
+                    Button::new(("deny", id as usize))
+                        .label("Deny")
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.deny_approval(id, cx))
+                        })),
+                )
+                .child(
+                    Button::new(("approve", id as usize))
+                        .label("Approve")
+                        .xsmall()
+                        .primary()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.approve(id, cx))
+                        })),
+                )
+        });
         v_flex()
             .flex_none()
+            .children(approvals)
             .when(busy, |el| {
                 el.child(
                     h_flex()
