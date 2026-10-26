@@ -112,20 +112,6 @@ pub fn save_settings(settings: &AgentSettings) {
     with_session(|s| s.store.save_effective_settings(s.project, settings));
 }
 
-/// Make every difference from the user settings specific to the open project.
-pub fn save_project_settings(settings: &AgentSettings) {
-    with_session(|s| s.store.save_project_settings(s.project, settings));
-}
-
-/// Drop the open project's overrides; returns the user settings.
-pub fn reset_project_settings() -> Option<AgentSettings> {
-    with_session(|s| {
-        s.store
-            .save_project_overrides(s.project, &Default::default())?;
-        s.store.user_settings()
-    })
-}
-
 /// Switch projects: the current one is closed cleanly first.
 pub fn open_project(id: ProjectId) -> Option<Loaded> {
     with_session(|s| {
@@ -159,13 +145,6 @@ fn switch(s: &mut Session, opened: OpenedProject) -> koo_store::Result<Loaded> {
     s.project = loaded.project.id;
     s.saved_version = None;
     Ok(loaded)
-}
-
-/// Write pending changes now (e.g. before handing the project to a renderer).
-pub fn flush() {
-    if let Some(s) = session().as_ref() {
-        s.autosaver.flush();
-    }
 }
 
 /// Clean exit: write and close the open project. Call on app quit; without

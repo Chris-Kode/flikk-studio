@@ -32,15 +32,3 @@ impl Render for MediaDrag {
             .child(self.name.clone())
     }
 }
-
-/// Stand-in body for a panel that has not been built yet.
-pub fn placeholder(name: &'static str, cx: &App) -> Div {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_sm()
-        .text_color(cx.theme().muted_foreground)
-        .child(name)
-}

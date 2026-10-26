@@ -1,4 +1,4 @@
-// Temporary: removed by the integration pass that wires the remaining hooks.
+// Temporary: removed once the chat composer focus is wired (integration A).
 #![allow(dead_code)]
 
 mod agent_link;
