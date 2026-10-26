@@ -9,8 +9,9 @@ use koo_core::agent::*;
 use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
 use koo_core::command::Command;
 use koo_core::model::Project;
-use koo_core::services::Services;
+use koo_core::services::{AnalysisService, MediaService, Services};
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How often agent output and tool calls are drained on the UI thread.
@@ -37,8 +38,13 @@ pub struct EditorState {
 
 impl EditorState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (project, settings) = persistence::load_or_new();
-        let mut bus = CommandBus::new(project);
+        let persistence::Loaded {
+            project,
+            history,
+            settings,
+            ..
+        } = persistence::load_session();
+        let mut bus = CommandBus::with_history(project, history);
         bus.set_permissions(settings.permissions.clone());
         let pump = cx.spawn(async move |this, cx| {
             loop {
@@ -50,7 +56,7 @@ impl EditorState {
         });
         Self {
             bus,
-            services: Services::default(),
+            services: services(),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
             in_out: None,
@@ -60,7 +66,7 @@ impl EditorState {
             chat: Vec::new(),
             activity: Vec::new(),
             preview: None,
-            status: None,
+            status: persistence::take_notice(),
             agent: AgentLink::new(),
             _pump: pump,
         }
@@ -236,6 +242,22 @@ impl EditorState {
             change_set,
             at: now(),
         });
+    }
+}
+
+/// The engines, wired once per window. Media is optional: without FFmpeg
+/// the editor still opens, and panels degrade quietly.
+fn services() -> Services {
+    let media = match koo_media::FfmpegMedia::new() {
+        Ok(m) => Some(Arc::new(m) as Arc<dyn MediaService>),
+        Err(e) => {
+            eprintln!("media engine unavailable: {e}");
+            None
+        }
+    };
+    Services {
+        media,
+        analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
     }
 }
 

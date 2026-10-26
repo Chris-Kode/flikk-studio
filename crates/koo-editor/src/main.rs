@@ -15,6 +15,8 @@ fn main() {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         app::bind_keys(cx);
+        cx.on_app_quit(|_| async { persistence::shutdown() })
+            .detach();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,

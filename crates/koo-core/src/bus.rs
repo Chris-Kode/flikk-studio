@@ -132,6 +132,23 @@ impl CommandBus {
         }
     }
 
+    /// Resume a saved project with its undo history. Versions continue from
+    /// the history so change-set conflict tracking stays monotonic.
+    pub fn with_history(project: Project, history: History) -> Self {
+        let version = history
+            .undo
+            .iter()
+            .chain(&history.redo)
+            .map(|e| e.version)
+            .max()
+            .unwrap_or(0);
+        Self {
+            history,
+            version,
+            ..Self::new(project)
+        }
+    }
+
     pub fn project(&self) -> &Project {
         &self.project
     }
@@ -225,7 +242,7 @@ impl CommandBus {
 
     fn propose(&mut self, command: Command, author: Author, reason: String) -> Result<Outcome> {
         let version = self.version;
-        let base = self.project.clone();
+        let project = &self.project;
         let set = match self
             .change_sets
             .iter_mut()
@@ -240,12 +257,19 @@ impl CommandBus {
                     state: ChangeSetState::Open,
                     items: Vec::new(),
                     base_version: version,
-                    draft: Some(base),
+                    draft: None,
                 });
                 self.change_sets.last_mut().unwrap()
             }
         };
-        let draft = set.draft.get_or_insert_with(|| self.project.clone());
+        // A set with no items yet (e.g. its first command failed to plan)
+        // must not keep planning against a snapshot older than the user's
+        // latest edits.
+        if set.items.is_empty() {
+            set.draft = None;
+            set.base_version = version;
+        }
+        let draft = set.draft.get_or_insert_with(|| project.clone());
         let Plan { ops, warnings } = command.plan(draft)?;
         apply_all(draft, &ops)?;
         let item = ChangeItem {
