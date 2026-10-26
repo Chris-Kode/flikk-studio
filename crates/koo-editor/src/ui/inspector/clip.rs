@@ -29,7 +29,7 @@ impl ClipKind {
         match &clip.content {
             ClipContent::Caption { .. } => Self::Caption,
             ClipContent::Title { .. } => Self::Title,
-            ClipContent::Overlay { .. } => Self::Overlay,
+            ClipContent::Overlay { .. } | ClipContent::Generator { .. } => Self::Overlay,
             ClipContent::Media { .. } if track.kind == TrackKind::Audio => Self::Audio,
             ClipContent::Media { .. } => Self::Video,
         }
@@ -513,5 +513,6 @@ fn clip_name(clip: &Clip, project: &Project) -> String {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        ClipContent::Generator { .. } => clip.display_name(project),
     }
 }

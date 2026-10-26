@@ -331,7 +331,9 @@ impl Builder<'_> {
                 (item.path.clone(), item.kind == MediaKind::Image, known)
             }
             ClipContent::Overlay { asset, .. } => (asset.clone(), is_still_path(asset), None),
-            ClipContent::Title { .. } | ClipContent::Caption { .. } => return Ok(None),
+            ClipContent::Title { .. }
+            | ClipContent::Caption { .. }
+            | ClipContent::Generator { .. } => return Ok(None),
         };
         if !path.exists() {
             bail!("media offline: {}", path.display());

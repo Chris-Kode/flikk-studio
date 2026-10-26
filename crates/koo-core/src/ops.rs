@@ -36,18 +36,19 @@ impl TrackProps {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
+    // Clips are boxed: they are large, and history holds many ops.
     InsertClip {
         track: TrackId,
-        clip: Clip,
+        clip: Box<Clip>,
     },
     RemoveClip {
         track: TrackId,
-        clip: Clip,
+        clip: Box<Clip>,
     },
     UpdateClip {
         track: TrackId,
-        before: Clip,
-        after: Clip,
+        before: Box<Clip>,
+        after: Box<Clip>,
     },
     InsertMarker {
         marker: Marker,
@@ -93,6 +94,11 @@ pub enum Op {
     SetBins {
         before: Vec<Bin>,
         after: Vec<Bin>,
+    },
+    /// The project's FX programs ([`Project::fx`]).
+    SetFxAssets {
+        before: Vec<crate::fx::FxAsset>,
+        after: Vec<crate::fx::FxAsset>,
     },
 }
 
@@ -177,6 +183,10 @@ impl Op {
                 before: after,
                 after: before,
             },
+            Op::SetFxAssets { before, after } => Op::SetFxAssets {
+                before: after,
+                after: before,
+            },
         }
     }
 
@@ -194,14 +204,14 @@ impl Op {
                     return Err(CoreError::Conflict);
                 }
                 let at = t.clips.partition_point(|c| c.start < clip.start);
-                t.clips.insert(at, clip.clone());
+                t.clips.insert(at, (**clip).clone());
             }
             Op::RemoveClip { track, clip } => {
                 let t = track_mut(timeline, *track)?;
                 let ix = t
                     .clips
                     .iter()
-                    .position(|c| c == clip)
+                    .position(|c| *c == **clip)
                     .ok_or(CoreError::Conflict)?;
                 t.clips.remove(ix);
             }
@@ -214,7 +224,7 @@ impl Op {
                 let ix = t
                     .clips
                     .iter()
-                    .position(|c| c == before)
+                    .position(|c| *c == **before)
                     .ok_or(CoreError::Conflict)?;
                 if t.clips
                     .iter()
@@ -223,7 +233,7 @@ impl Op {
                 {
                     return Err(CoreError::Conflict);
                 }
-                t.clips[ix] = after.clone();
+                t.clips[ix] = (**after).clone();
                 t.clips.sort_by_key(|c| c.start);
             }
             Op::InsertMarker { marker } => {
@@ -315,6 +325,12 @@ impl Op {
                     return Err(CoreError::Conflict);
                 }
                 project.bins = after.clone();
+            }
+            Op::SetFxAssets { before, after } => {
+                if project.fx != *before {
+                    return Err(CoreError::Conflict);
+                }
+                project.fx = after.clone();
             }
         }
         Ok(())

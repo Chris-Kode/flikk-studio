@@ -2,10 +2,12 @@
 //! agent host can be written against them independently.
 
 use crate::analysis::{Analysis, Loudness};
+use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MediaId};
 use crate::model::{Fingerprint, MediaInfo, MediaItem};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ impl ServiceError {
     }
 }
 
-/// Decoded RGBA8 image.
+/// Decoded RGBA8 image, straight (not premultiplied) alpha.
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub width: u32,
@@ -130,9 +132,51 @@ pub trait AnalysisService: Send + Sync {
     fn loudness(&self, path: &Path, range: Option<TimeRange>) -> ServiceResult<Loudness>;
 }
 
-/// The engines the UI and agent host call. `None` until wired.
+/// One evaluated FX program: what to run, its parameter values and clock.
+/// Build `values` with [`crate::fx::FxInstance::values_at`].
+#[derive(Clone, Copy, Debug)]
+pub struct FxCall<'a> {
+    pub asset: &'a FxAsset,
+    pub values: &'a BTreeMap<String, ParamValue>,
+    /// Seconds since the clip or transition started (`iTime`), and its
+    /// length (`iDuration`). A transition's `progress` is `time / duration`.
+    pub time: f64,
+    pub duration: f64,
+    /// Sequence size: HTML lays out at this size in CSS px.
+    pub canvas: (u32, u32),
+}
+
+/// GLSL programs on the GPU (`koo-gpu`). Thread-safe; frames in and out are
+/// RGBA8 with straight alpha.
+pub trait FxService: Send + Sync {
+    /// Compile `asset`. Errors name lines of the author's code, so the agent
+    /// and the code editor can point at them.
+    fn check(&self, asset: &FxAsset) -> ServiceResult<()>;
+    /// Run `chain` (effects) in order over `frame`; same size out.
+    fn apply(&self, frame: &Frame, chain: &[FxCall<'_>]) -> ServiceResult<Frame>;
+    /// Blend `from` into `to` (same size) with a transition program at
+    /// `call.time / call.duration`.
+    fn transition(&self, from: &Frame, to: &Frame, call: &FxCall<'_>) -> ServiceResult<Frame>;
+    /// Render a generator program at `width` × `height`.
+    fn generate(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame>;
+}
+
+/// HTML generators in a headless browser (`koo-html`).
+pub trait HtmlService: Send + Sync {
+    /// Load the document at `call.time` and return script and console errors
+    /// (empty when clean).
+    fn check(&self, call: &FxCall<'_>) -> ServiceResult<Vec<String>>;
+    /// One frame with alpha, laid out at `call.canvas` and scaled to
+    /// `width` × `height`.
+    fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame>;
+}
+
+/// The engines the UI and agent host call. `None` until wired, or when the
+/// machine lacks them (no GPU adapter, no Chromium); callers degrade quietly.
 #[derive(Clone, Default)]
 pub struct Services {
     pub media: Option<Arc<dyn MediaService>>,
     pub analysis: Option<Arc<dyn AnalysisService>>,
+    pub fx: Option<Arc<dyn FxService>>,
+    pub html: Option<Arc<dyn HtmlService>>,
 }

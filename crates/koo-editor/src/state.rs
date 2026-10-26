@@ -700,6 +700,8 @@ fn services() -> Services {
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
+        fx: None,
+        html: None,
     }
 }
 

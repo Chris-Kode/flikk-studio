@@ -142,9 +142,11 @@ impl InspectorPanel {
         let theme = cx.theme();
         let (muted, active, hover) = (theme.muted_foreground, theme.list_active, theme.list_hover);
         let (clip_id, start) = (clip.id, clip.start);
-        section("Keyframes", cx).children(frames.into_iter().enumerate().map(|(i, k)| {
+        let keyed = frames
+            .into_iter()
+            .filter_map(|k| Some((transform_key(k.property)?, k)));
+        section("Keyframes", cx).children(keyed.enumerate().map(|(i, (key, k))| {
             let current = (k.at - at).0.abs() < frame.0 / 2 + 1;
-            let key = transform_key(k.property);
             let spec = key.spec();
             let (property, time) = (k.property, k.at);
             h_flex()
@@ -205,12 +207,14 @@ impl InspectorPanel {
     }
 }
 
-fn transform_key(p: Property) -> Key {
-    match p {
+/// The inspector control a keyframed property belongs to, if it has one.
+fn transform_key(p: Property) -> Option<Key> {
+    Some(match p {
         Property::PositionX => Key::PosX,
         Property::PositionY => Key::PosY,
         Property::Scale => Key::Scale,
         Property::Rotation => Key::Rotation,
         Property::Opacity => Key::Opacity,
-    }
+        _ => return None,
+    })
 }

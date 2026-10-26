@@ -125,6 +125,7 @@ pub fn editor_context(project: &Project, ctx: &EditorContext) -> Value {
                     .unwrap_or_default(),
                 ClipContent::Title { text, .. } | ClipContent::Caption { text, .. } => text.clone(),
                 ClipContent::Overlay { asset, .. } => asset.display().to_string(),
+                ClipContent::Generator { .. } => clip.display_name(project),
             };
             json!({
                 "id": short(clip.id),

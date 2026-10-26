@@ -32,6 +32,7 @@ impl Ease {
 }
 
 impl Transform {
+    /// [`Property::Volume`] is not a transform property and reads 0.
     pub fn get(&self, property: Property) -> f32 {
         match property {
             Property::PositionX => self.position[0],
@@ -39,9 +40,15 @@ impl Transform {
             Property::Scale => self.scale,
             Property::Rotation => self.rotation_deg,
             Property::Opacity => self.opacity,
+            Property::CropLeft => self.crop[0],
+            Property::CropTop => self.crop[1],
+            Property::CropRight => self.crop[2],
+            Property::CropBottom => self.crop[3],
+            Property::Volume => 0.0,
         }
     }
 
+    /// Setting [`Property::Volume`] does nothing.
     pub fn set(&mut self, property: Property, value: f32) {
         match property {
             Property::PositionX => self.position[0] = value,
@@ -49,13 +56,27 @@ impl Transform {
             Property::Scale => self.scale = value,
             Property::Rotation => self.rotation_deg = value,
             Property::Opacity => self.opacity = value,
+            Property::CropLeft => self.crop[0] = value,
+            Property::CropTop => self.crop[1] = value,
+            Property::CropRight => self.crop[2] = value,
+            Property::CropBottom => self.crop[3] = value,
+            Property::Volume => {}
         }
     }
 }
 
 impl Clip {
+    /// The un-keyframed value of `property`: the [`Transform`] field, or the
+    /// clip gain for [`Property::Volume`].
+    pub fn base_value(&self, property: Property) -> f32 {
+        match property {
+            Property::Volume => self.audio.gain_db,
+            p => self.transform.get(p),
+        }
+    }
+
     /// Value of `property` at clip-relative time `t`. Without keyframes for
-    /// it, the static [`Transform`] value; before the first and after the
+    /// it, [`Clip::base_value`]; before the first and after the
     /// last keyframe, that keyframe's value; in between, eased by the earlier
     /// keyframe's [`Ease`].
     pub fn value_at(&self, property: Property, t: Time) -> f32 {
@@ -70,7 +91,7 @@ impl Clip {
             }
         }
         match (prev, next) {
-            (None, None) => self.transform.get(property),
+            (None, None) => self.base_value(property),
             (Some(k), None) | (None, Some(k)) => k.value,
             (Some(a), Some(b)) => {
                 let u = (t - a.at).0 as f64 / (b.at - a.at).0 as f64;
@@ -82,24 +103,33 @@ impl Clip {
     /// The full transform at clip-relative time `t`.
     pub fn transform_at(&self, t: Time) -> Transform {
         let mut out = self.transform.clone();
-        for p in [
-            Property::PositionX,
-            Property::PositionY,
-            Property::Scale,
-            Property::Rotation,
-            Property::Opacity,
-        ] {
+        for p in Property::TRANSFORM {
             out.set(p, self.value_at(p, t));
         }
         out
     }
 
-    /// Source range this clip plays, for media clips.
+    /// Where a source range lands on the timeline through this clip's speed,
+    /// unclamped (it may lie outside the clip).
+    pub fn source_to_timeline_range(&self, source: TimeRange) -> TimeRange {
+        let source_in = match &self.content {
+            ClipContent::Media { source_in, .. } => *source_in,
+            _ => Time::ZERO,
+        };
+        let inv = 1.0 / self.speed;
+        TimeRange::new(
+            self.start + (source.start - source_in).scale(inv),
+            self.start + (source.end - source_in).scale(inv),
+        )
+    }
+
+    /// Source range this clip plays, for media clips (`duration × speed`).
     pub fn source_range(&self) -> Option<TimeRange> {
         match &self.content {
-            ClipContent::Media { source_in, .. } => {
-                Some(TimeRange::new(*source_in, *source_in + self.duration))
-            }
+            ClipContent::Media { source_in, .. } => Some(TimeRange::new(
+                *source_in,
+                *source_in + self.duration.scale(self.speed),
+            )),
             _ => None,
         }
     }
@@ -108,12 +138,14 @@ impl Clip {
 // ------------------------------------------------------------ what plays at t
 
 /// Clips drawn at timeline time `t`, topmost first: every shown (not muted)
-/// non-audio track's clip whose opacity there is above zero, as rendered.
+/// non-audio track's enabled clip whose opacity there is above zero, as
+/// rendered.
 pub fn visible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
     tl.tracks
         .iter()
         .filter(|tr| tr.kind != TrackKind::Audio && !tr.mix.mute)
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
+        .filter(|(_, c)| c.enabled)
         .filter(|(_, c)| c.value_at(Property::Opacity, t - c.start) > 0.0)
         .collect()
 }
@@ -133,7 +165,7 @@ pub fn audible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
     audio()
         .filter(|tr| !tr.mix.mute && (!solo || tr.mix.solo))
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
-        .filter(|(_, c)| c.media().is_some())
+        .filter(|(_, c)| c.enabled && c.media().is_some())
         .collect()
 }
 
@@ -225,9 +257,8 @@ pub fn words_in_range(
                 continue;
             };
             for word in transcript.words_in(source) {
-                let Some(timeline) = word
-                    .range
-                    .shift(clip.start - source.start)
+                let Some(timeline) = clip
+                    .source_to_timeline_range(word.range)
                     .intersect(&clip.range())
                     .filter(|r| r.overlaps(&range))
                 else {
@@ -278,7 +309,7 @@ pub fn source_to_timeline(
             Some(SourceMapping {
                 track: t.id,
                 clip: c.id,
-                timeline: s.shift(c.start - used.start),
+                timeline: c.source_to_timeline_range(s),
                 source: s,
             })
         })

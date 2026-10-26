@@ -153,6 +153,9 @@ fn clip_label(project: &Project, content: &ClipContent) -> String {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Overlay".into()),
+        ClipContent::Generator { fx } => koo_core::fx::asset(project, &fx.fx)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "Generator".into()),
     }
 }
 

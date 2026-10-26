@@ -1651,6 +1651,9 @@ fn matching_audio_track(timeline: &koo_core::model::Timeline, video: TrackId) ->
 }
 
 fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {
+    if let Some(name) = &clip.name {
+        return name.clone();
+    }
     match &clip.content {
         ClipContent::Media { media, .. } => project
             .media(*media)
@@ -1662,6 +1665,7 @@ fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        ClipContent::Generator { .. } => clip.display_name(project),
     }
 }
 

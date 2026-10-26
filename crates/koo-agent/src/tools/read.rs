@@ -47,6 +47,10 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
                 v["speaker"] = json!(short(s));
             }
         }
+        ClipContent::Generator { fx } => {
+            v["generator"] = json!(fx.fx.to_string());
+            v["name"] = json!(clip.display_name(project));
+        }
     }
     if clip.audio.gain_db != 0.0 {
         v["gain_db"] = json!(clip.audio.gain_db);
