@@ -4,35 +4,66 @@
 //! `send` starts a turn, `pump` runs on the UI thread every frame-ish, serves
 //! pending tool calls against the bus (as `Author::Agent`) and returns the
 //! events produced since the last call.
+//!
+//! Everything else (backend subprocess, MCP bridge, tools, prompts) lives in
+//! `koo_agent::AgentHost`; this type adapts it to the editor.
 
+use koo_agent::{AgentHost, PendingApproval};
 use koo_core::agent::{AgentEvent, AgentSettings, EditorContext};
-use koo_core::bus::CommandBus;
+use koo_core::bus::{AgentRole, CommandBus};
+use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 
 pub struct AgentLink {
-    pending: Vec<AgentEvent>,
+    host: AgentHost,
 }
 
 impl AgentLink {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
+            host: AgentHost::new(),
         }
     }
 
     pub fn is_busy(&self) -> bool {
-        false
+        self.host.is_busy()
     }
 
-    pub fn send(&mut self, _message: String, _context: EditorContext, _settings: &AgentSettings) {
-        self.pending.push(AgentEvent::Error {
-            message: "The agent is not connected yet".into(),
-        });
+    pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {
+        self.host.send(message, context, settings);
     }
 
-    pub fn cancel(&mut self) {}
+    pub fn cancel(&mut self) {
+        self.host.cancel();
+    }
 
-    pub fn pump(&mut self, _bus: &mut CommandBus, _services: &Services) -> Vec<AgentEvent> {
-        std::mem::take(&mut self.pending)
+    pub fn pump(&mut self, bus: &mut CommandBus, services: &Services) -> Vec<AgentEvent> {
+        self.host.pump(bus, services)
+    }
+
+    /// Editor or Builder role; applies from the next turn.
+    pub fn set_role(&mut self, role: AgentRole) {
+        self.host.set_role(role);
+    }
+
+    /// Recipes offered as `/name` slash commands.
+    pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
+        self.host.set_recipes(recipes);
+    }
+
+    /// Style rules and source facts from the store.
+    pub fn set_memory(&mut self, rules: Vec<StyleRule>, facts: Vec<SourceFact>) {
+        self.host.set_memory(rules, facts);
+    }
+
+    /// Memory and deliver requests waiting for the user's approval.
+    pub fn pending_approvals(&self) -> &[PendingApproval] {
+        self.host.pending_approvals()
+    }
+
+    /// Take a request off the list once the user approved (and the caller
+    /// performed it) or denied it.
+    pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {
+        self.host.resolve_approval(id)
     }
 }

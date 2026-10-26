@@ -22,6 +22,7 @@ pub mod memory;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod query;
 pub mod services;
 pub mod time;
 

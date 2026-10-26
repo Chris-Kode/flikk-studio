@@ -25,6 +25,7 @@ pub struct Speaker {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
     pub fingerprint: Fingerprint,
+    /// Position in `MediaInfo::audio` (ffmpeg `0:a:N`), not the container index.
     pub audio_stream: u32,
     pub language: String,
     pub words: Vec<Word>,
