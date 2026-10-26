@@ -2,9 +2,10 @@
 //! its methods instead of touching the bus directly, so every change goes
 //! through the same path whether it came from a button or the agent.
 
-use crate::agent_link::AgentLink;
+use crate::agent_link::{AgentLink, approve};
 use crate::persistence;
 use gpui_kit::*;
+use koo_agent::PendingApproval;
 use koo_core::agent::*;
 use koo_core::bus::{AcceptReport, AgentRole, Author, CommandBus, Outcome};
 use koo_core::changeset::ChangeItem;
@@ -51,6 +52,10 @@ pub struct EditorState {
     // --- chat
     /// Mirrors the role last handed to the agent host.
     agent_role: AgentRole,
+    /// Requests the user settled since their last message, and what came of them.
+    pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
+    /// Renders approved in the chat. Clones share the queue.
+    pub render_queue: koo_deliver::RenderQueue,
 }
 
 impl EditorState {
@@ -94,6 +99,8 @@ impl EditorState {
             agent: AgentLink::new(),
             _pump: pump,
             agent_role: AgentRole::Editor,
+            settled: Vec::new(),
+            render_queue: koo_deliver::RenderQueue::new(),
         };
         this.load_agent_memory();
         this
@@ -320,6 +327,7 @@ impl EditorState {
         });
         let context = self.context();
         self.agent.send(text, context, &self.settings);
+        self.settled.clear();
         self.save_chat();
         cx.notify();
     }
@@ -641,84 +649,106 @@ impl EditorState {
     }
 
     pub fn deny_approval(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.agent.resolve_approval(id);
+        let Some(pending) = self.agent.resolve_approval(id) else {
+            return;
+        };
+        self.agent
+            .report_outcome(format!("denied: {}", pending.request.summary));
+        self.settled.push((pending, ApprovalOutcome::Denied));
         cx.notify();
     }
 
-    /// Perform an approved request and take it off the list.
+    /// Carry out an approved request (store, render queue, export), take it
+    /// off the list and tell the agent on its next turn.
     pub fn approve(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(pending) = self.agent.resolve_approval(id) else {
             return;
         };
-        let result = self.perform(&pending.request);
-        self.status = result.err();
-        self.load_agent_memory();
+        let summary = pending.request.summary.clone();
+        let mut settings = self.settings.clone();
+        let started = approve::start(
+            &pending.request,
+            approve::Inputs {
+                project: self.bus.project(),
+                caption_styles: &self.presets.caption_styles,
+                queue: &self.render_queue,
+                settings: &mut settings,
+            },
+        );
+        if settings != self.settings {
+            self.set_settings(settings, cx);
+        } else {
+            self.load_agent_memory();
+        }
+        let outcome = match started {
+            Ok(approve::Started::Done(line)) => {
+                self.agent.report_outcome(format!("approved: {summary}"));
+                ApprovalOutcome::Done(line)
+            }
+            Ok(approve::Started::Render(job, path)) => {
+                self.agent.report_outcome(format!(
+                    "approved: {summary}; rendering to {}",
+                    path.display()
+                ));
+                ApprovalOutcome::Rendering {
+                    job,
+                    file: approve::file_name(&path),
+                }
+            }
+            Ok(approve::Started::Background(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(file) => {
+                                this.agent
+                                    .report_outcome(format!("approved: {summary}; wrote {file}"));
+                                ApprovalOutcome::Done(file)
+                            }
+                            Err(e) => {
+                                this.agent.report_outcome(format!(
+                                    "approved but failed: {summary}: {e:#}"
+                                ));
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                            entry.1 = outcome;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Err(e) => {
+                self.agent
+                    .report_outcome(format!("approved but failed: {summary}: {e:#}"));
+                ApprovalOutcome::Failed(format!("{e:#}"))
+            }
+        };
+        self.settled.push((pending, outcome));
         cx.notify();
+    }
+
+    /// A render started from the chat, as the queue sees it now.
+    pub fn render_job(&self, job: koo_core::JobId) -> Option<koo_deliver::RenderJob> {
+        self.render_queue.jobs().into_iter().find(|j| j.id == job)
     }
 
     /// The user's recipes, for `/` completion and the quick-command bar.
     pub fn recipes(&self) -> Vec<koo_core::memory::Recipe> {
         persistence::with_store(|s| s.list_recipes()).unwrap_or_default()
     }
+}
 
-    fn perform(&self, request: &koo_agent::tools::ApprovalRequest) -> Result<(), String> {
-        use koo_core::memory::*;
-        use serde_json::Value;
-        let args = &request.args;
-        let str_of = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default();
-        let saved = match request.tool.as_str() {
-            "save_recipe" => {
-                let recipe = Recipe {
-                    id: koo_core::RecipeId::new(),
-                    name: str_of("name").into(),
-                    description: str_of("description").into(),
-                    params: serde_json::from_value(args["params"].clone()).unwrap_or_default(),
-                    prompt: str_of("prompt").into(),
-                    builtin: false,
-                };
-                persistence::with_store(|s| s.save_recipe(&recipe))
-            }
-            "propose_rule" => {
-                let profile = self
-                    .settings
-                    .style_profile
-                    .ok_or("Pick a style profile before saving rules")?;
-                let rule = StyleRule {
-                    id: koo_core::RuleId::new(),
-                    text: str_of("text").into(),
-                    scope: match str_of("scope") {
-                        "project" => RuleScope::Project {
-                            project: self.bus.project().id,
-                        },
-                        "next_video" => RuleScope::NextVideo,
-                        _ => RuleScope::Global,
-                    },
-                    status: RuleStatus::Approved,
-                    supersedes: None,
-                    created_at: now(),
-                    evidence: serde_json::from_value(args["evidence"].clone()).unwrap_or_default(),
-                };
-                persistence::with_store(|s| s.save_rule(profile, &rule))
-            }
-            "add_source_fact" => {
-                let secs = |v: &Value| v.as_f64().map(Time::from_secs_f64);
-                let range = args
-                    .get("source_range")
-                    .and_then(|r| Some(TimeRange::new(secs(&r["start"])?, secs(&r["end"])?)));
-                let fact = SourceFact {
-                    id: koo_core::FactId::new(),
-                    fingerprint: serde_json::from_value(args["fingerprint"].clone())
-                        .map_err(|e| e.to_string())?,
-                    kind: serde_json::from_value(args["kind"].clone())
-                        .map_err(|e| e.to_string())?,
-                    text: str_of("text").into(),
-                    range,
-                    status: FactStatus::Confirmed,
-                };
-                persistence::with_store(|s| s.save_fact(&fact))
-            }
-            _ => return Err(format!("{} isn't connected yet", request.summary)),
-        };
-        saved.ok_or_else(|| format!("Couldn't save: {}", request.summary))
-    }
+/// What came of an approval request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApprovalOutcome {
+    Working,
+    Done(String),
+    Rendering { job: koo_core::JobId, file: String },
+    Failed(String),
+    Denied,
 }

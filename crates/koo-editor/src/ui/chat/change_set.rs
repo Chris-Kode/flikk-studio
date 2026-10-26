@@ -24,6 +24,10 @@ pub struct Review {
     pub open: bool,
     /// Pending items the user unticked.
     pub excluded: HashSet<ChangeItemId>,
+    /// Item to scroll into view on the next paint (picked on the timeline).
+    pub reveal: Option<ChangeItemId>,
+    /// The review list's scroll position.
+    pub scroll: ScrollHandle,
 }
 
 pub type Reviews = HashMap<ChangeSetId, Review>;
@@ -40,9 +44,14 @@ impl ChatPanel {
         };
         let previewing = state.preview == Some(id);
         let project = state.bus.project().clone();
+        let focused = state
+            .focused_change_item()
+            .filter(|(set, _)| *set == id)
+            .map(|(_, item)| item);
         let review = self.reviews.entry(id).or_default();
         let open = review.open;
         let excluded = review.excluded.clone();
+
         let theme = cx.theme();
 
         let total = set.items.len();
@@ -190,7 +199,7 @@ impl ChatPanel {
                 .into_any_element()
         };
 
-        let list = open.then(|| self.render_items(&set, &project, &excluded, cx));
+        let list = open.then(|| self.render_items(&set, &project, focused, cx));
 
         let theme = cx.theme();
         v_flex()
@@ -227,13 +236,17 @@ impl ChatPanel {
     }
 
     fn render_items(
-        &self,
+        &mut self,
         set: &ChangeSet,
         project: &Project,
-        excluded: &HashSet<ChangeItemId>,
+        focused: Option<ChangeItemId>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = set.id;
+        let review = self.reviews.entry(id).or_default();
+        let excluded = review.excluded.clone();
+        let reveal = review.reveal.take();
+        let scroll = review.scroll.clone();
         let theme = cx.theme().clone();
         let mut items: Vec<_> = set
             .items
@@ -242,6 +255,9 @@ impl ChatPanel {
             .map(|(ix, item)| (ix, item, item_time(item, project)))
             .collect();
         items.sort_by_key(|(ix, _, at)| (at.is_none(), *at, *ix));
+        if let Some(row) = reveal.and_then(|r| items.iter().position(|(_, i, _)| i.id == r)) {
+            scroll.scroll_to_item(row);
+        }
         let rows = items.into_iter().map(|(ix, item, at)| {
             let item_id = item.id;
             let tint = match diff_kind(item) {
@@ -264,6 +280,7 @@ impl ChatPanel {
                 .text_xs()
                 .cursor_pointer()
                 .hover(|el| el.bg(theme.accent.opacity(0.5)))
+                .when(focused == Some(item_id), |el| el.bg(theme.accent))
                 .when(!pending, |el| el.opacity(0.6))
                 .child(if pending {
                     Checkbox::new(("item-check", ix))
@@ -329,6 +346,7 @@ impl ChatPanel {
             .child(
                 v_flex()
                     .id(("items", id_hash(id)))
+                    .track_scroll(&scroll)
                     .py_1()
                     .max_h(px(280.))
                     .overflow_y_scroll()

@@ -69,6 +69,8 @@ pub struct AgentHost {
     jobs_rx: Receiver<JobResult>,
     approvals: Vec<PendingApproval>,
     next_approval: u64,
+    /// What became of approval requests, told to the agent on its next turn.
+    outcomes: Vec<String>,
 }
 
 impl Default for AgentHost {
@@ -91,6 +93,7 @@ impl AgentHost {
             jobs_rx,
             approvals: Vec::new(),
             next_approval: 1,
+            outcomes: Vec::new(),
         }
     }
 
@@ -157,6 +160,12 @@ impl AgentHost {
         Some(self.approvals.remove(ix))
     }
 
+    /// Tell the agent, at the start of its next turn, what became of an
+    /// approval request (`"approved: Style rule: …"`).
+    pub fn report_outcome(&mut self, outcome: String) {
+        self.outcomes.push(outcome);
+    }
+
     pub fn pump(&mut self, bus: &mut CommandBus, services: &Services) -> Vec<AgentEvent> {
         if self.turn.is_none()
             && let Some(q) = self.queued.take()
@@ -190,13 +199,17 @@ impl AgentHost {
             Some((name, prompt)) => (Some(name), prompt),
             None => (None, q.message.clone()),
         };
-        let message = prompt::turn_message(
+        let mut message = prompt::turn_message(
             &text,
             project,
             &q.context,
             &self.memory.rules,
             recipe.as_deref(),
         );
+        if !self.outcomes.is_empty() {
+            let outcomes = std::mem::take(&mut self.outcomes).join("\n");
+            message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
+        }
         let system_prompt = prompt::system_prompt(self.role, &q.settings);
 
         let launch = (|| -> std::io::Result<(McpLaunch, PathBuf, PathBuf)> {

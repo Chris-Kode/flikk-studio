@@ -1,6 +1,7 @@
 //! Quick-command bar (PRD AG1): cmd/ctrl-K from anywhere opens a palette to
 //! type a one-off request or start a recipe. Both go through `send_chat`.
 
+use super::composer::Composer;
 use super::recipes;
 use crate::state::EditorState;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
@@ -25,6 +26,15 @@ impl Global for Target {}
 
 pub fn register(state: &Entity<EditorState>, cx: &mut App) {
     cx.set_global(Target(state.downgrade()));
+}
+
+/// Where typing continues after a request went out from the bar.
+struct ComposerTarget(WeakEntity<Composer>);
+
+impl Global for ComposerTarget {}
+
+pub fn register_composer(composer: &Entity<Composer>, cx: &mut App) {
+    cx.set_global(ComposerTarget(composer.downgrade()));
 }
 
 fn toggle(cx: &mut App) {
@@ -125,6 +135,12 @@ impl Render for QuickCommand {
                     };
                     state.update(cx, |s, cx| s.send_chat(text, cx));
                     window.close_dialog(cx);
+                    if let Some(composer) = cx
+                        .try_global::<ComposerTarget>()
+                        .and_then(|c| c.0.upgrade())
+                    {
+                        composer.update(cx, |c, cx| c.focus(window, cx));
+                    }
                 }
             })
             .on_cancel(|window, cx| window.close_dialog(cx));
