@@ -124,9 +124,11 @@ impl DeliverPanel {
                 },
             ),
         ];
+        // Shared with the chat, so renders the agent queues show up here.
+        let queue = state.read(cx).render_queue.clone();
         Self {
             state,
-            queue: RenderQueue::new(),
+            queue,
             presets,
             preset: 0,
             preset_select,

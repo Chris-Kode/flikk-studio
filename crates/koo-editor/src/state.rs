@@ -51,7 +51,6 @@ pub struct EditorState {
     _pump: Task<()>,
     // --- chat
     /// Mirrors the role last handed to the agent host.
-    agent_role: AgentRole,
     /// Requests the user settled since their last message, and what came of them.
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
@@ -98,7 +97,6 @@ impl EditorState {
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
-            agent_role: AgentRole::Editor,
             settled: Vec::new(),
             render_queue: koo_deliver::RenderQueue::new(),
         };
@@ -109,6 +107,7 @@ impl EditorState {
     /// Hand the agent its recipes, the approved rules of the selected style
     /// profile and the facts about this project's sources.
     fn load_agent_memory(&mut self) {
+        self.agent.set_role(self.settings.role);
         use koo_core::memory::{FactStatus, RuleStatus};
         use koo_store::{FactFilter, RuleFilter};
         let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
@@ -633,13 +632,16 @@ fn now() -> i64 {
 
 impl EditorState {
     pub fn agent_role(&self) -> AgentRole {
-        self.agent_role
+        self.settings.role
     }
 
+    /// Saved with the user's settings; applies from the next turn.
     pub fn set_agent_role(&mut self, role: AgentRole, cx: &mut Context<Self>) {
-        self.agent_role = role;
-        self.agent.set_role(role);
-        cx.notify();
+        let settings = AgentSettings {
+            role,
+            ..self.settings.clone()
+        };
+        self.set_settings(settings, cx);
     }
 
     /// Memory and deliver requests waiting for the user (PRD "Agent

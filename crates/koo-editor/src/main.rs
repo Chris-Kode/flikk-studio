@@ -1,6 +1,3 @@
-// Temporary: removed once the chat composer focus is wired (integration A).
-#![allow(dead_code)]
-
 mod agent_link;
 mod app;
 mod demo;
