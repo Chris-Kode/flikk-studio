@@ -32,6 +32,15 @@ pub struct EditorState {
     pub preview: Option<ChangeSetId>,
     /// Last error or notice for the status line; cleared on the next action.
     pub status: Option<String>,
+    // --- panels
+    /// Pool item loaded in the viewer as source (double-click in the pool).
+    pub source_media: Option<koo_core::MediaId>,
+    /// Bins created in the pool; `Project::bins` has no command yet.
+    pub pool_bins: Vec<koo_core::model::Bin>,
+    /// Caption styles, loudness and ducking defaults until profiles are wired.
+    pub presets: koo_core::memory::Presets,
+    /// Index into `presets.caption_styles` used for new captions.
+    pub caption_style: usize,
     agent: AgentLink,
     _pump: Task<()>,
 }
@@ -67,6 +76,10 @@ impl EditorState {
             activity: Vec::new(),
             preview: None,
             status: persistence::take_notice(),
+            source_media: None,
+            pool_bins: Vec::new(),
+            presets: koo_core::memory::Presets::default(),
+            caption_style: 0,
             agent: AgentLink::new(),
             _pump: pump,
         };
@@ -207,6 +220,31 @@ impl EditorState {
     pub fn select_clips(&mut self, clips: Vec<koo_core::ClipId>, cx: &mut Context<Self>) {
         self.selection.clips = clips;
         cx.notify();
+    }
+
+    // --- panels
+
+    pub fn set_source_media(&mut self, media: Option<koo_core::MediaId>, cx: &mut Context<Self>) {
+        self.source_media = media;
+        cx.notify();
+    }
+
+    pub fn select_words(
+        &mut self,
+        words: Option<(koo_core::MediaId, TimeRange)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection.words = words;
+        cx.notify();
+    }
+
+    /// The caption style new captions use.
+    pub fn active_caption_style(&self) -> koo_core::memory::CaptionStyle {
+        self.presets
+            .caption_styles
+            .get(self.caption_style)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // ------------------------------------------------------------------ agent
