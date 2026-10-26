@@ -1,0 +1,8 @@
+[package]
+name = "koo-deliver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+koo-core.workspace = true

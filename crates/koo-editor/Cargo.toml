@@ -1,0 +1,14 @@
+[package]
+name = "koo-editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+koo-core.workspace = true
+koo-store.workspace = true
+koo-media.workspace = true
+koo-analysis.workspace = true
+koo-agent.workspace = true
+koo-deliver.workspace = true

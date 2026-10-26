@@ -1,0 +1,32 @@
+// Hooks in state.rs and the panel stubs are used as the work streams land.
+// Remove once every panel is wired.
+#![allow(dead_code)]
+
+mod agent_link;
+mod app;
+mod persistence;
+mod state;
+mod ui;
+
+use gpui_kit::*;
+
+fn main() {
+    gpui_kit::application().run(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        app::bind_keys(cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1440.), px(900.)),
+                cx,
+            ))),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| app::KooEditor::new(window, cx))
+        })
+        .expect("failed to open window");
+        cx.activate(true);
+    });
+}
