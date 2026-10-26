@@ -232,7 +232,7 @@ impl Render for SettingsPanel {
             .unwrap_or(0);
         let role_ix = ROLES
             .iter()
-            .position(|(r, _)| *r == self.state.read(cx).agent_role())
+            .position(|(r, _)| *r == settings.role)
             .unwrap_or(0);
         let differs = settings.permissions != Permissions::default();
         v_flex()
@@ -263,7 +263,7 @@ impl Render for SettingsPanel {
                         .children(ROLES.iter().map(|(_, label)| Tab::new().label(*label)))
                         .on_click(cx.listener(|this, ix: &usize, _, cx| {
                             let role = ROLES[*ix].0;
-                            this.state.update(cx, |s, cx| s.set_agent_role(role, cx));
+                            this.update(cx, |s| s.role = role);
                         })),
                 ),
             )

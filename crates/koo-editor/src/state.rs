@@ -7,7 +7,7 @@ use crate::persistence;
 use gpui_kit::*;
 use koo_agent::PendingApproval;
 use koo_core::agent::*;
-use koo_core::bus::{AcceptReport, AgentRole, Author, CommandBus, Outcome};
+use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
 use koo_core::changeset::ChangeItem;
 use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
@@ -50,7 +50,6 @@ pub struct EditorState {
     agent: AgentLink,
     _pump: Task<()>,
     // --- chat
-    /// Mirrors the role last handed to the agent host.
     /// Requests the user settled since their last message, and what came of them.
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
@@ -104,8 +103,8 @@ impl EditorState {
         this
     }
 
-    /// Hand the agent its recipes, the approved rules of the selected style
-    /// profile and the facts about this project's sources.
+    /// Hand the agent its role, its recipes, the approved rules of the
+    /// selected style profile and the facts about this project's sources.
     fn load_agent_memory(&mut self) {
         self.agent.set_role(self.settings.role);
         use koo_core::memory::{FactStatus, RuleStatus};
@@ -631,19 +630,6 @@ fn now() -> i64 {
 // --- chat
 
 impl EditorState {
-    pub fn agent_role(&self) -> AgentRole {
-        self.settings.role
-    }
-
-    /// Saved with the user's settings; applies from the next turn.
-    pub fn set_agent_role(&mut self, role: AgentRole, cx: &mut Context<Self>) {
-        let settings = AgentSettings {
-            role,
-            ..self.settings.clone()
-        };
-        self.set_settings(settings, cx);
-    }
-
     /// Memory and deliver requests waiting for the user (PRD "Agent
     /// configuration": these categories need approval per call).
     pub fn pending_approvals(&self) -> &[koo_agent::PendingApproval] {
