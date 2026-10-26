@@ -201,27 +201,21 @@ impl MediaPoolPanel {
     }
 
     fn bins(&self, cx: &App) -> Vec<Bin> {
-        let state = self.state.read(cx);
-        let mut bins = state.bus.project().bins.clone();
-        for b in &state.pool_bins {
-            if !bins.iter().any(|x| x.id == b.id) {
-                bins.push(b.clone());
-            }
-        }
-        bins
+        self.state.read(cx).bus.project().bins.clone()
     }
 
     fn new_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.bins(cx).len() + 1;
+        let mut bins = self.bins(cx);
+        let n = bins.len() + 1;
         let bin = Bin {
             id: BinId::new(),
             name: format!("Bin {n}"),
             parent: None,
         };
         let id = bin.id;
+        bins.push(bin);
         self.state.update(cx, |s, cx| {
-            s.pool_bins.push(bin);
-            cx.notify();
+            s.execute(Command::SetBins { bins }, cx);
         });
         self.start_rename(id, window, cx);
     }
@@ -248,12 +242,13 @@ impl MediaPoolPanel {
             return;
         };
         if !name.is_empty() {
-            self.state.update(cx, |s, cx| {
-                if let Some(b) = s.pool_bins.iter_mut().find(|b| b.id == id) {
-                    b.name = name;
-                }
-                cx.notify();
-            });
+            let mut bins = self.bins(cx);
+            if let Some(b) = bins.iter_mut().find(|b| b.id == id) {
+                b.name = name;
+                self.state.update(cx, |s, cx| {
+                    s.execute(Command::SetBins { bins }, cx);
+                });
+            }
         }
         cx.notify();
     }

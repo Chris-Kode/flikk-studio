@@ -160,8 +160,8 @@ pub fn seed(state: &mut EditorState) {
         job("Analysis", &media[1], JobState::Done),
     ];
     project.media = media;
+    project.bins = bins.to_vec();
     state.bus = CommandBus::new(project);
-    state.pool_bins = bins.to_vec();
     state.selection.clips = vec![selected];
     state.playhead = s(5.2);
     state.services = Services {

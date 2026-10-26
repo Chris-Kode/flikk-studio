@@ -86,6 +86,10 @@ pub enum Op {
         before: MediaItem,
         after: MediaItem,
     },
+    SetBins {
+        before: Vec<Bin>,
+        after: Vec<Bin>,
+    },
 }
 
 /// How an op shows on the timeline while pending.
@@ -158,6 +162,10 @@ impl Op {
             Op::AddMedia { media } => Op::RemoveMedia { media },
             Op::RemoveMedia { media } => Op::AddMedia { media },
             Op::UpdateMedia { before, after } => Op::UpdateMedia {
+                before: after,
+                after: before,
+            },
+            Op::SetBins { before, after } => Op::SetBins {
                 before: after,
                 after: before,
             },
@@ -287,6 +295,12 @@ impl Op {
                     .find(|m| *m == before)
                     .ok_or(CoreError::Conflict)?;
                 *m = after.clone();
+            }
+            Op::SetBins { before, after } => {
+                if project.bins != *before {
+                    return Err(CoreError::Conflict);
+                }
+                project.bins = after.clone();
             }
         }
         Ok(())

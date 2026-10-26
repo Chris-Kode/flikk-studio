@@ -20,24 +20,27 @@ fn main() {
         }
         return;
     }
-    gpui_kit::application().run(|cx| {
-        gpui_kit::init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        app::bind_keys(cx);
-        cx.on_app_quit(|_| async { persistence::shutdown() })
-            .detach();
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1440.), px(900.)),
-                cx,
-            ))),
-            ..Default::default()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| app::KooEditor::new(window, cx))
-        })
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            app::bind_keys(cx);
+            ui::chat::init(cx);
+            cx.on_app_quit(|_| async { persistence::shutdown() })
+                .detach();
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1440.), px(900.)),
+                    cx,
+                ))),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| app::KooEditor::new(window, cx))
+            })
+            .expect("failed to open window");
+            cx.activate(true);
+        });
 }

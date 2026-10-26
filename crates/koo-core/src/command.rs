@@ -189,6 +189,11 @@ pub enum Command {
     },
 
     // ---- captions and titles (C1–C4)
+    /// Caption style preset for a caption track (PRD C2); `None` = default.
+    SetCaptionStyle {
+        track: TrackId,
+        style: Option<String>,
+    },
     AddCaption {
         track: TrackId,
         range: TimeRange,
@@ -263,6 +268,10 @@ pub enum Command {
     RemoveMedia {
         media: MediaId,
     },
+    /// Replace the bin list (create, rename, reparent).
+    SetBins {
+        bins: Vec<Bin>,
+    },
 }
 
 impl Command {
@@ -286,7 +295,9 @@ impl Command {
             SetTransform { .. } | AddZoom { .. } | SetKeyframe { .. } | RemoveKeyframe { .. } => {
                 ToolCategory::Transform
             }
-            AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => ToolCategory::Captions,
+            SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
+                ToolCategory::Captions
+            }
             SetGrade { .. } | ApplyLut { .. } | CopyGrade { .. } => ToolCategory::Color,
             SetGain { .. }
             | AddFade { .. }
@@ -294,7 +305,9 @@ impl Command {
             | SetDucking { .. }
             | SetPlaylist { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
-            ImportMedia { .. } | UpdateMedia { .. } | RemoveMedia { .. } => ToolCategory::Media,
+            ImportMedia { .. } | UpdateMedia { .. } | RemoveMedia { .. } | SetBins { .. } => {
+                ToolCategory::Media
+            }
         }
     }
 

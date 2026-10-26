@@ -35,8 +35,6 @@ pub struct EditorState {
     // --- panels
     /// Pool item loaded in the viewer as source (double-click in the pool).
     pub source_media: Option<koo_core::MediaId>,
-    /// Bins created in the pool; `Project::bins` has no command yet.
-    pub pool_bins: Vec<koo_core::model::Bin>,
     /// Caption styles, loudness and ducking defaults until profiles are wired.
     pub presets: koo_core::memory::Presets,
     /// Index into `presets.caption_styles` used for new captions.
@@ -77,7 +75,6 @@ impl EditorState {
             preview: None,
             status: persistence::take_notice(),
             source_media: None,
-            pool_bins: Vec::new(),
             presets: koo_core::memory::Presets::default(),
             caption_style: 0,
             agent: AgentLink::new(),

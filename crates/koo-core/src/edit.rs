@@ -165,6 +165,23 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 Edge::End => c.audio.fade_out = d,
             }
         }),
+        Command::SetCaptionStyle { track, style } => {
+            let t = tl.track(*track).ok_or(CoreError::TrackNotFound(*track))?;
+            let before = TrackProps::of(t);
+            let after = TrackProps {
+                caption_style: style.clone(),
+                ..before.clone()
+            };
+            Ok(ops(vec![Op::UpdateTrack {
+                track: *track,
+                before,
+                after,
+            }]))
+        }
+        Command::SetBins { bins } => Ok(ops(vec![Op::SetBins {
+            before: project.bins.clone(),
+            after: bins.clone(),
+        }])),
         Command::SetTrackMix { track, mix } => {
             let t = tl.track(*track).ok_or(CoreError::TrackNotFound(*track))?;
             let before = TrackProps::of(t);
