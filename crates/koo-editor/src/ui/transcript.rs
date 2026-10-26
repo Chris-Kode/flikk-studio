@@ -301,12 +301,7 @@ impl TranscriptPanel {
                                 .text_color(muted)
                                 .child(l)
                         }))
-                        .child(
-                            h_flex()
-                                .flex_wrap()
-                                .gap_x(px(4.))
-                                .children(std::mem::take(line)),
-                        ),
+                        .child(h_flex().flex_wrap().children(std::mem::take(line))),
                 );
             };
         let mut prev: Option<&TimelineWord> = None;
