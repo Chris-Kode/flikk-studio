@@ -84,11 +84,6 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "set_keyframe" => {
             let p = ctx.project();
             let clip = clip_id(p, args.str("clip")?)?;
-            let start = p
-                .timeline
-                .clip(clip)
-                .map(|(_, c)| c.start)
-                .unwrap_or_default();
             let property = match args.str("property")? {
                 "position_x" => Property::PositionX,
                 "position_y" => Property::PositionY,
@@ -100,8 +95,8 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             vec![Command::SetKeyframe {
                 clip,
                 property,
-                // Keyframes are stored relative to the clip's start.
-                at: args.time("at")? - start,
+                // Timeline time; the planner converts to clip-relative.
+                at: args.time("at")?,
                 value: args.f64("value")? as f32,
                 ease: ease(args)?.unwrap_or_default(),
             }]
