@@ -1,7 +1,7 @@
 //! Message input: Enter sends, Shift+Enter breaks the line, `@` opens the
 //! reference list (inserted as chips) and `/` at the start lists recipes.
 
-use super::recipes::RECIPES;
+use super::recipes;
 use super::refs::{self, Reference};
 use crate::state::EditorState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -41,10 +41,7 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 enum Suggestion {
     Reference(Reference),
-    Recipe {
-        name: &'static str,
-        title: &'static str,
-    },
+    Recipe { name: String, title: String },
 }
 
 struct Suggestions {
@@ -136,8 +133,8 @@ impl Composer {
                 .collect()
         } else {
             let query = word.strip_prefix('/').filter(|_| start == 0)?;
-            RECIPES
-                .iter()
+            recipes::list(self.state.read(cx))
+                .into_iter()
                 .filter(|(name, _)| name.starts_with(query))
                 .map(|(name, title)| Suggestion::Recipe { name, title })
                 .collect()
@@ -201,7 +198,7 @@ impl Composer {
                     (r.kind.word().to_string(), r.label.clone(), r.detail.clone())
                 }
                 Suggestion::Recipe { name, title } => {
-                    (String::new(), format!("/{name}"), title.to_string())
+                    (String::new(), format!("/{name}"), title.clone())
                 }
             };
             h_flex()
