@@ -17,24 +17,7 @@ use std::path::{Path, PathBuf};
 const DETAIL_MAX: f64 = 20.0;
 const FRAME_WIDTH: u32 = 1280;
 
-/// `n` points spread evenly over `range` (centre of each slice), resolved to
-/// the topmost video clip under each; gaps are skipped.
-///
-/// Local stand-in for `koo_core::query::sample_points`, which the core
-/// stream is adding; swap it in once merged.
-pub fn sample_points(project: &Project, range: TimeRange, n: usize) -> Vec<SamplePoint> {
-    if range.is_empty() || n == 0 {
-        return Vec::new();
-    }
-    let step = range.duration().0 as f64 / n as f64;
-    (0..n)
-        .filter_map(|i| {
-            let t = range.start + Time((step * (i as f64 + 0.5)) as i64);
-            sample_at(project, t)
-        })
-        .collect()
-}
-
+/// The source frame under timeline time `t`, through the topmost video clip.
 fn sample_at(project: &Project, t: Time) -> Option<SamplePoint> {
     project
         .timeline
@@ -75,7 +58,7 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
     }
     let n = ctx.settings.vision.frames_per_collage.clamp(1, 30) as usize;
     let tile_width = ctx.settings.vision.tile_width.clamp(64, 640);
-    let samples = sample_points(project, range, n);
+    let samples = koo_core::query::sample_points(project, range, n);
 
     // Transcript is cheap; build it here so the job only decodes.
     let transcript = match timeline_words(project, ctx.services, range) {

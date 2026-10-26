@@ -11,6 +11,15 @@ mod ui;
 use gpui_kit::*;
 
 fn main() {
+    // The agent backend launches this binary as its MCP server when no
+    // separate `koo-mcp` is installed next to it.
+    if std::env::args().nth(1).as_deref() == Some(koo_agent::backend::MCP_SUBCOMMAND) {
+        if let Err(e) = koo_agent::mcp::run() {
+            eprintln!("koo-editor mcp: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);

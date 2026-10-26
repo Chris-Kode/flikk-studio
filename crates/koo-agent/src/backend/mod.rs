@@ -22,6 +22,7 @@ use std::thread;
 #[derive(Clone, Debug)]
 pub struct McpLaunch {
     pub command: PathBuf,
+    pub args: Vec<String>,
     pub env: Vec<(String, String)>,
 }
 
@@ -267,10 +268,12 @@ fn is_file(p: &Path) -> bool {
     p.metadata().map(|m| m.is_file()).unwrap_or(false)
 }
 
-/// `koo-mcp` next to the running executable, or `$KOOEDITOR_MCP`.
-pub fn mcp_binary() -> std::io::Result<PathBuf> {
+/// How to start the MCP server: `$KOOEDITOR_MCP`, else `koo-mcp` next to
+/// the running executable, else the editor itself as `<exe> mcp` (so
+/// `cargo run -p koo-editor` works without building `koo-mcp`).
+pub fn mcp_command() -> std::io::Result<(PathBuf, Vec<String>)> {
     if let Some(p) = std::env::var_os("KOOEDITOR_MCP").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(p));
+        return Ok((PathBuf::from(p), Vec::new()));
     }
     let exe = std::env::current_exe()?;
     let name = format!("koo-mcp{}", std::env::consts::EXE_SUFFIX);
@@ -279,17 +282,16 @@ pub fn mcp_binary() -> std::io::Result<PathBuf> {
         // `target/debug/deps` when run from cargo tooling.
         exe.parent().and_then(|d| d.parent()).map(|d| d.join(&name)),
     ];
-    candidates
+    Ok(candidates
         .into_iter()
         .flatten()
         .find(|p| is_file(p))
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{name} was not found next to the editor (set KOOEDITOR_MCP)"),
-            )
-        })
+        .map(|p| (p, Vec::new()))
+        .unwrap_or((exe, vec![MCP_SUBCOMMAND.into()])))
 }
+
+/// Argument that makes the editor binary run as the stdio MCP server.
+pub const MCP_SUBCOMMAND: &str = "mcp";
 
 /// Joins text pieces that arrive as separate messages with a blank line.
 #[derive(Default)]

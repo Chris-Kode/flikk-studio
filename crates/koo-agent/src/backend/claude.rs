@@ -31,7 +31,7 @@ impl Adapter for Claude {
                 "koo": {
                     "type": "stdio",
                     "command": turn.mcp.command,
-                    "args": [],
+                    "args": turn.mcp.args,
                     "env": env,
                 }
             }

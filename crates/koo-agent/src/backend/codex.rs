@@ -65,7 +65,15 @@ impl Adapter for Codex {
                 "mcp_servers.koo.command={}",
                 toml_str(&turn.mcp.command.to_string_lossy())
             ),
-            "mcp_servers.koo.args=[]".into(),
+            format!(
+                "mcp_servers.koo.args=[{}]",
+                turn.mcp
+                    .args
+                    .iter()
+                    .map(|a| toml_str(a))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             format!("mcp_servers.koo.env={{{}}}", env.join(",")),
             "mcp_servers.koo.startup_timeout_sec=20".into(),
             "mcp_servers.koo.tool_timeout_sec=300".into(),

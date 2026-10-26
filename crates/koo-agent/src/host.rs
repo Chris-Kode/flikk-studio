@@ -204,8 +204,10 @@ impl AgentHost {
                 self.bridge = Some(BridgeServer::start()?);
             }
             let bridge = self.bridge.as_ref().unwrap();
+            let (command, args) = backend::mcp_command()?;
             let mcp = McpLaunch {
-                command: backend::mcp_binary()?,
+                command,
+                args,
                 env: vec![
                     (bridge::ENV_ADDR.into(), bridge.addr().to_string()),
                     (bridge::ENV_TOKEN.into(), bridge.token().into()),

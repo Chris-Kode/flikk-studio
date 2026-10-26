@@ -54,7 +54,7 @@ impl EditorState {
                 }
             }
         });
-        Self {
+        let mut this = Self {
             bus,
             services: services(),
             workspace: Workspace::default(),
@@ -69,7 +69,48 @@ impl EditorState {
             status: persistence::take_notice(),
             agent: AgentLink::new(),
             _pump: pump,
-        }
+        };
+        this.load_agent_memory();
+        this
+    }
+
+    /// Hand the agent its recipes, the approved rules of the selected style
+    /// profile and the facts about this project's sources.
+    fn load_agent_memory(&mut self) {
+        use koo_core::memory::{FactStatus, RuleStatus};
+        use koo_store::{FactFilter, RuleFilter};
+        let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
+        let rules = self
+            .settings
+            .style_profile
+            .and_then(|profile| {
+                let filter = RuleFilter {
+                    status: Some(RuleStatus::Approved),
+                    ..Default::default()
+                };
+                persistence::with_store(|s| s.rules(profile, &filter))
+            })
+            .unwrap_or_default();
+        let fingerprints: Vec<_> = self
+            .bus
+            .project()
+            .media
+            .iter()
+            .filter_map(|m| m.fingerprint.clone())
+            .collect();
+        let facts = fingerprints
+            .into_iter()
+            .flat_map(|fingerprint| {
+                let filter = FactFilter {
+                    fingerprint: Some(fingerprint),
+                    ..Default::default()
+                };
+                persistence::with_store(|s| s.facts(&filter)).unwrap_or_default()
+            })
+            .filter(|f| f.status != FactStatus::Suspended)
+            .collect();
+        self.agent.set_recipes(recipes);
+        self.agent.set_memory(rules, facts);
     }
 
     pub fn context(&self) -> EditorContext {
@@ -196,6 +237,7 @@ impl EditorState {
         self.bus.set_permissions(settings.permissions.clone());
         persistence::save_settings(&settings);
         self.settings = settings;
+        self.load_agent_memory();
         cx.notify();
     }
 
