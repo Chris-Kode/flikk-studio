@@ -24,7 +24,9 @@ use std::sync::Mutex;
 pub const MODEL: &str = "qwen3-forced-aligner-0.6b-q4.onnx";
 /// Where [`MODEL`] is downloaded from. Qwen publishes no ONNX export; how
 /// this one is made and hosted is in `docs/TECHNICAL_DESIGN.md`.
-const MODEL_URL: Option<&str> = None;
+const MODEL_URL: Option<&str> = Some(
+    "https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx/resolve/c1386c6a094f575f2067cf82632c30238c1b1f9d/qwen3-forced-aligner-0.6b-q4.onnx",
+);
 /// Qwen's tokenizer, from the model's own repository.
 const TOKENIZER: [(&str, &str); 2] = [
     (

@@ -191,8 +191,10 @@ All nine streams are merged. What runs today:
   so it is only the fallback. Results of an older `ANALYSIS_VERSION` are
   upgraded when a project opens, without running Whisper again.
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
-  `qwen3-forced-aligner-0.6b-q4.onnx` is our export, to be hosted by us
-  (`MODEL_URL` in `forced.rs`, unset until then). The graph takes 16 kHz
+  `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
+  [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
+  with its build scripts (`MODEL_URL` in `forced.rs` pins the commit;
+  589,447,679 bytes, SHA-256 `228f127b…9ab49df`). The graph takes 16 kHz
   samples (a multiple of 160) and the text's token ids, and returns the
   argmax of the 5,000 timestamp classes for each token. Inside it: the
   Whisper log-mel features of `WhisperFeatureExtractor` (400-point frames,
@@ -205,9 +207,9 @@ All nine streams are merged. What runs today:
   weights quantized with `MatMulNBitsQuantizer` (4 bits, block 32,
   symmetric; the embedding table as `GatherBlockQuantized`). It matches
   Qwen's own pipeline exactly before quantization and to within 0.5
-  points of clean cuts after; dynamic int8 quantization breaks it. Host it
-  with the Apache-2.0 licence text and a note that it is a modified
-  (exported, quantized) Qwen3-ForcedAligner-0.6B.
+  points of clean cuts after; dynamic int8 quantization breaks it. The
+  repository carries the Apache-2.0 licence text and states that it is a
+  modified (exported, quantized) Qwen3-ForcedAligner-0.6B.
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both, on a frame boundary when the pause holds one, with
   a 10 ms audio fade at the join. The transcript panel's word delete and
