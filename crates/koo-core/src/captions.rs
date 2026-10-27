@@ -136,7 +136,32 @@ pub fn group_words(words: &[Word], rules: &CaptionRules) -> Vec<CaptionPhrase> {
         start = end;
     }
     hold_short(&mut phrases, rules.min_duration);
+    separate(&mut phrases);
     phrases
+}
+
+/// Make every phrase non-empty and keep it clear of the next, so they can
+/// share one caption track. Aligned words may overrun the next word, and the
+/// same speech may be heard on two tracks.
+fn separate(phrases: &mut [CaptionPhrase]) {
+    let shortest = Time::from_millis(100);
+    for i in 0..phrases.len() {
+        if i > 0 {
+            let prev = phrases[i - 1].range;
+            let start = phrases[i].range.start;
+            if start < prev.end {
+                if start > prev.start {
+                    phrases[i - 1].range.end = start;
+                } else {
+                    phrases[i].range.start = prev.end;
+                }
+            }
+        }
+        let r = &mut phrases[i].range;
+        if r.end < r.start + shortest {
+            r.end = r.start + shortest;
+        }
+    }
 }
 
 /// Where a phrase that overflowed after `words[start..end]` should end
