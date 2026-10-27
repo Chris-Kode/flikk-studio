@@ -7,7 +7,9 @@ mod style;
 mod words;
 
 use crate::state::EditorState;
+use crate::ui::RefDrag;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -59,6 +61,9 @@ pub struct TranscriptPanel {
     anchor: Option<usize>,
     head: Option<usize>,
     dragging: bool,
+    /// A word inside the selection pressed without dragging yet: a click
+    /// there selects it alone, a drag takes the selection to the chat.
+    pressed_in_selection: Option<usize>,
     /// Caption being edited inline, with its editor.
     editing: Option<ClipId>,
     editor: Entity<InputState>,
@@ -120,6 +125,7 @@ impl TranscriptPanel {
             anchor: None,
             head: None,
             dragging: false,
+            pressed_in_selection: None,
             editing: None,
             editor,
             captions: Vec::new(),
@@ -195,6 +201,11 @@ impl TranscriptPanel {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        let inside = self.selection().is_some_and(|(a, b)| a <= i && i <= b);
+        if inside && !ev.modifiers.shift && ev.click_count == 1 {
+            self.pressed_in_selection = Some(i);
+            return;
+        }
         if ev.modifiers.shift && self.anchor.is_some() {
             self.head = Some(i);
         } else if ev.click_count >= 2 {
@@ -222,6 +233,15 @@ impl TranscriptPanel {
     }
 
     fn drag_end(&mut self, cx: &mut Context<Self>) {
+        if let Some(i) = self.pressed_in_selection.take()
+            && let Some(t) = self.words.get(i).map(|w| w.timeline.start)
+        {
+            self.anchor = Some(i);
+            self.head = None;
+            self.state.update(cx, |s, cx| s.seek(t, cx));
+            self.publish_selection(cx);
+            cx.notify();
+        }
         if self.dragging {
             self.dragging = false;
             self.publish_selection(cx);
@@ -252,6 +272,36 @@ impl TranscriptPanel {
             }
             s.select_words(None, cx);
         });
+    }
+
+    /// The selected words as a chat reference: their timeline range,
+    /// labelled with the quoted words.
+    fn selection_ref(&self) -> Option<(String, SharedString)> {
+        let (a, b) = self.selection()?;
+        let range = TimeRange::new(self.words[a].timeline.start, self.words[b].timeline.end);
+        let text = self.words[a..=b]
+            .iter()
+            .map(|w| w.word.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut label: String = text.chars().take(32).collect();
+        if text.chars().count() > 32 {
+            label.push('…');
+        }
+        Some((
+            format!(
+                "@range {:.3}-{:.3}",
+                range.start.as_secs_f64(),
+                range.end.as_secs_f64()
+            ),
+            format!("“{label}”").into(),
+        ))
+    }
+
+    fn add_to_chat(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.selection_ref() {
+            self.state.update(cx, |s, cx| s.mention(vec![r], cx));
+        }
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -309,6 +359,7 @@ impl TranscriptPanel {
                 .child("No transcript")
                 .into_any_element();
         }
+        let panel = cx.entity();
         div()
             .id("transcript-words")
             .flex_1()
@@ -333,6 +384,17 @@ impl TranscriptPanel {
                 .line_height(rems(1.6)),
             )
             .vertical_scrollbar(&self.list)
+            .context_menu(move |menu, _, cx| {
+                if panel.read(cx).selection().is_none() {
+                    return menu;
+                }
+                let panel = panel.clone();
+                menu.item(
+                    PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
+                        panel.update(cx, |this, cx| this.add_to_chat(cx))
+                    }),
+                )
+            })
             .into_any_element()
     }
 
@@ -349,6 +411,8 @@ impl TranscriptPanel {
         );
         let playhead = self.state.read(cx).playhead;
         let sel = self.selection();
+        let drag = self.selection_ref().map(|r| RefDrag { refs: vec![r] });
+        let panel = cx.entity().downgrade();
         let words = p.words.clone().map(|i| {
             let w = &self.words[i];
             let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
@@ -377,6 +441,14 @@ impl TranscriptPanel {
                         this.word_drag(i, cx);
                     }
                 }))
+                .when_some(drag.clone().filter(|_| selected), |d, drag| {
+                    let panel = panel.clone();
+                    d.on_drag(drag, move |drag, _, _, cx| {
+                        // Dragged away: the press was not a click.
+                        let _ = panel.update(cx, |this, _| this.pressed_in_selection = None);
+                        cx.new(|_| drag.clone())
+                    })
+                })
         });
         v_flex()
             .px_3()

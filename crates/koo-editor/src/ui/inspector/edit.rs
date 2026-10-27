@@ -1,30 +1,40 @@
-//! The selected clip's properties (see `clip.rs`); for
-//! picture clips, transform with per-property keyframe toggles at the
-//! playhead, and the clip's keyframes (PRD E5).
+//! The selected clip's properties (see `clip.rs`), or the selected
+//! transition; for picture clips, transform, composite and crop with
+//! per-property keyframe toggles at the playhead, and the clip's keyframes
+//! (PRD E5).
 
 use super::param::{Key, format_value};
+use super::transition::labeled;
 use super::{InspectorPanel, clip_time, property_of, section};
+use crate::ui::library::{FxGlyph, fx_glyph};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::Time;
 use koo_core::command::Command;
-use koo_core::model::{Clip, Keyframe, Property};
+use koo_core::model::{BlendMode, Clip, Keyframe, Property};
 
-const TRANSFORM: [Key; 5] = [
-    Key::PosX,
-    Key::PosY,
-    Key::Scale,
-    Key::Rotation,
-    Key::Opacity,
-];
+const TRANSFORM: [Key; 4] = [Key::PosX, Key::PosY, Key::Scale, Key::Rotation];
+const CROP: [Key; 4] = [Key::Crop(0), Key::Crop(1), Key::Crop(2), Key::Crop(3)];
 
 impl InspectorPanel {
     /// The selected clip's properties for its kind, or the sequence format
     /// when nothing is selected.
     pub(super) fn edit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Shown until another clip is selected (the timeline may keep the
+        // transition picked while clips are clicked).
+        let state = self.state.read(cx);
+        let transition = state.selected_transition.filter(|(clip, _)| {
+            state.selection.clips.is_empty() || state.selection.clips.contains(clip)
+        });
+        if let Some((clip, edge)) = transition
+            && let Some(view) = self.transition_view(clip, edge, window, cx)
+        {
+            return view;
+        }
         match self.primary_on_track(cx) {
             Some((track, clip)) => self.clip_view(track, clip, window, cx),
             None => self.sequence_view(cx),
@@ -45,23 +55,114 @@ impl InspectorPanel {
         let at = clip_time(&clip, playhead);
         let inside = clip.range().contains(playhead);
 
-        let mut rows = Vec::new();
-        for key in TRANSFORM {
-            let property = property_of(key).unwrap();
-            let value = clip.value_at(property, at);
-            let row = self.param(key, value, window, cx).row(cx);
-            let toggle = self.key_toggle(&clip, property, at, frame, inside, cx);
-            rows.push(row.child(toggle));
-        }
+        let mut keyed_rows = |keys: &[Key], this: &mut Self, cx: &mut Context<Self>| {
+            keys.iter()
+                .map(|&key| {
+                    let property = property_of(key).unwrap();
+                    let value = clip.value_at(property, at);
+                    let row = this.param(key, value, window, cx).row(cx);
+                    let toggle = this.key_toggle(&clip, property, at, frame, inside, cx);
+                    row.child(toggle)
+                })
+                .collect::<Vec<_>>()
+        };
+        let transform_rows = keyed_rows(&TRANSFORM, self, cx);
+        let opacity = keyed_rows(&[Key::Opacity], self, cx);
+        let crop_rows = keyed_rows(&CROP, self, cx);
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
-        let transform = section("Transform", cx).children(rows);
+        let transform = section("Transform", cx)
+            .children(transform_rows)
+            .child(self.flip_row(&clip, cx));
+        let composite = section("Composite", cx)
+            .children(opacity)
+            .child(self.blend_row(&clip, cx));
+        let crop = section("Crop", cx).children(crop_rows);
         let list = (!frames.is_empty()).then(|| self.keyframe_list(&clip, frames, at, frame, cx));
         v_flex()
             .gap_4()
             .child(transform)
+            .child(composite)
+            .child(crop)
             .children(list)
             .into_any_element()
+    }
+
+    /// Mirror toggles; not animatable.
+    fn flip_row(&self, clip: &Clip, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let flip = clip.transform.flip;
+        let toggle = |axis: usize, cx: &mut Context<Self>| {
+            let (glyph, tip) = match axis {
+                0 => (FxGlyph::FlipH, "Flip horizontal"),
+                _ => (FxGlyph::FlipV, "Flip vertical"),
+            };
+            let (id, transform) = (clip.id, clip.transform.clone());
+            Button::new(("flip", axis))
+                .ghost()
+                .xsmall()
+                .toggled(flip[axis])
+                .tooltip(tip)
+                .child(fx_glyph(glyph, px(13.), muted))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let mut transform = transform.clone();
+                    transform.flip[axis] = !transform.flip[axis];
+                    this.run(
+                        vec![Command::SetTransform {
+                            clip: id,
+                            transform,
+                        }],
+                        "set_transform",
+                        cx,
+                    );
+                }))
+        };
+        labeled(
+            "Flip",
+            h_flex().gap_1().child(toggle(0, cx)).child(toggle(1, cx)),
+            cx,
+        )
+    }
+
+    /// Composite mode dropdown.
+    fn blend_row(&self, clip: &Clip, cx: &mut Context<Self>) -> Div {
+        let (id, transform) = (clip.id, clip.transform.clone());
+        let current = transform.blend;
+        let panel = cx.entity();
+        labeled(
+            "Blend",
+            Button::new("blend")
+                .outline()
+                .xsmall()
+                .w_full()
+                .label(current.label())
+                .dropdown_caret(true)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for mode in BlendMode::ALL {
+                        let (panel, transform) = (panel.clone(), transform.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new(mode.label())
+                                .checked(mode == current)
+                                .on_click(move |_, _, cx| {
+                                    let mut transform = transform.clone();
+                                    transform.blend = mode;
+                                    panel.update(cx, |this, cx| {
+                                        this.run(
+                                            vec![Command::SetTransform {
+                                                clip: id,
+                                                transform,
+                                            }],
+                                            "set_transform",
+                                            cx,
+                                        )
+                                    })
+                                }),
+                        );
+                    }
+                    menu
+                }),
+            cx,
+        )
     }
 
     /// Filled when a keyframe sits at the playhead, outlined when the
@@ -142,9 +243,11 @@ impl InspectorPanel {
         let theme = cx.theme();
         let (muted, active, hover) = (theme.muted_foreground, theme.list_active, theme.list_hover);
         let (clip_id, start) = (clip.id, clip.start);
-        section("Keyframes", cx).children(frames.into_iter().enumerate().map(|(i, k)| {
+        let keyed = frames
+            .into_iter()
+            .filter_map(|k| Some((transform_key(k.property)?, k)));
+        section("Keyframes", cx).children(keyed.enumerate().map(|(i, (key, k))| {
             let current = (k.at - at).0.abs() < frame.0 / 2 + 1;
-            let key = transform_key(k.property);
             let spec = key.spec();
             let (property, time) = (k.property, k.at);
             h_flex()
@@ -205,12 +308,18 @@ impl InspectorPanel {
     }
 }
 
-fn transform_key(p: Property) -> Key {
-    match p {
+/// The inspector control a keyframed property belongs to, if it has one.
+fn transform_key(p: Property) -> Option<Key> {
+    Some(match p {
         Property::PositionX => Key::PosX,
         Property::PositionY => Key::PosY,
         Property::Scale => Key::Scale,
         Property::Rotation => Key::Rotation,
         Property::Opacity => Key::Opacity,
-    }
+        Property::CropLeft => Key::Crop(0),
+        Property::CropTop => Key::Crop(1),
+        Property::CropRight => Key::Crop(2),
+        Property::CropBottom => Key::Crop(3),
+        _ => return None,
+    })
 }

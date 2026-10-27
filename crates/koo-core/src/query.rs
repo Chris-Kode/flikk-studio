@@ -32,6 +32,7 @@ impl Ease {
 }
 
 impl Transform {
+    /// [`Property::Volume`] is not a transform property and reads 0.
     pub fn get(&self, property: Property) -> f32 {
         match property {
             Property::PositionX => self.position[0],
@@ -39,9 +40,15 @@ impl Transform {
             Property::Scale => self.scale,
             Property::Rotation => self.rotation_deg,
             Property::Opacity => self.opacity,
+            Property::CropLeft => self.crop[0],
+            Property::CropTop => self.crop[1],
+            Property::CropRight => self.crop[2],
+            Property::CropBottom => self.crop[3],
+            Property::Volume => 0.0,
         }
     }
 
+    /// Setting [`Property::Volume`] does nothing.
     pub fn set(&mut self, property: Property, value: f32) {
         match property {
             Property::PositionX => self.position[0] = value,
@@ -49,13 +56,27 @@ impl Transform {
             Property::Scale => self.scale = value,
             Property::Rotation => self.rotation_deg = value,
             Property::Opacity => self.opacity = value,
+            Property::CropLeft => self.crop[0] = value,
+            Property::CropTop => self.crop[1] = value,
+            Property::CropRight => self.crop[2] = value,
+            Property::CropBottom => self.crop[3] = value,
+            Property::Volume => {}
         }
     }
 }
 
 impl Clip {
+    /// The un-keyframed value of `property`: the [`Transform`] field, or the
+    /// clip gain for [`Property::Volume`].
+    pub fn base_value(&self, property: Property) -> f32 {
+        match property {
+            Property::Volume => self.audio.gain_db,
+            p => self.transform.get(p),
+        }
+    }
+
     /// Value of `property` at clip-relative time `t`. Without keyframes for
-    /// it, the static [`Transform`] value; before the first and after the
+    /// it, [`Clip::base_value`]; before the first and after the
     /// last keyframe, that keyframe's value; in between, eased by the earlier
     /// keyframe's [`Ease`].
     pub fn value_at(&self, property: Property, t: Time) -> f32 {
@@ -70,7 +91,7 @@ impl Clip {
             }
         }
         match (prev, next) {
-            (None, None) => self.transform.get(property),
+            (None, None) => self.base_value(property),
             (Some(k), None) | (None, Some(k)) => k.value,
             (Some(a), Some(b)) => {
                 let u = (t - a.at).0 as f64 / (b.at - a.at).0 as f64;
@@ -82,24 +103,33 @@ impl Clip {
     /// The full transform at clip-relative time `t`.
     pub fn transform_at(&self, t: Time) -> Transform {
         let mut out = self.transform.clone();
-        for p in [
-            Property::PositionX,
-            Property::PositionY,
-            Property::Scale,
-            Property::Rotation,
-            Property::Opacity,
-        ] {
+        for p in Property::TRANSFORM {
             out.set(p, self.value_at(p, t));
         }
         out
     }
 
-    /// Source range this clip plays, for media clips.
+    /// Where a source range lands on the timeline through this clip's speed,
+    /// unclamped (it may lie outside the clip).
+    pub fn source_to_timeline_range(&self, source: TimeRange) -> TimeRange {
+        let source_in = match &self.content {
+            ClipContent::Media { source_in, .. } => *source_in,
+            _ => Time::ZERO,
+        };
+        let inv = 1.0 / self.speed;
+        TimeRange::new(
+            self.start + (source.start - source_in).scale(inv),
+            self.start + (source.end - source_in).scale(inv),
+        )
+    }
+
+    /// Source range this clip plays, for media clips (`duration × speed`).
     pub fn source_range(&self) -> Option<TimeRange> {
         match &self.content {
-            ClipContent::Media { source_in, .. } => {
-                Some(TimeRange::new(*source_in, *source_in + self.duration))
-            }
+            ClipContent::Media { source_in, .. } => Some(TimeRange::new(
+                *source_in,
+                *source_in + self.duration.scale(self.speed),
+            )),
             _ => None,
         }
     }
@@ -108,12 +138,14 @@ impl Clip {
 // ------------------------------------------------------------ what plays at t
 
 /// Clips drawn at timeline time `t`, topmost first: every shown (not muted)
-/// non-audio track's clip whose opacity there is above zero, as rendered.
+/// non-audio track's enabled clip whose opacity there is above zero, as
+/// rendered.
 pub fn visible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
     tl.tracks
         .iter()
         .filter(|tr| tr.kind != TrackKind::Audio && !tr.mix.mute)
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
+        .filter(|(_, c)| c.enabled)
         .filter(|(_, c)| c.value_at(Property::Opacity, t - c.start) > 0.0)
         .collect()
 }
@@ -133,7 +165,7 @@ pub fn audible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
     audio()
         .filter(|tr| !tr.mix.mute && (!solo || tr.mix.solo))
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
-        .filter(|(_, c)| c.media().is_some())
+        .filter(|(_, c)| c.enabled && c.media().is_some())
         .collect()
 }
 
@@ -225,9 +257,8 @@ pub fn words_in_range(
                 continue;
             };
             for word in transcript.words_in(source) {
-                let Some(timeline) = word
-                    .range
-                    .shift(clip.start - source.start)
+                let Some(timeline) = clip
+                    .source_to_timeline_range(word.range)
                     .intersect(&clip.range())
                     .filter(|r| r.overlaps(&range))
                 else {
@@ -278,7 +309,7 @@ pub fn source_to_timeline(
             Some(SourceMapping {
                 track: t.id,
                 clip: c.id,
-                timeline: s.shift(c.start - used.start),
+                timeline: c.source_to_timeline_range(s),
                 source: s,
             })
         })
@@ -332,8 +363,25 @@ pub enum Reference {
     Clip { clip: ClipId },
     /// "@marker 9c1d2e3f" or "@marker intro hook".
     Marker { marker: MarkerId },
-    /// "@track V1".
+    /// "@track V1" or "@track 3f2a91c0".
     Track { track: TrackId },
+    /// "@media 3f2a91c0" (resolved with the project only).
+    Media { media: MediaId },
+    /// "@bin 3f2a91c0" (resolved with the project only).
+    Bin { bin: BinId },
+    /// "@effect 3f2a91c0/9c1d2e3f": a video or audio effect on a clip.
+    Effect { clip: ClipId, effect: EffectId },
+    /// "@transition 3f2a91c0/in" or ".../out": the clip's transition at
+    /// that edge, which may not be set.
+    Transition {
+        clip: ClipId,
+        edge: crate::command::Edge,
+    },
+    /// "@fx cross_dissolve" (a built-in key) or "@fx 3f2a91c0" (a project
+    /// asset, resolved with the project only).
+    Fx { fx: crate::fx::FxRef },
+    /// "@audiofx compressor": an audio effect kind by its name.
+    AudioFx { kind: crate::audiofx::AudioFxKind },
     /// An `@` mention that names nothing in the timeline, or more than one
     /// thing.
     Unresolved { text: String },
@@ -349,7 +397,20 @@ pub struct ResolvedRef {
 /// Find every time and `@` reference in `text`, in order. Single times need
 /// "at" in front, so ratios like "16:9" are left alone; clock times need a
 /// colon ("SS" alone is not a time). Ids match by prefix of their hex form.
+/// `@range <start>-<end>` and `@time <secs>` (timeline seconds) read as
+/// [`Reference::Range`] and [`Reference::At`]. Media, bins and project FX
+/// need the project: see [`resolve_project_references`].
 pub fn resolve_references(tl: &Timeline, text: &str) -> Vec<ResolvedRef> {
+    resolve(tl, None, text)
+}
+
+/// [`resolve_references`] with the whole project, so `@media`, `@bin` and
+/// project `@fx` tokens resolve too.
+pub fn resolve_project_references(project: &Project, text: &str) -> Vec<ResolvedRef> {
+    resolve(&project.timeline, Some(project), text)
+}
+
+fn resolve(tl: &Timeline, project: Option<&Project>, text: &str) -> Vec<ResolvedRef> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < text.len() {
@@ -359,7 +420,7 @@ pub fn resolve_references(tl: &Timeline, text: &str) -> Vec<ResolvedRef> {
             .next_back()
             .is_none_or(|c| !c.is_alphanumeric() && c != ':' && c != '.');
         let found = if rest.starts_with('@') {
-            parse_mention(tl, rest)
+            parse_mention(tl, rest).or_else(|| parse_fx_mention(tl, project, rest))
         } else if at_boundary {
             parse_time_ref(rest)
         } else {
@@ -506,6 +567,16 @@ fn parse_mention(tl: &Timeline, s: &str) -> Option<(usize, Reference)> {
         if len == 0 {
             return None;
         }
+        if let Some((hex_len, hex)) = hex_token(&body[k..])
+            && let [track] = tl
+                .tracks
+                .iter()
+                .filter(|t| t.id.0.simple().to_string().starts_with(&hex))
+                .map(|t| t.id)
+                .collect::<Vec<_>>()[..]
+        {
+            return Some((1 + k + hex_len, Reference::Track { track }));
+        }
         let name = &body[k..k + len];
         let hits: Vec<TrackId> = tl
             .tracks
@@ -520,6 +591,144 @@ fn parse_mention(tl: &Timeline, s: &str) -> Option<(usize, Reference)> {
         return Some((1 + k + len, reference));
     }
     None
+}
+
+/// The mention kinds added with FX: media, bins, effects, transitions, FX
+/// assets, audio effects, `@range` and `@time`.
+fn parse_fx_mention(
+    tl: &Timeline,
+    project: Option<&Project>,
+    s: &str,
+) -> Option<(usize, Reference)> {
+    use crate::audiofx::AudioFxKind;
+    use crate::command::Edge;
+    let body = &s[1..];
+    let done = |k: usize, len: usize, r: Option<Reference>| {
+        let end = 1 + k + len;
+        Some((end, r.unwrap_or_else(|| unresolved(&s[..end]))))
+    };
+    let clips = || tl.tracks.iter().flat_map(|t| &t.clips);
+    if let Some(k) = keyword(body, "media") {
+        let (len, hex) = hex_token(&body[k..])?;
+        let hit = project.and_then(|p| unique(p.media.iter().map(|m| (m.id, m.id.0)), &hex));
+        return done(k, len, hit.map(|media| Reference::Media { media }));
+    }
+    if let Some(k) = keyword(body, "bin") {
+        let (len, hex) = hex_token(&body[k..])?;
+        let hit = project.and_then(|p| unique(p.bins.iter().map(|b| (b.id, b.id.0)), &hex));
+        return done(k, len, hit.map(|bin| Reference::Bin { bin }));
+    }
+    if let Some(k) = keyword(body, "effect") {
+        let rest = &body[k..];
+        let (clip_len, clip_hex) = hex_token(rest)?;
+        let (fx_len, fx_hex) = hex_token(rest[clip_len..].strip_prefix('/')?)?;
+        let len = clip_len + 1 + fx_len;
+        let hit = clips()
+            .filter(|c| c.id.0.simple().to_string().starts_with(&clip_hex))
+            .collect::<Vec<_>>();
+        let found = match hit[..] {
+            [clip] => unique(
+                clip.effects
+                    .iter()
+                    .map(|e| (e.id, e.id.0))
+                    .chain(clip.audio.effects.iter().map(|e| (e.id, e.id.0))),
+                &fx_hex,
+            )
+            .map(|effect| Reference::Effect {
+                clip: clip.id,
+                effect,
+            }),
+            _ => None,
+        };
+        return done(k, len, found);
+    }
+    if let Some(k) = keyword(body, "transition") {
+        let rest = &body[k..];
+        let (clip_len, clip_hex) = hex_token(rest)?;
+        let side = rest[clip_len..].strip_prefix('/')?;
+        let side_len = word_len(side);
+        let edge = match side[..side_len].to_ascii_lowercase().as_str() {
+            "in" => Edge::Start,
+            "out" => Edge::End,
+            _ => return None,
+        };
+        let clip = unique(clips().map(|c| (c.id, c.id.0)), &clip_hex);
+        return done(
+            k,
+            clip_len + 1 + side_len,
+            clip.map(|clip| Reference::Transition { clip, edge }),
+        );
+    }
+    if let Some(k) = keyword(body, "fx") {
+        let len = word_len(&body[k..]);
+        if len == 0 {
+            return None;
+        }
+        let name = body[k..k + len].to_ascii_lowercase();
+        let builtin = crate::fx::builtins()
+            .iter()
+            .find(|a| matches!(&a.id, crate::fx::FxRef::Builtin(key) if *key == name))
+            .map(|a| a.id.clone());
+        let fx = builtin.or_else(|| {
+            let p = project?;
+            let ids = p.fx.iter().filter_map(|a| match &a.id {
+                crate::fx::FxRef::Project(id) => Some((*id, id.0)),
+                crate::fx::FxRef::Builtin(_) => None,
+            });
+            unique(ids, &name).map(crate::fx::FxRef::Project)
+        });
+        return done(k, len, fx.map(|fx| Reference::Fx { fx }));
+    }
+    if let Some(k) = keyword(body, "audiofx") {
+        let len = word_len(&body[k..]);
+        if len == 0 {
+            return None;
+        }
+        let kind = AudioFxKind::from_name(&body[k..k + len].to_ascii_lowercase());
+        return done(k, len, kind.map(|kind| Reference::AudioFx { kind }));
+    }
+    if let Some(k) = keyword(body, "range") {
+        let rest = &body[k..];
+        let (a_len, start) = seconds(rest)?;
+        let (b_len, end) = seconds(rest[a_len..].strip_prefix('-')?)?;
+        return (end > start).then_some((
+            1 + k + a_len + 1 + b_len,
+            Reference::Range {
+                range: TimeRange::new(start, end),
+            },
+        ));
+    }
+    if let Some(k) = keyword(body, "time") {
+        let (len, time) = seconds(&body[k..])?;
+        return Some((1 + k + len, Reference::At { time }));
+    }
+    None
+}
+
+/// The one id whose hex form starts with `hex`.
+fn unique<T: Copy>(ids: impl Iterator<Item = (T, uuid::Uuid)>, hex: &str) -> Option<T> {
+    let hits: Vec<T> = ids
+        .filter(|(_, u)| u.simple().to_string().starts_with(hex))
+        .map(|(id, _)| id)
+        .collect();
+    match hits[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// Plain seconds such as `12` or `12.345`, ending at a word boundary.
+fn seconds(s: &str) -> Option<(usize, Time)> {
+    let len = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let token = s[..len].trim_end_matches('.');
+    let boundary = s[token.len()..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric());
+    let secs: f64 = token.parse().ok().filter(|v: &f64| v.is_finite())?;
+    boundary.then(|| (token.len(), Time::from_secs_f64(secs)))
 }
 
 fn unresolved(text: &str) -> Reference {

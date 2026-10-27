@@ -1,8 +1,10 @@
-//! Audio workspace, for the whole timeline: track mixer, loudness with
-//! normalize, and ducking (PRD A1–A3).
+//! Audio workspace inspector: the selected clip's volume automation and
+//! effects ([`ClipAudioFx`]), loudness with normalize, and ducking (PRD
+//! A1–A3). The track mixer is its own panel (`ui/mixer.rs`).
 
 use super::param::{Key, format_value};
-use super::{InspectorPanel, audio_tracks, is_media, section, section_with};
+use super::{InspectorPanel, audio_tracks, is_media, section_with, sound_clips};
+use crate::ui::mixer::clip::ClipAudioFx;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
@@ -19,83 +21,29 @@ use koo_core::{ClipId, Time, TimeRange};
 use std::path::PathBuf;
 
 impl InspectorPanel {
-    /// Whole-timeline sound: track mixer, loudness with normalize, ducking.
+    /// The Audio workspace: the selected clip's volume (with keyframes) and
+    /// effects, then whole-timeline loudness and ducking. Track faders, pan
+    /// and inserts are in the mixer.
     pub(super) fn timeline_audio_view(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        v_flex()
-            .gap_4()
-            .child(self.mixer(window, cx))
-            .child(self.loudness_view(cx))
-            .child(self.ducking_view(window, cx))
-    }
-
-    fn mixer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let tracks = audio_tracks(self.project(cx));
-        let mut rows = Vec::new();
-        for (i, track) in tracks.into_iter().enumerate() {
-            let id = track.id;
-            let volume = self
-                .param(Key::Volume(id), track.mix.volume_db, window, cx)
-                .slider(None);
-            let pan = self
-                .param(Key::Pan(id), track.mix.pan, window, cx)
-                .slider(None);
-            let muted = cx.theme().muted_foreground;
-            let (mute_mix, solo_mix) = (track.mix.clone(), track.mix.clone());
-            rows.push(
-                h_flex()
-                    .h(px(28.))
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(24.))
-                            .flex_none()
-                            .text_xs()
-                            .child(track.name.clone()),
-                    )
-                    .child(volume)
-                    .child(
-                        div()
-                            .w(px(34.))
-                            .flex_none()
-                            .text_xs()
-                            .text_right()
-                            .text_color(muted)
-                            .child(format_value(track.mix.volume_db, 1)),
-                    )
-                    .child(div().w(px(52.)).flex_none().flex().child(pan))
-                    .child(
-                        Button::new(("mute", i))
-                            .ghost()
-                            .xsmall()
-                            .label("M")
-                            .tooltip("Mute")
-                            .toggled(track.mix.mute)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let mut mix = mute_mix.clone();
-                                mix.mute = !mix.mute;
-                                this.run(vec![Command::SetTrackMix { track: id, mix }], "mix", cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("solo", i))
-                            .ghost()
-                            .xsmall()
-                            .label("S")
-                            .tooltip("Solo")
-                            .toggled(track.mix.solo)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let mut mix = solo_mix.clone();
-                                mix.solo = !mix.solo;
-                                this.run(vec![Command::SetTrackMix { track: id, mix }], "mix", cx);
-                            })),
-                    ),
-            );
+        let clips = self.selected_clips(cx);
+        let sound = sound_clips(&self.project(cx).timeline, &clips)
+            .first()
+            .map(|c| c.id);
+        let mut view = v_flex().gap_4();
+        if let Some(id) = sound {
+            let state = self.state.clone();
+            let fx = window.use_keyed_state("clip-audio-fx", cx, move |_, cx| {
+                ClipAudioFx::new(state, cx)
+            });
+            fx.update(cx, |f, cx| f.set_clip(Some(id), cx));
+            view = view.child(fx);
         }
-        section("Mixer", cx).children(rows)
+        view.child(self.loudness_view(cx))
+            .child(self.ducking_view(window, cx))
     }
 
     /// Clips the loudness readout covers: every media clip on an audio track.

@@ -5,10 +5,13 @@
 //! so callers clone the project on the UI thread and hand it to a background
 //! thread. FFmpeg is spawned as a binary (`KOOEDITOR_FFMPEG`, else `PATH`).
 
+mod audio_fx;
 pub mod captions;
+mod composed;
 pub mod fcpxml;
 pub mod ffmpeg;
 pub mod frame;
+pub mod grade;
 pub mod graph;
 pub mod keyframes;
 pub mod otio;

@@ -11,6 +11,7 @@ use koo_core::memory::{
     StyleRule,
 };
 use koo_core::model::{Fingerprint, Project};
+use koo_core::services::Services;
 use koo_core::{JobId, RecipeId, RuleId, Time, TimeRange};
 use koo_deliver::{RenderQueue, RenderRequest, RenderSettings};
 use serde_json::Value;
@@ -30,6 +31,7 @@ pub struct Inputs<'a> {
     pub project: &'a Project,
     pub caption_styles: &'a [CaptionStyle],
     pub queue: &'a RenderQueue,
+    pub services: &'a Services,
     /// May gain a style profile when a rule needs one.
     pub settings: &'a mut AgentSettings,
 }
@@ -49,6 +51,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 settings,
                 output: output.clone(),
                 caption_styles: inputs.caption_styles.to_vec(),
+                services: inputs.services.clone(),
             })?;
             Ok(Started::Render(id, output))
         }
@@ -68,9 +71,10 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 .ok_or_else(|| anyhow!("missing time"))?;
             let project = inputs.project.clone();
             let styles = inputs.caption_styles.to_vec();
+            let services = inputs.services.clone();
             let path = free_output(&project, "png");
             Ok(Started::Background(Box::new(move || {
-                koo_deliver::export_frame(&project, t, &styles, &path)?;
+                koo_deliver::export_frame(&project, t, &styles, &services, &path)?;
                 Ok(file_name(&path))
             })))
         }

@@ -11,12 +11,16 @@
 
 pub mod agent;
 pub mod analysis;
+pub mod audiofx;
 pub mod bus;
 pub mod captions;
 pub mod changeset;
 pub mod command;
+pub mod compose;
 pub mod edit;
 pub mod error;
+pub mod fx;
+pub mod grade;
 pub mod history;
 pub mod ids;
 pub mod memory;
@@ -24,6 +28,7 @@ pub mod model;
 pub mod ops;
 pub mod paths;
 pub mod query;
+pub mod scopes;
 pub mod services;
 pub mod time;
 

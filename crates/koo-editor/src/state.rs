@@ -52,6 +52,12 @@ pub struct EditorState {
     pub play_speed: f64,
     /// Change item picked on the timeline overlay; the chat panel reveals it.
     pub focused_change: Option<(ChangeSetId, ChangeItemId)>,
+    /// Transition picked on the timeline: the clip and edge it sits on. The
+    /// inspector shows it.
+    pub selected_transition: Option<(koo_core::ClipId, koo_core::command::Edge)>,
+    /// `@` references waiting for the chat composer ("Add to chat" from the
+    /// timeline, inspector, transcript…): token text and chip label.
+    pending_mentions: Vec<(String, SharedString)>,
     clock: Option<Task<()>>,
     agent: AgentLink,
     _pump: Task<()>,
@@ -60,6 +66,9 @@ pub struct EditorState {
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
     pub render_queue: koo_deliver::RenderQueue,
+    // --- library (effects library, inspector, FX code editor)
+    /// FX program open in the code editor; built-ins open read-only.
+    pub editing_fx: Option<koo_core::fx::FxRef>,
 }
 
 impl EditorState {
@@ -101,6 +110,9 @@ impl EditorState {
             caption_style: 0,
             play_speed: 1.0,
             focused_change: None,
+            selected_transition: None,
+            pending_mentions: Vec::new(),
+            editing_fx: None,
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
@@ -272,6 +284,27 @@ impl EditorState {
     pub fn select_clips(&mut self, clips: Vec<koo_core::ClipId>, cx: &mut Context<Self>) {
         self.selection.clips = clips;
         cx.notify();
+    }
+
+    pub fn select_transition(
+        &mut self,
+        transition: Option<(koo_core::ClipId, koo_core::command::Edge)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_transition = transition;
+        cx.notify();
+    }
+
+    /// Queue `@` references (token text as the agent reads it, chip label)
+    /// for the chat composer, which inserts them as chips.
+    pub fn mention(&mut self, refs: Vec<(String, SharedString)>, cx: &mut Context<Self>) {
+        self.pending_mentions.extend(refs);
+        cx.notify();
+    }
+
+    /// References queued by [`Self::mention`], oldest first.
+    pub fn take_mentions(&mut self) -> Vec<(String, SharedString)> {
+        std::mem::take(&mut self.pending_mentions)
     }
 
     // --- panels
@@ -454,13 +487,18 @@ impl EditorState {
 
     fn save_chat(&mut self) {
         let id = self.chats.active.clone();
+        let title = self
+            .chat
+            .iter()
+            .find(|m| m.role == ChatRole::User)
+            .map(|m| chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project())));
         let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == id) else {
             return;
         };
         if session.title.is_empty()
-            && let Some(first) = self.chat.iter().find(|m| m.role == ChatRole::User)
+            && let Some(title) = title
         {
-            session.title = chat_title(&first.text);
+            session.title = title;
         }
         if let Some(last) = self.chat.last() {
             session.at = last.at;
@@ -484,7 +522,9 @@ impl EditorState {
                     .flatten();
                 let title = match first {
                     _ if !s.title.is_empty() => s.title.clone(),
-                    Some(m) => chat_title(&m.text),
+                    Some(m) => {
+                        chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project()))
+                    }
                     None => "Untitled".to_owned(),
                 };
                 (s.id.clone(), title)
@@ -697,9 +737,25 @@ fn services() -> Services {
             None
         }
     };
+    let fx = match koo_gpu::GpuFx::new() {
+        Ok(gpu) => Some(Arc::new(gpu) as Arc<dyn koo_core::services::FxService>),
+        Err(e) => {
+            eprintln!("GPU effects unavailable: {e}");
+            None
+        }
+    };
+    let html = match koo_html::HtmlEngine::new() {
+        Ok(h) => Some(Arc::new(h) as Arc<dyn koo_core::services::HtmlService>),
+        Err(e) => {
+            eprintln!("HTML engine unavailable: {e}");
+            None
+        }
+    };
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
+        fx,
+        html,
     }
 }
 
@@ -931,6 +987,7 @@ impl EditorState {
                 project: self.bus.project(),
                 caption_styles: &self.presets.caption_styles,
                 queue: &self.render_queue,
+                services: &self.services,
                 settings: &mut settings,
             },
         );
@@ -1002,6 +1059,17 @@ impl EditorState {
     }
 }
 
+// --- library (effects library, inspector, FX code editor)
+impl EditorState {
+    /// Open `fx` in the code editor, or close it with `None`.
+    pub fn edit_fx(&mut self, fx: Option<koo_core::fx::FxRef>, cx: &mut Context<Self>) {
+        if self.editing_fx != fx {
+            self.editing_fx = fx;
+            cx.notify();
+        }
+    }
+}
+
 /// What came of an approval request.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApprovalOutcome {
@@ -1010,4 +1078,36 @@ pub enum ApprovalOutcome {
     Rendering { job: koo_core::JobId, file: String },
     Failed(String),
     Denied,
+}
+
+// ------------------------------------------------------------- chat stream
+
+impl EditorState {
+    /// Send `text` as the user's message, like [`Self::send_chat`]; the agent
+    /// also reads `context` after it (the resolved `@` references), which
+    /// the chat neither shows nor stores.
+    pub fn send_chat_with_context(
+        &mut self,
+        text: String,
+        context: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.push(ChatMessage {
+            role: ChatRole::User,
+            text: text.clone(),
+            choices: vec![],
+            change_set: None,
+            tools: vec![],
+            at: now(),
+        });
+        let message = match context {
+            Some(context) => format!("{text}\n\n{context}"),
+            None => text,
+        };
+        let editor = self.context();
+        self.agent.send(message, editor, &self.settings);
+        self.settled.clear();
+        self.save_chat();
+        cx.notify();
+    }
 }

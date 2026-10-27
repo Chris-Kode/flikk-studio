@@ -8,6 +8,7 @@ use gpui_kit::*;
 pub enum Glyph {
     Pointer,
     Blade,
+    Trim,
     Magnet,
     Marker,
     Silence,
@@ -123,6 +124,19 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
             circle(11.5, 12., 2.2, false, window);
             lines(&[(5.8, 10.2), (11.5, 2.)], false, window);
             lines(&[(10.2, 10.2), (4.5, 2.)], false, window);
+        }
+        Glyph::Trim => {
+            lines(
+                &[(6.5, 2.5), (3.5, 2.5), (3.5, 13.5), (6.5, 13.5)],
+                false,
+                window,
+            );
+            lines(
+                &[(9.5, 2.5), (12.5, 2.5), (12.5, 13.5), (9.5, 13.5)],
+                false,
+                window,
+            );
+            lines(&[(8., 5.), (8., 11.)], false, window);
         }
         Glyph::Magnet => {
             lines(&[(3., 2.5), (3., 8.)], false, window);

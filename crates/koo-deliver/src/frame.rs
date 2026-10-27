@@ -1,5 +1,8 @@
-//! Still export (PRD D3): one PNG through the same graph as a render.
+//! Still export (PRD D3): one PNG composed like a render (through
+//! `koo_core::compose` when the media engine is there, else the graph),
+//! with captions burned in by the same graph.
 
+use crate::composed::{self, Frames};
 use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
 use crate::graph::{self, GraphSpec};
 use crate::preset::RenderSettings;
@@ -7,6 +10,7 @@ use crate::queue::{WorkDir, write_script};
 use anyhow::Result;
 use koo_core::memory::CaptionStyle;
 use koo_core::model::Project;
+use koo_core::services::Services;
 use koo_core::{JobId, Time, TimeRange};
 use std::ffi::OsString;
 use std::path::Path;
@@ -18,6 +22,7 @@ pub fn export_frame(
     project: &Project,
     t: Time,
     caption_styles: &[CaptionStyle],
+    services: &Services,
     path: &Path,
 ) -> Result<()> {
     ensure_free(path)?;
@@ -29,11 +34,15 @@ pub fn export_frame(
     };
     let mut spec = GraphSpec::new(project, &settings, caption_styles);
     spec.audio = false;
+    spec.piped = services.media.is_some();
     let work = WorkDir::new()?;
     let g = graph::build(project, &spec, &work.0)?;
     let script = write_script(&work.0, "frame.txt", &g.script)?;
     let tmp = temp_path(path, &JobId::new().to_string());
     let mut args: Vec<OsString> = vec!["-loglevel".into(), "error".into(), "-y".into()];
+    if spec.piped {
+        args.extend(composed::input_args(&spec));
+    }
     args.extend(filter_script_args(&script));
     args.extend(
         [
@@ -51,7 +60,14 @@ pub fn export_frame(
         .map(OsString::from),
     );
     args.push(tmp.clone().into());
-    if let Err(e) = ffmpeg::run(&args, 0.0, &|_| {}, &AtomicBool::new(false)) {
+    let cancel = AtomicBool::new(false);
+    let result = if spec.piped {
+        let mut frames = Frames::new(project, services, &spec);
+        composed::run(&args, &g, &mut frames, &|_| {}, &cancel)
+    } else {
+        ffmpeg::run(&args, 0.0, &|_| {}, &cancel).map(|_| ())
+    };
+    if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }

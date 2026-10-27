@@ -43,4 +43,8 @@ id_type!(
     FactId,
     RecipeId,
     JobId,
+    // One effect on a clip's stack (video or audio), unique within the clip.
+    EffectId,
+    // A project FX asset (shader or HTML program).
+    FxId,
 );

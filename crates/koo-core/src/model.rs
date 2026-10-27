@@ -1,8 +1,11 @@
-//! The project: media pool, one timeline, markers.
+//! The project: media pool, one timeline, markers, and the project's own
+//! FX programs.
 //!
 //! Plain data with serde, so the store can persist it and the agent can read
 //! it as JSON. Mutation goes through [`crate::ops::Op`] only.
 
+use crate::audiofx::AudioFx;
+use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,10 @@ pub struct Project {
     pub media: Vec<MediaItem>,
     pub bins: Vec<Bin>,
     pub timeline: Timeline,
+    /// Shader and HTML programs written for this project (by the user or
+    /// the agent). Built-ins are not stored here; see [`crate::fx::builtins`].
+    #[serde(default)]
+    pub fx: Vec<FxAsset>,
 }
 
 impl Project {
@@ -25,6 +32,7 @@ impl Project {
             media: Vec::new(),
             bins: Vec::new(),
             timeline: Timeline::default(),
+            fx: Vec::new(),
         }
     }
 
@@ -223,8 +231,13 @@ impl Track {
 pub struct TrackMix {
     pub volume_db: f32,
     pub pan: f32,
+    /// On video tracks: hidden.
     pub mute: bool,
     pub solo: bool,
+    /// Track-level audio effects, after every clip's own (Fairlight-style
+    /// track inserts), in order.
+    #[serde(default)]
+    pub effects: Vec<AudioFx>,
 }
 
 impl Default for TrackMix {
@@ -234,8 +247,17 @@ impl Default for TrackMix {
             pan: 0.0,
             mute: false,
             solo: false,
+            effects: Vec::new(),
         }
     }
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -249,6 +271,30 @@ pub struct Clip {
     pub keyframes: Vec<Keyframe>,
     pub grade: Grade,
     pub audio: ClipAudio,
+    /// Playback speed of media clips: 2.0 plays twice as fast, so the clip
+    /// covers twice as much source per timeline second. Always > 0.
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// Disabled clips stay on the timeline but are not seen or heard.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// User label shown on the timeline instead of the source name.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<ClipColor>,
+    /// Video effect stack, applied in order after the grade and before the
+    /// transform (see [`crate::fx`]).
+    #[serde(default)]
+    pub effects: Vec<FxInstance>,
+    /// Transition into this clip: from the clip ending where this one starts
+    /// on the same track, or from nothing (see [`crate::fx::transitions`]).
+    #[serde(default)]
+    pub transition_in: Option<Transition>,
+    /// Transition out of this clip; at a cut it is used only when the next
+    /// clip has no `transition_in`.
+    #[serde(default)]
+    pub transition_out: Option<Transition>,
 }
 
 impl Clip {
@@ -262,6 +308,13 @@ impl Clip {
             keyframes: Vec::new(),
             grade: Grade::default(),
             audio: ClipAudio::default(),
+            speed: 1.0,
+            enabled: true,
+            name: None,
+            color: None,
+            effects: Vec::new(),
+            transition_in: None,
+            transition_out: None,
         }
     }
 
@@ -273,10 +326,13 @@ impl Clip {
         TimeRange::new(self.start, self.end())
     }
 
-    /// Timeline time → source time for media clips (PRD E8).
+    /// Timeline time → source time for media clips (PRD E8), honouring
+    /// [`Clip::speed`]. Times outside the clip map onto its handles.
     pub fn to_source(&self, t: Time) -> Option<Time> {
         match &self.content {
-            ClipContent::Media { source_in, .. } => Some(*source_in + (t - self.start)),
+            ClipContent::Media { source_in, .. } => {
+                Some(*source_in + (t - self.start).scale(self.speed))
+            }
             _ => None,
         }
     }
@@ -285,10 +341,38 @@ impl Clip {
     pub fn to_timeline(&self, source_t: Time) -> Option<Time> {
         match &self.content {
             ClipContent::Media { source_in, .. } => {
-                let t = self.start + (source_t - *source_in);
+                let t = self.start + (source_t - *source_in).scale(1.0 / self.speed);
                 self.range().contains(t).then_some(t)
             }
             _ => None,
+        }
+    }
+
+    /// Label for lists and chat: the user's name, else what the clip shows.
+    pub fn display_name(&self, project: &Project) -> String {
+        if let Some(name) = self.name.as_ref().filter(|n| !n.trim().is_empty()) {
+            return name.clone();
+        }
+        match &self.content {
+            ClipContent::Media { media, .. } => project
+                .media(*media)
+                .and_then(|m| m.path.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Clip".into()),
+            ClipContent::Title { text, .. } | ClipContent::Caption { text, .. } => {
+                let mut s: String = text.chars().take(28).collect();
+                if text.chars().count() > 28 {
+                    s.push('…');
+                }
+                s
+            }
+            ClipContent::Overlay { asset, .. } => asset
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Overlay".into()),
+            ClipContent::Generator { fx } => crate::fx::asset(project, &fx.fx)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "Generator".into()),
         }
     }
 
@@ -325,17 +409,100 @@ pub enum ClipContent {
         asset: PathBuf,
         speaker: Option<SpeakerId>,
     },
+    /// Synthesized picture: a GLSL generator or an HTML motion graphic
+    /// (titles, lower thirds, callouts), with alpha. See [`crate::fx`].
+    Generator {
+        fx: FxInstance,
+    },
+}
+
+/// Clip color label, as in Resolve's clip color menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipColor {
+    Orange,
+    Yellow,
+    Lime,
+    Green,
+    Teal,
+    Blue,
+    Navy,
+    Purple,
+    Pink,
+    Red,
+    Brown,
+    Gray,
+}
+
+impl ClipColor {
+    pub const ALL: [ClipColor; 12] = [
+        Self::Orange,
+        Self::Yellow,
+        Self::Lime,
+        Self::Green,
+        Self::Teal,
+        Self::Blue,
+        Self::Navy,
+        Self::Purple,
+        Self::Pink,
+        Self::Red,
+        Self::Brown,
+        Self::Gray,
+    ];
+
+    /// sRGB, 0xRRGGBB.
+    pub fn rgb(self) -> u32 {
+        match self {
+            Self::Orange => 0xE8833A,
+            Self::Yellow => 0xE6C229,
+            Self::Lime => 0x9ACD32,
+            Self::Green => 0x3FA34D,
+            Self::Teal => 0x2A9D8F,
+            Self::Blue => 0x3A86FF,
+            Self::Navy => 0x264B8C,
+            Self::Purple => 0x8E5BD9,
+            Self::Pink => 0xE85D9E,
+            Self::Red => 0xD64545,
+            Self::Brown => 0x8B5E3C,
+            Self::Gray => 0x8A8F98,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Lime => "Lime",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Blue => "Blue",
+            Self::Navy => "Navy",
+            Self::Purple => "Purple",
+            Self::Pink => "Pink",
+            Self::Red => "Red",
+            Self::Brown => "Brown",
+            Self::Gray => "Gray",
+        }
+    }
 }
 
 // ------------------------------------------------------ transform & keyframes
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Transform {
     /// Normalized offset, (0, 0) = centered.
     pub position: [f32; 2],
     pub scale: f32,
     pub rotation_deg: f32,
     pub opacity: f32,
+    /// Fractions of the source picture cut away before scaling:
+    /// [left, top, right, bottom], each 0..1, 0 = none.
+    pub crop: [f32; 4],
+    /// Mirror horizontally / vertically.
+    pub flip: [bool; 2],
+    /// How the clip composites over the tracks below it.
+    pub blend: BlendMode,
 }
 
 impl Default for Transform {
@@ -345,6 +512,58 @@ impl Default for Transform {
             scale: 1.0,
             rotation_deg: 0.0,
             opacity: 1.0,
+            crop: [0.0; 4],
+            flip: [false; 2],
+            blend: BlendMode::Normal,
+        }
+    }
+}
+
+/// Composite mode (Resolve's "Composite Mode"). Formulas are the usual
+/// separable blend modes on straight sRGB values, then mixed by alpha ×
+/// opacity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Screen,
+    Multiply,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Lighten,
+    Darken,
+    Difference,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 10] = [
+        Self::Normal,
+        Self::Add,
+        Self::Screen,
+        Self::Multiply,
+        Self::Overlay,
+        Self::SoftLight,
+        Self::HardLight,
+        Self::Lighten,
+        Self::Darken,
+        Self::Difference,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Add => "Add",
+            Self::Screen => "Screen",
+            Self::Multiply => "Multiply",
+            Self::Overlay => "Overlay",
+            Self::SoftLight => "Soft light",
+            Self::HardLight => "Hard light",
+            Self::Lighten => "Lighten",
+            Self::Darken => "Darken",
+            Self::Difference => "Difference",
         }
     }
 }
@@ -357,6 +576,61 @@ pub enum Property {
     Scale,
     Rotation,
     Opacity,
+    CropLeft,
+    CropTop,
+    CropRight,
+    CropBottom,
+    /// Clip gain in dB; keyframes override [`ClipAudio::gain_db`]
+    /// (volume automation).
+    Volume,
+}
+
+impl Property {
+    pub const ALL: [Property; 10] = [
+        Self::PositionX,
+        Self::PositionY,
+        Self::Scale,
+        Self::Rotation,
+        Self::Opacity,
+        Self::CropLeft,
+        Self::CropTop,
+        Self::CropRight,
+        Self::CropBottom,
+        Self::Volume,
+    ];
+
+    /// The properties stored in [`Transform`].
+    pub const TRANSFORM: [Property; 9] = [
+        Self::PositionX,
+        Self::PositionY,
+        Self::Scale,
+        Self::Rotation,
+        Self::Opacity,
+        Self::CropLeft,
+        Self::CropTop,
+        Self::CropRight,
+        Self::CropBottom,
+    ];
+
+    /// Tool / JSON name, e.g. `crop_left`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PositionX => "position_x",
+            Self::PositionY => "position_y",
+            Self::Scale => "scale",
+            Self::Rotation => "rotation",
+            Self::Opacity => "opacity",
+            Self::CropLeft => "crop_left",
+            Self::CropTop => "crop_top",
+            Self::CropRight => "crop_right",
+            Self::CropBottom => "crop_bottom",
+            Self::Volume => "volume",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,8 +656,12 @@ pub struct Keyframe {
 
 // --------------------------------------------------------------------- color
 
-/// Primary correction (PRD K1). Neutral values leave the image untouched.
+/// Primary correction (PRD K1) plus curves. Neutral values leave the image
+/// untouched. Order: LUT, exposure, white balance (temperature, tint),
+/// lift/gamma/gain and offset, shadows/highlights, contrast, gamma,
+/// saturation and hue, then curves.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Grade {
     pub exposure: f32,
     pub contrast: f32,
@@ -395,6 +673,14 @@ pub struct Grade {
     pub gamma_rgb: [f32; 3],
     pub gain: [f32; 3],
     pub lut: Option<PathBuf>,
+    /// Added to every channel, [r, g, b]; 0 = neutral (Resolve's Offset wheel).
+    pub offset: [f32; 3],
+    /// Lift or lower the darks / brights, -1..1; 0 = neutral.
+    pub shadows: f32,
+    pub highlights: f32,
+    /// Hue rotation in degrees; 0 = neutral.
+    pub hue: f32,
+    pub curves: Curves,
 }
 
 impl Default for Grade {
@@ -410,7 +696,32 @@ impl Default for Grade {
             gamma_rgb: [1.0; 3],
             gain: [1.0; 3],
             lut: None,
+            offset: [0.0; 3],
+            shadows: 0.0,
+            highlights: 0.0,
+            hue: 0.0,
+            curves: Curves::default(),
         }
+    }
+}
+
+/// Custom curves: control points `[input, output]` in 0..1, sorted by
+/// input, through which a monotone cubic is drawn. An empty list is the
+/// identity. `master` applies to all channels after the per-channel curves.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Curves {
+    pub master: Vec<[f32; 2]>,
+    pub red: Vec<[f32; 2]>,
+    pub green: Vec<[f32; 2]>,
+    pub blue: Vec<[f32; 2]>,
+}
+
+impl Curves {
+    pub fn is_identity(&self) -> bool {
+        [&self.master, &self.red, &self.green, &self.blue]
+            .iter()
+            .all(|c| c.is_empty() || c.iter().all(|[x, y]| (x - y).abs() < 1e-4))
     }
 }
 
@@ -421,6 +732,9 @@ pub struct ClipAudio {
     pub gain_db: f32,
     pub fade_in: Time,
     pub fade_out: Time,
+    /// Clip audio effects in order (EQ, dynamics, cleanup, space).
+    #[serde(default)]
+    pub effects: Vec<AudioFx>,
 }
 
 /// Music under dialogue (PRD A3).

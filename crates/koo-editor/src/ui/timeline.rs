@@ -1,15 +1,24 @@
 //! Multi-track timeline (PRD E1, E2, E4, E8, AG4): track headers, a painted
 //! ruler and lanes, select/move/trim/blade with snapping, markers, in/out,
-//! JKL, the pending change-set overlay and the silence tool.
+//! JKL, the pending change-set overlay and the silence tool. Pro editing
+//! (§8): transitions as objects, FX library drops, multi-select, clipboard,
+//! nudge, a trim mode (slip, ripple, roll), clip menus, and references
+//! dragged (Alt) or sent to the chat.
 
+mod drops;
+mod editing;
+mod fx;
 pub(crate) mod glyph;
 mod layout;
+mod menu;
 mod overlay;
 mod paint;
+mod refs;
 mod silence;
 mod thumbs;
 mod waveform;
 
+use super::RefDrag;
 use crate::app::TogglePlay;
 use crate::state::EditorState;
 use glyph::{Glyph, glyph};
@@ -23,13 +32,16 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge, InsertMode};
-use koo_core::model::{ClipContent, MarkerKind, MediaKind, Project, Timeline, TrackKind, TrackMix};
-use koo_core::{ChangeItemId, ChangeSetId, ClipId, Time, TimeRange, TrackId};
+use koo_core::model::{
+    Clip, ClipContent, MarkerKind, MediaKind, Project, Timeline, TrackKind, TrackMix,
+};
+use koo_core::{ChangeItemId, ChangeSetId, ClipId, Rate, Time, TimeRange, TrackId};
 use layout::{EDGE_PX, HEADER_WIDTH, RULER_HEIGHT, Row, SNAP_PX, TOOLBAR_HEIGHT, Viewport};
 use overlay::OverlayItem;
-use paint::{ClipScene, Colors, Ghost, Scene, TrackScene};
+use paint::{ClipScene, Colors, DropHint, Ghost, Marquee, Scene, TrackScene, TransitionScene};
 use silence::SilenceCache;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thumbs::Thumbs;
@@ -58,6 +70,16 @@ actions!(
         ZoomToFit,
         PrevCut,
         NextCut,
+        TrimTool,
+        CopyClips,
+        CutClips,
+        PasteClips,
+        DuplicateClips,
+        NudgeLeft,
+        NudgeRight,
+        NudgeLeftMore,
+        NudgeRightMore,
+        ToggleEnabled,
     ]
 );
 
@@ -84,7 +106,25 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("=", ZoomIn, t),
         KeyBinding::new("-", ZoomOut, t),
         KeyBinding::new("shift-z", ZoomToFit, t),
+        KeyBinding::new("t", TrimTool, t),
+        KeyBinding::new("d", ToggleEnabled, t),
+        KeyBinding::new(",", NudgeLeft, t),
+        KeyBinding::new(".", NudgeRight, t),
+        // Shifted punctuation arrives as the typed character on some
+        // platforms and as shift + key on others.
+        KeyBinding::new("shift-,", NudgeLeftMore, t),
+        KeyBinding::new("shift-.", NudgeRightMore, t),
+        KeyBinding::new("<", NudgeLeftMore, t),
+        KeyBinding::new(">", NudgeRightMore, t),
     ];
+    for m in ["cmd", "ctrl"] {
+        bindings.extend([
+            KeyBinding::new(&format!("{m}-c"), CopyClips, t),
+            KeyBinding::new(&format!("{m}-x"), CutClips, t),
+            KeyBinding::new(&format!("{m}-v"), PasteClips, t),
+            KeyBinding::new(&format!("{m}-d"), DuplicateClips, t),
+        ]);
+    }
     // Transport keys work in the viewer too.
     for context in ["Timeline", "Viewer"] {
         let c = Some(context);
@@ -236,6 +276,8 @@ fn add_track_items(menu: PopupMenu, panel: &Entity<TimelinePanel>) -> PopupMenu 
 enum Tool {
     Select,
     Blade,
+    /// Body drags slip, edge drags ripple-trim, shared edges roll.
+    Trim,
 }
 
 enum Drag {
@@ -256,6 +298,36 @@ enum Drag {
         delta: Time,
         ripple: bool,
     },
+    Roll {
+        left: ClipId,
+        right: ClipId,
+        delta: Time,
+    },
+    Slip {
+        clip: ClipId,
+        grab: Time,
+        /// Timeline time the source moves by (`Command::Slip`).
+        delta: Time,
+    },
+    /// Rubber-band selection from empty lane space.
+    Marquee {
+        from: (Time, f32),
+        to: (Time, f32),
+        /// Selection kept when the band started with a modifier.
+        base: Vec<ClipId>,
+        moved: bool,
+    },
+    /// A transition's edge: changes its duration.
+    TransitionEdge {
+        owner: (ClipId, Edge),
+        duration: Time,
+    },
+    /// A track header's bottom border.
+    TrackHeight {
+        track: TrackId,
+        grab: Pixels,
+        from: f32,
+    },
 }
 
 enum Hit {
@@ -265,9 +337,24 @@ enum Hit {
         clip: ClipId,
         edge: Option<Edge>,
     },
+    Transition {
+        row: Row,
+        owner: (ClipId, Edge),
+        /// Near the block's left or right edge: a duration drag.
+        resize: bool,
+    },
     Lane {
         row: Option<Row>,
     },
+}
+
+/// What a right click landed on; the context menu reads it.
+#[derive(Clone, Copy, Debug)]
+enum MenuTarget {
+    Clip(ClipId),
+    Transition((ClipId, Edge)),
+    Lane(Time),
+    Ruler(Time, Option<koo_core::MarkerId>),
 }
 
 pub struct TimelinePanel {
@@ -292,7 +379,18 @@ pub struct TimelinePanel {
     silence_min: Entity<SliderState>,
     silence_padding: Entity<SliderState>,
     silences: SilenceCache,
-    drop_row: Option<TrackId>,
+    /// What a media or FX drag over the lanes would hit.
+    drop: Option<DropHint>,
+    /// Heights of tracks the user resized.
+    heights: HashMap<TrackId, f32>,
+    /// Copied clips with their tracks, at their timeline positions.
+    clipboard: Vec<(TrackId, Clip)>,
+    /// Alt is held: objects drag to the chat as references.
+    alt: bool,
+    menu_target: Option<MenuTarget>,
+    /// Window position of the last right click: popups open there.
+    menu_at: Point<Pixels>,
+    popup: Option<menu::Popup>,
     _observe: Subscription,
     _sliders: [Subscription; 2],
 }
@@ -341,7 +439,13 @@ impl TimelinePanel {
             silence_min,
             silence_padding,
             silences: SilenceCache::default(),
-            drop_row: None,
+            drop: None,
+            heights: HashMap::new(),
+            clipboard: Vec::new(),
+            alt: false,
+            menu_target: None,
+            menu_at: Point::default(),
+            popup: None,
             _observe,
             _sliders,
         }
@@ -362,6 +466,10 @@ impl TimelinePanel {
         )
     }
 
+    fn rows(&self, tl: &Timeline) -> Vec<Row> {
+        layout::rows(tl, &self.heights)
+    }
+
     fn hit(&self, p: Point<Pixels>, cx: &App) -> Hit {
         let b = self.bounds.get();
         if p.y < b.origin.y + px(RULER_HEIGHT) {
@@ -369,7 +477,7 @@ impl TimelinePanel {
         }
         let (x, y) = self.local(p);
         let project = self.state.read(cx).bus.project();
-        let rows = layout::rows(&project.timeline);
+        let rows = self.rows(&project.timeline);
         let Some(row) = layout::row_at(&rows, y).copied() else {
             return Hit::Lane { row: None };
         };
@@ -377,6 +485,18 @@ impl TimelinePanel {
             return Hit::Lane { row: None };
         };
         let vp = &self.viewport;
+        // Transitions sit on top of the clip edges they cover.
+        for t in fx::placed(track) {
+            let (a, b) = transition_span(vp, t.range);
+            if x >= a - 2. && x <= b + 2. {
+                let resize = b - a >= 10. && ((x - a).abs() <= 4. || (x - b).abs() <= 4.);
+                return Hit::Transition {
+                    row,
+                    owner: t.owner,
+                    resize,
+                };
+            }
+        }
         let mut best = None;
         for clip in &track.clips {
             let (a, b) = (vp.x(clip.start), vp.x(clip.end()));
@@ -409,7 +529,7 @@ impl TimelinePanel {
     fn overlay_at(&self, p: Point<Pixels>, cx: &App) -> Option<(ChangeSetId, ChangeItemId)> {
         let state = self.state.read(cx);
         let project = state.bus.project();
-        let rows = layout::rows(&project.timeline);
+        let rows = self.rows(&project.timeline);
         let items = overlay::collect(&project.timeline, state.bus.change_sets());
         let b = self.bounds.get();
         let lanes = Bounds::new(
@@ -456,8 +576,12 @@ impl TimelinePanel {
 
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // Alt-drags hand a reference to the chat (the overlays start them).
+        if ev.modifiers.alt {
+            return;
+        }
         let rate = self.state.read(cx).bus.project().timeline.settings.rate;
-        let (x, _) = self.local(ev.position);
+        let (x, y) = self.local(ev.position);
         let at = self.viewport.time(x).max(Time::ZERO);
         let hit = self.hit(ev.position, cx);
 
@@ -471,7 +595,7 @@ impl TimelinePanel {
 
         if self.tool == Tool::Blade && !matches!(hit, Hit::Ruler) {
             let row = match &hit {
-                Hit::Clip { row, .. } => Some(*row),
+                Hit::Clip { row, .. } | Hit::Transition { row, .. } => Some(*row),
                 Hit::Lane { row } => *row,
                 Hit::Ruler => None,
             };
@@ -488,6 +612,15 @@ impl TimelinePanel {
             return;
         }
 
+        let locked = |row: &Row, cx: &App| {
+            self.state
+                .read(cx)
+                .bus
+                .project()
+                .timeline
+                .track(row.track)
+                .is_some_and(|t| t.locked)
+        };
         match hit {
             Hit::Ruler => {
                 self.drag = Some(Drag::Scrub);
@@ -495,48 +628,81 @@ impl TimelinePanel {
                     .update(cx, |s, cx| s.seek(at.floor_to_frame(rate), cx));
             }
             Hit::Lane { .. } => {
-                if !ev.modifiers.shift {
-                    self.state.update(cx, |s, cx| s.select_clips(vec![], cx));
+                let additive = ev.modifiers.shift || ev.modifiers.secondary();
+                let base = if additive {
+                    self.state.read(cx).selection.clips.clone()
+                } else {
+                    self.select(vec![], cx);
+                    vec![]
+                };
+                self.drag = Some(Drag::Marquee {
+                    from: (at, y),
+                    to: (at, y),
+                    base,
+                    moved: false,
+                });
+            }
+            Hit::Transition { row, owner, resize } => {
+                self.select_transition(owner, cx);
+                if resize && !locked(&row, cx) {
+                    let duration = transition_of(self.state.read(cx).bus.project(), owner)
+                        .map_or(Time::ZERO, |t| t.duration);
+                    self.drag = Some(Drag::TransitionEdge { owner, duration });
                 }
-                self.drag = Some(Drag::Scrub);
-                self.state
-                    .update(cx, |s, cx| s.seek(at.floor_to_frame(rate), cx));
             }
             Hit::Clip { row, clip, edge } => {
-                let locked = self
-                    .state
-                    .read(cx)
-                    .bus
-                    .project()
-                    .timeline
-                    .track(row.track)
-                    .is_some_and(|t| t.locked);
                 let selected = self.state.read(cx).selection.clips.clone();
-                if ev.modifiers.shift {
+                if ev.modifiers.secondary() {
                     let mut next = selected;
                     if let Some(i) = next.iter().position(|c| *c == clip) {
                         next.remove(i);
                     } else {
                         next.push(clip);
                     }
-                    self.state.update(cx, |s, cx| s.select_clips(next, cx));
+                    self.select(next, cx);
                     return;
                 }
-                if !selected.contains(&clip) || edge.is_some() {
-                    self.state
-                        .update(cx, |s, cx| s.select_clips(vec![clip], cx));
-                }
-                if locked {
+                if ev.modifiers.shift {
+                    let next = self.range_selection(row.track, clip, selected, cx);
+                    self.select(next, cx);
                     return;
                 }
-                self.drag = Some(match edge {
-                    Some(edge) => Drag::Trim {
+                if !selected.contains(&clip) || edge.is_some() || self.tool == Tool::Trim {
+                    self.select(vec![clip], cx);
+                } else if self.state.read(cx).selected_transition.is_some() {
+                    self.state.update(cx, |s, cx| s.select_transition(None, cx));
+                }
+                if locked(&row, cx) {
+                    return;
+                }
+                self.drag = Some(match (self.tool, edge) {
+                    (Tool::Trim, None) => Drag::Slip {
+                        clip,
+                        grab: self.viewport.time(x),
+                        delta: Time::ZERO,
+                    },
+                    (Tool::Trim, Some(edge)) => {
+                        match neighbour(self.state.read(cx).bus.project(), clip, edge) {
+                            Some((left, right)) => Drag::Roll {
+                                left,
+                                right,
+                                delta: Time::ZERO,
+                            },
+                            None => Drag::Trim {
+                                clip,
+                                edge,
+                                delta: Time::ZERO,
+                                ripple: true,
+                            },
+                        }
+                    }
+                    (_, Some(edge)) => Drag::Trim {
                         clip,
                         edge,
                         delta: Time::ZERO,
-                        ripple: ev.modifiers.alt,
+                        ripple: false,
                     },
-                    None => Drag::Move {
+                    (_, None) => Drag::Move {
                         clips: self.state.read(cx).selection.clips.clone(),
                         grab: self.viewport.time(x),
                         from_track: row.track,
@@ -551,10 +717,112 @@ impl TimelinePanel {
         cx.notify();
     }
 
+    /// Right click: remember the target for the context menu, and select
+    /// what was clicked unless it is already part of the selection.
+    fn right_mouse_down(
+        &mut self,
+        ev: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        self.menu_at = ev.position;
+        let (x, _) = self.local(ev.position);
+        let at = self.viewport.time(x).max(Time::ZERO);
+        self.menu_target = Some(match self.hit(ev.position, cx) {
+            Hit::Clip { clip, .. } => {
+                if !self.state.read(cx).selection.clips.contains(&clip) {
+                    self.select(vec![clip], cx);
+                }
+                MenuTarget::Clip(clip)
+            }
+            Hit::Transition { owner, .. } => {
+                self.select_transition(owner, cx);
+                MenuTarget::Transition(owner)
+            }
+            Hit::Lane { .. } => MenuTarget::Lane(at),
+            Hit::Ruler => MenuTarget::Ruler(at, self.marker_at(x, cx)),
+        });
+    }
+
+    /// The marker whose flag is under lane-local `x` on the ruler.
+    fn marker_at(&self, x: f32, cx: &App) -> Option<koo_core::MarkerId> {
+        let tl = &self.state.read(cx).bus.project().timeline;
+        tl.markers
+            .iter()
+            .filter(|m| {
+                let (a, b) = (self.viewport.x(m.range.start), self.viewport.x(m.range.end));
+                x >= a - 5. && x <= b.max(a) + 5.
+            })
+            .min_by_key(|m| (self.viewport.x(m.range.start) - x).abs() as i64)
+            .map(|m| m.id)
+    }
+
+    /// Select clips; a clip selection and a transition selection exclude
+    /// each other.
+    fn select(&self, clips: Vec<ClipId>, cx: &mut App) {
+        self.state.update(cx, |s, cx| {
+            if s.selected_transition.is_some() {
+                s.select_transition(None, cx);
+            }
+            s.select_clips(clips, cx);
+        });
+    }
+
+    fn select_transition(&self, owner: (ClipId, Edge), cx: &mut App) {
+        self.state.update(cx, |s, cx| {
+            if !s.selection.clips.is_empty() {
+                s.select_clips(vec![], cx);
+            }
+            s.select_transition(Some(owner), cx);
+        });
+    }
+
+    /// Shift-click: everything on `track` from the last selected clip there
+    /// to `clip`, added to the selection.
+    fn range_selection(
+        &self,
+        track: TrackId,
+        clip: ClipId,
+        mut selected: Vec<ClipId>,
+        cx: &App,
+    ) -> Vec<ClipId> {
+        let tl = &self.state.read(cx).bus.project().timeline;
+        let Some(t) = tl.track(track) else {
+            return selected;
+        };
+        let index = |id: &ClipId| t.clips.iter().position(|c| c.id == *id);
+        let Some(to) = index(&clip) else {
+            return selected;
+        };
+        let from = selected.iter().rev().find_map(index).unwrap_or(to);
+        for c in &t.clips[from.min(to)..=from.max(to)] {
+            if !selected.contains(&c.id) {
+                selected.push(c.id);
+            }
+        }
+        selected
+    }
+
+    /// Clips a rubber band covers.
+    fn marquee_hits(&self, from: (Time, f32), to: (Time, f32), tl: &Timeline) -> Vec<ClipId> {
+        let range = TimeRange::new(from.0.min(to.0), from.0.max(to.0));
+        let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
+        self.rows(tl)
+            .iter()
+            .zip(&tl.tracks)
+            .filter(|(row, _)| row.y < y1 && row.y + row.height > y0)
+            .flat_map(|(_, t)| &t.clips)
+            .filter(|c| c.start < range.end && c.end() > range.start)
+            .map(|c| c.id)
+            .collect()
+    }
+
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        self.set_alt(ev.modifiers.alt, cx);
         if self.drag.is_some() {
             if ev.dragging() {
-                self.drag_to(ev.position, ev.modifiers, cx);
+                self.drag_to(ev.position, cx);
             }
             return;
         }
@@ -576,11 +844,23 @@ impl TimelinePanel {
         }
     }
 
-    fn edge_hover(&self, p: Option<Point<Pixels>>, cx: &App) -> bool {
-        p.is_some_and(|p| matches!(self.hit(p, cx), Hit::Clip { edge: Some(_), .. }))
+    fn set_alt(&mut self, alt: bool, cx: &mut Context<Self>) {
+        if alt != self.alt {
+            self.alt = alt;
+            cx.notify();
+        }
     }
 
-    fn drag_to(&mut self, p: Point<Pixels>, modifiers: Modifiers, cx: &mut Context<Self>) {
+    /// Over something an edge drag resizes (or, in trim mode, any clip).
+    fn edge_hover(&self, p: Option<Point<Pixels>>, cx: &App) -> bool {
+        p.is_some_and(|p| match self.hit(p, cx) {
+            Hit::Clip { edge, .. } => edge.is_some() || self.tool == Tool::Trim,
+            Hit::Transition { resize, .. } => resize,
+            _ => false,
+        })
+    }
+
+    fn drag_to(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(p);
         let at = self.viewport.time(x);
         let state = self.state.read(cx);
@@ -631,7 +911,7 @@ impl TimelinePanel {
                     let earliest = dragged.iter().map(|c| c.start).min().unwrap_or(Time::ZERO);
                     delta = Time(delta.0.max(-earliest.0));
                     delta = Time(delta.0 - delta.0.rem_euclid(frame.0.max(1)));
-                    let rows = layout::rows(&project.timeline);
+                    let rows = self.rows(&project.timeline);
                     let kind = |t: TrackId| project.timeline.track(t).map(|t| t.kind);
                     let single_track = dragged.iter().all(|c| {
                         project.timeline.clip(c.id).map(|(t, _)| t.id) == Some(from_track)
@@ -661,7 +941,6 @@ impl TimelinePanel {
             Some(Drag::Trim {
                 clip, edge, ripple, ..
             }) => {
-                let ripple = ripple || modifiers.alt;
                 let Some((track, c)) = project.timeline.clip(clip) else {
                     return;
                 };
@@ -672,21 +951,13 @@ impl TimelinePanel {
                 let target = self.snap_time(at, &[clip], cx);
                 let mut delta = target - edge_t;
                 delta = Time(delta.0 - delta.0.rem_euclid(frame.0.max(1)));
-                let source_len = c
-                    .media()
-                    .and_then(|m| project.media(m))
-                    .and_then(|m| m.info.as_ref())
-                    .map(|i| i.duration);
-                let source_in = match &c.content {
-                    ClipContent::Media { source_in, .. } => Some(*source_in),
-                    _ => None,
-                };
+                let (before, after) = handles(&project, c);
                 let ix = track.clips.iter().position(|o| o.id == clip).unwrap_or(0);
                 match edge {
                     Edge::Start => {
                         let mut lo = -c.start.0;
-                        if let Some(si) = source_in {
-                            lo = lo.max(-si.0);
+                        if let Some(before) = before {
+                            lo = lo.max(-before.0);
                         }
                         if !ripple && ix > 0 {
                             lo = lo.max(track.clips[ix - 1].end().0 - c.start.0);
@@ -695,8 +966,8 @@ impl TimelinePanel {
                     }
                     Edge::End => {
                         let mut hi = i64::MAX;
-                        if let (Some(si), Some(len)) = (source_in, source_len) {
-                            hi = hi.min((len - si - c.duration).0);
+                        if let Some(after) = after {
+                            hi = hi.min(after.0);
                         }
                         if !ripple && let Some(next) = track.clips.get(ix + 1) {
                             hi = hi.min(next.start.0 - c.end().0);
@@ -711,6 +982,68 @@ impl TimelinePanel {
                     ripple,
                 });
             }
+            Some(Drag::Roll { left, right, .. }) => {
+                let tl = &project.timeline;
+                let (Some((_, l)), Some((_, r))) = (tl.clip(left), tl.clip(right)) else {
+                    return;
+                };
+                let target = self.snap_time(at, &[left, right], cx);
+                let mut delta = floor_to(target - l.end(), frame);
+                let mut lo = (frame - l.duration).0;
+                if let (Some(before), _) = handles(&project, r) {
+                    lo = lo.max(-before.0);
+                }
+                let mut hi = (r.duration - frame).0;
+                if let (_, Some(after)) = handles(&project, l) {
+                    hi = hi.min(after.0);
+                }
+                delta = Time(delta.0.clamp(lo.min(0), hi.max(0)));
+                self.drag = Some(Drag::Roll { left, right, delta });
+            }
+            Some(Drag::Slip { clip, grab, .. }) => {
+                let Some((_, c)) = project.timeline.clip(clip) else {
+                    return;
+                };
+                let (Some(before), after) = handles(&project, c) else {
+                    return;
+                };
+                // Dragging right shows earlier source: the in point moves left.
+                let delta = floor_to(grab - at, frame);
+                let hi = after.map_or(i64::MAX, |a| a.0);
+                let delta = Time(delta.0.clamp(-before.0, hi));
+                self.drag = Some(Drag::Slip { clip, grab, delta });
+            }
+            Some(Drag::Marquee {
+                from, base, moved, ..
+            }) => {
+                let moved = moved
+                    || (self.viewport.x(at) - self.viewport.x(from.0)).abs() > 3.
+                    || (y - from.1).abs() > 3.;
+                self.drag = Some(Drag::Marquee {
+                    from,
+                    to: (at.max(Time::ZERO), y),
+                    base,
+                    moved,
+                });
+            }
+            Some(Drag::TransitionEdge { owner, .. }) => {
+                let placed = project.timeline.clip(owner.0).and_then(|(track, _)| {
+                    fx::placed(track).into_iter().find(|p| p.owner == owner)
+                });
+                let Some(placed) = placed else {
+                    return;
+                };
+                let target = self.snap_time(at, &[], cx);
+                let duration = floor_to(placed.duration_at(target), frame);
+                let duration = Time(duration.0.clamp(frame.0, placed.max.0.max(frame.0)));
+                self.drag = Some(Drag::TransitionEdge { owner, duration });
+            }
+            Some(Drag::TrackHeight { track, grab, from }) => {
+                let h = (from + f32::from(p.y - grab))
+                    .clamp(layout::MIN_ROW_HEIGHT, layout::MAX_ROW_HEIGHT);
+                self.heights.insert(track, h.round());
+                self.drag = Some(Drag::TrackHeight { track, grab, from });
+            }
             None => {}
         }
         cx.notify();
@@ -722,7 +1055,58 @@ impl TimelinePanel {
         };
         self.snap = None;
         match drag {
-            Drag::Scrub => {}
+            Drag::Scrub | Drag::TrackHeight { .. } => {}
+            Drag::Marquee {
+                from,
+                to,
+                mut base,
+                moved,
+            } => {
+                if moved {
+                    let hits =
+                        self.marquee_hits(from, to, &self.state.read(cx).bus.project().timeline);
+                    for id in hits {
+                        if !base.contains(&id) {
+                            base.push(id);
+                        }
+                    }
+                    self.select(base, cx);
+                } else {
+                    let rate = self.state.read(cx).bus.project().timeline.settings.rate;
+                    self.state
+                        .update(cx, |s, cx| s.seek(from.0.floor_to_frame(rate), cx));
+                }
+            }
+            Drag::Roll { left, right, delta } => {
+                if delta != Time::ZERO {
+                    self.state.update(cx, |s, cx| {
+                        s.edit(Command::Roll { left, right, delta }, cx);
+                    });
+                }
+            }
+            Drag::Slip { clip, delta, .. } => {
+                if delta != Time::ZERO {
+                    self.state.update(cx, |s, cx| {
+                        s.edit(Command::Slip { clip, delta }, cx);
+                    });
+                }
+            }
+            Drag::TransitionEdge { owner, duration } => {
+                let current = transition_of(self.state.read(cx).bus.project(), owner).cloned();
+                if let Some(t) = current.filter(|t| t.duration != duration) {
+                    let transition = Some(koo_core::fx::Transition { duration, ..t });
+                    self.state.update(cx, |s, cx| {
+                        s.edit(
+                            Command::SetTransition {
+                                clip: owner.0,
+                                edge: owner.1,
+                                transition,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            }
             Drag::Move {
                 clips,
                 from_track,
@@ -801,7 +1185,7 @@ impl TimelinePanel {
             self.viewport.scroll_x -= dy + dx;
         } else {
             self.viewport.scroll_x -= dx;
-            let rows = layout::rows(&self.state.read(cx).bus.project().timeline);
+            let rows = self.rows(&self.state.read(cx).bus.project().timeline);
             let overflow = layout::rows_height(&rows) + layout::BOTTOM_PAD - self.lanes_height();
             if overflow > 0. && dy.abs() > dx.abs() {
                 self.viewport.scroll_y = (self.viewport.scroll_y - dy).clamp(0., overflow);
@@ -876,7 +1260,7 @@ impl TimelinePanel {
     }
 
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
-        self.drop_row = None;
+        self.drop = None;
         let p = window.mouse_position();
         let (x, y) = self.local(p);
         let state = self.state.read(cx);
@@ -884,7 +1268,7 @@ impl TimelinePanel {
         let Some(item) = project.media(drag.media) else {
             return;
         };
-        let rows = layout::rows(&project.timeline);
+        let rows = self.rows(&project.timeline);
         let wanted = match item.kind {
             koo_core::model::MediaKind::Audio => TrackKind::Audio,
             _ => TrackKind::Video,
@@ -943,18 +1327,6 @@ impl TimelinePanel {
     }
 
     // -------------------------------------------------------------- actions
-
-    fn delete_selection(&mut self, ripple: bool, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| {
-            let clips = s.selection.clips.clone();
-            if clips.is_empty() {
-                return;
-            }
-            if s.edit(Command::DeleteClips { clips, ripple }, cx).is_some() {
-                s.select_clips(vec![], cx);
-            }
-        });
-    }
 
     fn add_marker(&mut self, protected: bool, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
@@ -1116,7 +1488,8 @@ impl TimelinePanel {
         let state = self.state.read(cx);
         let project = state.bus.project();
         let media = state.services.media.clone();
-        let selection = state.selection.clips.clone();
+        let mut selection = state.selection.clips.clone();
+        let selected_transition = state.selected_transition;
         let playhead = state.playhead;
         let in_out = state.in_out;
         let focused = state.focused_change().map(|i| i.id);
@@ -1127,6 +1500,23 @@ impl TimelinePanel {
             .tracks
             .iter()
             .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
+        let rate = tl.settings.rate;
+
+        let mut marquee = None;
+        if let Some(Drag::Marquee {
+            from,
+            to,
+            base,
+            moved: true,
+        }) = &self.drag
+        {
+            selection = base.clone();
+            selection.extend(self.marquee_hits(*from, *to, tl));
+            marquee = Some(Marquee {
+                from: *from,
+                to: *to,
+            });
+        }
 
         let lifted: Vec<ClipId> = match &self.drag {
             Some(Drag::Move {
@@ -1154,6 +1544,7 @@ impl TimelinePanel {
                         ghosts.push(Ghost {
                             track,
                             range: c.range().shift(*delta),
+                            label: None,
                         });
                     }
                 }
@@ -1170,13 +1561,35 @@ impl TimelinePanel {
                     ghosts.push(Ghost {
                         track: track.id,
                         range,
+                        label: None,
+                    });
+                }
+            }
+            Some(Drag::Roll { left, right, delta }) => {
+                if let (Some((track, l)), Some((_, r))) = (tl.clip(*left), tl.clip(*right)) {
+                    let cut = l.end() + *delta;
+                    for range in [TimeRange::new(l.start, cut), TimeRange::new(cut, r.end())] {
+                        ghosts.push(Ghost {
+                            track: track.id,
+                            range,
+                            label: None,
+                        });
+                    }
+                }
+            }
+            Some(Drag::Slip { clip, delta, .. }) => {
+                if let Some((track, c)) = tl.clip(*clip) {
+                    ghosts.push(Ghost {
+                        track: track.id,
+                        range: c.range(),
+                        label: Some(signed_timecode(*delta, rate).into()),
                     });
                 }
             }
             _ => {}
         }
 
-        let rows = layout::rows(tl);
+        let rows = self.rows(tl);
         let width = f32::from(self.bounds.get().size.width);
         // Only clips in view are built and painted: a long transcript makes
         // thousands of captions.
@@ -1213,7 +1626,13 @@ impl TimelinePanel {
                         ClipScene {
                             tiles,
                             range: clip.range(),
-                            label: clip_label(clip, project).into(),
+                            label: clip.display_name(project).into(),
+                            color: clip.color.map(|c| rgb(c.rgb()).into()),
+                            enabled: clip.enabled,
+                            generator: matches!(clip.content, ClipContent::Generator { .. }),
+                            effects: !clip.effects.is_empty(),
+                            speed: ((clip.speed - 1.).abs() > 1e-6)
+                                .then(|| format!("{}%", (clip.speed * 100.).round()).into()),
                             selected: selection.contains(&clip.id),
                             lifted: lifted.contains(&clip.id),
                             peaks,
@@ -1230,6 +1649,30 @@ impl TimelinePanel {
                 }
             })
             .collect();
+
+        let resizing = match &self.drag {
+            Some(Drag::TransitionEdge { owner, duration }) => Some((*owner, *duration)),
+            _ => None,
+        };
+        let mut transitions = Vec::new();
+        for track in &tl.tracks {
+            for t in fx::placed(track) {
+                let range = match resizing {
+                    Some((owner, d)) if owner == t.owner => t.range_with(d),
+                    _ => t.range,
+                };
+                if range.end < visible.start || range.start > visible.end {
+                    continue;
+                }
+                transitions.push(TransitionScene {
+                    track: track.id,
+                    range,
+                    label: koo_core::fx::asset(project, &t.fx)
+                        .map_or_else(|| "Transition".into(), |a| a.name.clone().into()),
+                    selected: selected_transition == Some(t.owner),
+                });
+            }
+        }
 
         let silences = if self.silence_open {
             let (min, pad) = self.silence_params(cx);
@@ -1263,10 +1706,12 @@ impl TimelinePanel {
             focused,
             hovered: self.hovered_item.map(|(_, i)| i),
             silences,
+            transitions,
             ghosts,
             snap: self.snap,
             blade,
-            drop_row: self.drop_row,
+            drop: self.drop,
+            marquee,
             colors,
         };
 
@@ -1410,6 +1855,18 @@ impl TimelinePanel {
                     cx.notify();
                 })),
             )
+            .child(
+                tool(
+                    "tool-trim",
+                    Glyph::Trim,
+                    self.tool == Tool::Trim,
+                    "Trim (T)",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tool = Tool::Trim;
+                    cx.notify();
+                })),
+            )
             .child(separator())
             .child(
                 tool("snapping", Glyph::Magnet, self.snapping, "Snapping (N)").on_click(
@@ -1460,12 +1917,15 @@ impl TimelinePanel {
     fn headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
+        let marker = theme.blue_light;
+        let alt = self.alt;
         let tl = &self.state.read(cx).bus.project().timeline;
         let any_solo = tl
             .tracks
             .iter()
             .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
-        let rows: Vec<_> = layout::rows(tl)
+        let rows: Vec<_> = self
+            .rows(tl)
             .into_iter()
             .zip(tl.tracks.iter().cloned())
             .collect();
@@ -1490,13 +1950,55 @@ impl TimelinePanel {
                 (false, false) => (Glyph::Eye, "Hide"),
                 (false, true) => (Glyph::EyeOff, "Show"),
             };
+            let reference = refs::track(&track);
             h_flex()
                 .id(ElementId::Name(key("header")))
+                .relative()
                 .h(px(row.height))
                 .px_2()
                 .gap_0p5()
                 .border_b_1()
                 .border_color(border.opacity(0.5))
+                .when(audio, |el| {
+                    el.drag_over::<super::AudioFxDrag>(move |style, _, _, _| {
+                        style.bg(marker.opacity(0.25))
+                    })
+                    .on_drop(cx.listener(
+                        move |this, drag: &super::AudioFxDrag, _, cx| {
+                            this.drop_audio_fx_on_track(drag, id, cx)
+                        },
+                    ))
+                })
+                .when(alt, |el| {
+                    // Alt-drag hands the track to the chat.
+                    el.on_drag(
+                        RefDrag {
+                            refs: vec![reference.clone()],
+                        },
+                        |d, _, _, cx| cx.new(|_| d.clone()),
+                    )
+                })
+                .child(
+                    div()
+                        .id(ElementId::Name(key("resize")))
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(-2.))
+                        .h(px(5.))
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.drag = Some(Drag::TrackHeight {
+                                    track: id,
+                                    grab: ev.position.y,
+                                    from: row.height,
+                                });
+                            }),
+                        ),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -1534,6 +2036,8 @@ impl TimelinePanel {
                 )
                 .context_menu(move |menu, _, _| {
                     let remove = panel.clone();
+                    let mention = panel.clone();
+                    let reference = reference.clone();
                     add_track_items(menu, &panel)
                         .item(PopupMenuItem::separator())
                         .item(
@@ -1543,6 +2047,11 @@ impl TimelinePanel {
                                     remove.update(cx, |this, cx| this.remove_track(id, cx))
                                 }),
                         )
+                        .item(PopupMenuItem::separator())
+                        .item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
+                            let r = reference.clone();
+                            mention.update(cx, |this, cx| this.mention(vec![r], cx))
+                        }))
                 })
         });
         v_flex()
@@ -1631,6 +2140,71 @@ impl TimelinePanel {
     }
 }
 
+/// Room on either side of a media clip's source range, in timeline time:
+/// how far its start may move left and its end right. `None` before for
+/// clips without a source; `None` after when the source length is unknown.
+fn handles(project: &Project, clip: &Clip) -> (Option<Time>, Option<Time>) {
+    let ClipContent::Media {
+        media, source_in, ..
+    } = &clip.content
+    else {
+        return (None, None);
+    };
+    let speed = clip.speed.max(1e-6);
+    let before = source_in.scale(1. / speed).max(Time::ZERO);
+    let after = project
+        .media(*media)
+        .and_then(|m| m.info.as_ref())
+        .map(|i| {
+            (i.duration - *source_in - clip.duration.scale(speed))
+                .scale(1. / speed)
+                .max(Time::ZERO)
+        });
+    (Some(before), after)
+}
+
+/// `t` rounded down to a whole number of `frame`s.
+fn floor_to(t: Time, frame: Time) -> Time {
+    Time(t.0 - t.0.rem_euclid(frame.0.max(1)))
+}
+
+/// The transition stored on a clip edge.
+fn transition_of(
+    project: &Project,
+    (clip, edge): (ClipId, Edge),
+) -> Option<&koo_core::fx::Transition> {
+    let (_, c) = project.timeline.clip(clip)?;
+    match edge {
+        Edge::Start => c.transition_in.as_ref(),
+        Edge::End => c.transition_out.as_ref(),
+    }
+}
+
+/// The clips on either side of `clip`'s `edge` when another clip touches
+/// it there: `(left, right)` for a roll.
+fn neighbour(project: &Project, clip: ClipId, edge: Edge) -> Option<(ClipId, ClipId)> {
+    let (track, c) = project.timeline.clip(clip)?;
+    match edge {
+        Edge::Start => track
+            .clips
+            .iter()
+            .find(|o| o.end() == c.start && o.id != clip)
+            .map(|o| (o.id, clip)),
+        Edge::End => track
+            .clips
+            .iter()
+            .find(|o| o.start == c.end() && o.id != clip)
+            .map(|o| (clip, o.id)),
+    }
+}
+
+/// Lane-local x span of a transition block, at least 6 px wide.
+fn transition_span(vp: &Viewport, range: TimeRange) -> (f32, f32) {
+    let (a, b) = (vp.x(range.start), vp.x(range.end));
+    let pad = ((6. - (b - a)) / 2.).max(0.);
+    (a - pad, b + pad)
+}
+
 /// The audio track paired with a video track: V1 ↔ A1, V2 ↔ A2, counting
 /// video tracks up from the one nearest the audio. Falls back to the first
 /// unlocked audio track.
@@ -1650,19 +2224,12 @@ fn matching_audio_track(timeline: &koo_core::model::Timeline, video: TrackId) ->
     audios.get(rank).or(audios.first()).map(|t| t.id)
 }
 
-fn clip_label(clip: &koo_core::model::Clip, project: &Project) -> String {
-    match &clip.content {
-        ClipContent::Media { media, .. } => project
-            .media(*media)
-            .and_then(|m| m.path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        ClipContent::Title { text, .. } | ClipContent::Caption { text, .. } => text.clone(),
-        ClipContent::Overlay { asset, .. } => asset
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    }
+/// A signed offset as `+S:FF` (seconds and frames).
+fn signed_timecode(t: Time, rate: Rate) -> String {
+    let fps = rate.rounded_fps() as i64;
+    let sign = if t.0 < 0 { '-' } else { '+' };
+    let frames = Time(t.0.abs()).to_frame(rate);
+    format!("{sign}{}:{:02}", frames / fps.max(1), frames % fps.max(1))
 }
 
 fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
@@ -1726,6 +2293,7 @@ impl Render for TimelinePanel {
         for image in self.thumbs.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        self.alt = window.modifiers().alt;
         let bounds = self.bounds.get();
         let duration = self.state.read(cx).bus.project().timeline.duration();
         if !self.fitted && bounds.size.width > px(0.) && duration > Time::ZERO {
@@ -1779,18 +2347,52 @@ impl Render for TimelinePanel {
 
         let cursor = if self.tool == Tool::Blade {
             CursorStyle::Crosshair
-        } else if matches!(self.drag, Some(Drag::Trim { .. })) || self.edge_hover(self.hover, cx) {
+        } else if matches!(self.drag, Some(Drag::TrackHeight { .. })) {
+            CursorStyle::ResizeUpDown
+        } else if matches!(
+            self.drag,
+            Some(
+                Drag::Trim { .. }
+                    | Drag::Roll { .. }
+                    | Drag::Slip { .. }
+                    | Drag::TransitionEdge { .. }
+            )
+        ) || self.edge_hover(self.hover, cx)
+        {
             CursorStyle::ResizeLeftRight
         } else {
             CursorStyle::Arrow
         };
+        let overlays = self.ref_overlays(cx);
+        let popup = self.render_popup(cx);
         let theme = cx.theme();
+        let menu_panel = cx.entity();
 
-        v_flex()
+        let main = v_flex()
             .size_full()
             .bg(theme.background)
             .track_focus(&self.focus)
             .key_context("Timeline")
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
+                this.set_alt(ev.modifiers.alt, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TrimTool, _, cx| {
+                this.tool = if this.tool == Tool::Trim {
+                    Tool::Select
+                } else {
+                    Tool::Trim
+                };
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CopyClips, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &CutClips, _, cx| this.cut(cx)))
+            .on_action(cx.listener(|this, _: &PasteClips, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &DuplicateClips, _, cx| this.duplicate(cx)))
+            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-1, cx)))
+            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1, cx)))
+            .on_action(cx.listener(|this, _: &NudgeLeftMore, _, cx| this.nudge(-10, cx)))
+            .on_action(cx.listener(|this, _: &NudgeRightMore, _, cx| this.nudge(10, cx)))
+            .on_action(cx.listener(|this, _: &ToggleEnabled, _, cx| this.toggle_enabled(cx)))
             .on_action(cx.listener(|this, _: &SelectTool, _, cx| {
                 this.tool = Tool::Select;
                 cx.notify();
@@ -1867,6 +2469,12 @@ impl Render for TimelinePanel {
                                     this.mouse_down(ev, window, cx)
                                 }),
                             )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    this.right_mouse_down(ev, window, cx)
+                                }),
+                            )
                             .on_scroll_wheel(
                                 cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                                     this.scroll(ev, cx)
@@ -1881,22 +2489,41 @@ impl Render for TimelinePanel {
                                     let row = if ev.bounds.contains(&p) {
                                         let (_, y) = this.local(p);
                                         let tl = &this.state.read(cx).bus.project().timeline;
-                                        layout::row_at(&layout::rows(tl), y).map(|r| r.track)
+                                        layout::row_at(&this.rows(tl), y).map(|r| r.track)
                                     } else {
                                         None
                                     };
-                                    if row != this.drop_row {
-                                        this.drop_row = row;
-                                        cx.notify();
-                                    }
+                                    this.set_drop(row.map(DropHint::Row), cx);
                                 },
                             ))
                             .on_drop(cx.listener(|this, drag: &super::MediaDrag, window, cx| {
                                 this.drop_media(drag, window, cx)
                             }))
+                            .on_drag_move(cx.listener(
+                                |this, ev: &DragMoveEvent<super::FxDrag>, _, cx| {
+                                    let drag = ev.drag(cx).clone();
+                                    this.fx_drag_moved(&drag, ev.event.position, cx)
+                                },
+                            ))
+                            .on_drop(cx.listener(|this, drag: &super::FxDrag, window, cx| {
+                                this.drop_fx(drag, window, cx)
+                            }))
+                            .on_drag_move(cx.listener(
+                                |this, ev: &DragMoveEvent<super::AudioFxDrag>, _, cx| {
+                                    this.audio_fx_drag_moved(ev.event.position, cx)
+                                },
+                            ))
+                            .on_drop(cx.listener(|this, drag: &super::AudioFxDrag, window, cx| {
+                                this.drop_audio_fx(drag, window, cx)
+                            }))
+                            .context_menu(move |menu, window, cx| {
+                                menu::build(&menu_panel, menu, window, cx)
+                            })
                             .child(lanes)
+                            .children(overlays)
                             .children(self.tooltip(cx)),
                     ),
-            )
+            );
+        div().size_full().child(main).children(popup)
     }
 }

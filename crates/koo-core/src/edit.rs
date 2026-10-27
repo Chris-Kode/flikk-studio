@@ -4,8 +4,9 @@
 //! track and let [`diff_track`] emit ops in an order that never overlaps
 //! clips mid-way. The bus validates every plan by applying it to a copy.
 
-use crate::command::{Command, Edge, InsertMode, Plan, TrackScope, Warning};
+use crate::command::{Command, Edge, InsertMode, PlacedClip, Plan, TrackScope, Warning};
 use crate::error::{CoreError, Result};
+use crate::fx::{self, FxAsset, FxInstance, FxKind, FxRef, ParamKeyframe, ParamValue, Transition};
 use crate::ids::*;
 use crate::model::*;
 use crate::ops::apply_all;
@@ -25,6 +26,17 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::ImportMedia { .. }
             | Command::UpdateMedia { .. }
             | Command::RemoveMedia { .. }
+            | Command::RenameClip { .. }
+            | Command::SetClipColor { .. }
+            | Command::AddEffect { .. }
+            | Command::SetEffect { .. }
+            | Command::RemoveEffect { .. }
+            | Command::MoveEffect { .. }
+            | Command::SetEffectKeyframe { .. }
+            | Command::RemoveEffectKeyframe { .. }
+            | Command::SetFxAsset { .. }
+            | Command::RemoveFxAsset { .. }
+            | Command::SetAudioEffects { .. }
     ) {
         warn_protected(project, &mut plan);
     }
@@ -290,6 +302,137 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             remove_keyframe(tl, *clip, *property, *at)
         }
         Command::SetPlaylist { track, at, songs } => set_playlist(project, *track, *at, songs),
+
+        Command::PlaceClips { clips, mode } => place_clips(project, clips, *mode),
+        Command::SetSpeed {
+            clip,
+            speed,
+            ripple,
+        } => set_speed(project, *clip, *speed, *ripple),
+        Command::SetClipsEnabled { clips, enabled } => {
+            update_clips(tl, clips, |c| c.enabled = *enabled)
+        }
+        Command::RenameClip { clip, name } => update_clip(tl, *clip, |c| {
+            c.name = name
+                .as_ref()
+                .map(|n| n.trim().to_owned())
+                .filter(|n| !n.is_empty())
+        }),
+        Command::SetClipColor { clips, color } => update_clips(tl, clips, |c| c.color = *color),
+
+        Command::AddEffect {
+            clips,
+            effect,
+            index,
+        } => add_effect(project, clips, effect, *index),
+        Command::SetEffect { clip, effect } => {
+            let asset = fx_asset(project, &effect.fx, FxKind::Effect)?;
+            let effect = coerced(effect, asset);
+            with_effect(tl, *clip, effect.id, |list, ix| list[ix] = effect.clone())
+        }
+        Command::RemoveEffect { clip, effect } => with_effect(tl, *clip, *effect, |list, ix| {
+            list.remove(ix);
+        }),
+        Command::MoveEffect {
+            clip,
+            effect,
+            index,
+        } => with_effect(tl, *clip, *effect, |list, ix| {
+            let e = list.remove(ix);
+            list.insert((*index).min(list.len()), e);
+        }),
+        Command::SetEffectKeyframe {
+            clip,
+            effect,
+            param,
+            at,
+            value,
+            ease,
+        } => set_effect_keyframe(project, *clip, *effect, param, *at, Some((value, *ease))),
+        Command::RemoveEffectKeyframe {
+            clip,
+            effect,
+            param,
+            at,
+        } => set_effect_keyframe(project, *clip, *effect, param, *at, None),
+        Command::SetTransition {
+            clip,
+            edge,
+            transition,
+        } => set_transition(project, *clip, *edge, transition.as_ref()),
+        Command::AddGenerator { track, range, fx } => {
+            let asset = fx_asset(project, &fx.fx, FxKind::Generator)?;
+            let t = editable_track(tl, *track)?;
+            if !matches!(
+                t.kind,
+                TrackKind::Video | TrackKind::Overlay | TrackKind::Title
+            ) {
+                return Err(CoreError::Invalid(
+                    "generators go on video, overlay or title tracks".into(),
+                ));
+            }
+            insert_new(
+                tl,
+                *track,
+                *range,
+                ClipContent::Generator {
+                    fx: coerced(fx, asset),
+                },
+            )
+        }
+        Command::SetGenerator { clip, fx } => {
+            let asset = fx_asset(project, &fx.fx, FxKind::Generator)?;
+            let (_, c) = find_clip(tl, *clip)?;
+            if !matches!(c.content, ClipContent::Generator { .. }) {
+                return Err(CoreError::Invalid(format!(
+                    "{clip} is not a generator clip"
+                )));
+            }
+            let fx = coerced(fx, asset);
+            update_clip(tl, *clip, |c| c.content = ClipContent::Generator { fx })
+        }
+        Command::SetFxAsset { asset } => {
+            if !matches!(asset.id, FxRef::Project(_)) {
+                return Err(CoreError::Invalid(
+                    "built-in programs cannot be replaced; save a copy under a new id".into(),
+                ));
+            }
+            asset.validate().map_err(CoreError::Invalid)?;
+            let mut after = project.fx.clone();
+            match after.iter_mut().find(|a| a.id == asset.id) {
+                Some(a) => *a = asset.clone(),
+                None => after.push(asset.clone()),
+            }
+            Ok(ops(vec![Op::SetFxAssets {
+                before: project.fx.clone(),
+                after,
+            }]))
+        }
+        Command::RemoveFxAsset { asset } => {
+            let r = FxRef::Project(*asset);
+            if !project.fx.iter().any(|a| a.id == r) {
+                return Err(CoreError::Invalid(format!("no FX program {asset}")));
+            }
+            let used = fx::uses(project, &r);
+            if !used.is_empty() {
+                return Err(CoreError::Invalid(format!(
+                    "the program is still used by {} clip(s)",
+                    used.len()
+                )));
+            }
+            let after = project.fx.iter().filter(|a| a.id != r).cloned().collect();
+            Ok(ops(vec![Op::SetFxAssets {
+                before: project.fx.clone(),
+                after,
+            }]))
+        }
+        Command::SetAudioEffects { clip, effects } => {
+            let (_, c) = find_clip(tl, *clip)?;
+            if c.media().is_none() {
+                return Err(CoreError::Invalid(format!("{clip} has no audio")));
+            }
+            update_clip(tl, *clip, |c| c.audio.effects = effects.clone())
+        }
     }
 }
 
@@ -302,12 +445,12 @@ fn blade(tl: &Timeline, at: Time, scope: &TrackScope) -> Result<Plan> {
             let (left, right) = split_clip(clip, at);
             out.push(Op::UpdateClip {
                 track: track.id,
-                before: clip.clone(),
-                after: left,
+                before: Box::new(clip.clone()),
+                after: Box::new(left),
             });
             out.push(Op::InsertClip {
                 track: track.id,
-                clip: right,
+                clip: Box::new(right),
             });
         }
     }
@@ -435,18 +578,18 @@ fn move_clip(tl: &Timeline, id: ClipId, at: Time, to: Option<TrackId>) -> Result
     Ok(ops(if to == from.id {
         vec![Op::UpdateClip {
             track: to,
-            before: clip.clone(),
-            after: moved,
+            before: Box::new(clip.clone()),
+            after: Box::new(moved),
         }]
     } else {
         vec![
             Op::RemoveClip {
                 track: from.id,
-                clip: clip.clone(),
+                clip: Box::new(clip.clone()),
             },
             Op::InsertClip {
                 track: to,
-                clip: moved,
+                clip: Box::new(moved),
             },
         ]
     }))
@@ -630,9 +773,10 @@ fn slip(project: &Project, id: ClipId, delta: Time) -> Result<Plan> {
         return Err(CoreError::Invalid("only media clips can slip".into()));
     };
     let delta = clamp(delta, Some(-before), room_after(project, clip));
+    // `delta` is timeline time; the source moves by that much at the clip's speed.
     update_clip(tl, id, |c| {
         if let ClipContent::Media { source_in, .. } = &mut c.content {
-            *source_in = *source_in + delta;
+            *source_in = *source_in + delta.scale(c.speed);
         }
     })
 }
@@ -848,6 +992,359 @@ fn set_playlist(project: &Project, track: TrackId, at: Time, songs: &[MediaId]) 
     Ok(ops(diff_track(target, next)))
 }
 
+/// Copies of clips on their target tracks (paste, duplicate).
+fn place_clips(project: &Project, items: &[PlacedClip], mode: InsertMode) -> Result<Plan> {
+    let tl = &project.timeline;
+    if items.is_empty() {
+        return Err(CoreError::Invalid("nothing to place".into()));
+    }
+    let mut groups: Vec<(TrackId, Vec<Clip>)> = Vec::new();
+    for item in items {
+        let track = editable_track(tl, item.track)?;
+        if !fits_track(project, &item.clip.content, track.kind) {
+            return Err(CoreError::Invalid(format!(
+                "that clip does not go on {} ({:?})",
+                track.name, track.kind
+            )));
+        }
+        if item.clip.start < Time::ZERO || item.clip.duration <= Time::ZERO {
+            return Err(CoreError::Invalid("negative start or empty clip".into()));
+        }
+        let mut clip = item.clip.clone();
+        clip.id = ClipId::new();
+        match groups.iter_mut().find(|(t, _)| *t == item.track) {
+            Some((_, clips)) => clips.push(clip),
+            None => groups.push((item.track, vec![clip])),
+        }
+    }
+    let mut out = Vec::new();
+    for (track_id, mut placed) in groups {
+        placed.sort_by_key(|c| c.start);
+        if placed.windows(2).any(|w| w[0].end() > w[1].start) {
+            return Err(CoreError::Invalid("placed clips overlap each other".into()));
+        }
+        let track = tl
+            .track(track_id)
+            .ok_or(CoreError::TrackNotFound(track_id))?;
+        let first = placed[0].start;
+        let span = placed.iter().map(Clip::end).max().unwrap_or(first) - first;
+        let mut next = match mode {
+            InsertMode::Overwrite => placed
+                .iter()
+                .fold(track.clips.clone(), |clips, c| cut_out(&clips, c.range())),
+            InsertMode::Insert => {
+                let mut next = Vec::with_capacity(track.clips.len() + 1);
+                for c in &track.clips {
+                    if c.end() <= first {
+                        next.push(c.clone());
+                    } else if c.start >= first {
+                        next.push(Clip {
+                            start: c.start + span,
+                            ..c.clone()
+                        });
+                    } else {
+                        let (left, mut right) = split_clip(c, first);
+                        right.start = right.start + span;
+                        next.push(left);
+                        next.push(right);
+                    }
+                }
+                next
+            }
+        };
+        next.extend(placed);
+        out.extend(diff_track(track, next));
+    }
+    Ok(ops(out))
+}
+
+/// Whether `content` may sit on a `kind` track.
+fn fits_track(project: &Project, content: &ClipContent, kind: TrackKind) -> bool {
+    match content {
+        ClipContent::Media { media, .. } => {
+            let Some(item) = project.media(*media) else {
+                return false;
+            };
+            match kind {
+                TrackKind::Audio => {
+                    item.kind != MediaKind::Image
+                        && item.info.as_ref().is_none_or(|i| !i.audio.is_empty())
+                }
+                TrackKind::Video | TrackKind::Overlay => item.kind != MediaKind::Audio,
+                TrackKind::Title | TrackKind::Caption => false,
+            }
+        }
+        ClipContent::Caption { .. } => kind == TrackKind::Caption,
+        ClipContent::Title { .. } => kind == TrackKind::Title,
+        ClipContent::Overlay { .. } => matches!(kind, TrackKind::Overlay | TrackKind::Video),
+        ClipContent::Generator { .. } => matches!(
+            kind,
+            TrackKind::Video | TrackKind::Overlay | TrackKind::Title
+        ),
+    }
+}
+
+/// Retime a media clip: the source it plays stays the same, so the clip
+/// lasts `duration × old / new`. Keyframes stretch with it.
+fn set_speed(project: &Project, id: ClipId, speed: f64, ripple: bool) -> Result<Plan> {
+    let tl = &project.timeline;
+    let (track, clip) = find_clip(tl, id)?;
+    editable_track(tl, track.id)?;
+    if !(speed.is_finite() && (0.01..=100.0).contains(&speed)) {
+        return Err(CoreError::Invalid(
+            "speed must be between 0.01 and 100".into(),
+        ));
+    }
+    if clip.media().is_none() {
+        return Err(CoreError::Invalid("only media clips change speed".into()));
+    }
+    let ratio = clip.speed / speed;
+    let mut duration = clip.duration.scale(ratio).max(min_len(tl));
+    let ix = clip_index(track, id);
+    if !ripple && let Some(next) = track.clips.get(ix + 1) {
+        duration = duration.min(next.start - clip.start);
+    }
+    let mut c = clip.clone();
+    c.speed = speed;
+    c.duration = duration;
+    for k in &mut c.keyframes {
+        k.at = k.at.scale(ratio);
+    }
+    for e in &mut c.effects {
+        e.scale_keyframes(ratio);
+    }
+    c.audio.fade_in = c.audio.fade_in.min(duration);
+    c.audio.fade_out = c.audio.fade_out.min(duration);
+    let shift = if ripple {
+        duration - clip.duration
+    } else {
+        Time::ZERO
+    };
+    let mut clips: Vec<Clip> = track.clips[..ix].to_vec();
+    clips.push(c);
+    clips.extend(track.clips[ix + 1..].iter().map(|c| Clip {
+        start: c.start + shift,
+        ..c.clone()
+    }));
+    Ok(ops(diff_track(track, clips)))
+}
+
+/// The asset `r` names, which must be of `kind`.
+fn fx_asset<'a>(project: &'a Project, r: &FxRef, kind: FxKind) -> Result<&'a FxAsset> {
+    let asset =
+        fx::asset(project, r).ok_or_else(|| CoreError::Invalid(format!("no FX program `{r}`")))?;
+    if asset.kind != kind {
+        return Err(CoreError::Invalid(format!(
+            "`{}` is a {}, not a {}",
+            asset.name,
+            asset.kind.label().to_lowercase(),
+            kind.label().to_lowercase()
+        )));
+    }
+    Ok(asset)
+}
+
+/// `fx` with unknown parameters dropped and values coerced to their kinds.
+fn coerced(fx: &FxInstance, asset: &FxAsset) -> FxInstance {
+    let mut out = fx.clone();
+    out.params = fx
+        .params
+        .iter()
+        .filter_map(|(name, v)| {
+            let spec = asset.param(name)?;
+            Some((name.clone(), spec.kind.coerce(v, &spec.default)))
+        })
+        .collect();
+    out.keyframes = fx
+        .keyframes
+        .iter()
+        .filter_map(|k| {
+            let spec = asset.param(&k.param)?;
+            Some(ParamKeyframe {
+                value: spec.kind.coerce(&k.value, &spec.default),
+                ..k.clone()
+            })
+        })
+        .collect();
+    out
+}
+
+/// Whether the clip shows a picture effects can process.
+fn has_picture(track: &Track, clip: &Clip) -> bool {
+    track.kind != TrackKind::Audio && !matches!(clip.content, ClipContent::Caption { .. })
+}
+
+fn add_effect(
+    project: &Project,
+    clips: &[ClipId],
+    effect: &FxInstance,
+    index: Option<usize>,
+) -> Result<Plan> {
+    let tl = &project.timeline;
+    let asset = fx_asset(project, &effect.fx, FxKind::Effect)?;
+    if clips.is_empty() {
+        return Err(CoreError::Invalid("no clips given".into()));
+    }
+    let effect = coerced(effect, asset);
+    let mut out = Vec::new();
+    for (i, id) in clips.iter().enumerate() {
+        let (track, clip) = find_clip(tl, *id)?;
+        if !has_picture(track, clip) {
+            return Err(CoreError::Invalid(format!(
+                "{id} has no picture to apply an effect to"
+            )));
+        }
+        out.extend(
+            update_clip(tl, *id, |c| {
+                let mut e = effect.clone();
+                // The first clip keeps the caller's id so it can refer to it.
+                if i > 0 || c.effects.iter().any(|x| x.id == e.id) {
+                    e.id = EffectId::new();
+                }
+                let at = index.unwrap_or(c.effects.len()).min(c.effects.len());
+                c.effects.insert(at, e);
+            })?
+            .ops,
+        );
+    }
+    Ok(ops(out))
+}
+
+/// Edit the effect stack of `clip` where effect `effect` is at `ix`.
+fn with_effect(
+    tl: &Timeline,
+    clip: ClipId,
+    effect: EffectId,
+    f: impl FnOnce(&mut Vec<FxInstance>, usize),
+) -> Result<Plan> {
+    let (_, c) = find_clip(tl, clip)?;
+    let ix = c
+        .effects
+        .iter()
+        .position(|e| e.id == effect)
+        .ok_or_else(|| CoreError::Invalid(format!("{clip} has no effect {effect}")))?;
+    update_clip(tl, clip, |c| f(&mut c.effects, ix))
+}
+
+/// Set (`Some`) or remove (`None`, nearest within half a frame) a keyframe
+/// on an effect, generator or transition instance of `clip`.
+fn set_effect_keyframe(
+    project: &Project,
+    clip: ClipId,
+    effect: EffectId,
+    param: &str,
+    at: Time,
+    key: Option<(&ParamValue, crate::model::Ease)>,
+) -> Result<Plan> {
+    let tl = &project.timeline;
+    let (track, c) = find_clip(tl, clip)?;
+    // The instance's clock origin in timeline time.
+    let origin = if c.effects.iter().any(|e| e.id == effect)
+        || matches!(&c.content, ClipContent::Generator { fx } if fx.id == effect)
+    {
+        c.start
+    } else {
+        fx::transitions(track)
+            .into_iter()
+            .find(|p| p.transition.fx.id == effect)
+            .map(|p| p.range.start)
+            .ok_or_else(|| CoreError::Invalid(format!("{clip} has no effect {effect}")))?
+    };
+    let rel = at - origin;
+    let tolerance = Time(tl.settings.rate.frame_duration().0 / 2);
+    let mut after = c.clone();
+    let inst = instance_mut(&mut after, effect)
+        .ok_or_else(|| CoreError::Invalid(format!("{clip} has no effect {effect}")))?;
+    let asset = fx::asset(project, &inst.fx)
+        .ok_or_else(|| CoreError::Invalid(format!("no FX program `{}`", inst.fx)))?;
+    let spec = asset.param(param).ok_or_else(|| {
+        CoreError::Invalid(format!("`{}` has no parameter `{param}`", asset.name))
+    })?;
+    match key {
+        Some((value, ease)) => {
+            if !spec.kind.accepts(value) && spec.kind.coerce(value, &spec.default) == spec.default {
+                return Err(CoreError::Invalid(format!(
+                    "value does not fit parameter `{param}`"
+                )));
+            }
+            let value = spec.kind.coerce(value, &spec.default);
+            inst.keyframes
+                .retain(|k| !(k.param == param && (k.at - rel).0.abs() <= tolerance.0));
+            inst.keyframes.push(ParamKeyframe {
+                param: param.to_owned(),
+                at: rel,
+                value,
+                ease,
+            });
+            inst.keyframes.sort_by_key(|k| k.at);
+        }
+        None => {
+            let ix = inst
+                .keyframes
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.param == param && (k.at - rel).0.abs() <= tolerance.0)
+                .min_by_key(|(_, k)| (k.at - rel).0.abs())
+                .map(|(i, _)| i)
+                .ok_or_else(|| CoreError::Invalid(format!("no `{param}` keyframe at {at}")))?;
+            inst.keyframes.remove(ix);
+        }
+    }
+    Ok(ops(vec![Op::UpdateClip {
+        track: track.id,
+        before: Box::new(c.clone()),
+        after: Box::new(after),
+    }]))
+}
+
+/// The effect, generator or transition instance `id` of a clip.
+fn instance_mut(c: &mut Clip, id: EffectId) -> Option<&mut FxInstance> {
+    if let Some(e) = c.effects.iter_mut().find(|e| e.id == id) {
+        return Some(e);
+    }
+    if let ClipContent::Generator { fx } = &mut c.content
+        && fx.id == id
+    {
+        return Some(fx);
+    }
+    [&mut c.transition_in, &mut c.transition_out]
+        .into_iter()
+        .flatten()
+        .find(|t| t.fx.id == id)
+        .map(|t| &mut t.fx)
+}
+
+fn set_transition(
+    project: &Project,
+    id: ClipId,
+    edge: Edge,
+    transition: Option<&Transition>,
+) -> Result<Plan> {
+    let tl = &project.timeline;
+    let (track, clip) = find_clip(tl, id)?;
+    editable_track(tl, track.id)?;
+    if matches!(clip.content, ClipContent::Caption { .. }) {
+        return Err(CoreError::Invalid("captions take no transitions".into()));
+    }
+    let transition = match transition {
+        Some(t) => {
+            let asset = fx_asset(project, &t.fx.fx, FxKind::Transition)?;
+            if t.duration <= Time::ZERO {
+                return Err(CoreError::Invalid("a transition needs a duration".into()));
+            }
+            Some(Transition {
+                fx: coerced(&t.fx, asset),
+                ..t.clone()
+            })
+        }
+        None => None,
+    };
+    update_clip(tl, id, |c| match edge {
+        Edge::Start => c.transition_in = transition,
+        Edge::End => c.transition_out = transition,
+    })
+}
+
 fn insert_new(
     tl: &Timeline,
     track: TrackId,
@@ -861,7 +1358,10 @@ fn insert_new(
             "the range is empty or already occupied".into(),
         ));
     }
-    Ok(ops(vec![Op::InsertClip { track, clip }]))
+    Ok(ops(vec![Op::InsertClip {
+        track,
+        clip: Box::new(clip),
+    }]))
 }
 
 fn update_clip(tl: &Timeline, id: ClipId, f: impl FnOnce(&mut Clip)) -> Result<Plan> {
@@ -873,8 +1373,8 @@ fn update_clip(tl: &Timeline, id: ClipId, f: impl FnOnce(&mut Clip)) -> Result<P
     } else {
         vec![Op::UpdateClip {
             track: track.id,
-            before: before.clone(),
-            after,
+            before: Box::new(before.clone()),
+            after: Box::new(after),
         }]
     }))
 }
@@ -917,16 +1417,19 @@ pub fn media_duration(project: &Project, id: MediaId) -> Option<Time> {
         .filter(|d| *d > Time::ZERO)
 }
 
-/// Source media available before the clip's first frame; `None` = unlimited.
+/// Source media available before the clip's first frame, in timeline time
+/// at the clip's speed; `None` = unlimited.
 fn room_before(clip: &Clip) -> Option<Time> {
     match &clip.content {
-        ClipContent::Media { source_in, .. } => Some((*source_in).max(Time::ZERO)),
+        ClipContent::Media { source_in, .. } => {
+            Some((*source_in).max(Time::ZERO).scale(1.0 / clip.speed))
+        }
         _ => None,
     }
 }
 
-/// Source media available after the clip's last frame; `None` = unlimited or
-/// unknown.
+/// Source media available after the clip's last frame, in timeline time at
+/// the clip's speed; `None` = unlimited or unknown.
 fn room_after(project: &Project, clip: &Clip) -> Option<Time> {
     let ClipContent::Media {
         media, source_in, ..
@@ -934,7 +1437,11 @@ fn room_after(project: &Project, clip: &Clip) -> Option<Time> {
     else {
         return None;
     };
-    media_duration(project, *media).map(|d| (d - *source_in - clip.duration).max(Time::ZERO))
+    media_duration(project, *media).map(|d| {
+        (d - *source_in - clip.duration.scale(clip.speed))
+            .max(Time::ZERO)
+            .scale(1.0 / clip.speed)
+    })
 }
 
 /// The tighter of two optional lower bounds.
@@ -968,6 +1475,7 @@ fn clamp(delta: Time, lo: Option<Time>, hi: Option<Time>) -> Time {
 
 /// `clips` with everything inside `range` removed, without closing the gap.
 /// A clip spanning the whole range is split; the right part gets a new id.
+/// An edge that is cut away loses its transition.
 pub fn cut_out(clips: &[Clip], range: TimeRange) -> Vec<Clip> {
     let mut next = Vec::with_capacity(clips.len() + 1);
     for c in clips {
@@ -976,10 +1484,13 @@ pub fn cut_out(clips: &[Clip], range: TimeRange) -> Vec<Clip> {
             continue;
         }
         if c.start < range.start {
-            next.push(with_duration(c, range.start - c.start));
+            let mut left = with_duration(c, range.start - c.start);
+            left.transition_out = None;
+            next.push(left);
         }
         if c.end() > range.end {
             let mut right = trim_start(c, range.end);
+            right.transition_in = None;
             if c.start < range.start {
                 right.id = ClipId::new();
             }
@@ -1117,6 +1628,7 @@ enum SegmentKey<'a> {
         media: MediaId,
         stream: Option<u32>,
         offset: Time,
+        speed: u64,
     },
     Other(&'a ClipContent),
 }
@@ -1144,7 +1656,8 @@ fn segments(clips: &[Clip], range: TimeRange) -> Vec<Segment<'_>> {
             } => SegmentKey::Media {
                 media: *media,
                 stream: *audio_stream,
-                offset: *source_in - c.start + range.start,
+                offset: *source_in - (c.start - range.start).scale(c.speed),
+                speed: c.speed.to_bits(),
             },
             other => SegmentKey::Other(other),
         };
@@ -1185,9 +1698,18 @@ pub fn scoped_tracks<'a>(
 pub fn split_clip(clip: &Clip, at: Time) -> (Clip, Clip) {
     let mut left = with_duration(clip, at - clip.start);
     left.audio.fade_out = Time::ZERO;
+    left.transition_out = None;
     let mut right = trim_start(clip, at);
     right.id = ClipId::new();
     right.audio.fade_in = Time::ZERO;
+    right.transition_in = None;
+    // Each half owns its effect instances.
+    for e in &mut right.effects {
+        e.id = EffectId::new();
+    }
+    if let ClipContent::Generator { fx } = &mut right.content {
+        fx.id = EffectId::new();
+    }
     (left, right)
 }
 
@@ -1197,8 +1719,13 @@ pub fn trim_start(clip: &Clip, at: Time) -> Clip {
     let mut c = clip.clone();
     c.start = at;
     c.duration = clip.duration - offset;
-    if let ClipContent::Media { source_in, .. } = &mut c.content {
-        *source_in = *source_in + offset;
+    match &mut c.content {
+        ClipContent::Media { source_in, .. } => *source_in = *source_in + offset.scale(clip.speed),
+        ClipContent::Generator { fx } => fx.shift_keyframes(-offset),
+        _ => {}
+    }
+    for e in &mut c.effects {
+        e.shift_keyframes(-offset);
     }
     c.keyframes = if offset > Time::ZERO {
         keyframes_from(clip, offset)
@@ -1231,7 +1758,7 @@ pub fn diff_track(track: &Track, mut next: Vec<Clip>) -> Vec<Op> {
         .filter(|c| !new_ids.contains(&c.id))
         .map(|c| Op::RemoveClip {
             track: id,
-            clip: c.clone(),
+            clip: Box::new(c.clone()),
         })
         .collect();
 
@@ -1243,8 +1770,8 @@ pub fn diff_track(track: &Track, mut next: Vec<Clip>) -> Vec<Op> {
         }
         let op = Op::UpdateClip {
             track: id,
-            before: before.clone(),
-            after: after.clone(),
+            before: Box::new(before.clone()),
+            after: Box::new(after.clone()),
         };
         let (b, a) = (before.range(), after.range());
         if a.start >= b.start && a.end <= b.end {
@@ -1266,7 +1793,10 @@ pub fn diff_track(track: &Track, mut next: Vec<Clip>) -> Vec<Op> {
     out.extend(
         next.into_iter()
             .filter(|c| !old.contains_key(&c.id))
-            .map(|clip| Op::InsertClip { track: id, clip }),
+            .map(|clip| Op::InsertClip {
+                track: id,
+                clip: Box::new(clip),
+            }),
     );
     out
 }

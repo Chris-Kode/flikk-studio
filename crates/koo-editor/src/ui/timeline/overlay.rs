@@ -99,7 +99,7 @@ fn item_marks(timeline: &Timeline, item: &ChangeItem, cuts: &[TimeRange]) -> Vec
         .ops
         .iter()
         .filter_map(|op| match op {
-            Op::InsertClip { track, clip } => Some((track, clip)),
+            Op::InsertClip { track, clip } => Some((track, &**clip)),
             _ => None,
         })
         .filter(|(track, clip)| {
@@ -140,7 +140,7 @@ fn item_marks(timeline: &Timeline, item: &ChangeItem, cuts: &[TimeRange]) -> Vec
                 if is_shift(before, after) {
                     continue;
                 }
-                let kept: Vec<&Clip> = std::iter::once(after)
+                let kept: Vec<&Clip> = std::iter::once(&**after)
                     .chain(
                         pieces
                             .iter()

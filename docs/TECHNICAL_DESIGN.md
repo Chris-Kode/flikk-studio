@@ -49,6 +49,8 @@ behaviour and this file wins on structure.
 | `koo-analysis` | Background jobs: Whisper transcript, VAD, speakers, shot changes, silences, loudness | core, whisper-rs |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
+| `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
+| `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock | core, tungstenite |
 | `koo-editor` | GPUI app: layout, `EditorState`, panels, wiring of all of the above | all |
 
 Crates other than `koo-editor` depend only on `koo-core`, never on each other.
@@ -187,8 +189,39 @@ All nine streams are merged. What runs today:
   kind (video, audio, caption, title), transcript/captions, chat sessions
   with change-set review, agent settings, project menu.
 
+The pro-editing build-out (§8) is merged on top:
+
+* **FX:** GLSL effects, transitions and generators on the GPU (51
+  built-ins) and HTML/CSS/JS motion graphics (15 templates), with typed,
+  keyframeable parameters; programs written by the user or the agent live
+  in the project and are edited in the FX code editor.
+* **Compositor:** one program frame for the viewer, the export and the
+  agent's view tools; exported frames match the viewer at 38–39 dB PSNR
+  (the yuv420p encode is the limit).
+* **Editing:** transitions on cuts and edges, speed, enable/disable, clip
+  names and colors, crop/flip/blend modes, multi-select, copy/paste/
+  duplicate, nudge, a trim mode (slip, ripple, roll), resizable tracks.
+* **Color:** one grade pipeline in core, baked into a 3D LUT for export;
+  wheels, curves, scopes (waveform, parade, vectorscope, histogram), shot
+  matching, LUT list.
+* **Audio:** clip and track effect inserts matched between preview and
+  export, volume automation, crossfades, retimed audio, meters and a
+  mixer.
+* **Agent:** a tool for every command (71), `create_fx`/`update_fx` with
+  line-numbered compile errors, `preview_fx` to look at a program over
+  time, graded scopes, timecode and frame addressing, and an external MCP
+  bridge (below).
+* **Chat:** drag clips (Alt-drag on the timeline), media, effects,
+  transitions and transcript words into the composer, an `@` picker for
+  every object kind, and a resolved `<references>` block sent with each
+  message.
+
 Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor`
-(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace).
+(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace). More demo
+states: `KOOEDITOR_DEMO_FX=effects|generator|transition|library|code`,
+`KOOEDITOR_DEMO_SELECTION=clips|transition`, `KOOEDITOR_DEMO_CHAT=1`,
+`KOOEDITOR_DEMO_PLAY=1`, and `KOOEDITOR_DEMO_COMPOSE=<seconds>` (every
+compositor feature on real FFmpeg-made media).
 
 ### Known gaps
 
@@ -198,5 +231,139 @@ Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.
-* P1/P2 PRD items (scopes, LUT browser, nested sequences, music playlist
-  UI, voice cleanup, vertical reframing, voice input) are not built.
+* P1/P2 PRD items not yet built: nested sequences, music playlist UI,
+  voice cleanup, vertical reframing, voice input.
+* Mouse and keyboard interactions (drags, drops, context menus,
+  shortcuts) were checked by code review and screenshots of seeded states
+  only: the cloud containers have no input automation.
+* Preview vs export: noise reduction previews with an expander (export
+  uses `afftdn`); the limiter and time-stretch differ slightly in shape.
+* The FX code editor has no syntax highlighting (gpui-kit's `syntect`
+  feature is not vendored). A shader that never returns can stall the GPU.
+* A program an external agent proposes is usable by its later connections
+  only once the user accepts it.
+* If the editor crashes, its headless browser can keep running.
+* CPU fallbacks (no GPU adapter) are slow in debug builds; use release
+  builds on machines without a GPU.
+
+## 8. Pro editing: FX, shaders and HTML motion graphics
+
+The second build-out takes the editor to Resolve-level tools while keeping
+it agent-first: everything below is a `Command`, so the agent reaches it
+with the same precision as the UI.
+
+### Design
+
+* **One FX format** (`koo-core/src/fx/mod.rs`; its module docs are the
+  authoritative GLSL and HTML conventions). An `FxAsset` is a GLSL program
+  (effect, transition or generator) or an HTML/CSS/JS document (generator:
+  titles, lower thirds, motion graphics, image layouts) plus typed
+  parameters (number, bool, color, point, text, choice, image). Built-ins
+  ship in `fx/shaders.rs` and `fx/templates.rs`; programs the user or the
+  agent writes live in `Project::fx`. An `FxInstance` uses an asset with
+  parameter values and keyframes: on a clip's effect stack, as a clip's
+  transition, or as a generator clip's content.
+* **GLSL** follows ShaderToy/gl-transitions: authors write
+  `effect(uv)`, `transition(uv)` or `generate(uv)`; the engine adds
+  uniforms and helpers and reports errors against the author's lines.
+* **HTML** renders in headless Chromium with an engine-owned clock (CSS
+  animations, Web Animations, rAF and timers all follow clip time), so
+  frames are deterministic and exportable, with alpha.
+* **Engines behind traits:** `services::FxService` (`koo-gpu`, wgpu — the
+  same wgpu GPUI uses) and `services::HtmlService` (`koo-html`). Both may be
+  `None` (no GPU adapter, no browser); callers degrade quietly.
+* **Model additions:** clip effects, `transition_in`/`transition_out`
+  (resolved by `fx::transitions`), speed, enabled, name, color; transform
+  crop/flip/blend; grade offset/shadows/highlights/hue/curves; audio
+  effects on clips and tracks (`audiofx.rs`); crop and volume keyframes;
+  `PlaceClips` for paste/duplicate; scope readings and shot matching
+  (`scopes.rs`).
+* **Compositor:** `koo_core::compose::program` draws the program at a
+  time (picture → clip and timeline grade → effect stack in sequence
+  pixels → transform with crop/flip → blend mode; transitions blend each
+  side's own canvas), with `FxService::composite` doing placement and
+  blending (wgpu in `koo-gpu`, CPU reference in core). The viewer (paused
+  and playing), frame export, renders that use FX (piped as raw RGBA into
+  the FFmpeg graph, which keeps captions and audio) and the agent's view
+  and scope tools all use it; ranges without FX still render through the
+  graph. Source pictures come through `compose::Pictures` (single decodes
+  or per-layer streams that honour speed).
+
+### Driving the editor from an external agent
+
+While the editor runs it publishes its MCP bridge in
+`paths::home()/bridge.json` (address, token, pid; owner-only). Any MCP
+client can then use the same tools as the built-in agent:
+
+```sh
+claude mcp add koo -- koo-editor mcp          # Claude Code
+```
+
+or for Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.koo]
+command = "koo-editor"
+args = ["mcp"]
+```
+
+External calls act with the agent's current role and permissions. Their
+edits land in an "External agent" change set that goes to review when the
+client disconnects or after 90 s without a call; `ask_user` is not
+available to them. The HTML engine finds Chrome, Chromium, Edge or Brave
+on its own; set `KOOEDITOR_CHROME` to use another build.
+
+### Streams
+
+Each stream runs in its own cloud session, branched from the foundation on
+`claude/zen-fermat-fzspvz`, and pushes to its own branch. The coordinator
+session merges them.
+
+| Stream | Branch | Owns |
+| --- | --- | --- |
+| gpu | `claude/fx-gpu` | new `crates/koo-gpu`; `koo-core/src/fx/shaders.rs`; `fx:` in `state.rs` `services()` |
+| html | `claude/fx-html` | new `crates/koo-html`; `koo-core/src/fx/templates.rs`; `html:` in `services()` |
+| timeline | `claude/fx-timeline` | `ui/timeline.rs`, `ui/timeline/*` |
+| library | `claude/fx-library` | `ui/inspector.rs`, `ui/inspector/{clip,edit,param}.rs` + new inspector files; new `ui/library*`, `ui/code_editor.rs`; the Edit arm of `app.rs` |
+| chat | `claude/fx-chat` | `ui/chat.rs`, `ui/chat/*`; `resolve_references` in `koo-core/src/query.rs`; word drag/"Add to chat" in `ui/transcript*` |
+| agent | `claude/fx-agent` | `crates/koo-agent/**`; `agent_link.rs`, `agent_link/` |
+| audio | `claude/fx-audio` | `ui/viewer/audio.rs`, `ui/inspector/audio.rs`, new `ui/mixer*`; audio half of `koo-deliver/src/graph.rs` + new `audio_fx.rs`; `koo-core/src/audiofx.rs`; the Audio arm of `app.rs` |
+| color | `claude/fx-color` | new `koo-core/src/grade.rs`; `koo-core/src/scopes.rs`; `ui/viewer/grade.rs`, `ui/inspector/color*`, new `ui/scopes.rs`; `grade_filters` in `graph.rs` (+ new `koo-deliver/src/grade.rs`); the Color arm of `app.rs` |
+
+Rules for every stream (in addition to AGENTS.md):
+
+* **Edit only what you own.** Shared files are additive only:
+  `state.rs` (add fields and methods in one block marked with your stream;
+  don't change existing signatures), `app.rs` (only your arm), `demo.rs`
+  (additive demo seeding for your feature, in its own function). Never
+  change a public type in `koo-core` outside your files; if you need one,
+  work around it and say so in your report.
+* **Shared seams** come from the foundation: the drag payloads in
+  `ui/mod.rs` (`MediaDrag`, `FxDrag`, `AudioFxDrag`, `RefDrag`),
+  `EditorState::select_transition` / `selected_transition`, and
+  `mention` / `take_mentions` (references queued for the chat composer).
+  Leave the foundation's `#[allow(dead_code)]` markers alone; the
+  coordinator removes them when the seams are in use.
+* **Chat reference tokens** (what the agent reads; every stream that
+  produces or parses them uses exactly this): `@clip <id8>`,
+  `@media <id8>`, `@marker <id8>`, `@track <id8>`, `@bin <id8>`,
+  `@effect <clip id8>/<effect id8>`, `@transition <clip id8>/in|out`,
+  `@fx <builtin key or project id8>`, `@range <start>-<end>` (timeline
+  seconds, three decimals) and `@time <secs>`. `<id8>` is the id's
+  `Display`.
+* **Agent parity:** any UI action that changes the project goes through a
+  `Command`.
+* **UI copy:** let the layout explain (§4).
+* **No tests** of any kind; throwaway verification programs live outside
+  the repo. Before every push: `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo build --workspace`, `cargo test --workspace` (0 tests).
+* **Looking at the app:** `scripts/screenshot.sh out.png [wait]` renders it
+  under Xvfb; `KOOEDITOR_DEMO=1` seeds a demo project and
+  `KOOEDITOR_DEMO_WORKSPACE=Color|Audio|Captions|Deliver` opens a
+  workspace. There is no input automation in the containers, so seed the
+  states you need to see. Chromium for the HTML engine is under
+  `/opt/pw-browsers/` in the cloud containers.
+* **Report:** end your session with a short report (what you built by
+  file, how you verified it, what is left, integration notes, skipped test
+  items) and make sure everything is pushed.

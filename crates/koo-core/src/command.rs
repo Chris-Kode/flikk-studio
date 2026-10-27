@@ -2,7 +2,9 @@
 //! (PRD "Agent tool API"). Read and view tools are not commands: they do not
 //! change the project and are served by the agent crate from a snapshot.
 
+use crate::audiofx::AudioFx;
 use crate::error::Result;
+use crate::fx::{FxAsset, FxInstance, ParamValue, Transition};
 use crate::ids::*;
 use crate::model::*;
 use crate::ops::Op;
@@ -27,10 +29,13 @@ pub enum ToolCategory {
     Deliver,
     /// Importing or removing pool media. Never available to the agent.
     Media,
+    /// Shader effects, transitions, generators (incl. HTML motion graphics)
+    /// and the project's FX programs.
+    Effects,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 12] = [
+    pub const ALL: [ToolCategory; 13] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -40,6 +45,7 @@ impl ToolCategory {
         Self::Color,
         Self::Audio,
         Self::Overlays,
+        Self::Effects,
         Self::ProjectMemory,
         Self::Deliver,
         Self::Media,
@@ -63,6 +69,7 @@ impl ToolCategory {
             Self::ProjectMemory => "Project and memory",
             Self::Deliver => "Deliver",
             Self::Media => "Media",
+            Self::Effects => "Effects and motion graphics",
         }
     }
 }
@@ -86,6 +93,15 @@ pub enum InsertMode {
 
 /// `None` = every unlocked track.
 pub type TrackScope = Option<Vec<TrackId>>;
+
+/// A clip to place by [`Command::PlaceClips`]: a copy of `clip` (any
+/// content, with its effects, keyframes and grade) on `track`, starting at
+/// `clip.start`. The copy gets a new id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlacedClip {
+    pub track: TrackId,
+    pub clip: Clip,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -165,6 +181,36 @@ pub enum Command {
     SetTrackLocked {
         track: TrackId,
         locked: bool,
+    },
+    /// Paste or duplicate: place copies of clips. Insert pushes later clips
+    /// on each target track right by the span placed there; overwrite
+    /// replaces what is underneath.
+    PlaceClips {
+        clips: Vec<PlacedClip>,
+        #[serde(default)]
+        mode: InsertMode,
+    },
+    /// Retime a media clip; the same source plays in `duration / speed`.
+    /// Without ripple the clip stops at the next clip.
+    SetSpeed {
+        clip: ClipId,
+        speed: f64,
+        #[serde(default)]
+        ripple: bool,
+    },
+    /// Disabled clips are kept but not seen or heard.
+    SetClipsEnabled {
+        clips: Vec<ClipId>,
+        enabled: bool,
+    },
+    /// `None` restores the source name.
+    RenameClip {
+        clip: ClipId,
+        name: Option<String>,
+    },
+    SetClipColor {
+        clips: Vec<ClipId>,
+        color: Option<ClipColor>,
     },
 
     // ---- transform (E5)
@@ -267,6 +313,82 @@ pub enum Command {
         speaker: Option<SpeakerId>,
     },
 
+    // ---- effects, transitions, generators
+    /// Add `effect` to each clip's stack at `index` (default: last, i.e.
+    /// applied after the others). Each clip gets its own copy and id.
+    AddEffect {
+        clips: Vec<ClipId>,
+        effect: FxInstance,
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    /// Replace the effect with `effect.id` on `clip`: params, keyframes,
+    /// enabled.
+    SetEffect {
+        clip: ClipId,
+        effect: FxInstance,
+    },
+    RemoveEffect {
+        clip: ClipId,
+        effect: EffectId,
+    },
+    MoveEffect {
+        clip: ClipId,
+        effect: EffectId,
+        index: usize,
+    },
+    /// Key a parameter of a clip effect, of a generator clip's program
+    /// (`effect` = the generator instance's id), or of a transition on the
+    /// clip (`effect` = the transition's instance id). `at` is timeline
+    /// time, like [`Command::SetKeyframe`].
+    SetEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        param: String,
+        at: Time,
+        value: ParamValue,
+        #[serde(default)]
+        ease: Ease,
+    },
+    RemoveEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        param: String,
+        at: Time,
+    },
+    /// Transition at a clip's start (from the clip before it, or from
+    /// nothing) or end; `None` removes it. See [`crate::fx::transitions`].
+    SetTransition {
+        clip: ClipId,
+        edge: Edge,
+        transition: Option<Transition>,
+    },
+    /// A shader or HTML generator clip (backgrounds, titles, motion
+    /// graphics) on a video, overlay or title track.
+    AddGenerator {
+        track: TrackId,
+        range: TimeRange,
+        fx: FxInstance,
+    },
+    SetGenerator {
+        clip: ClipId,
+        fx: FxInstance,
+    },
+    /// Create or replace a project FX program, matched by id.
+    SetFxAsset {
+        asset: FxAsset,
+    },
+    /// Fails while a clip still uses it.
+    RemoveFxAsset {
+        asset: FxId,
+    },
+
+    /// Replace a clip's audio effect stack.
+    SetAudioEffects {
+        clip: ClipId,
+        effects: Vec<AudioFx>,
+    },
+
     // ---- media pool (user only)
     ImportMedia {
         media: MediaItem,
@@ -301,7 +423,12 @@ impl Command {
             | RemoveMarker { .. }
             | AddTrack { .. }
             | RemoveTrack { .. }
-            | SetTrackLocked { .. } => ToolCategory::EditTimeline,
+            | SetTrackLocked { .. }
+            | PlaceClips { .. }
+            | SetSpeed { .. }
+            | SetClipsEnabled { .. }
+            | RenameClip { .. }
+            | SetClipColor { .. } => ToolCategory::EditTimeline,
             SetTransform { .. } | AddZoom { .. } | SetKeyframe { .. } | RemoveKeyframe { .. } => {
                 ToolCategory::Transform
             }
@@ -315,8 +442,20 @@ impl Command {
             | AddFade { .. }
             | SetTrackMix { .. }
             | SetDucking { .. }
-            | SetPlaylist { .. } => ToolCategory::Audio,
+            | SetPlaylist { .. }
+            | SetAudioEffects { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
+            AddEffect { .. }
+            | SetEffect { .. }
+            | RemoveEffect { .. }
+            | MoveEffect { .. }
+            | SetEffectKeyframe { .. }
+            | RemoveEffectKeyframe { .. }
+            | SetTransition { .. }
+            | AddGenerator { .. }
+            | SetGenerator { .. }
+            | SetFxAsset { .. }
+            | RemoveFxAsset { .. } => ToolCategory::Effects,
             ImportMedia { .. } | UpdateMedia { .. } | RemoveMedia { .. } | SetBins { .. } => {
                 ToolCategory::Media
             }

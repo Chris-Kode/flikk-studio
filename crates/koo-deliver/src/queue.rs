@@ -2,6 +2,7 @@
 //! thread, report progress from `-progress pipe:1`, can be canceled, and
 //! never overwrite an existing file.
 
+use crate::composed::{self, Frames};
 use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
 use crate::graph::{self, GraphSpec, Loudnorm, Measured};
 use crate::preset::RenderSettings;
@@ -10,6 +11,7 @@ use koo_core::JobId;
 use koo_core::memory::CaptionStyle;
 use koo_core::model::Project;
 use koo_core::paths;
+use koo_core::services::Services;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +25,9 @@ pub struct RenderRequest {
     pub output: PathBuf,
     /// The style profile's caption presets, for burn-in.
     pub caption_styles: Vec<CaptionStyle>,
+    /// Engines for the compositor (decode, effects, HTML); ranges that
+    /// need it are composited frame by frame.
+    pub services: Services,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -250,10 +255,14 @@ pub fn render_blocking(
         spec.loudnorm = Some(Loudnorm::Apply(target, measured));
     }
 
+    spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
     let g = graph::build(&request.project, &spec, &work.0)?;
     let script = write_script(&work.0, "graph.txt", &g.script)?;
     let tmp = temp_path(out, &JobId::new().to_string());
     let mut args: Vec<OsString> = vec!["-loglevel".into(), "error".into(), "-y".into()];
+    if spec.piped {
+        args.extend(composed::input_args(&spec));
+    }
     args.extend(filter_script_args(&script));
     if let Some(v) = &g.video {
         args.extend(["-map".into(), format!("[{v}]").into()]);
@@ -263,12 +272,13 @@ pub fn render_blocking(
     }
     args.extend(settings.codec_args().into_iter().map(OsString::from));
     args.push(tmp.clone().into());
-    let result = ffmpeg::run(
-        &args,
-        g.seconds,
-        &|p| progress(share + p * (1.0 - share)),
-        cancel,
-    );
+    let progress = |p: f32| progress(share + p * (1.0 - share));
+    let result = if spec.piped {
+        let mut frames = Frames::new(&request.project, &request.services, &spec);
+        composed::run(&args, &g, &mut frames, &progress, cancel)
+    } else {
+        ffmpeg::run(&args, g.seconds, &progress, cancel).map(|_| ())
+    };
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);

@@ -35,6 +35,15 @@ impl Time {
         self.0 / (FLICKS_PER_SECOND / 1000)
     }
 
+    /// This duration multiplied by `factor`, rounded to the nearest flick.
+    /// Timeline ↔ source conversions of retimed clips use it.
+    pub fn scale(self, factor: f64) -> Self {
+        if factor == 1.0 {
+            return self;
+        }
+        Time((self.0 as f64 * factor).round() as i64)
+    }
+
     /// Frame index containing this time (floor).
     pub fn to_frame(self, rate: Rate) -> i64 {
         self.0.div_euclid(rate.frame_duration().0)
