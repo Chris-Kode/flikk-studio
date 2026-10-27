@@ -174,7 +174,16 @@ All nine streams are merged. What runs today:
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness;
   Whisper transcription behind the default `whisper` feature. The model
   downloads to `paths::models()` on first use, or set
-  `KOOEDITOR_WHISPER_MODEL`.
+  `KOOEDITOR_WHISPER_MODEL`. Word edges are measured on the audio
+  (`koo-analysis/src/align.rs`): Whisper's own snapping keeps only a
+  word's loud core, so its starts ran up to 0.2 s late. Results of an
+  older `ANALYSIS_VERSION` are upgraded when a project opens, without
+  running Whisper again.
+* **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
+  words, clear of both, on a frame boundary when the pause holds one, with
+  a 10 ms audio fade at the join. The transcript panel's word delete and
+  the agent's `cut_words` use it; `blade` and `ripple_delete` move a cut
+  that falls on a word into the nearest pause and say so.
 * **Agent:** `claude -p` verified end to end (collage → proposals → one
   change set → accept); Codex adapter written from its docs, not yet run.
   The editor binary doubles as the MCP server (`koo-editor mcp`).
@@ -207,7 +216,7 @@ The pro-editing build-out (§8) is merged on top:
 * **Audio:** clip and track effect inserts matched between preview and
   export, volume automation, crossfades, retimed audio, meters and a
   mixer.
-* **Agent:** a tool for every command (71), `create_fx`/`update_fx` with
+* **Agent:** a tool for every command (72), `create_fx`/`update_fx` with
   line-numbered compile errors, `preview_fx` to look at a program over
   time, graded scopes, timecode and frame addressing, and an external MCP
   bridge (below).
@@ -226,8 +235,11 @@ compositor feature on real FFmpeg-made media).
 ### Known gaps
 
 * Pending change sets are in memory only; they don't survive a restart.
-* Codex backend untested; Whisper untested in the cloud container (its
-  network blocks the model download).
+* Codex backend untested.
+* Inside connected speech (no pause between words) word edges are only as
+  good as Whisper's token times, and cuts there may be heard; the agent's
+  results say so. whisper.cpp's DTW timestamps were tried and came out
+  0.2–0.9 s late on real speech, so they are off.
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.

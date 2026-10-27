@@ -3,10 +3,13 @@
 //! `koo_core::services::AnalysisService`.
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
-//! of worker threads runs the pipeline (audio → VAD → transcript → speakers →
-//! shot changes) and caches the result by fingerprint, so an item is only
-//! ever analyzed once (principle 4).
+//! of worker threads runs the pipeline (audio → VAD and levels → transcript
+//! → speakers → word edges on the audio → shot changes) and caches the
+//! result by fingerprint, so an item is only ever analyzed once (principle
+//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
+//! reusing their transcript and shot changes.
 
+mod align;
 mod cache;
 mod ffmpeg;
 pub mod speakers;
@@ -14,7 +17,7 @@ pub mod speakers;
 mod transcribe;
 mod vad;
 
-use koo_core::analysis::{Analysis, Loudness, Transcript};
+use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, Transcript};
 use koo_core::ids::JobId;
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
 use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, ServiceResult};
@@ -234,9 +237,12 @@ impl Shared {
         }
     }
 
-    /// Whether full results are in memory.
+    /// Whether full, current results are in memory.
     fn complete(&self, fp: &Fingerprint) -> bool {
-        lock(&self.results).contains_key(fp) && !lock(&self.incomplete).contains(fp)
+        lock(&self.results)
+            .get(fp)
+            .is_some_and(|a| a.version >= ANALYSIS_VERSION)
+            && !lock(&self.incomplete).contains(fp)
     }
 
     /// Memory first, then the disk cache.
@@ -316,12 +322,26 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     let duration = item.info.as_ref().map(|i| i.duration);
     let audio_wanted = has_audio(item);
     let video_wanted = has_video(item);
+    let stream = choose_stream(item, &task.options);
+    // A complete result of an older version keeps what is still good.
+    let previous = (!task.options.refresh)
+        .then(|| shared.cached(&task.fingerprint))
+        .flatten()
+        .filter(|a| {
+            a.version < ANALYSIS_VERSION && !lock(&shared.incomplete).contains(&task.fingerprint)
+        });
+    let reused_transcript = previous
+        .as_ref()
+        .and_then(|a| a.transcript.clone())
+        .filter(|t| t.audio_stream == stream);
     let mut steps = Vec::new();
     if audio_wanted {
         steps.push((Step::Audio, 1.0));
-        steps.push((Step::Transcript, 6.0));
+        if reused_transcript.is_none() {
+            steps.push((Step::Transcript, 6.0));
+        }
     }
-    if video_wanted {
+    if video_wanted && previous.is_none() {
         steps.push((Step::Shots, 2.0));
     }
     let progress = Progress {
@@ -337,7 +357,6 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     let mut unpersisted = false;
 
     if audio_wanted {
-        let stream = choose_stream(item, &task.options);
         let audio = match ffmpeg::extract_audio(
             &item.path,
             stream,
@@ -354,8 +373,16 @@ fn run(shared: &Shared, task: &Task) -> JobState {
         };
         if let Some(audio) = audio {
             analysis.speech = vad::speech_ranges(&audio);
-            match transcript(shared, task, stream, &audio, &analysis.speech, &progress) {
-                Ok(Some(t)) => analysis.transcript = Some(t),
+            let (levels, sound) = align::measure(&audio);
+            let transcript = match reused_transcript {
+                Some(t) => Ok(Some(t)),
+                None => transcript(shared, task, stream, &audio, &analysis.speech, &progress),
+            };
+            match transcript {
+                Ok(Some(mut t)) => {
+                    align::refine(&mut t.words, &levels, &sound);
+                    analysis.transcript = Some(t);
+                }
                 // This build cannot transcribe: keep the rest for this
                 // session, but leave the disk cache for a build that can.
                 Ok(None) => unpersisted = true,
@@ -364,10 +391,13 @@ fn run(shared: &Shared, task: &Task) -> JobState {
                     incomplete = true;
                 }
             }
+            analysis.levels = Some(levels);
         }
     }
 
-    if video_wanted {
+    if let Some(previous) = &previous {
+        analysis.shot_changes = previous.shot_changes.clone();
+    } else if video_wanted {
         match ffmpeg::shot_changes(
             &item.path,
             shared.options.scene_threshold,
@@ -384,6 +414,14 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     }
 
     let fp = &task.fingerprint;
+    analysis.version = ANALYSIS_VERSION;
+    if incomplete && previous.is_some() {
+        // The upgrade failed: keep what the older version found, and try
+        // again on the next request.
+        return JobState::Failed {
+            message: problems.join("; "),
+        };
+    }
     if !incomplete
         && !unpersisted
         && let Err(e) = cache::store(fp, &analysis)

@@ -116,6 +116,9 @@ pub enum Command {
         range: TimeRange,
         #[serde(default)]
         tracks: TrackScope,
+        /// Audio fade on both sides of the join (see [`crate::cuts::FADE`]).
+        #[serde(default)]
+        fade: Time,
     },
     /// Remove clips, optionally closing the gap.
     DeleteClips {

@@ -13,9 +13,10 @@ use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
 use gpui_kit::*;
 use koo_core::agent::*;
-use koo_core::analysis::{Analysis, Speaker, Transcript, Word};
+use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Speaker, Transcript, Word};
 use koo_core::bus::{AgentRole, Author, CommandBus, Outcome};
 use koo_core::command::Command;
+use koo_core::cuts::FADE;
 use koo_core::model::*;
 use koo_core::services::{JobState, JobStatus};
 use koo_core::*;
@@ -472,6 +473,8 @@ fn interview_analysis(demo: &Demo) -> (Fingerprint, Analysis) {
         }),
         speech,
         shot_changes: Vec::new(),
+        levels: None,
+        version: ANALYSIS_VERSION,
     };
     (fingerprint, analysis)
 }
@@ -580,6 +583,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
             Command::RippleDelete {
                 range: secs(50.5, 52.4),
                 tracks: None,
+                fade: FADE,
             },
             "Pause 1.9 s after “This film is for him.”",
         ),
@@ -587,6 +591,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
             Command::RippleDelete {
                 range: secs(45.6, 46.4),
                 tracks: None,
+                fade: FADE,
             },
             "Pause 0.8 s inside the sponsor read",
         ),
@@ -594,6 +599,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
             Command::RippleDelete {
                 range: secs(22.9, 24.4),
                 tracks: None,
+                fade: FADE,
             },
             "Pause 1.5 s before the quiet-days line",
         ),

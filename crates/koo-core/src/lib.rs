@@ -17,6 +17,7 @@ pub mod captions;
 pub mod changeset;
 pub mod command;
 pub mod compose;
+pub mod cuts;
 pub mod edit;
 pub mod error;
 pub mod fx;

@@ -1,6 +1,7 @@
 //! Transcript words placed on the timeline, through the shared core mapping.
 
 use koo_core::analysis::Word;
+use koo_core::cuts::Speech;
 use koo_core::model::Project;
 use koo_core::query::{self, TimelineWord};
 use koo_core::services::AnalysisService;
@@ -41,23 +42,19 @@ pub fn to_word(w: &TimelineWord) -> Word {
     }
 }
 
-/// Timeline ranges to ripple-delete for the words `first..=last`: each word
-/// runs to the next word's onset in the same clip, so the pause goes too.
-/// Merged, and returned last first so earlier deletes don't shift later ones.
-pub fn delete_ranges(words: &[TimelineWord], first: usize, last: usize) -> Vec<TimeRange> {
-    let ranges = (first..=last.min(words.len().saturating_sub(1)))
-        .map(|i| {
-            let w = &words[i];
-            let end = match words.get(i + 1) {
-                Some(next) if next.clip == w.clip && next.timeline.start >= w.timeline.end => {
-                    next.timeline.start
-                }
-                _ => w.timeline.end,
-            };
-            TimeRange::new(w.timeline.start, end)
-        })
-        .collect();
-    let mut merged = query::merge_ranges(ranges);
-    merged.reverse();
-    merged
+/// Timeline ranges to ripple-delete for the words `first..=last`: cut in
+/// the pauses around them, so the pause after them goes too, and returned
+/// last first so earlier deletes don't shift later ones.
+pub fn delete_ranges(
+    project: &Project,
+    analysis: &dyn AnalysisService,
+    words: &[TimelineWord],
+    first: usize,
+    last: usize,
+) -> Vec<TimeRange> {
+    Speech::new(project, |fp| analysis.analysis(fp))
+        .removals(words, first, last)
+        .into_iter()
+        .map(|r| r.range)
+        .collect()
 }

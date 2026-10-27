@@ -76,7 +76,7 @@ pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
 }
 
 /// RMS level in dBFS and zero-crossing rate per sample.
-fn frame_stats(frame: &[f32]) -> (f32, f32) {
+pub(crate) fn frame_stats(frame: &[f32]) -> (f32, f32) {
     let energy = frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32;
     let db = 10.0 * energy.max(1e-12).log10();
     let crossings = frame
