@@ -8,12 +8,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped when analysis learns something older results lack; those are
 /// upgraded the next time the item is analyzed.
-pub const ANALYSIS_VERSION: u32 = 1;
+pub const ANALYSIS_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
     /// Where the word sounds: Whisper's estimate, moved onto the audio
-    /// (from version 1) so that its edges sit at the pauses around it.
+    /// (from version 1) so that its edges sit at the pauses around it, then
+    /// (from version 2) onto the letters a forced aligner hears.
     pub range: TimeRange,
     pub text: String,
     /// 0..1 from the recognizer; the caption pass flags low values (PRD recipes).

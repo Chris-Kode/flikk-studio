@@ -1,13 +1,12 @@
 //! Word-level transcription with whisper.cpp, and the ggml model it needs.
 
+use crate::download::Download;
 use anyhow::{Context, Result, bail};
 use koo_core::analysis::Word;
 use koo_core::paths;
 use koo_core::time::{Time, TimeRange};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub const DEFAULT_MODEL: &str = "ggml-base.bin";
@@ -24,12 +23,8 @@ pub struct Output {
 #[derive(Default)]
 pub struct Whisper {
     ctx: Mutex<Option<Arc<WhisperContext>>>,
-    /// The last failed download, so a queue of items doesn't retry it each.
-    download: Mutex<Option<(Instant, String)>>,
+    download: Download,
 }
-
-/// How long a failed download is reported before trying again.
-const RETRY_AFTER: Duration = Duration::from_secs(120);
 
 impl Whisper {
     /// The model path, downloading it first if needed; `start_download`
@@ -45,23 +40,10 @@ impl Whisper {
         let Some(name) = name else {
             bail!("Whisper model not found at {}", path.display());
         };
-        // One download at a time; later callers find the file in place.
-        let mut failed = self.download.lock().unwrap_or_else(|e| e.into_inner());
-        if path.is_file() {
-            return Ok(path);
-        }
-        if let Some((at, message)) = &*failed
-            && at.elapsed() < RETRY_AFTER
-        {
-            bail!("{message}");
-        }
-        match download(&name, &path, &*start_download(&name)) {
-            Ok(()) => Ok(path),
-            Err(e) => {
-                *failed = Some((Instant::now(), format!("{e:#}")));
-                Err(e)
-            }
-        }
+        let url = format!("{MODEL_URL}{name}");
+        self.download
+            .ensure(&path, &url, "Whisper model", || start_download(&name))?;
+        Ok(path)
     }
 
     fn context(&self, model: &Path) -> Result<Arc<WhisperContext>> {
@@ -230,54 +212,4 @@ fn model_location() -> Result<(PathBuf, Option<String>)> {
             Some(DEFAULT_MODEL.to_string()),
         )),
     }
-}
-
-/// Fetch `name` from the whisper.cpp Hugging Face repository into `dest`,
-/// via a temporary file so a cut download never looks complete.
-fn download(name: &str, dest: &Path, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<()> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_body(None)
-        .build()
-        .into();
-    let url = format!("{MODEL_URL}{name}");
-    let mut response = agent
-        .get(&url)
-        .call()
-        .with_context(|| format!("could not download Whisper model from {url}"))?;
-    let total = response.body().content_length();
-    let mut body = response.body_mut().as_reader();
-
-    let part = dest.with_extension("bin.part");
-    let mut file = std::fs::File::create(&part)
-        .with_context(|| format!("could not write {}", part.display()))?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut done = 0u64;
-    loop {
-        let n = body
-            .read(&mut buf)
-            .context("Whisper model download interrupted")?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        done += n as u64;
-        if let Some(total) = total.filter(|t| *t > 0) {
-            progress(done as f32 / total as f32);
-        }
-    }
-    file.sync_all()?;
-    drop(file);
-    if total.is_some_and(|t| t != done) {
-        let _ = std::fs::remove_file(&part);
-        bail!("Whisper model download incomplete ({done} bytes)");
-    }
-    std::fs::rename(&part, dest)?;
-    Ok(())
 }

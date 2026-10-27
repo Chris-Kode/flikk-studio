@@ -4,14 +4,20 @@
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
 //! of worker threads runs the pipeline (audio → VAD and levels → transcript
-//! → speakers → word edges on the audio → shot changes) and caches the
-//! result by fingerprint, so an item is only ever analyzed once (principle
-//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
+//! → speakers → word edges on the audio → word times from the aligner →
+//! shot changes) and caches the result by fingerprint, so an item is only
+//! ever analyzed once (principle 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
 //! reusing their transcript and shot changes.
 
 mod align;
+#[cfg(feature = "aligner")]
+mod bpe;
 mod cache;
+#[cfg(any(feature = "whisper", feature = "aligner"))]
+mod download;
 mod ffmpeg;
+#[cfg(feature = "aligner")]
+mod forced;
 pub mod speakers;
 #[cfg(feature = "whisper")]
 mod transcribe;
@@ -88,6 +94,8 @@ struct Shared {
     incomplete: Mutex<HashSet<Fingerprint>>,
     #[cfg(feature = "whisper")]
     whisper: transcribe::Whisper,
+    #[cfg(feature = "aligner")]
+    aligner: forced::Aligner,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -117,6 +125,8 @@ impl LocalAnalysis {
             incomplete: Mutex::default(),
             #[cfg(feature = "whisper")]
             whisper: Default::default(),
+            #[cfg(feature = "aligner")]
+            aligner: Default::default(),
         });
         let (queue, rx) = channel::<Task>();
         let rx = Arc::new(Mutex::new(rx));
@@ -287,6 +297,7 @@ struct Progress {
 enum Step {
     Audio,
     Transcript,
+    Words,
     Shots,
 }
 
@@ -340,6 +351,9 @@ fn run(shared: &Shared, task: &Task) -> JobState {
         if reused_transcript.is_none() {
             steps.push((Step::Transcript, 6.0));
         }
+        if cfg!(feature = "aligner") {
+            steps.push((Step::Words, 3.0));
+        }
     }
     if video_wanted && previous.is_none() {
         steps.push((Step::Shots, 2.0));
@@ -355,6 +369,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     // A step failed in a way a rerun could fix.
     let mut incomplete = false;
     let mut unpersisted = false;
+    let mut version = ANALYSIS_VERSION;
 
     if audio_wanted {
         let audio = match ffmpeg::extract_audio(
@@ -381,6 +396,13 @@ fn run(shared: &Shared, task: &Task) -> JobState {
             match transcript {
                 Ok(Some(mut t)) => {
                     align::refine(&mut t.words, &levels, &sound);
+                    if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
+                        // The edges measured on the audio are what the
+                        // version before the aligner found; a later run
+                        // with the model upgrades them.
+                        problems.push(format!("word alignment: {e:#}"));
+                        version = WITHOUT_ALIGNER;
+                    }
                     analysis.transcript = Some(t);
                 }
                 // This build cannot transcribe: keep the rest for this
@@ -414,7 +436,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     }
 
     let fp = &task.fingerprint;
-    analysis.version = ANALYSIS_VERSION;
+    analysis.version = version;
     if incomplete && previous.is_some() {
         // The upgrade failed: keep what the older version found, and try
         // again on the next request.
@@ -458,32 +480,7 @@ fn transcript(
     let mut detected = language.map(str::to_string);
     // Whisper invents words in silence; only run it when someone talks.
     if !speech.is_empty() {
-        let download = Mutex::new(None);
-        let model = shared.whisper.ensure_model(|name| {
-            let id = JobId::new();
-            *lock(&download) = Some(id);
-            lock(&shared.jobs).push(JobStatus {
-                id,
-                label: format!("Download {name}"),
-                media: None,
-                state: JobState::Running { fraction: 0.0 },
-            });
-            let jobs = shared.jobs.clone();
-            Box::new(move |f: f32| {
-                if let Some(j) = lock(&jobs).iter_mut().find(|j| j.id == id) {
-                    j.state = if f >= 1.0 {
-                        JobState::Done
-                    } else {
-                        JobState::Running { fraction: f }
-                    };
-                }
-            })
-        });
-        if let (Err(e), Some(id)) = (&model, *lock(&download)) {
-            let message = format!("{e:#}");
-            shared.set_state(id, JobState::Failed { message });
-        }
-        let model = model?;
+        let model = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
         let out =
             shared
                 .whisper
@@ -499,6 +496,81 @@ fn transcript(
         words,
         speakers,
     }))
+}
+
+/// Version of a result whose words the aligner did not place. Without the
+/// aligner, edges measured on the audio are as good as this build gets.
+#[cfg(feature = "aligner")]
+const WITHOUT_ALIGNER: u32 = 1;
+#[cfg(not(feature = "aligner"))]
+const WITHOUT_ALIGNER: u32 = ANALYSIS_VERSION;
+
+/// Fit the transcript's words to the audio with the alignment model. A
+/// language it does not know keeps the edges measured on the audio, for
+/// good.
+#[cfg(feature = "aligner")]
+fn align_words(
+    shared: &Shared,
+    audio: &[f32],
+    transcript: &mut Transcript,
+    progress: &Progress,
+) -> anyhow::Result<()> {
+    if transcript.words.is_empty() || !forced::supports(&transcript.language) {
+        return Ok(());
+    }
+    let files = fetch_model(shared, |start| shared.aligner.ensure_model(start))?;
+    shared.aligner.align(
+        &files,
+        audio,
+        &mut transcript.words,
+        progress.step(Step::Words),
+    )
+}
+
+#[cfg(not(feature = "aligner"))]
+fn align_words(
+    _shared: &Shared,
+    _audio: &[f32],
+    _transcript: &mut Transcript,
+    _progress: &Progress,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Run `ensure`, which may download a model, showing the download as a job
+/// of its own.
+#[cfg(any(feature = "whisper", feature = "aligner"))]
+fn fetch_model<T>(
+    shared: &Shared,
+    ensure: impl FnOnce(&dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let download = Mutex::new(None);
+    let start = |name: &str| -> Box<dyn Fn(f32) + Send + Sync> {
+        let id = JobId::new();
+        *lock(&download) = Some(id);
+        lock(&shared.jobs).push(JobStatus {
+            id,
+            label: format!("Download {name}"),
+            media: None,
+            state: JobState::Running { fraction: 0.0 },
+        });
+        let jobs = shared.jobs.clone();
+        Box::new(move |f: f32| {
+            if let Some(j) = lock(&jobs).iter_mut().find(|j| j.id == id) {
+                j.state = if f >= 1.0 {
+                    JobState::Done
+                } else {
+                    JobState::Running { fraction: f }
+                };
+            }
+        })
+    };
+    let model = ensure(&start);
+    if let (Err(e), Some(id)) = (&model, *lock(&download)) {
+        let message = format!("{e:#}");
+        shared.set_state(id, JobState::Failed { message });
+    }
+    model
 }
 
 #[cfg(not(feature = "whisper"))]
