@@ -46,7 +46,7 @@ behaviour and this file wins on structure.
 | `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
 | `koo-store` | SQLite persistence, autosave, crash recovery, settings, memory stores | core, rusqlite |
 | `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms | core, image |
-| `koo-analysis` | Background jobs: Whisper transcript, VAD, speakers, shot changes, silences, loudness | core, whisper-rs |
+| `koo-analysis` | Background jobs: Whisper transcript, forced word alignment, VAD, speakers, shot changes, silences, loudness | core, whisper-rs, ort |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
@@ -68,6 +68,7 @@ Crates other than `koo-editor` depend only on `koo-core`, never on each other.
 | Playback | Proxies by default (720p, short GOP H.264, `cache/proxies/<fp>.mp4`); a streaming decoder pipes RGBA frames from a long-lived ffmpeg process | Smooth 1080p60 on a laptop (PRD NFR); revisit after the GPUI video spike |
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks | Fast on multi-GB files; good enough to detect replacement (F2) |
 | Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`, GPU when built with it | Local, word timestamps, any language; no per-use cost |
+| Word times | Forced alignment of Whisper's words with MMS (`mms-300m-1130-forced-aligner`, int8 ONNX, 317 MB in `paths::models()`) on ONNX Runtime (`ort`, prebuilt and linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94–99 % of word starts within 100 ms on hand-labelled speech. One model for 1,100+ languages, written in Latin letters with `any_ascii` |
 | Caches | Everything derived is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
 | Agent ↔ editor | The backend CLI launches `koo-mcp` (stdio MCP server). It connects to the editor over `127.0.0.1:<port>` with a per-session token; the editor serves tool calls on the UI thread in `AgentLink::pump` | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments and results are seconds (`f64`) or `"M:SS.mmm"` strings, converted to `Time` at the boundary | What models read and write reliably |
@@ -174,11 +175,19 @@ All nine streams are merged. What runs today:
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness;
   Whisper transcription behind the default `whisper` feature. The model
   downloads to `paths::models()` on first use, or set
-  `KOOEDITOR_WHISPER_MODEL`. Word edges are measured on the audio
-  (`koo-analysis/src/align.rs`): Whisper's own snapping keeps only a
-  word's loud core, so its starts ran up to 0.2 s late. Results of an
-  older `ANALYSIS_VERSION` are upgraded when a project opens, without
-  running Whisper again.
+  `KOOEDITOR_WHISPER_MODEL`. Word times come from a forced aligner
+  (`koo-analysis/src/forced.rs`, behind the default `aligner` feature): a
+  CTC model hears the audio and Whisper's words are fitted to it letter by
+  letter, in chunks of at most 30 s. Its model downloads on first use too
+  (or set `KOOEDITOR_ALIGNER_MODEL` to a path). The model hears a letter
+  slightly late, so starts move 40 ms earlier and ends 20 ms later, never
+  over a neighbour. Where the model is unavailable, word edges are
+  measured on the audio levels (`koo-analysis/src/align.rs`) and the
+  result keeps version 1, to be aligned once the model is there; words
+  the model has no letters for (digits) keep those edges too. Running
+  that measurement after the aligner made cuts worse, so it is only the
+  fallback. Results of an older `ANALYSIS_VERSION` are upgraded when a
+  project opens, without running Whisper again.
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both, on a frame boundary when the pause holds one, with
   a 10 ms audio fade at the join. The transcript panel's word delete and
@@ -236,10 +245,21 @@ compositor feature on real FFmpeg-made media).
 
 * Pending change sets are in memory only; they don't survive a restart.
 * Codex backend untested.
-* Inside connected speech (no pause between words) word edges are only as
-  good as Whisper's token times, and cuts there may be heard; the agent's
-  results say so. whisper.cpp's DTW timestamps were tried and came out
-  0.2–0.9 s late on real speech, so they are off.
+* Inside connected speech (no pause between words) about 4 in 10 cuts
+  still clip the tail or the onset of a word by more than 20 ms (on
+  hand-labelled English and Dutch; 9 in 10 before the aligner), and may
+  be heard; the agent's results say so. whisper.cpp's DTW timestamps were tried and came
+  out 0.2–0.9 s late on real speech, so they are off.
+* The alignment model (MMS) is licensed CC-BY-NC 4.0, so commercial use
+  needs another model. `facebook/wav2vec2-base-960h` (Apache-2.0) is
+  English-only and leaves fewer cuts clean on conversation (50 % against
+  60 % on Buckeye; Whisper alone: 19 %).
+* Scripts other than Latin are aligned through `any_ascii`
+  transliteration, which is rough for Japanese kanji and abjads (Hebrew,
+  Arabic); only English and Dutch were measured. Whisper's digits have no
+  letters to align and keep the measured edges.
+* ONNX Runtime adds about 25 MB to the binary, and the first build
+  downloads it (from pyke's CDN).
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.
