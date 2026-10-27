@@ -4,6 +4,7 @@
 //! the author's lines.
 
 use koo_core::fx::{FxAsset, FxKind, ParamKind, ParamValue};
+use koo_core::services::FxCall;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
@@ -84,6 +85,8 @@ pub struct Wrapped {
     /// Prelude line (1-based) → the parameter it declares.
     param_lines: BTreeMap<usize, String>,
     fields: Vec<Field>,
+    /// Offset of `_koo_target`, the render target's size in pixels.
+    target_offset: usize,
     /// Size of the uniform block, a multiple of 16.
     pub uniform_size: usize,
     /// Image parameters, in binding order.
@@ -179,6 +182,7 @@ pub fn wrap(asset: &FxAsset) -> Result<Wrapped, String> {
             offset: at,
         });
     }
+    let target_offset = push(&mut src, &mut offset, Slot::Vec2, "_koo_target");
     src.push_str("};\n");
     let uniform_size = align(offset.max(16), 16);
     for b in &bools {
@@ -251,7 +255,7 @@ pub fn wrap(asset: &FxAsset) -> Result<Wrapped, String> {
     let _ = write!(
         src,
         "void main() {{\n    \
-         vec2 _koo_uv = vec2(gl_FragCoord.x, iResolution.y - gl_FragCoord.y) / iResolution;\n    \
+         vec2 _koo_uv = vec2(gl_FragCoord.x, _koo_target.y - gl_FragCoord.y) / _koo_target;\n    \
          _koo_out = clamp({entry}(_koo_uv), vec4(0.0), vec4(1.0));\n}}\n"
     );
 
@@ -262,18 +266,41 @@ pub fn wrap(asset: &FxAsset) -> Result<Wrapped, String> {
         author_lines,
         param_lines,
         fields,
+        target_offset,
         uniform_size,
         images,
     })
 }
 
-/// The clock of one call.
+/// The clock and sizes of one call.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
-    pub width: u32,
-    pub height: u32,
+    /// `iResolution`: the frame's size in canvas (sequence) pixels.
+    pub resolution: [f64; 2],
+    /// The render target's size in pixels.
+    pub target: (u32, u32),
     pub time: f64,
     pub duration: f64,
+}
+
+impl Clock {
+    /// The clock of `call` rendering at `width` × `height`: `iResolution`
+    /// is that size fitted inside the call's canvas.
+    pub fn new(call: &FxCall<'_>, width: u32, height: u32) -> Self {
+        let (w, h) = (width.max(1) as f64, height.max(1) as f64);
+        let (cw, ch) = call.canvas;
+        let fit = if cw == 0 || ch == 0 {
+            1.0
+        } else {
+            (cw as f64 / w).min(ch as f64 / h)
+        };
+        Self {
+            resolution: [w * fit, h * fit],
+            target: (width, height),
+            time: call.time,
+            duration: call.duration,
+        }
+    }
 }
 
 impl Wrapped {
@@ -293,15 +320,18 @@ impl Wrapped {
         } else {
             0.0
         };
-        put(0, &f(clock.width as f64));
-        put(4, &f(clock.height as f64));
+        let [rw, rh] = clock.resolution;
+        put(0, &f(rw));
+        put(4, &f(rh));
         put(8, &f(clock.time));
         put(12, &f(clock.duration));
         put(16, &f(progress));
         if self.kind == FxKind::Transition {
             put(20, &f(progress));
-            put(24, &f(clock.width as f64 / clock.height.max(1) as f64));
+            put(24, &f(rw / rh.max(1.0)));
         }
+        put(self.target_offset, &f(clock.target.0 as f64));
+        put(self.target_offset + 4, &f(clock.target.1 as f64));
         for field in &self.fields {
             let spec = &asset.params[field.param];
             let raw = values.get(&spec.name).unwrap_or(&spec.default);

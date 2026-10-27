@@ -4,10 +4,12 @@
 //! use (effects, transitions, generators, blend modes, grades, transforms):
 //! paused frames are composed off-thread from single decodes (one at a
 //! time, the latest request wins), playback composes from streams and
-//! mixes audio in background threads. Captions and titles are drawn on top
-//! in their export styles.
+//! mixes audio in background threads. Composed frames are kept
+//! ([`cache`]), and a playhead that rests renders the next seconds ahead
+//! into them. Captions and titles are drawn on top in their export styles.
 
 mod audio;
+mod cache;
 mod player;
 
 use super::timeline::glyph::{Glyph, glyph};
@@ -17,6 +19,7 @@ use super::timeline::{
 use crate::app::TogglePlay;
 use crate::state::EditorState;
 use audio::AudioOut;
+use cache::{FrameCache, SharedCache};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -24,19 +27,25 @@ use koo_core::compose::{self, Stills};
 use koo_core::memory::{CaptionPosition, CaptionStyle};
 use koo_core::model::{ClipContent, Project, TrackKind};
 use koo_core::query::topmost_video_clip;
-use koo_core::services::Services;
+use koo_core::services::{PixelOrder, Services};
 use koo_core::{ChangeSetId, Time};
 use koo_deliver::captions;
 use player::Player;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
+use std::time::Duration;
 
 /// Largest frame width requested from the media engine.
 const MAX_FRAME_WIDTH: u32 = 1280;
 const CONTROLS_HEIGHT: f32 = 30.;
 /// A playhead move larger than this between renders is a seek, in seconds.
 const SEEK_JUMP: f64 = 0.35;
+/// How long the playhead rests before the frames after it render ahead.
+const AHEAD_DELAY: Duration = Duration::from_millis(500);
+/// Seconds rendered ahead of a resting playhead.
+const AHEAD_SECONDS: f64 = 4.0;
 
 /// What a running playback was started from; a change restarts it.
 #[derive(Clone, Copy, PartialEq)]
@@ -59,8 +68,8 @@ struct Request {
 struct Job {
     project: Arc<Project>,
     services: Services,
+    request: Request,
     t: Time,
-    width: u32,
 }
 
 struct Playback {
@@ -90,6 +99,13 @@ pub struct ViewerPanel {
     playback: Option<Playback>,
     /// Width of the program image in device px, from the last layout.
     frame_width: Rc<Cell<u32>>,
+    /// Composed frames, shared with the playback threads.
+    cache: SharedCache,
+    /// Playback preview resolution, kept across playbacks (see
+    /// `player::Quality`).
+    shift: Arc<AtomicU8>,
+    /// Frames after the resting playhead being rendered into `cache`.
+    ahead: Option<(Request, Player)>,
     _observe: Subscription,
 }
 
@@ -107,6 +123,9 @@ impl ViewerPanel {
             retired: Vec::new(),
             playback: None,
             frame_width: Rc::new(Cell::new(640)),
+            cache: FrameCache::shared(),
+            shift: Arc::new(AtomicU8::new(0)),
+            ahead: None,
             _observe,
         }
     }
@@ -141,6 +160,7 @@ impl ViewerPanel {
             self.playback = None;
             return;
         };
+        self.ahead = None;
         let playhead = state.playhead;
         // A seek while playing restarts the audio at the new position; video
         // follows the playhead on its own.
@@ -150,8 +170,14 @@ impl ViewerPanel {
             .is_some_and(|p| (playhead - p.last).0.abs() > Time::from_secs_f64(SEEK_JUMP).0);
         if self.playback.as_ref().is_none_or(|p| p.key != key) {
             let project = Arc::new(state.display_project().clone());
-            let player =
-                Player::start(state.services.clone(), project.clone(), playhead, key.width);
+            let player = Player::start(
+                state.services.clone(),
+                project.clone(),
+                playhead,
+                key,
+                self.cache.clone(),
+                self.shift.clone(),
+            );
             let audio = AudioOut::start(media, project.clone(), playhead);
             self.playback = Some(Playback {
                 key,
@@ -188,6 +214,9 @@ impl ViewerPanel {
             return;
         }
         self.requested = Some(request);
+        if self.ahead.as_ref().is_some_and(|(r, _)| r.key != key) {
+            self.ahead = None;
+        }
         let project = match &self.snapshot {
             Some((k, project)) if *k == key => project.clone(),
             _ => {
@@ -196,11 +225,23 @@ impl ViewerPanel {
                 project
             }
         };
+        let cached = self
+            .cache
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(key, request.frame));
+        if let Some(picture) = cached {
+            // Whatever is still composing is older: don't show it.
+            self.pending = None;
+            self.show(Some(picture));
+            self.render_ahead_later(request, cx);
+            return;
+        }
         let job = Job {
             project,
             services: state.services.clone(),
+            request,
             t: Time::from_frame(request.frame, rate),
-            width: key.width,
         };
         if self.composing {
             self.pending = Some(job);
@@ -211,27 +252,82 @@ impl ViewerPanel {
 
     fn compose(&mut self, job: Job, cx: &mut Context<Self>) {
         self.composing = true;
+        let request = job.request;
+        let cache = self.cache.clone();
         cx.spawn(async move |this, cx| {
             let picture = cx
                 .background_executor()
                 .spawn(async move {
-                    let size = compose::size_for_width(&job.project, job.width);
-                    let mut stills = Stills::new(job.services.media.clone(), job.width);
-                    let frame =
-                        compose::program(&job.project, job.t, size, &job.services, &mut stills);
-                    player::to_image(&frame)
+                    let width = job.request.key.width;
+                    let size = compose::size_for_width(&job.project, width);
+                    let mut stills = Stills::new(job.services.media.clone(), width);
+                    let frame = compose::submit_program(
+                        &job.project,
+                        job.t,
+                        size,
+                        &job.services,
+                        &mut stills,
+                        PixelOrder::Bgra,
+                    )
+                    .wait();
+                    let image = player::bgra_image(&frame)?;
+                    if let Ok(mut cache) = cache.lock() {
+                        let bytes = frame.rgba.len();
+                        cache.insert(request.key, request.frame, image.clone(), bytes);
+                    }
+                    Some(image)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.composing = false;
-                if this.playback.is_none() {
+                // Show progress toward the latest request, but nothing older
+                // than a frame already shown from the cache.
+                let current = this.requested == Some(request);
+                if this.playback.is_none() && (current || this.pending.is_some()) {
                     this.show(picture);
                 }
                 // Latest request wins: compose the newest one asked for meanwhile.
                 if let Some(next) = this.pending.take() {
                     this.compose(next, cx);
+                } else if current {
+                    this.render_ahead_later(request, cx);
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Once the playhead has rested on `request` for [`AHEAD_DELAY`], render
+    /// the following [`AHEAD_SECONDS`] into the cache.
+    fn render_ahead_later(&mut self, request: Request, cx: &mut Context<Self>) {
+        if self.ahead.as_ref().is_some_and(|(r, _)| *r == request) {
+            return;
+        }
+        self.ahead = None;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AHEAD_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.requested != Some(request) || this.playback.is_some() {
+                    return;
+                }
+                let state = this.state.read(cx);
+                let Some((_, project)) = this.snapshot.clone().filter(|(k, _)| *k == request.key)
+                else {
+                    return;
+                };
+                let rate = project.timeline.settings.rate;
+                let end = project.timeline.duration().to_frame(rate);
+                let span = (AHEAD_SECONDS * rate.num as f64 / rate.den.max(1) as f64) as i64;
+                let frames = request.frame + 1..(request.frame + 1 + span).min(end);
+                let player = Player::render_ahead(
+                    state.services.clone(),
+                    project,
+                    frames,
+                    request.key,
+                    this.cache.clone(),
+                );
+                this.ahead = Some((request, player));
             });
         })
         .detach();

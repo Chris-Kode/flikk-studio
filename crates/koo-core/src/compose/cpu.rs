@@ -283,11 +283,14 @@ pub(super) fn mix(a: &Frame, b: &Frame, progress: f32) -> Frame {
     }
 }
 
-/// A fully transparent frame.
-pub(super) fn transparent(width: u32, height: u32) -> Frame {
+/// `frame` with red and blue swapped (RGBA ↔ BGRA).
+pub(super) fn swapped(frame: &Frame) -> Frame {
+    let mut rgba = frame.rgba.to_vec();
+    for px in rgba.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
     Frame {
-        width,
-        height,
-        rgba: Arc::from(vec![0u8; width as usize * height as usize * 4]),
+        rgba: Arc::from(rgba),
+        ..*frame
     }
 }

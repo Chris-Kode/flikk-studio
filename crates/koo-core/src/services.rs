@@ -142,16 +142,24 @@ pub struct FxCall<'a> {
     /// length (`iDuration`). A transition's `progress` is `time / duration`.
     pub time: f64,
     pub duration: f64,
-    /// Sequence size: HTML lays out at this size in CSS px.
+    /// Sequence size: HTML lays out at this size in CSS px, and GLSL
+    /// programs measure `iResolution` in its pixels.
     pub canvas: (u32, u32),
 }
 
 /// GLSL programs on the GPU (`koo-gpu`). Thread-safe; frames in and out are
 /// RGBA8 with straight alpha.
+///
+/// Programs see `iResolution` as the frame's size fitted inside
+/// [`FxCall::canvas`], whatever size they actually render at, so a radius in
+/// pixels looks the same in a small preview and in a full-size render.
 pub trait FxService: Send + Sync {
     /// Compile `asset`. Errors name lines of the author's code, so the agent
     /// and the code editor can point at them.
     fn check(&self, asset: &FxAsset) -> ServiceResult<()>;
+    /// A batch for one composed frame: pictures stay on the GPU between its
+    /// steps and come back once.
+    fn batch(&self) -> Box<dyn FxBatch + '_>;
     /// Run `chain` (effects) in order over `frame`; same size out.
     fn apply(&self, frame: &Frame, chain: &[FxCall<'_>]) -> ServiceResult<Frame>;
     /// Blend `from` into `to` (same size) with a transition program at
@@ -172,6 +180,77 @@ pub trait FxService: Send + Sync {
         Ok(crate::compose::composite_cpu(
             width, height, background, layers,
         ))
+    }
+}
+
+/// A picture held by an [`FxBatch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Surface(pub usize);
+
+/// Byte order of a returned frame's pixels. With `Bgra`, [`Frame::rgba`]
+/// holds blue, green, red, alpha: the order GPUI images take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelOrder {
+    Rgba,
+    Bgra,
+}
+
+/// A frame on its way back from an engine ([`FxBatch::submit`]).
+pub trait PendingFrame {
+    /// Block until the picture is back.
+    fn wait(self: Box<Self>) -> ServiceResult<Frame>;
+}
+
+/// A frame that is already there.
+impl PendingFrame for Frame {
+    fn wait(self: Box<Self>) -> ServiceResult<Frame> {
+        Ok(*self)
+    }
+}
+
+/// The steps of one composed frame, kept where the engine runs them: frames
+/// go in with [`FxBatch::upload`], each step returns a new [`Surface`], and
+/// [`FxBatch::submit`] starts them all and returns one picture. Steps mean
+/// what the [`FxService`] methods of the same name mean; errors from a step
+/// leave the batch usable.
+pub trait FxBatch {
+    fn upload(&mut self, frame: &Frame) -> ServiceResult<Surface>;
+    fn size(&self, surface: Surface) -> (u32, u32);
+    fn apply(&mut self, input: Surface, chain: &[FxCall<'_>]) -> ServiceResult<Surface>;
+    fn transition(
+        &mut self,
+        from: Surface,
+        to: Surface,
+        call: &FxCall<'_>,
+    ) -> ServiceResult<Surface>;
+    fn generate(&mut self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Surface>;
+    fn composite(
+        &mut self,
+        width: u32,
+        height: u32,
+        background: [u8; 4],
+        layers: &[(Surface, Placement)],
+    ) -> ServiceResult<Surface>;
+    /// Color multiplied by alpha.
+    fn premultiply(&mut self, surface: Surface) -> ServiceResult<Surface>;
+    /// Premultiplied color made straight again.
+    fn unpremultiply(&mut self, surface: Surface) -> ServiceResult<Surface>;
+    /// `from` → `to` at `progress` (a cross-dissolve of premultiplied
+    /// pictures of the same size; `to`'s size wins otherwise).
+    fn mix(&mut self, from: Surface, to: Surface, progress: f32) -> ServiceResult<Surface>;
+    /// Start every step; `surface` comes back in `order` from
+    /// [`PendingFrame::wait`], so the caller can prepare the next frame
+    /// meanwhile.
+    fn submit<'p>(
+        self: Box<Self>,
+        surface: Surface,
+        order: PixelOrder,
+    ) -> ServiceResult<Box<dyn PendingFrame + 'p>>
+    where
+        Self: 'p;
+    /// Run every step and return `surface` (RGBA).
+    fn finish(self: Box<Self>, surface: Surface) -> ServiceResult<Frame> {
+        self.submit(surface, PixelOrder::Rgba)?.wait()
     }
 }
 

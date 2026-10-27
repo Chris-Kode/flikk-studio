@@ -4,11 +4,11 @@
 
 use crate::ids::{ClipId, MediaId};
 use crate::model::{MediaItem, MediaKind};
-use crate::services::{Frame, FrameStream, MediaService};
+use crate::services::{Frame, FrameStream, MediaService, ServiceResult};
 use crate::time::{Rate, Time};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 /// Source pictures for the compositor.
 pub trait Pictures {
@@ -41,6 +41,8 @@ impl Pictures for Stills {
 
 /// Larger forward jumps than this reopen a stream instead of decoding up.
 const MAX_SKIP: f64 = 1.5;
+/// Frames a stream decodes ahead of the compositor.
+const READ_AHEAD: usize = 4;
 
 struct Open {
     path: PathBuf,
@@ -56,7 +58,9 @@ struct Open {
 /// requested source times: frames are decoded and dropped when the source
 /// runs faster than the requests (speed above 1) and held when it runs
 /// slower; a backward or long forward jump reopens the stream. Streams of
-/// layers a composed frame did not use are closed.
+/// layers a composed frame did not use are closed. Each stream is read on
+/// its own thread, [`READ_AHEAD`] frames ahead, so decoding overlaps
+/// composing.
 pub struct Streams {
     media: Option<Arc<dyn MediaService>>,
     max_width: u32,
@@ -103,6 +107,7 @@ impl Pictures for Streams {
                 .as_ref()?
                 .playback(item, t, self.max_width)
                 .ok()?;
+            let stream = Box::new(ReadAhead::new(stream));
             self.open.insert(
                 clip,
                 Open {
@@ -156,5 +161,37 @@ pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
         bin: None,
         tags: Vec::new(),
         proxy: None,
+    }
+}
+
+/// A [`FrameStream`] read on its own thread into a bounded queue. The thread
+/// ends, closing the stream, once this is dropped.
+struct ReadAhead {
+    frames: mpsc::Receiver<ServiceResult<Option<(Time, Frame)>>>,
+}
+
+impl ReadAhead {
+    fn new(mut stream: Box<dyn FrameStream>) -> Self {
+        let (tx, frames) = mpsc::sync_channel(READ_AHEAD);
+        let read = move || {
+            loop {
+                let next = stream.next_frame();
+                let more = matches!(next, Ok(Some(_)));
+                if tx.send(next).is_err() || !more {
+                    break;
+                }
+            }
+        };
+        // Without a thread the receiver sees a closed queue: the stream ends.
+        let _ = std::thread::Builder::new()
+            .name("koo-read-ahead".into())
+            .spawn(read);
+        Self { frames }
+    }
+}
+
+impl FrameStream for ReadAhead {
+    fn next_frame(&mut self) -> ServiceResult<Option<(Time, Frame)>> {
+        self.frames.recv().unwrap_or(Ok(None))
     }
 }

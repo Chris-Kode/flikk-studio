@@ -4,30 +4,36 @@
 //! Each program is wrapped (see [`wrap`]) into a `#version 450` fragment
 //! shader, compiled with naga's GLSL front end and drawn as a fullscreen
 //! triangle into an offscreen texture. Frames go up as RGBA8 textures and
-//! come back as RGBA8; a whole effect chain runs on the GPU between one
-//! upload and one readback, with 16-bit float intermediates.
+//! come back as RGBA8; a whole composed frame runs on the GPU between one
+//! upload per source picture and one readback ([`batch`]), with 16-bit
+//! float intermediates.
 //!
 //! The engine owns its own wgpu device (the same wgpu GPUI uses) and is
-//! synchronous: every call takes a lock, records, submits and waits, so it
-//! can be used from any thread. Compiled programs are cached by a hash of
+//! synchronous: a batch records its steps (locking briefly for programs and
+//! textures), then submits under the lock and waits, so it can be used from
+//! any thread. Compiled programs are cached by a hash of
 //! their code, kind and parameter layout (compile errors too, so a broken
 //! shader is not recompiled every frame); Image parameters are cached by
 //! path and modification time; textures and buffers are pooled by size.
 //! Layer compositing for the program frame lives in [`composite`].
 
+mod batch;
 mod composite;
 mod wrap;
 
 use anyhow::Context as _;
+use batch::Batch;
 use koo_core::fx::{FxAsset, FxKind, FxLanguage, ParamKind};
-use koo_core::services::{CompositeLayer, Frame, FxCall, FxService, ServiceError, ServiceResult};
+use koo_core::services::{
+    CompositeLayer, Frame, FxBatch, FxCall, FxService, ServiceError, ServiceResult,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use wrap::{Clock, Wrapped};
+use wrap::Wrapped;
 
 /// Pixel format of uploads, of the last pass and of readbacks.
 const OUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -36,7 +42,10 @@ const MID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Compiled programs kept before the cache is cleared.
 const MAX_PROGRAMS: usize = 256;
 /// Pooled textures kept before the pool is cleared.
-const MAX_POOLED: usize = 24;
+const MAX_POOLED: usize = 32;
+/// Stack of the thread programs compile on. naga's GLSL front end recurses
+/// deeply (past the 512 KiB of GPUI's background threads in debug builds).
+const COMPILE_STACK: usize = 16 << 20;
 
 const VERTEX_WGSL: &str = r#"
 @vertex
@@ -57,6 +66,7 @@ pub struct GpuFx {
     uniform_align: u64,
     max_size: u32,
     compositor: composite::Compositor,
+    converter: batch::Converter,
     state: Mutex<State>,
 }
 
@@ -73,16 +83,8 @@ struct State {
     programs: HashMap<u64, Result<Program, String>>,
     images: HashMap<PathBuf, (Option<SystemTime>, wgpu::TextureView)>,
     textures: HashMap<(u32, u32, wgpu::TextureFormat), Vec<wgpu::Texture>>,
-    readback: Option<wgpu::Buffer>,
+    readbacks: Vec<wgpu::Buffer>,
     uniforms: Option<wgpu::Buffer>,
-}
-
-/// One pass of a frame: which program, its uniforms, what it reads.
-struct Pass<'a> {
-    key: u64,
-    uniforms: Vec<u8>,
-    inputs: Vec<&'a wgpu::TextureView>,
-    images: Vec<wgpu::TextureView>,
 }
 
 impl GpuFx {
@@ -123,6 +125,7 @@ impl GpuFx {
             .create_view(&wgpu::TextureViewDescriptor::default());
         Ok(Self {
             compositor: composite::Compositor::new(&device),
+            converter: batch::Converter::new(&device),
             uniform_align: limits.min_uniform_buffer_offset_alignment as u64,
             max_size: limits.max_texture_dimension_2d,
             device,
@@ -144,14 +147,22 @@ impl GpuFx {
         state
     }
 
-    /// Compile `asset` into the cache (once per key); its error otherwise.
+    /// Compile `asset` into the cache (once per key, on a thread with room
+    /// for the compiler, see [`COMPILE_STACK`]); its error otherwise.
     fn program(&self, state: &mut State, asset: &FxAsset) -> Result<u64, String> {
         let key = wrap::program_key(asset);
-        match state
-            .programs
-            .entry(key)
-            .or_insert_with(|| self.compile(asset))
-        {
+        let compile = || {
+            std::thread::scope(|scope| {
+                std::thread::Builder::new()
+                    .name("koo-gpu compile".into())
+                    .stack_size(COMPILE_STACK)
+                    .spawn_scoped(scope, || self.compile(asset))
+                    .map_err(|e| format!("could not start the shader compiler: {e}"))?
+                    .join()
+                    .unwrap_or_else(|_| Err("the shader compiler crashed".into()))
+            })
+        };
+        match state.programs.entry(key).or_insert_with(compile) {
             Ok(_) => Ok(key),
             Err(e) => Err(e.clone()),
         }
@@ -435,192 +446,6 @@ impl GpuFx {
         state.images.insert(path, (mtime, view.clone()));
         view
     }
-
-    /// Record `passes` in order, each drawing into its target, submit, and
-    /// read the last target back.
-    fn run(
-        &self,
-        state: &mut State,
-        passes: &[Pass<'_>],
-        targets: &[&wgpu::Texture],
-    ) -> ServiceResult<Frame> {
-        let last = targets.last().expect("at least one pass");
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-
-        // All uniform blocks in one buffer, one aligned slot per pass.
-        let slot = passes
-            .iter()
-            .map(|p| (p.uniforms.len() as u64).next_multiple_of(self.uniform_align))
-            .max()
-            .unwrap_or(self.uniform_align);
-        let need = slot * passes.len() as u64;
-        if state.uniforms.as_ref().is_none_or(|b| b.size() < need) {
-            state.uniforms = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("koo-gpu uniforms"),
-                size: need.next_power_of_two().max(4096),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        let uniforms = state.uniforms.clone().expect("just created");
-        for (i, p) in passes.iter().enumerate() {
-            self.queue
-                .write_buffer(&uniforms, slot * i as u64, &p.uniforms);
-        }
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("koo-gpu"),
-            });
-        for (i, (pass, target)) in passes.iter().zip(targets).enumerate() {
-            let program = match state.programs.get_mut(&pass.key) {
-                Some(Ok(p)) => p,
-                _ => return Err(ServiceError("program evicted mid-call".into())),
-            };
-            let mut entries = vec![
-                wgpu::BindGroupEntry {
-                    binding: wrap::BIND_UNIFORMS,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &uniforms,
-                        offset: slot * i as u64,
-                        size: NonZeroU64::new(pass.uniforms.len() as u64),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: wrap::BIND_SAMPLER,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ];
-            for (b, view) in input_bindings(program.wrapped.kind)
-                .iter()
-                .zip(&pass.inputs)
-            {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: *b,
-                    resource: wgpu::BindingResource::TextureView(view),
-                });
-            }
-            for (k, view) in pass.images.iter().enumerate() {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: wrap::BIND_IMAGES + k as u32,
-                    resource: wgpu::BindingResource::TextureView(view),
-                });
-            }
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("koo-gpu pass"),
-                layout: &program.bind_layout,
-                entries: &entries,
-            });
-            let pipeline = self.pipeline(program, target.format());
-            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("koo-gpu pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rpass.set_pipeline(pipeline);
-            rpass.set_bind_group(0, &bind_group, &[]);
-            rpass.draw(0..3, 0..1);
-        }
-        self.read_back(state, encoder, last, scope)
-    }
-
-    /// Copy `texture` out after the commands in `encoder`, submit, check
-    /// `scope` for errors and wait for the pixels.
-    fn read_back(
-        &self,
-        state: &mut State,
-        mut encoder: wgpu::CommandEncoder,
-        texture: &wgpu::Texture,
-        scope: wgpu::ErrorScopeGuard,
-    ) -> ServiceResult<Frame> {
-        let (width, height) = (texture.width(), texture.height());
-        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let size = row as u64 * height as u64;
-        if state.readback.as_ref().is_none_or(|b| b.size() < size) {
-            state.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("koo-gpu readback"),
-                size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        let readback = state.readback.clone().expect("just created");
-
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(height),
-                },
-            },
-            extent(width, height),
-        );
-        let index = self.queue.submit([encoder.finish()]);
-        if let Some(e) = pollster::block_on(scope.pop()) {
-            return Err(ServiceError(format!("GPU error: {e}")));
-        }
-
-        let slice = readback.slice(..size);
-        let (tx, rx) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(index),
-                timeout: None,
-            })
-            .map_err(ServiceError::new)?;
-        rx.recv()
-            .map_err(ServiceError::new)?
-            .map_err(ServiceError::new)?;
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        {
-            let data = slice.get_mapped_range();
-            for y in 0..height as usize {
-                let start = y * row as usize;
-                rgba.extend_from_slice(&data[start..start + width as usize * 4]);
-            }
-        }
-        readback.unmap();
-        Ok(Frame {
-            width,
-            height,
-            rgba: rgba.into(),
-        })
-    }
-
-    fn uniforms(state: &State, key: u64, call: &FxCall<'_>, width: u32, height: u32) -> Vec<u8> {
-        let Some(Ok(program)) = state.programs.get(&key) else {
-            return Vec::new();
-        };
-        program.wrapped.uniforms(
-            call.asset,
-            call.values,
-            Clock {
-                width,
-                height,
-                time: call.time,
-                duration: call.duration,
-            },
-        )
-    }
 }
 
 fn expect_kind(asset: &FxAsset, kind: FxKind) -> ServiceResult<()> {
@@ -696,103 +521,35 @@ impl FxService for GpuFx {
             .map_err(ServiceError)
     }
 
+    fn batch(&self) -> Box<dyn FxBatch + '_> {
+        Box::new(Batch::new(self))
+    }
+
     /// Runs on the GPU from one upload to one readback; an empty chain
     /// returns the frame unchanged.
     fn apply(&self, frame: &Frame, chain: &[FxCall<'_>]) -> ServiceResult<Frame> {
         if chain.is_empty() {
             return Ok(frame.clone());
         }
-        let mut state = self.lock();
-        let (w, h) = (frame.width, frame.height);
-        let mut keys = Vec::with_capacity(chain.len());
-        for call in chain {
-            expect_kind(call.asset, FxKind::Effect)?;
-            keys.push(
-                self.program(&mut state, call.asset)
-                    .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?,
-            );
-        }
-        let input = self.upload_frame(&mut state, frame)?;
-        // Ping-pong between two float textures; the last pass writes RGBA8.
-        let mids: Vec<wgpu::Texture> = (0..chain.len().saturating_sub(1).min(2))
-            .map(|_| self.texture(&mut state, w, h, MID_FORMAT))
-            .collect();
-        let output = self.texture(&mut state, w, h, OUT_FORMAT);
-        let input_view = input.create_view(&Default::default());
-        let mid_views: Vec<_> = mids
-            .iter()
-            .map(|t| t.create_view(&Default::default()))
-            .collect();
-        let mut passes = Vec::with_capacity(chain.len());
-        let mut targets = Vec::with_capacity(chain.len());
-        for (i, (call, key)) in chain.iter().zip(&keys).enumerate() {
-            let source = if i == 0 {
-                &input_view
-            } else {
-                &mid_views[(i - 1) % 2]
-            };
-            targets.push(if i + 1 == chain.len() {
-                &output
-            } else {
-                &mids[i % 2]
-            });
-            passes.push(Pass {
-                key: *key,
-                uniforms: Self::uniforms(&state, *key, call, w, h),
-                inputs: vec![source],
-                images: self.images(&mut state, call),
-            });
-        }
-        let result = self.run(&mut state, &passes, &targets);
-        drop(passes);
-        Self::give_back(&mut state, mids.into_iter().chain([input, output]));
-        result
+        let mut batch = Box::new(Batch::new(self));
+        let input = batch.upload(frame)?;
+        let output = batch.apply(input, chain)?;
+        batch.finish(output)
     }
 
     /// Frames are expected to be the same size. If they differ, the output
     /// takes `to`'s size and `from` is stretched to fit.
     fn transition(&self, from: &Frame, to: &Frame, call: &FxCall<'_>) -> ServiceResult<Frame> {
-        expect_kind(call.asset, FxKind::Transition)?;
-        let mut state = self.lock();
-        let key = self
-            .program(&mut state, call.asset)
-            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
-        let a = self.upload_frame(&mut state, from)?;
-        let b = self.upload_frame(&mut state, to)?;
-        let output = self.texture(&mut state, to.width, to.height, OUT_FORMAT);
-        let (va, vb) = (
-            a.create_view(&Default::default()),
-            b.create_view(&Default::default()),
-        );
-        let pass = Pass {
-            key,
-            uniforms: Self::uniforms(&state, key, call, to.width, to.height),
-            inputs: vec![&va, &vb],
-            images: self.images(&mut state, call),
-        };
-        let result = self.run(&mut state, std::slice::from_ref(&pass), &[&output]);
-        drop(pass);
-        Self::give_back(&mut state, [a, b, output]);
-        result
+        let mut batch = Box::new(Batch::new(self));
+        let (a, b) = (batch.upload(from)?, batch.upload(to)?);
+        let output = batch.transition(a, b, call)?;
+        batch.finish(output)
     }
 
     fn generate(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame> {
-        expect_kind(call.asset, FxKind::Generator)?;
-        self.check_size(width, height)?;
-        let mut state = self.lock();
-        let key = self
-            .program(&mut state, call.asset)
-            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
-        let output = self.texture(&mut state, width, height, OUT_FORMAT);
-        let pass = Pass {
-            key,
-            uniforms: Self::uniforms(&state, key, call, width, height),
-            inputs: Vec::new(),
-            images: self.images(&mut state, call),
-        };
-        let result = self.run(&mut state, std::slice::from_ref(&pass), &[&output]);
-        Self::give_back(&mut state, [output]);
-        result
+        let mut batch = Box::new(Batch::new(self));
+        let output = batch.generate(call, width, height)?;
+        batch.finish(output)
     }
 
     /// One pass per layer on the GPU; matches the CPU reference.
@@ -803,6 +560,12 @@ impl FxService for GpuFx {
         background: [u8; 4],
         layers: &[CompositeLayer<'_>],
     ) -> ServiceResult<Frame> {
-        self.composite_layers(width, height, background, layers)
+        let mut batch = Box::new(Batch::new(self));
+        let mut placed = Vec::with_capacity(layers.len());
+        for l in layers {
+            placed.push((batch.upload(l.frame)?, l.placement));
+        }
+        let output = batch.composite(width, height, background, &placed)?;
+        batch.finish(output)
     }
 }
