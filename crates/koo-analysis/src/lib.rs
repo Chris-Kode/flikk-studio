@@ -10,6 +10,8 @@
 //! reusing their transcript and shot changes.
 
 mod align;
+#[cfg(feature = "aligner")]
+mod bpe;
 mod cache;
 #[cfg(any(feature = "whisper", feature = "aligner"))]
 mod download;
@@ -394,7 +396,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
             match transcript {
                 Ok(Some(mut t)) => {
                     align::refine(&mut t.words, &levels, &sound);
-                    if let Err(e) = align_words(shared, &audio, &mut t.words, &progress) {
+                    if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
                         // The edges measured on the audio are what the
                         // version before the aligner found; a later run
                         // with the model upgrades them.
@@ -503,28 +505,33 @@ const WITHOUT_ALIGNER: u32 = 1;
 #[cfg(not(feature = "aligner"))]
 const WITHOUT_ALIGNER: u32 = ANALYSIS_VERSION;
 
-/// Fit `words` to the audio with the alignment model.
+/// Fit the transcript's words to the audio with the alignment model. A
+/// language it does not know keeps the edges measured on the audio, for
+/// good.
 #[cfg(feature = "aligner")]
 fn align_words(
     shared: &Shared,
     audio: &[f32],
-    words: &mut [koo_core::analysis::Word],
+    transcript: &mut Transcript,
     progress: &Progress,
 ) -> anyhow::Result<()> {
-    if words.is_empty() {
+    if transcript.words.is_empty() || !forced::supports(&transcript.language) {
         return Ok(());
     }
-    let model = fetch_model(shared, |start| shared.aligner.ensure_model(start))?;
-    shared
-        .aligner
-        .align(&model, audio, words, progress.step(Step::Words))
+    let files = fetch_model(shared, |start| shared.aligner.ensure_model(start))?;
+    shared.aligner.align(
+        &files,
+        audio,
+        &mut transcript.words,
+        progress.step(Step::Words),
+    )
 }
 
 #[cfg(not(feature = "aligner"))]
 fn align_words(
     _shared: &Shared,
     _audio: &[f32],
-    _words: &mut [koo_core::analysis::Word],
+    _transcript: &mut Transcript,
     _progress: &Progress,
 ) -> anyhow::Result<()> {
     Ok(())

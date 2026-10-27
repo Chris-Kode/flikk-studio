@@ -11,14 +11,14 @@ whisper = ["dep:whisper-rs", "dep:ureq"]
 # Word times from a forced-alignment model run by ONNX Runtime, which is
 # downloaded and linked statically at build time; without it word edges are
 # measured on the audio levels alone.
-aligner = ["dep:ort", "dep:any_ascii", "dep:ureq"]
+aligner = ["dep:ort", "dep:unicode-normalization", "dep:ureq"]
 
 [dependencies]
-any_ascii = { version = "0.3", optional = true }
 anyhow.workspace = true
 koo-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization = { version = "0.1", optional = true }
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 whisper-rs = { version = "0.16", optional = true }

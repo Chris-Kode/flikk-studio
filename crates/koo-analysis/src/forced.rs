@@ -1,132 +1,175 @@
-//! Word times from a forced aligner, as WhisperX does: a CTC model (MMS,
-//! trained on 1,100+ languages written in Latin letters) hears the audio,
-//! and the transcript's letters are fitted to what it heard. Whisper only
-//! knows roughly where a word is and sometimes gives it to the wrong sound
-//! (or drifts by a second in conversation); the aligner finds where its
-//! letters sound. Words with no letters it knows (digits, symbols) keep the
-//! times [`crate::align`] measured.
+//! Word times from a forced aligner: Qwen3-ForcedAligner-0.6B
+//! (Apache-2.0) hears a stretch of audio with the words said in it and
+//! gives each word a start and an end, in 80 ms steps. Whisper only knows
+//! roughly where a word is, sometimes puts it on the wrong sound and
+//! drifts by a second in conversation; the aligner does not. It knows 11
+//! languages ([`supports`]); elsewhere, and for words with no letters or
+//! digits, the edges [`crate::align`] measured stay.
 
+use crate::bpe::Bpe;
 use crate::download::Download;
 use crate::ffmpeg::SAMPLE_RATE;
-use anyhow::{Context, Result, anyhow, bail};
-use koo_core::analysis::Word;
+use anyhow::{Result, anyhow, bail};
+use koo_core::analysis::{Levels, Word};
 use koo_core::paths;
 use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use ort::session::Session;
 use ort::value::Tensor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// int8 ONNX export of `MahmoudAshraf/mms-300m-1130-forced-aligner`.
-pub const MODEL: &str = "mms-300m-1130-forced-aligner-int8.onnx";
-const MODEL_URL: &str = "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/main/onnx/model_int8.onnx";
+/// The model as ONNX, with its Whisper-style features built in (16 kHz
+/// samples and token ids in, a class per token out), weights quantized to
+/// 4 bits.
+pub const MODEL: &str = "qwen3-forced-aligner-0.6b-q4.onnx";
+/// Where [`MODEL`] is downloaded from. Qwen publishes no ONNX export; how
+/// this one is made and hosted is in `docs/TECHNICAL_DESIGN.md`.
+const MODEL_URL: Option<&str> = None;
+/// Qwen's tokenizer, from the model's own repository.
+const TOKENIZER: [(&str, &str); 2] = [
+    (
+        "qwen3-forced-aligner-vocab.json",
+        "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/vocab.json",
+    ),
+    (
+        "qwen3-forced-aligner-merges.txt",
+        "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/merges.txt",
+    ),
+];
 
-/// The model's letters and their output index; 0 is the CTC blank.
-const LETTERS: &str = "aienoutsrmkldghybpwcvjzf'qx";
-const FIRST_LETTER: u32 = 4;
-/// Longest stretch of audio aligned at once. 30 s keeps the model's
-/// working memory under 300 MB; shorter chunks cut more of the words
-/// Whisper misplaced at their edges.
+/// Follows each unit twice; the model answers with its start and its end.
+const TIMESTAMP: i64 = 151705;
+/// One step of those answers.
+const STEP_MS: i64 = 80;
+/// Longest run of words aligned at once.
 const MAX_CHUNK: Time = Time(FLICKS_PER_SECOND * 30);
-/// The model hears a letter a little after it starts and stops hearing it
-/// a little before it ends; edges move out by this much, never past a
-/// neighbour. Measured on hand-labelled English and Dutch.
-const EARLIER: Time = Time(FLICKS_PER_SECOND * 40 / 1000);
-const LATER: Time = Time(FLICKS_PER_SECOND * 20 / 1000);
+/// Audio either side of a run, so a word Whisper misplaced is still in it.
+const SLACK: Time = Time(FLICKS_PER_SECOND * 5);
+/// The model's starts come a little late; they move this much earlier,
+/// never into the word before. Measured on hand-labelled English.
+const EARLIER: Time = Time(FLICKS_PER_SECOND * 20 / 1000);
+
+/// Whether the model knows `language` (Whisper's code).
+pub fn supports(language: &str) -> bool {
+    matches!(
+        language,
+        "en" | "es" | "fr" | "de" | "it" | "pt" | "ru" | "zh" | "yue" | "ja" | "ko"
+    )
+}
+
+/// The model and its tokenizer on disk.
+pub struct Files {
+    model: PathBuf,
+    vocab: PathBuf,
+    merges: PathBuf,
+}
 
 /// Loaded model, shared by every job. Runs one chunk at a time.
 #[derive(Default)]
 pub struct Aligner {
-    session: Mutex<Option<Session>>,
-    download: Download,
+    loaded: Mutex<Option<(Session, Bpe)>>,
+    downloads: [Download; 3],
 }
 
 impl Aligner {
-    /// The model path, downloading it first if needed; `start_download`
-    /// returns a progress callback for the download.
+    /// The model's files, downloading them first if needed;
+    /// `start_download` returns a progress callback for each download.
     pub fn ensure_model(
         &self,
-        start_download: impl FnOnce(&str) -> Box<dyn Fn(f32) + Send + Sync>,
-    ) -> Result<PathBuf> {
+        start_download: impl Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>,
+    ) -> Result<Files> {
         // `$KOOEDITOR_ALIGNER_MODEL` is a path, never fetched.
-        if let Some(path) = std::env::var_os("KOOEDITOR_ALIGNER_MODEL").filter(|v| !v.is_empty()) {
-            let path = PathBuf::from(path);
-            if !path.is_file() {
-                bail!("alignment model not found at {}", path.display());
+        let model = match std::env::var_os("KOOEDITOR_ALIGNER_MODEL").filter(|v| !v.is_empty()) {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let path = paths::models().join(MODEL);
+                if let Some(url) = MODEL_URL {
+                    self.downloads[0]
+                        .ensure(&path, url, "alignment model", || start_download(MODEL))?;
+                }
+                path
             }
-            return Ok(path);
+        };
+        if !model.is_file() {
+            bail!(
+                "alignment model not found at {} (set KOOEDITOR_ALIGNER_MODEL)",
+                model.display()
+            );
         }
-        let path = paths::models().join(MODEL);
-        self.download
-            .ensure(&path, MODEL_URL, "alignment model", || {
-                start_download(MODEL)
-            })?;
-        Ok(path)
+        let mut tokenizer = Vec::new();
+        for ((name, url), download) in TOKENIZER.iter().zip(&self.downloads[1..]) {
+            let path = paths::models().join(name);
+            download.ensure(&path, url, "alignment tokenizer", || start_download(name))?;
+            tokenizer.push(path);
+        }
+        let [vocab, merges] = <[PathBuf; 2]>::try_from(tokenizer).expect("two files");
+        Ok(Files {
+            model,
+            vocab,
+            merges,
+        })
     }
 
-    /// Move `words` onto the letters the model hears in 16 kHz mono
+    /// Move `words` onto where the model hears them in 16 kHz mono
     /// `audio`. Their times only need to be roughly right; they decide
     /// which stretch of audio each word is looked for in.
     pub fn align(
         &self,
-        model: &Path,
+        files: &Files,
         audio: &[f32],
         words: &mut [Word],
         progress: impl Fn(f32),
     ) -> Result<()> {
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        if session.is_none() {
-            let env = ort::init()
-                .build()
-                .map_err(|e| anyhow!("could not start ONNX Runtime: {e}"))?;
-            let loaded = Session::builder(&env)
-                .map_err(|e| anyhow!("{e}"))?
-                .with_intra_threads(threads())
-                .map_err(|e| anyhow!("{e}"))?
-                // Idle threads would spin and slow a Whisper job running
-                // next to this one.
-                .with_intra_op_spinning(false)
-                .map_err(|e| anyhow!("{e}"))?
-                // Repacked weights would double the model in memory, for
-                // no speed gain here.
-                .with_prepacking(false)
-                .map_err(|e| anyhow!("{e}"))?
-                .commit_from_file(model)
-                .map_err(|e| anyhow!("could not load alignment model {}: {e}", model.display()))?;
-            *session = Some(loaded);
+        let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        if loaded.is_none() {
+            *loaded = Some((load(files)?, Bpe::load(&files.vocab, &files.merges)?));
         }
-        let session = session.as_mut().expect("loaded above");
+        let (session, bpe) = loaded.as_mut().expect("loaded above");
 
         let end = Time::from_secs_f64(audio.len() as f64 / SAMPLE_RATE as f64);
         let chunks = chunks(words, end);
         let mut aligned = vec![None; words.len()];
         for (n, (span, window)) in chunks.iter().enumerate() {
             progress(n as f32 / chunks.len() as f32);
-            let at = |t: Time| ((t.as_secs_f64() * SAMPLE_RATE as f64) as usize).min(audio.len());
-            let samples = &audio[at(window.start)..at(window.end)];
-            let mut letters = Vec::new();
+            let mut ids = Vec::new();
             let mut owner = Vec::new();
             for i in span.clone() {
-                for letter in letters_of(&words[i].text) {
-                    letters.push(letter);
+                for unit in units(&words[i].text) {
+                    ids.extend(bpe.encode(&unit));
+                    ids.extend([TIMESTAMP, TIMESTAMP]);
                     owner.push(i);
                 }
             }
-            // Nothing to align, or shorter than one frame of the model.
-            if letters.is_empty() || samples.len() < 400 {
+            // Features are 10 ms frames: whole ones only, and at least ten.
+            let at = |t: Time| ((t.as_secs_f64() * SAMPLE_RATE as f64) as usize).min(audio.len());
+            let from = at(window.start);
+            let frame = SAMPLE_RATE as usize / 100;
+            let to = from + (at(window.end) - from) / frame * frame;
+            if owner.is_empty() || to - from < 10 * frame {
                 continue;
             }
-            let frames = emissions(session, samples)?;
-            let per_frame = window.duration().as_secs_f64() / frames.len() as f64;
-            // Words that cannot fit keep their times.
-            if let Some(spans) = viterbi(&frames, &letters) {
-                let time = |f: usize| window.start + Time::from_secs_f64(f as f64 * per_frame);
-                for (k, &(first, last)) in spans.iter().enumerate() {
-                    let range: &mut Option<TimeRange> = &mut aligned[owner[k]];
-                    let (s, e) = (time(first), time(last + 1));
-                    *range =
-                        Some(range.map_or(TimeRange::new(s, e), |r| TimeRange::new(r.start, e)));
-                }
+            let classes = classes(session, &audio[from..to], &ids)?;
+            let steps: Vec<i64> = ids
+                .iter()
+                .zip(&classes)
+                .filter(|(id, _)| **id == TIMESTAMP)
+                .map(|(_, c)| c * STEP_MS)
+                .collect();
+            if steps.len() != 2 * owner.len() {
+                bail!(
+                    "alignment model gave {} times for {} words",
+                    steps.len(),
+                    owner.len()
+                );
+            }
+            let ms = monotonic(&steps);
+            for (u, &i) in owner.iter().enumerate() {
+                let (s, e) = (
+                    window.start + Time::from_millis(ms[2 * u]),
+                    window.start + Time::from_millis(ms[2 * u + 1]),
+                );
+                let range: &mut Option<TimeRange> = &mut aligned[i];
+                *range = Some(range.map_or(TimeRange::new(s, e), |r| TimeRange::new(r.start, e)));
             }
         }
         progress(1.0);
@@ -135,52 +178,142 @@ impl Aligner {
     }
 }
 
-/// Log probabilities per 20 ms frame for `samples`, normalized as the
-/// model was trained.
-fn emissions(session: &mut Session, samples: &[f32]) -> Result<Vec<[f32; 32]>> {
-    let n = samples.len() as f32;
-    let mean = samples.iter().sum::<f32>() / n;
-    let var = samples.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / n;
-    let scale = 1.0 / (var + 1e-7).sqrt();
-    let input: Vec<f32> = samples.iter().map(|s| (s - mean) * scale).collect();
-    let input = Tensor::from_array(([1usize, input.len()], input)).map_err(|e| anyhow!("{e}"))?;
-    let outputs = session
-        .run(ort::inputs![input])
-        .map_err(|e| anyhow!("alignment model failed: {e}"))?;
-    let (shape, logits) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow!("{e}"))?;
-    let classes = *shape.last().context("alignment model gave no output")? as usize;
-    if classes > 32 || classes < FIRST_LETTER as usize + LETTERS.len() {
-        bail!("alignment model has {classes} outputs");
-    }
-    Ok(logits
-        .chunks_exact(classes)
-        .map(|frame| {
-            let max = frame.iter().copied().fold(f32::MIN, f32::max);
-            let sum = frame.iter().map(|l| (l - max).exp()).sum::<f32>().ln() + max;
-            let mut out = [f32::NEG_INFINITY; 32];
-            for (o, l) in out.iter_mut().zip(frame) {
-                *o = l - sum;
-            }
-            out
+fn load(files: &Files) -> Result<Session> {
+    let env = ort::init()
+        .build()
+        .map_err(|e| anyhow!("could not start ONNX Runtime: {e}"))?;
+    Session::builder(&env)
+        .map_err(|e| anyhow!("{e}"))?
+        .with_intra_threads(threads())
+        .map_err(|e| anyhow!("{e}"))?
+        // Idle threads would spin and slow a Whisper job running next to
+        // this one.
+        .with_intra_op_spinning(false)
+        .map_err(|e| anyhow!("{e}"))?
+        // Repacked weights cost 180 MB for no speed gain here, and an
+        // arena would keep each run's working memory (500 MB for 30 s of
+        // audio) for good.
+        .with_prepacking(false)
+        .map_err(|e| anyhow!("{e}"))?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+        .map_err(|e| anyhow!("{e}"))?
+        .commit_from_file(&files.model)
+        .map_err(|e| {
+            anyhow!(
+                "could not load alignment model {}: {e}",
+                files.model.display()
+            )
         })
-        .collect())
 }
 
-/// The model's output index for each letter of `text` it knows, after
-/// writing it in Latin letters.
-fn letters_of(text: &str) -> Vec<u32> {
-    any_ascii::any_ascii(text)
+/// The model's answer for each of `ids`, heard against `samples`.
+fn classes(session: &mut Session, samples: &[f32], ids: &[i64]) -> Result<Vec<i64>> {
+    let samples =
+        Tensor::from_array(([samples.len()], samples.to_vec())).map_err(|e| anyhow!("{e}"))?;
+    let text = Tensor::from_array(([ids.len()], ids.to_vec())).map_err(|e| anyhow!("{e}"))?;
+    let outputs = session
+        .run(ort::inputs!["samples" => samples, "text_ids" => text])
+        .map_err(|e| anyhow!("alignment model failed: {e}"))?;
+    let (_, classes) = outputs["classes"]
+        .try_extract_tensor::<i64>()
+        .map_err(|e| anyhow!("{e}"))?;
+    if classes.len() != ids.len() {
+        bail!(
+            "alignment model gave {} answers for {} tokens",
+            classes.len(),
+            ids.len()
+        );
+    }
+    Ok(classes.to_vec())
+}
+
+/// What the model places for one word, split as Qwen splits text: its
+/// letters, digits and apostrophes, with each Chinese character alone.
+fn units(word: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut run = String::new();
+    for c in word
         .chars()
-        .filter_map(|c| LETTERS.find(c.to_ascii_lowercase()))
-        .map(|i| FIRST_LETTER + i as u32)
-        .collect()
+        .filter(|&c| c.is_alphabetic() || c.is_numeric() || c == '\'')
+    {
+        if ideograph(c) {
+            out.extend((!run.is_empty()).then(|| std::mem::take(&mut run)));
+            out.push(c.to_string());
+        } else {
+            run.push(c);
+        }
+    }
+    out.extend((!run.is_empty()).then_some(run));
+    out
+}
+
+fn ideograph(c: char) -> bool {
+    matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2CEAF | 0xF900..=0xFAFF)
+}
+
+/// Times that run backwards fixed as Qwen does: the longest run that never
+/// goes back stands; one or two strays take the nearer neighbour's time,
+/// longer stretches are spread evenly between their neighbours.
+fn monotonic(ms: &[i64]) -> Vec<i64> {
+    let n = ms.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut len = vec![1usize; n];
+    let mut parent = vec![None; n];
+    for i in 1..n {
+        for j in 0..i {
+            if ms[j] <= ms[i] && len[j] + 1 > len[i] {
+                len[i] = len[j] + 1;
+                parent[i] = Some(j);
+            }
+        }
+    }
+    let longest = *len.iter().max().expect("not empty");
+    let mut normal = vec![false; n];
+    let mut at = len.iter().position(|&l| l == longest);
+    while let Some(i) = at {
+        normal[i] = true;
+        at = parent[i];
+    }
+    let mut out = ms.to_vec();
+    let mut i = 0;
+    while i < n {
+        if normal[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < n && !normal[j] {
+            j += 1;
+        }
+        let left = (0..i).rev().find(|&k| normal[k]).map(|k| out[k]);
+        let right = (j..n).find(|&k| normal[k]).map(|k| out[k]);
+        for k in i..j {
+            out[k] = match (left, right) {
+                (Some(l), Some(r)) if j - i > 2 => {
+                    let step = (r - l) as f64 / (j - i + 1) as f64;
+                    (l as f64 + step * (k - i + 1) as f64) as i64
+                }
+                (Some(l), Some(r)) => {
+                    if k + 1 - i <= j - k {
+                        l
+                    } else {
+                        r
+                    }
+                }
+                (l, r) => l.or(r).unwrap_or(ms[k]),
+            };
+        }
+        i = j;
+    }
+    out
 }
 
 /// Runs of words aligned together, and the audio each is looked for in.
 /// Runs split at Whisper's longest pause so none is longer than
-/// [`MAX_CHUNK`]; neighbouring windows meet in the middle of that pause.
+/// [`MAX_CHUNK`]; a run's audio reaches [`SLACK`] past its words but never
+/// past the middle of the pause to the next run.
 fn chunks(words: &[Word], end: Time) -> Vec<(std::ops::Range<usize>, TimeRange)> {
     let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
     let mut from = 0;
@@ -199,88 +332,24 @@ fn chunks(words: &[Word], end: Time) -> Vec<(std::ops::Range<usize>, TimeRange)>
     let meet = |a: &Word, b: &Word| Time(a.range.end.0 + (b.range.start.0 - a.range.end.0) / 2);
     (0..runs.len())
         .map(|k| {
-            let start = k.checked_sub(1).map_or(Time::ZERO, |p| {
-                meet(&words[runs[p].end - 1], &words[runs[k].start])
-            });
-            let stop = runs
-                .get(k + 1)
-                .map_or(end, |n| meet(&words[runs[k].end - 1], &words[n.start]));
-            (
-                runs[k].clone(),
-                TimeRange::new(start.max(Time::ZERO), stop.min(end)),
-            )
+            let (first, last) = (&words[runs[k].start], &words[runs[k].end - 1]);
+            let lo = k
+                .checked_sub(1)
+                .map_or(Time::ZERO, |p| meet(&words[runs[p].end - 1], first));
+            let hi = runs.get(k + 1).map_or(end, |n| meet(last, &words[n.start]));
+            let start = lo.max(first.range.start - SLACK).max(Time::ZERO);
+            let stop = hi
+                .min(last.range.end + SLACK)
+                .min(start + MAX_CHUNK + SLACK + SLACK)
+                .min(end);
+            (runs[k].clone(), TimeRange::new(start, stop))
         })
         .filter(|(_, w)| w.start < w.end)
         .collect()
 }
 
-/// The most likely CTC path through `frames` that spells `letters`: the
-/// first and last frame of each letter, or `None` when there are more
-/// letters than the audio can hold.
-fn viterbi(frames: &[[f32; 32]], letters: &[u32]) -> Option<Vec<(usize, usize)>> {
-    const BLANK: usize = 0;
-    let t_len = frames.len();
-    // Blank, letter, blank, letter, …, blank.
-    let states: Vec<usize> = (0..2 * letters.len() + 1)
-        .map(|s| {
-            if s % 2 == 0 {
-                BLANK
-            } else {
-                letters[s / 2] as usize
-            }
-        })
-        .collect();
-    let repeats = letters.windows(2).filter(|w| w[0] == w[1]).count();
-    if letters.is_empty() || letters.len() + repeats > t_len {
-        return None;
-    }
-    // A letter can follow the one before it directly unless they are the
-    // same, which needs a blank between.
-    let skip = |s: usize| s % 2 == 1 && s >= 2 && states[s] != states[s - 2];
-    let n = states.len();
-    let mut score = vec![f32::NEG_INFINITY; n];
-    score[0] = frames[0][states[0]];
-    score[1] = frames[0][states[1]];
-    let mut back = vec![0u8; t_len * n];
-    let mut next = vec![f32::NEG_INFINITY; n];
-    for t in 1..t_len {
-        for s in 0..n {
-            let mut best = (score[s], 0u8);
-            if s >= 1 && score[s - 1] > best.0 {
-                best = (score[s - 1], 1);
-            }
-            if skip(s) && score[s - 2] > best.0 {
-                best = (score[s - 2], 2);
-            }
-            next[s] = best.0 + frames[t][states[s]];
-            back[t * n + s] = best.1;
-        }
-        std::mem::swap(&mut score, &mut next);
-    }
-    let mut s = if score[n - 1] >= score[n - 2] {
-        n - 1
-    } else {
-        n - 2
-    };
-    if score[s] == f32::NEG_INFINITY {
-        return None;
-    }
-    let mut spans = vec![(usize::MAX, 0); letters.len()];
-    for t in (0..t_len).rev() {
-        if s % 2 == 1 {
-            let span = &mut spans[s / 2];
-            if span.0 == usize::MAX {
-                span.1 = t;
-            }
-            span.0 = t;
-        }
-        s -= back[t * n + s] as usize;
-    }
-    Some(spans)
-}
-
-/// Give each aligned word its range, widened by [`EARLIER`] and [`LATER`]
-/// without reaching a neighbour; the others stay between their aligned
+/// Give each aligned word its range, its start [`EARLIER`] without
+/// reaching the word before; the others stay between their aligned
 /// neighbours.
 fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
     let heard: Vec<TimeRange> = words
@@ -305,16 +374,8 @@ fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
             .checked_sub(1)
             .map_or(Time::ZERO, |p| heard[p].end.min(r.start));
         w.range.start = (r.start - EARLIER).max(lo);
-        w.range.end = r.end;
-    }
-    for i in 0..words.len() {
-        if aligned[i].is_none() {
-            continue;
-        }
-        let hi = words
-            .get(i + 1)
-            .map_or(Time(i64::MAX), |n| n.range.start.max(words[i].range.end));
-        words[i].range.end = (words[i].range.end + LATER).min(hi);
+        // Both edges in one 80 ms step: still a word.
+        w.range.end = r.end.max(w.range.start + Levels::FRAME);
     }
 }
 
