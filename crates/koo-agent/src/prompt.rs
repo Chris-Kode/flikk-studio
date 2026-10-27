@@ -50,7 +50,13 @@ Do not wait for it. What the user decided arrives in an <approvals> block \
 at the start of a later message.
 
 Respect protected ranges (protected markers): if an edit would touch one, \
-leave it out unless the user asked for exactly that, and mention it.";
+leave it out unless the user asked for exactly that, and mention it.
+
+Cutting speech: remove words with `cut_words`, naming each run by the `@` \
+times of its first and last word; it places the cuts in the pauses so no \
+word is clipped. `blade` and `ripple_delete` move a cut that falls on a \
+word into the nearest pause. When a result says a cut has no pause to sit \
+in, tell the user it may be heard.";
 
 const FX: &str = "\
 Effects, transitions and generators are programs: GLSL for all three, or \

@@ -121,7 +121,25 @@ impl EditorState {
         };
         this.load_agent_memory();
         this.load_presets();
+        this.analyze_media();
         this
+    }
+
+    /// Analysis is cached per file, so this only runs for media never
+    /// analyzed or analyzed by an older version (which gains, e.g., word
+    /// times measured on the audio).
+    fn analyze_media(&self) {
+        let Some(analysis) = &self.services.analysis else {
+            return;
+        };
+        for item in &self.bus.project().media {
+            if item.kind != koo_core::model::MediaKind::Image
+                && item.fingerprint.is_some()
+                && item.path.is_file()
+            {
+                analysis.analyze(item);
+            }
+        }
     }
 
     /// Hand the agent its role, its recipes, the approved rules of the
@@ -642,6 +660,7 @@ impl EditorState {
         self.status = persistence::take_notice();
         self.load_agent_memory();
         self.load_presets();
+        self.analyze_media();
         cx.notify();
     }
 

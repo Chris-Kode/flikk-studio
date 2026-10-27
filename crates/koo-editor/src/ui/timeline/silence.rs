@@ -3,6 +3,7 @@
 //! audible clip is silent, then removed as one undo step.
 
 use koo_core::command::Command;
+use koo_core::cuts::FADE;
 use koo_core::model::{ClipContent, Project, TrackKind};
 use koo_core::services::AnalysisService;
 use koo_core::{MediaId, Time, TimeRange};
@@ -101,6 +102,7 @@ pub fn removal_commands(ranges: &[TimeRange]) -> Vec<Command> {
         .map(|range| Command::RippleDelete {
             range,
             tracks: None,
+            fade: FADE,
         })
         .collect()
 }

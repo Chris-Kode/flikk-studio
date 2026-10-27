@@ -47,7 +47,11 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
     let tl = &project.timeline;
     match command {
         Command::Blade { at, tracks } => blade(tl, *at, tracks),
-        Command::RippleDelete { range, tracks } => ripple_delete(tl, *range, tracks),
+        Command::RippleDelete {
+            range,
+            tracks,
+            fade,
+        } => ripple_delete(tl, *range, tracks, *fade),
         Command::DeleteClips { clips, ripple } => delete_clips(tl, clips, *ripple),
         Command::MoveClip { clip, at, track } => move_clip(tl, *clip, *at, *track),
 
@@ -457,7 +461,7 @@ fn blade(tl: &Timeline, at: Time, scope: &TrackScope) -> Result<Plan> {
     Ok(ops(out))
 }
 
-fn ripple_delete(tl: &Timeline, range: TimeRange, scope: &TrackScope) -> Result<Plan> {
+fn ripple_delete(tl: &Timeline, range: TimeRange, scope: &TrackScope, fade: Time) -> Result<Plan> {
     if range.is_empty() {
         return Err(CoreError::Invalid("empty range".into()));
     }
@@ -474,8 +478,14 @@ fn ripple_delete(tl: &Timeline, range: TimeRange, scope: &TrackScope) -> Result<
                     ..c.clone()
                 });
             } else {
+                // Audio either side of the join fades into it.
+                let fades =
+                    fade > Time::ZERO && track.kind == TrackKind::Audio && c.media().is_some();
                 if c.start < range.start {
-                    let (left, _) = split_clip(c, range.start);
+                    let (mut left, _) = split_clip(c, range.start);
+                    if fades {
+                        left.audio.fade_out = fade.min(left.duration);
+                    }
                     next.push(Clip { id: c.id, ..left });
                 }
                 if c.end() > range.end {
@@ -483,6 +493,9 @@ fn ripple_delete(tl: &Timeline, range: TimeRange, scope: &TrackScope) -> Result<
                     right.start = range.start;
                     if c.start < range.start {
                         right.id = ClipId::new();
+                    }
+                    if fades {
+                        right.audio.fade_in = fade.min(right.duration);
                     }
                     next.push(right);
                 }

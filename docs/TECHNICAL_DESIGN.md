@@ -46,7 +46,7 @@ behaviour and this file wins on structure.
 | `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
 | `koo-store` | SQLite persistence, autosave, crash recovery, settings, memory stores | core, rusqlite |
 | `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms | core, image |
-| `koo-analysis` | Background jobs: Whisper transcript, VAD, speakers, shot changes, silences, loudness | core, whisper-rs |
+| `koo-analysis` | Background jobs: Whisper transcript, forced word alignment, VAD, speakers, shot changes, silences, loudness | core, whisper-rs, ort |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
@@ -68,6 +68,7 @@ Crates other than `koo-editor` depend only on `koo-core`, never on each other.
 | Playback | Proxies by default (720p, short GOP H.264, `cache/proxies/<fp>.mp4`); a streaming decoder pipes RGBA frames from a long-lived ffmpeg process | Smooth 1080p60 on a laptop (PRD NFR); revisit after the GPUI video spike |
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks | Fast on multi-GB files; good enough to detect replacement (F2) |
 | Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`, GPU when built with it | Local, word timestamps, any language; no per-use cost |
+| Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB in `paths::models()`) on ONNX Runtime (`ort`, prebuilt and linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
 | Caches | Everything derived is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
 | Agent ↔ editor | The backend CLI launches `koo-mcp` (stdio MCP server). It connects to the editor over `127.0.0.1:<port>` with a per-session token; the editor serves tool calls on the UI thread in `AgentLink::pump` | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments and results are seconds (`f64`) or `"M:SS.mmm"` strings, converted to `Time` at the boundary | What models read and write reliably |
@@ -174,7 +175,46 @@ All nine streams are merged. What runs today:
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness;
   Whisper transcription behind the default `whisper` feature. The model
   downloads to `paths::models()` on first use, or set
-  `KOOEDITOR_WHISPER_MODEL`.
+  `KOOEDITOR_WHISPER_MODEL`. Word times come from a forced aligner
+  (`koo-analysis/src/forced.rs`, behind the default `aligner` feature):
+  Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
+  and answers with each word's start and end, in 80 ms steps; starts then
+  move 20 ms earlier, never into the word before. It knows English,
+  Spanish, French, German, Italian, Portuguese, Russian, Chinese,
+  Cantonese, Japanese and Korean. Its tokenizer (`bpe.rs`) downloads from
+  Qwen's repository on first use; the model from `MODEL_URL` (below), or
+  set `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages, and words
+  with neither letters nor digits, keep word edges measured on the audio
+  levels (`koo-analysis/src/align.rs`). When the model can't be loaded,
+  the result keeps those edges as version 1 and is aligned once the model
+  is there. Running that measurement after the aligner made cuts worse,
+  so it is only the fallback. Results of an older `ANALYSIS_VERSION` are
+  upgraded when a project opens, without running Whisper again.
+* **Alignment model file:** Qwen publishes PyTorch weights only, so
+  `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
+  [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
+  with its build scripts (`MODEL_URL` in `forced.rs` pins the commit;
+  589,447,679 bytes, SHA-256 `228f127b…9ab49df`). The graph takes 16 kHz
+  samples (a multiple of 160) and the text's token ids, and returns the
+  argmax of the 5,000 timestamp classes for each token. Inside it: the
+  Whisper log-mel features of `WhisperFeatureExtractor` (400-point frames,
+  hop 160, 128 mels), the audio encoder's convolutions per second of
+  features and its layers with attention over the whole chunk (as Qwen's
+  CPU path does), the audio between `<|audio_start|>` and `<|audio_end|>`
+  ahead of the text, and the causal text model. Exported with
+  `torch.onnx.export(dynamo=True)` at opset 18; constant-folded with ONNX
+  Runtime's basic optimizer; `Gemm` nodes rewritten as `MatMul` + `Add`;
+  weights quantized with `MatMulNBitsQuantizer` (4 bits, block 32,
+  symmetric; the embedding table as `GatherBlockQuantized`). It matches
+  Qwen's own pipeline exactly before quantization and to within 0.5
+  points of clean cuts after; dynamic int8 quantization breaks it. The
+  repository carries the Apache-2.0 licence text and states that it is a
+  modified (exported, quantized) Qwen3-ForcedAligner-0.6B.
+* **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
+  words, clear of both, on a frame boundary when the pause holds one, with
+  a 10 ms audio fade at the join. The transcript panel's word delete and
+  the agent's `cut_words` use it; `blade` and `ripple_delete` move a cut
+  that falls on a word into the nearest pause and say so.
 * **Agent:** `claude -p` verified end to end (collage → proposals → one
   change set → accept); Codex adapter written from its docs, not yet run.
   The editor binary doubles as the MCP server (`koo-editor mcp`).
@@ -207,7 +247,7 @@ The pro-editing build-out (§8) is merged on top:
 * **Audio:** clip and track effect inserts matched between preview and
   export, volume automation, crossfades, retimed audio, meters and a
   mixer.
-* **Agent:** a tool for every command (71), `create_fx`/`update_fx` with
+* **Agent:** a tool for every command (72), `create_fx`/`update_fx` with
   line-numbered compile errors, `preview_fx` to look at a program over
   time, graded scopes, timecode and frame addressing, and an external MCP
   bridge (below).
@@ -226,8 +266,25 @@ compositor feature on real FFmpeg-made media).
 ### Known gaps
 
 * Pending change sets are in memory only; they don't survive a restart.
-* Codex backend untested; Whisper untested in the cloud container (its
-  network blocks the model download).
+* Codex backend untested.
+* Inside connected speech (no pause between words) more than half of
+  the cuts still clip the tail or the onset of a word by more than 20 ms
+  (on hand-labelled English; nearly 9 in 10 before the aligner), and may
+  be heard; the agent's results say so. The aligner's 80 ms steps are the
+  limit: `facebook/wav2vec2-base-960h` (Apache-2.0, English only) left
+  4 points more cuts clean. whisper.cpp's DTW timestamps were tried and
+  came out 0.2–0.9 s late on real speech, so they are off.
+* Only English was measured against human labels. Spanish read speech
+  was only compared with another aligner (they agree about as well as on
+  English read speech). Japanese and Korean words are aligned as Whisper
+  splits them, not as Qwen's own word segmenters would.
+* Dutch and every other language outside the 11 keep Whisper's times as
+  measured on the audio.
+* The aligner needs about 600 MB of memory on top of Whisper (1.2 GB
+  peak while it runs on 30 s), a 589 MB download and ~4 s to load; it runs
+  at about 6 s per minute of audio on 4 CPU threads.
+* ONNX Runtime adds about 25 MB to the binary, and the first build
+  downloads it (from pyke's CDN).
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.

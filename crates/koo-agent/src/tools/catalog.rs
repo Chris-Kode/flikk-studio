@@ -326,19 +326,43 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "blade",
             Some(EditTimeline),
-            "Propose cutting clips at a time.",
+            "Propose cutting clips at a time. A time that falls on a spoken word moves to the nearest pause; the result says so.",
             object(
-                json!({ "at": time("Timeline seconds"), "tracks": strings("Track names or ids (default: all unlocked)"), "reason": reason() }),
+                json!({ "at": time("Timeline seconds"), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move off spoken words (default true)"), "reason": reason() }),
                 &["at"],
             ),
         ),
         spec(
             "ripple_delete",
             Some(EditTimeline),
-            "Propose removing a range and closing the gap.",
+            "Propose removing a range and closing the gap, with a short audio fade at the join. An edge that falls on a spoken word moves to the nearest pause; the result says so. To remove words, prefer `cut_words`.",
             object(
-                json!({ "range": range("Timeline range to remove"), "tracks": strings("Track names or ids (default: all unlocked)"), "reason": reason() }),
+                json!({ "range": range("Timeline range to remove"), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move edges off spoken words (default true)"), "reason": reason() }),
                 &["range"],
+            ),
+        ),
+        spec(
+            "cut_words",
+            Some(EditTimeline),
+            "Propose removing spoken words. Give each run by the `@` times of its first and last word from `get_transcript`. The cuts go in the pauses around the run, clear of the words kept, with a short audio fade; the pause before the run stays, the one after it goes. The result says where a cut has no pause to sit in.",
+            object(
+                json!({
+                    "runs": {
+                        "type": "array",
+                        "description": "Runs of consecutive words to remove",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": time("`@` time of the first word"),
+                                "to": time("`@` time of the last word (default: `from`)"),
+                                "text": string("The words, checked against the transcript")
+                            },
+                            "required": ["from"]
+                        }
+                    },
+                    "reason": reason()
+                }),
+                &["runs"],
             ),
         ),
         spec(

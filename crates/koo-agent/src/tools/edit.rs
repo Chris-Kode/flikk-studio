@@ -4,14 +4,17 @@ use super::analysis::timeline_words;
 use super::view::audio_segments;
 use super::{Done, Job, JobDone, Step, ToolCtx, propose};
 use crate::args::*;
+use crate::bridge::Content;
 use koo_core::audiofx::{AudioFx, AudioFxKind};
 use koo_core::command::{Command, Edge, InsertMode, PlacedClip};
+use koo_core::cuts::{FADE, Speech};
 use koo_core::fx::ParamKind;
 use koo_core::memory::Presets;
 use koo_core::model::{
     BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Grade, MarkerKind, Property,
     TrackKind, Transform,
 };
+use koo_core::query;
 use koo_core::{Time, TimeRange, TrackId};
 use serde_json::Value;
 
@@ -23,14 +26,32 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         .unwrap_or(tool)
         .to_owned();
     let commands = match tool {
-        "blade" => vec![Command::Blade {
-            at: args.time("at")?,
-            tracks: track_scope(ctx.project(), args)?,
-        }],
-        "ripple_delete" => vec![Command::RippleDelete {
-            range: args.range("range")?,
-            tracks: track_scope(ctx.project(), args)?,
-        }],
+        "blade" => {
+            let (at, note) = off_words(ctx, args, args.time("at")?)?;
+            let commands = vec![Command::Blade {
+                at,
+                tracks: track_scope(ctx.project(), args)?,
+            }];
+            return Ok(with_notes(propose(ctx, commands, &reason), note).into());
+        }
+        "ripple_delete" => {
+            let range = args.range("range")?;
+            let (start, a) = off_words(ctx, args, range.start)?;
+            let (end, b) = off_words(ctx, args, range.end)?;
+            if start >= end {
+                return fail(format!(
+                    "{range} lies inside one word; remove whole words with `cut_words`, \
+                     or pass `snap: false` to cut exactly there"
+                ));
+            }
+            let commands = vec![Command::RippleDelete {
+                range: TimeRange::new(start, end),
+                tracks: track_scope(ctx.project(), args)?,
+                fade: FADE,
+            }];
+            return Ok(with_notes(propose(ctx, commands, &reason), a.into_iter().chain(b)).into());
+        }
+        "cut_words" => return cut_words(ctx, args, &reason),
         "insert_clip" => insert_clip(ctx, args)?,
         "move_clip" => {
             let p = ctx.project();
@@ -317,6 +338,159 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         other => return Err(ToolError(format!("unknown tool `{other}`"))),
     };
     Ok(propose(ctx, commands, &reason).into())
+}
+
+/// Words heard within 5 s of `t`, and the speech to place cuts in.
+fn speech_near<'p>(
+    ctx: &'p ToolCtx,
+    t: Time,
+) -> Option<(Speech<'p>, Vec<koo_core::query::TimelineWord>)> {
+    let analysis = ctx.services.analysis.as_ref()?;
+    let project = ctx.project();
+    let around = Time::from_secs_f64(5.0);
+    let words = query::words_in_range(project, TimeRange::new(t - around, t + around), |fp| {
+        analysis.analysis(fp)
+    });
+    Some((Speech::new(project, |fp| analysis.analysis(fp)), words))
+}
+
+/// `t`, or the nearest pause when it falls on a word (unless `snap` is
+/// false), with a line for the model saying so.
+fn off_words(ctx: &ToolCtx, args: &Args, t: Time) -> ToolResultOf<(Time, Option<String>)> {
+    if args.opt_bool("snap")? == Some(false) {
+        return Ok((t, None));
+    }
+    let Some((speech, words)) = speech_near(ctx, t) else {
+        return Ok((t, None));
+    };
+    let Some(snap) = speech.snap(&words, t) else {
+        return Ok((t, None));
+    };
+    let w = &words[snap.word];
+    let mut note = format!(
+        "{t} fell on \"{}\" ({}); cut at {} instead.",
+        w.word.text.trim(),
+        w.timeline,
+        snap.cut.at
+    );
+    if snap.cut.tight {
+        note.push_str(" No pause there (the words run together), so the cut may be heard.");
+    }
+    Ok((snap.cut.at, Some(note)))
+}
+
+/// Append `notes` to a proposal's result.
+fn with_notes(mut done: Done, notes: impl IntoIterator<Item = String>) -> Done {
+    for note in notes {
+        if let Some(Content::Text { text }) = done.result.content.first_mut() {
+            text.push('\n');
+            text.push_str(&note);
+        }
+    }
+    done
+}
+
+/// Remove runs of words, each given by its first and last word's `@` time,
+/// cutting in the pauses around them.
+fn cut_words(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    let Some(analysis) = ctx.services.analysis.clone() else {
+        return fail("Analysis is not available in this build yet.");
+    };
+    let Some(Value::Array(runs)) = args.value("runs") else {
+        return fail("`runs` is a list of {from, to, text}");
+    };
+    if runs.is_empty() {
+        return fail("`runs` is empty");
+    }
+    let project = ctx.project();
+    let all = TimeRange::new(Time::ZERO, project.timeline.duration());
+    let words = query::words_in_range(project, all, |fp| analysis.analysis(fp));
+    let speech = Speech::new(project, |fp| analysis.analysis(fp));
+    let near = |t: Time| -> ToolResultOf<usize> {
+        let k = words
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, w)| (w.timeline.start - t).0.abs())
+            .map(|(k, _)| k)
+            .ok_or_else(|| ToolError("there is no transcribed speech on the timeline".into()))?;
+        if (words[k].timeline.start - t).0.abs() > Time::from_millis(250).0 {
+            return fail(format!(
+                "no word starts at {t}; the nearest is \"{}\" at {}",
+                words[k].word.text.trim(),
+                words[k].timeline.start
+            ));
+        }
+        Ok(k)
+    };
+    let mut ranges = Vec::new();
+    let mut lines = Vec::new();
+    for run in runs {
+        let run = Args(
+            run.as_object()
+                .ok_or_else(|| ToolError("each run is {from, to, text}".into()))?,
+            args.1,
+        );
+        let first = near(run.time("from")?)?;
+        let last = match run.opt_time("to")? {
+            Some(t) => near(t)?,
+            None => first,
+        };
+        if last < first {
+            return fail(format!(
+                "`to` {} is before `from` {}",
+                words[last].timeline.start, words[first].timeline.start
+            ));
+        }
+        let said: Vec<&str> = words[first..=last]
+            .iter()
+            .map(|w| w.word.text.trim())
+            .collect();
+        let said = said.join(" ");
+        if let Some(expected) = run.opt_str("text")?
+            && normalized(expected) != normalized(&said)
+        {
+            return fail(format!(
+                "the words from {} to {} are \"{said}\", not \"{expected}\"",
+                words[first].timeline.start, words[last].timeline.start
+            ));
+        }
+        for removal in speech.removals(&words, first, last) {
+            let mut line = format!("\"{said}\": {}", removal.range);
+            if removal.tight {
+                line.push_str(
+                    ", no pause at an edge (the words run together), so the cut may be heard",
+                );
+            }
+            lines.push(line);
+            ranges.push(removal.range);
+        }
+    }
+    let mut ranges = query::merge_ranges(ranges);
+    ranges.reverse();
+    let commands = ranges
+        .into_iter()
+        .map(|range| Command::RippleDelete {
+            range,
+            tracks: None,
+            fade: FADE,
+        })
+        .collect();
+    let mut done = propose(ctx, commands, reason);
+    done.excerpts = lines.clone();
+    Ok(with_notes(done, lines).into())
+}
+
+/// Lowercase words without punctuation, for comparing what was said.
+fn normalized(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 pub(super) fn edge(args: &Args) -> ToolResultOf<Edge> {

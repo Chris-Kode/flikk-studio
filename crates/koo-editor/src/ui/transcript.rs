@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::captions::LOW_CONFIDENCE;
 use koo_core::command::Command;
+use koo_core::cuts::FADE;
 use koo_core::query::TimelineWord;
 use koo_core::services::JobState;
 use koo_core::{ClipId, Time, TimeRange};
@@ -253,17 +254,22 @@ impl TranscriptPanel {
         let Some((a, b)) = self.selection() else {
             return;
         };
-        let commands: Vec<Command> = words::delete_ranges(&self.words, a, b)
+        let state = self.state.read(cx);
+        let Some(analysis) = state.services.analysis.clone() else {
+            return;
+        };
+        let ranges = words::delete_ranges(state.bus.project(), &*analysis, &self.words, a, b);
+        let Some(at) = ranges.iter().map(|r| r.start).min() else {
+            return;
+        };
+        let commands: Vec<Command> = ranges
             .into_iter()
             .map(|range| Command::RippleDelete {
                 range,
                 tracks: None,
+                fade: FADE,
             })
             .collect();
-        if commands.is_empty() {
-            return;
-        }
-        let at = self.words[a].timeline.start;
         self.anchor = None;
         self.head = None;
         self.state.update(cx, |s, cx| {
