@@ -172,9 +172,9 @@ All nine streams are merged. What runs today:
   change sets, protected-range warnings and conflict-safe accept.
 * **Media:** FFmpeg probe, fingerprint, frames, playback/audio streams,
   proxies, 6 × 5 collages (cached) and waveforms.
-* **Analysis:** background jobs, VAD, silences, shot changes, loudness;
-  Whisper transcription behind the default `whisper` feature. The model
-  downloads to `paths::models()` on first use, or set
+* **Analysis:** background jobs, VAD, silences, shot changes, loudness,
+  speakers (below); Whisper transcription behind the default `whisper`
+  feature. The model downloads to `paths::models()` on first use, or set
   `KOOEDITOR_WHISPER_MODEL`. Word times come from a forced aligner
   (`koo-analysis/src/forced.rs`, behind the default `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
@@ -210,6 +210,28 @@ All nine streams are merged. What runs today:
   points of clean cuts after; dynamic int8 quantization breaks it. The
   repository carries the Apache-2.0 licence text and states that it is a
   modified (exported, quantized) Qwen3-ForcedAligner-0.6B.
+* **Speakers** (`koo-analysis/src/diarize.rs`, behind the default
+  `diarizer` feature) follow pyannote's speaker-diarization-3.1 on ONNX
+  Runtime. pyannote segmentation-3.0 (MIT) hears 10 s windows 2.5 s
+  apart and says, every 17 ms, which of up to three voices of the window
+  speak. WeSpeaker ResNet34-LM (CC-BY-4.0, trained on VoxCeleb) turns
+  each window's voice, where it speaks alone, into a 256-number
+  voiceprint from Kaldi filterbank features (`fbank.rs`, equal to
+  `kaldi-native-fbank` to 1e-5). The voiceprints are clustered with
+  centroid linkage at pyannote's threshold (0.7046), clusters of fewer
+  than 12 join the nearest larger one, and the windows are averaged back
+  into who speaks in each frame. A word goes to the voice that speaks
+  through most of it, overlaps weighed by how many windows heard each;
+  below 0.6 of the speaking it keeps no speaker. Speakers are numbered
+  in order of appearance, and attributed after the aligner. Both models
+  download on first use from their own Hugging Face repositories
+  (`onnx-community/pyannote-segmentation-3.0`, 6 MB, and
+  `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; `diarize.rs` pins
+  the commits). When they can't be loaded, every word is "Speaker 1"
+  and the result is version 2, told apart once the models are there; a
+  voice that takes over most of an earlier speaker's words keeps its id.
+  ONNX Runtime allows one environment per process, so the aligner and
+  the diarizer share it (`onnx.rs`).
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both, on a frame boundary when the pause holds one, with
   a 10 ms audio fade at the join. The transcript panel's word delete and
@@ -283,6 +305,16 @@ compositor feature on real FFmpeg-made media).
 * The aligner needs about 600 MB of memory on top of Whisper (1.2 GB
   peak while it runs on 30 s), a 589 MB download and ~4 s to load; it runs
   at about 6 s per minute of audio on 4 CPU threads.
+* Speakers were measured on four AMI test meetings (four people each,
+  headset mix; pyannote's word-based reference): 4.1% of the speech of
+  one person at a time went to the wrong voice. On one meeting's
+  Whisper words, 98% of the words of one speaker got a speaker (99.5% of
+  them right) and 64% of the words said over someone else. Voices are
+  told apart within one item only; across items "Speaker 1" is not the
+  same person. Diarization runs at about 3% of the audio's length on 4
+  CPU threads (10 s for 5 minutes); the clustering fits on at most 2,000
+  voiceprints (about an hour of conversation) and matches the rest to
+  its voices.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN).
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
