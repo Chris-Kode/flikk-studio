@@ -1,29 +1,41 @@
 //! Local analysis: bundled Whisper transcription, voice activity, speakers,
-//! shot changes, silences and loudness. Implements
-//! `koo_core::services::AnalysisService`.
+//! sounds, music and beats, sound vectors, shot changes, silences and
+//! loudness. Implements `koo_core::services::AnalysisService`.
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
 //! of worker threads runs the pipeline (audio → VAD and levels → transcript
 //! → speakers → word edges on the audio → word times from the aligner →
-//! shot changes) and caches the result by fingerprint, so an item is only
-//! ever analyzed once (principle 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
-//! reusing their transcript and shot changes.
+//! sounds, music and sound vectors → beats → shot changes) and caches the
+//! result by fingerprint, so an item is only ever analyzed once (principle
+//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
+//! reusing their transcript (aligned words too, from version 2) and shot
+//! changes.
 
 mod align;
-#[cfg(feature = "aligner")]
+#[cfg(feature = "sounds")]
+mod beats;
+#[cfg(any(feature = "aligner", feature = "sounds"))]
 mod bpe;
 mod cache;
-#[cfg(any(feature = "whisper", feature = "aligner"))]
+#[cfg(feature = "sounds")]
+mod clap;
+#[cfg(any(feature = "whisper", feature = "aligner", feature = "sounds"))]
 mod download;
 mod ffmpeg;
 #[cfg(feature = "aligner")]
 mod forced;
+#[cfg(any(feature = "aligner", feature = "sounds"))]
+mod onnx;
+#[cfg(feature = "sounds")]
+mod sounds;
 pub mod speakers;
+#[cfg(feature = "sounds")]
+mod tagger;
 #[cfg(feature = "whisper")]
 mod transcribe;
 mod vad;
 
-use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, Transcript};
+use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript};
 use koo_core::ids::JobId;
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
 use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, ServiceResult};
@@ -96,6 +108,10 @@ struct Shared {
     whisper: transcribe::Whisper,
     #[cfg(feature = "aligner")]
     aligner: forced::Aligner,
+    #[cfg(feature = "sounds")]
+    sounds: sounds::SoundModels,
+    /// Sound vectors read so far, by fingerprint.
+    vectors: Mutex<HashMap<Fingerprint, Arc<SoundVectors>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -127,6 +143,9 @@ impl LocalAnalysis {
             whisper: Default::default(),
             #[cfg(feature = "aligner")]
             aligner: Default::default(),
+            #[cfg(feature = "sounds")]
+            sounds: Default::default(),
+            vectors: Mutex::default(),
         });
         let (queue, rx) = channel::<Task>();
         let rx = Arc::new(Mutex::new(rx));
@@ -238,6 +257,29 @@ impl AnalysisService for LocalAnalysis {
     fn loudness(&self, path: &Path, range: Option<TimeRange>) -> ServiceResult<Loudness> {
         ffmpeg::loudness(path, range).map_err(ServiceError::new)
     }
+
+    fn sound_vectors(&self, fingerprint: &Fingerprint) -> Option<Arc<SoundVectors>> {
+        let shared = &self.shared;
+        if let Some(v) = lock(&shared.vectors).get(fingerprint) {
+            return Some(v.clone());
+        }
+        let loaded = Arc::new(cache::load_vectors(fingerprint)?);
+        lock(&shared.vectors).insert(fingerprint.clone(), loaded.clone());
+        Some(loaded)
+    }
+
+    #[cfg(feature = "sounds")]
+    fn describe_sound(&self, text: &str) -> ServiceResult<Vec<f32>> {
+        let shared = &self.shared;
+        let files = fetch_model(shared, |start| {
+            clap::text_files(&shared.sounds.text_downloads, start)
+        })
+        .map_err(|e| ServiceError(format!("{e:#}")))?;
+        shared
+            .sounds
+            .describe(&files, text)
+            .map_err(|e| ServiceError(format!("{e:#}")))
+    }
 }
 
 impl Shared {
@@ -298,6 +340,8 @@ enum Step {
     Audio,
     Transcript,
     Words,
+    Sounds,
+    Beats,
     Shots,
 }
 
@@ -345,14 +389,21 @@ fn run(shared: &Shared, task: &Task) -> JobState {
         .as_ref()
         .and_then(|a| a.transcript.clone())
         .filter(|t| t.audio_stream == stream);
+    // Its words came from the aligner (or as near as this build gets).
+    let aligned =
+        reused_transcript.is_some() && previous.as_ref().is_some_and(|a| a.version >= ALIGNED);
     let mut steps = Vec::new();
     if audio_wanted {
         steps.push((Step::Audio, 1.0));
         if reused_transcript.is_none() {
             steps.push((Step::Transcript, 6.0));
         }
-        if cfg!(feature = "aligner") {
+        if cfg!(feature = "aligner") && !aligned {
             steps.push((Step::Words, 3.0));
+        }
+        if cfg!(feature = "sounds") {
+            steps.push((Step::Sounds, 4.0));
+            steps.push((Step::Beats, 1.0));
         }
     }
     if video_wanted && previous.is_none() {
@@ -394,6 +445,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
                 None => transcript(shared, task, stream, &audio, &analysis.speech, &progress),
             };
             match transcript {
+                Ok(Some(t)) if aligned => analysis.transcript = Some(t),
                 Ok(Some(mut t)) => {
                     align::refine(&mut t.words, &levels, &sound);
                     if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
@@ -401,7 +453,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
                         // version before the aligner found; a later run
                         // with the model upgrades them.
                         problems.push(format!("word alignment: {e:#}"));
-                        version = WITHOUT_ALIGNER;
+                        version = version.min(WITHOUT_ALIGNER);
                     }
                     analysis.transcript = Some(t);
                 }
@@ -413,7 +465,13 @@ fn run(shared: &Shared, task: &Task) -> JobState {
                     incomplete = true;
                 }
             }
+            drop(audio);
             analysis.levels = Some(levels);
+            if let Err(e) = hear(shared, task, stream, &mut analysis, &progress) {
+                // Speech is still good; a later run adds the sounds.
+                problems.push(format!("sounds: {e:#}"));
+                version = version.min(WITHOUT_SOUNDS);
+            }
         }
     }
 
@@ -505,6 +563,76 @@ const WITHOUT_ALIGNER: u32 = 1;
 #[cfg(not(feature = "aligner"))]
 const WITHOUT_ALIGNER: u32 = ANALYSIS_VERSION;
 
+/// Version from which words come from the aligner (in a build without it,
+/// from the audio levels, as near as that build gets); they are reused as
+/// they are.
+const ALIGNED: u32 = 2;
+
+/// Version of a result without the sounds a missing model would have
+/// found; a later run with the model adds them.
+#[cfg(feature = "sounds")]
+const WITHOUT_SOUNDS: u32 = 2;
+#[cfg(not(feature = "sounds"))]
+const WITHOUT_SOUNDS: u32 = ANALYSIS_VERSION;
+
+/// Sounds, music, beats and sound vectors for `analysis`, whose levels are
+/// measured. A model that could not be had is an error, so the result is
+/// upgraded once it is there; what the others heard is kept.
+#[cfg(feature = "sounds")]
+fn hear(
+    shared: &Shared,
+    task: &Task,
+    stream: u32,
+    analysis: &mut Analysis,
+    progress: &Progress,
+) -> anyhow::Result<()> {
+    let models = &shared.sounds;
+    let files = sounds::Files {
+        tagger: fetch_model(shared, |start| {
+            tagger::MODEL.ensure(&models.downloads[0], start)
+        })?,
+        beats: fetch_model(shared, |start| {
+            beats::MODEL.ensure(&models.downloads[1], start)
+        }),
+        clap: fetch_model(shared, |start| {
+            clap::AUDIO.ensure(&models.downloads[2], start)
+        }),
+    };
+    let heard = models.hear(
+        &task.item.path,
+        stream,
+        task.item.info.as_ref().map(|i| i.duration),
+        analysis.levels.as_ref(),
+        files,
+        &progress.step(Step::Sounds),
+        &progress.step(Step::Beats),
+    )?;
+    analysis.sounds = heard.sounds;
+    analysis.music = heard.music;
+    let mut problems = heard.problems;
+    if let Some(vectors) = heard.vectors {
+        if let Err(e) = cache::store_vectors(&task.fingerprint, &vectors) {
+            problems.push(format!("sound vectors: {e:#}"));
+        }
+        lock(&shared.vectors).insert(task.fingerprint.clone(), Arc::new(vectors));
+    }
+    if !problems.is_empty() {
+        anyhow::bail!("{}", problems.join("; "));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sounds"))]
+fn hear(
+    _shared: &Shared,
+    _task: &Task,
+    _stream: u32,
+    _analysis: &mut Analysis,
+    _progress: &Progress,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// Fit the transcript's words to the audio with the alignment model. A
 /// language it does not know keeps the edges measured on the audio, for
 /// good.
@@ -539,7 +667,7 @@ fn align_words(
 
 /// Run `ensure`, which may download a model, showing the download as a job
 /// of its own.
-#[cfg(any(feature = "whisper", feature = "aligner"))]
+#[cfg(any(feature = "whisper", feature = "aligner", feature = "sounds"))]
 fn fetch_model<T>(
     shared: &Shared,
     ensure: impl FnOnce(&dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>) -> anyhow::Result<T>,

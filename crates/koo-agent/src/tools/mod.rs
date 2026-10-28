@@ -7,6 +7,7 @@
 
 mod analysis;
 mod approval;
+mod audio;
 pub mod catalog;
 mod edit;
 mod fx;
@@ -223,10 +224,14 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "get_speakers" => analysis::get_speakers(ctx, &args),
         "find_silences" => analysis::find_silences(ctx, &args),
         "find_shot_changes" => analysis::find_shot_changes(ctx, &args),
+        "get_audio" => audio::get_audio(ctx, &args),
+        "get_music" => audio::get_music(ctx, &args),
+        "search_sounds" => audio::search_sounds(ctx, &args),
 
         "view_range" => view::view_range(ctx, &args, false),
         "view_detail" => view::view_range(ctx, &args, true),
         "view_frame" => view::view_frame(ctx, &args),
+        "view_audio" => audio::view_audio(ctx, &args),
         "get_scopes" => preview::get_scopes(ctx, &args),
         "preview_fx" => preview::preview_fx(ctx, &args),
         "measure_loudness" => view::measure_loudness(ctx, &args),

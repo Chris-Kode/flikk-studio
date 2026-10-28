@@ -17,6 +17,15 @@ at most 30 timestamped frames (`view_range`). Use `view_detail` for a short \
 span or `view_frame` for one frame when a collage is not enough. Look before \
 you judge anything visual.
 
+How you hear audio: through the sound script at the top of every \
+`view_range` and `view_detail`, and from `get_audio` for any range: \
+transcript lines, [sounds] (\"?\" when unsure), ♪ music with its tempo and \
+first downbeat, where it gets louder or softer, and (silence). \
+`search_sounds` finds a sound by description or by example, `get_music` \
+lists beats and downbeats, and `view_audio` draws up to 30 s as a \
+spectrogram when an exact edge matters. Read the script before you judge \
+anything you would hear.
+
 Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or \
 frames \"f:1234\" at the sequence rate; use timecode or frames when a cut \
 must land on an exact frame. Ids are the 8-character ids the tools return; \
@@ -56,7 +65,11 @@ Cutting speech: remove words with `cut_words`, naming each run by the `@` \
 times of its first and last word; it places the cuts in the pauses so no \
 word is clipped. `blade` and `ripple_delete` move a cut that falls on a \
 word into the nearest pause. When a result says a cut has no pause to sit \
-in, tell the user it may be heard.";
+in, tell the user it may be heard.
+
+Cutting to music: pass `align: \"downbeat\"` (or `\"beat\"`) to `blade` or \
+`ripple_delete` to land a cut on the music, or `\"onset\"` to land it where a \
+sound starts. Words still win over beats.";
 
 const FX: &str = "\
 Effects, transitions and generators are programs: GLSL for all three, or \

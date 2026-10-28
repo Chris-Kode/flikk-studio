@@ -1,6 +1,7 @@
-//! Qwen's byte-level BPE tokenizer, for the units the aligner is given:
-//! letters, digits and apostrophes only (see `forced::units`), so its
-//! pre-tokenizer reduces to a few rules instead of a regex.
+//! Byte-level BPE tokenizers in GPT-2's scheme: Qwen's for the units the
+//! aligner is given (letters, digits and apostrophes only, see
+//! `forced::units`), and RoBERTa's for the text of a sound search. Their
+//! pre-tokenizers reduce to a few rules instead of a regex.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -40,9 +41,21 @@ impl Bpe {
 
     /// Token ids of `unit`, as the tokenizer gives them for it standing
     /// between two special tokens.
+    #[cfg_attr(not(feature = "aligner"), allow(dead_code))]
     pub fn encode(&self, unit: &str) -> Vec<i64> {
         let text: String = unit.nfc().collect();
         pieces(&text)
+            .into_iter()
+            .flat_map(|piece| self.merge(piece))
+            .collect()
+    }
+
+    /// Token ids of `text` as RoBERTa's tokenizer splits it, without the
+    /// `<s>` and `</s>` around it.
+    #[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+    pub fn encode_text(&self, text: &str) -> Vec<i64> {
+        let text: String = text.nfc().collect();
+        spaced_pieces(&text)
             .into_iter()
             .flat_map(|piece| self.merge(piece))
             .collect()
@@ -84,6 +97,7 @@ impl Bpe {
 
 /// Qwen2's pre-tokenizer, `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+…`,
 /// on text without spaces.
+#[cfg_attr(not(feature = "aligner"), allow(dead_code))]
 fn pieces(text: &str) -> Vec<&str> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let letter = |i: usize| {
@@ -132,6 +146,54 @@ fn pieces(text: &str) -> Vec<&str> {
                     j += 1;
                 }
                 j
+            }
+        };
+        let end = chars.get(next).map_or(text.len(), |c| c.0);
+        out.push(&text[chars[i].0..end]);
+        i = next;
+    }
+    out
+}
+
+/// GPT-2's pre-tokenizer, `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`.
+#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+fn spaced_pieces(text: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let class = |i: usize| -> u8 {
+        match chars.get(i).map(|c| c.1) {
+            None => 0,
+            Some(c) if c.is_whitespace() => 1,
+            Some(c) if c.is_alphabetic() => 2,
+            Some(c) if c.is_numeric() => 3,
+            Some(_) => 4,
+        }
+    };
+    let run = |mut j: usize, k: u8| {
+        while class(j) == k {
+            j += 1;
+        }
+        j
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i].1;
+        let ahead: String = chars[i + 1..].iter().take(2).map(|c| c.1).collect();
+        let next = if c == '\'' && ["re", "ve", "ll"].iter().any(|s| ahead.starts_with(s)) {
+            i + 3
+        } else if c == '\'' && ahead.starts_with(['s', 't', 'm', 'd']) {
+            i + 2
+        } else if c == ' ' && class(i + 1) >= 2 {
+            run(i + 1, class(i + 1))
+        } else if class(i) >= 2 {
+            run(i, class(i))
+        } else {
+            // Whitespace, leaving the last space for the word after it.
+            let end = run(i, 1);
+            if end < chars.len() && end - i > 1 {
+                end - 1
+            } else {
+                end
             }
         };
         let end = chars.get(next).map_or(text.len(), |c| c.0);

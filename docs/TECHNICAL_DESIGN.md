@@ -45,8 +45,8 @@ behaviour and this file wins on structure.
 | --- | --- | --- |
 | `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
 | `koo-store` | SQLite persistence, autosave, crash recovery, settings, memory stores | core, rusqlite |
-| `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms | core, image |
-| `koo-analysis` | Background jobs: Whisper transcript, forced word alignment, VAD, speakers, shot changes, silences, loudness | core, whisper-rs, ort |
+| `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms, audio pictures | core, image |
+| `koo-analysis` | Background jobs: Whisper transcript, forced word alignment, VAD, speakers, sounds, music and beats, sound vectors, shot changes, silences, loudness | core, whisper-rs, ort |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
@@ -69,6 +69,10 @@ Crates other than `koo-editor` depend only on `koo-core`, never on each other.
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks | Fast on multi-GB files; good enough to detect replacement (F2) |
 | Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`, GPU when built with it | Local, word timestamps, any language; no per-use cost |
 | Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB in `paths::models()`) on ONNX Runtime (`ort`, prebuilt and linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
+| Hearing | The model never hears audio: analysis turns it into the sound script (words, `[sounds]`, `♪` music with tempo and changes, silences), beats to cut on, vectors to search by description, and spectrogram pictures | Neither backend takes audio input, and models place sounds in time far worse than in text; the transcript and collages already work this way |
+| Sounds | EfficientAT mn10_as (MIT; 527 AudioSet classes) on 2 s windows every second, each followed by 4 s of silence, grouped into about 180 names for the script | Small (20 MB) and fast on the CPU; trained on 10 s clips, it answers nonsense for 2 s alone, and 6 s gets nine in ten of its 10 s answers at half the cost |
+| Beats | Beat This! `final0` (MIT) on each stretch of music, 30 s chunks, its own minimal peak picking | State of the art for beats and downbeats without a DBN; runs only where the tagger heard music |
+| Sound search | LAION's larger_clap_general (Apache-2.0): a vector per 4 s window every 2 s, int8, in `<fp>.vectors`; the text tower encodes a description at query time | Finds sounds outside the tagger's vocabulary ("sizzling bacon") and sounds like an example; 2 s steps scored by the lower of their two windows place a sound to about 2 s |
 | Caches | Everything derived is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
 | Agent ↔ editor | The backend CLI launches `koo-mcp` (stdio MCP server). It connects to the editor over `127.0.0.1:<port>` with a per-session token; the editor serves tool calls on the UI thread in `AgentLink::pump` | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments and results are seconds (`f64`) or `"M:SS.mmm"` strings, converted to `Time` at the boundary | What models read and write reliably |
@@ -215,6 +219,57 @@ All nine streams are merged. What runs today:
   a 10 ms audio fade at the join. The transcript panel's word delete and
   the agent's `cut_words` use it; `blade` and `ripple_delete` move a cut
   that falls on a word into the nearest pause and say so.
+* **Sounds, music and beats** (behind the default `sounds` feature): after
+  the transcript, the audio is decoded once more at 32 kHz and streamed
+  through the sound tagger (`tagger.rs`) and CLAP's audio tower
+  (`clap.rs`) together; then the beat tracker (`beats.rs`) hears each
+  stretch of music the tagger found, with 1 s either side. Runs of tagged
+  windows become `Analysis::sounds` and `music` (version 3): a run starts
+  up to 2 s before its sound, so it is shrunk by that much, and a sound
+  under a second long moves onto the loudest stretch of the 10 ms levels
+  around it. Silence alone scores 0.25 as music, so music needs 0.5 to
+  start; bells, claps and other musical sounds inside music are dropped.
+  Music carries tags (genre, mood, vocals, lead instruments), beats and
+  downbeats; its tempo is the mean beat interval near the median. The
+  vectors go to `cache/analysis/<fp>.vectors`. A version 2 result keeps
+  its aligned words and runs only this pass. A model that cannot be had
+  leaves the result at version 2 (with what the others found) until it
+  is. On 4 CPU threads the pass takes about 2 minutes per hour of audio
+  for the tagger and 6 for CLAP, plus the beat tracker on music.
+  `koo-core/src/heard.rs` maps sounds, music, beats, level changes and
+  silences onto the timeline, and finds beats, downbeats and onsets (a
+  6 dB rise over the 50 ms before) near a cut.
+* **Sound model files:** our exports, built by `scripts/models/` and
+  hosted (with those scripts and the licence texts) at
+  [Chris-Kode/efficientat-mn10-as-onnx](https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx),
+  [Chris-Kode/beat-this-final0-onnx](https://huggingface.co/Chris-Kode/beat-this-final0-onnx)
+  and [Chris-Kode/larger-clap-general-onnx](https://huggingface.co/Chris-Kode/larger-clap-general-onnx);
+  the URLs in `tagger.rs`, `beats.rs` and `clap.rs` are pinned to a
+  commit. JKU's server was unreachable, so the Beat This! export was made
+  from the `safe-models/beat-this-final0` mirror, whose weights have not
+  been compared with JKU's. Each graph takes 32 kHz mono samples and holds
+  its model's own front end, so analysis decodes once for all three:
+  `efficientat-mn10-as.onnx` (20 MB; windows × samples in, 527
+  probabilities out; matches EfficientAT's pipeline to 2e-6),
+  `beat-this-final0.onnx` (85 MB; up to 30 s in, beat and downbeat logits
+  per 20 ms frame out; a windowed-sinc resampler to 22.05 kHz stands in
+  for soxr), `larger-clap-general-audio.onnx` (78 MB; 10 s windows in,
+  unit vectors out; resampled to 48 kHz inside; dynamic int8, cosine 0.997
+  to the float model) and `larger-clap-general-text.onnx` (141 MB; RoBERTa
+  token ids in; 8-bit block weights and an int8 embedding table, cosine
+  0.998). The text tower's tokenizer downloads from LAION's repository at
+  a pinned commit (`bpe.rs` encodes it). `KOOEDITOR_TAGGER_MODEL`,
+  `KOOEDITOR_BEATS_MODEL`, `KOOEDITOR_CLAP_AUDIO_MODEL` and
+  `KOOEDITOR_CLAP_TEXT_MODEL` point at local copies instead.
+* **Hearing tools:** `view_range` and `view_detail` open with the sound
+  script instead of the bare transcript; `get_audio` returns it for any
+  range, `get_music` lists tempo, beats, downbeats and level changes,
+  `search_sounds` ranks 2 s steps by a description or by an example
+  range, and `view_audio` draws up to 30 s as a spectrogram lane per track
+  (ffmpeg's `showspectrumpic`) with words, sounds and beats marked
+  (`MediaService::audio_picture`). `blade` and `ripple_delete` take
+  `align: beat | downbeat | onset`; a target clear of words wins over a
+  nearer one on a word, and the cut still moves off words after.
 * **Agent:** `claude -p` verified end to end (collage → proposals → one
   change set → accept); Codex adapter written from its docs, not yet run.
   The editor binary doubles as the MCP server (`koo-editor mcp`).
@@ -247,7 +302,7 @@ The pro-editing build-out (§8) is merged on top:
 * **Audio:** clip and track effect inserts matched between preview and
   export, volume automation, crossfades, retimed audio, meters and a
   mixer.
-* **Agent:** a tool for every command (72), `create_fx`/`update_fx` with
+* **Agent:** a tool for every command (76), `create_fx`/`update_fx` with
   line-numbered compile errors, `preview_fx` to look at a program over
   time, graded scopes, timecode and frame addressing, and an external MCP
   bridge (below).
@@ -284,7 +339,19 @@ compositor feature on real FFmpeg-made media).
   peak while it runs on 30 s), a 589 MB download and ~4 s to load; it runs
   at about 6 s per minute of audio on 4 CPU threads.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
-  downloads it (from pyke's CDN).
+  downloads it (from pyke's CDN). Its build script unpacks the archive
+  very slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
+  makes the first debug build take minutes instead of hours.
+* The sound models were checked on a 64 s collage of real recordings
+  (speech, ESC-50 effects, a drum loop), not measured against labels:
+  laughter, glass, knocks, a dog, applause, the music and its tempo were
+  found, rain under speech was not. Sounds the tagger is unsure of carry
+  "?" in the script.
+* Whisper still invents words over music and effects (the VAD reads them
+  as speech); the script shows them as speech, marked "?" when unsure.
+* The Beat This! export was verified here from a mirrored copy of the
+  `final0` weights; the hosted file must be built from the official
+  checkpoint (`export_beat_this.py` downloads it from JKU's server).
 * No GPU video surface yet: the viewer paints decoded RGBA frames (the
   PRD's GPUI video spike is still open), and Windows/macOS builds haven't
   been run.

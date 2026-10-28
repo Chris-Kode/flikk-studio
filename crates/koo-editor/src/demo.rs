@@ -475,6 +475,8 @@ fn interview_analysis(demo: &Demo) -> (Fingerprint, Analysis) {
         speech,
         shot_changes: Vec::new(),
         levels: None,
+        sounds: Vec::new(),
+        music: Vec::new(),
         version: ANALYSIS_VERSION,
     };
     (fingerprint, analysis)
