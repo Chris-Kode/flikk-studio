@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped when analysis learns something older results lack; those are
 /// upgraded the next time the item is analyzed.
-pub const ANALYSIS_VERSION: u32 = 3;
+pub const ANALYSIS_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -19,6 +19,8 @@ pub struct Word {
     pub text: String,
     /// 0..1 from the recognizer; the caption pass flags low values (PRD recipes).
     pub confidence: f32,
+    /// The voice heard saying it (from version 4; one for all before), or
+    /// `None` when that is unclear.
     pub speaker: Option<SpeakerId>,
 }
 

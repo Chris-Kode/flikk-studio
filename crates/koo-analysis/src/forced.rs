@@ -9,6 +9,7 @@
 use crate::bpe::Bpe;
 use crate::download::Download;
 use crate::ffmpeg::SAMPLE_RATE;
+use crate::onnx;
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::{Levels, Word};
 use koo_core::paths;
@@ -124,7 +125,10 @@ impl Aligner {
     ) -> Result<()> {
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
         if loaded.is_none() {
-            *loaded = Some((load(files)?, Bpe::load(&files.vocab, &files.merges)?));
+            *loaded = Some((
+                onnx::session(&files.model, "alignment model")?,
+                Bpe::load(&files.vocab, &files.merges)?,
+            ));
         }
         let (session, bpe) = loaded.as_mut().expect("loaded above");
 
@@ -178,10 +182,6 @@ impl Aligner {
         place(words, &aligned);
         Ok(())
     }
-}
-
-fn load(files: &Files) -> Result<Session> {
-    crate::onnx::session(&files.model, "alignment model")
 }
 
 /// The model's answer for each of `ids`, heard against `samples`.

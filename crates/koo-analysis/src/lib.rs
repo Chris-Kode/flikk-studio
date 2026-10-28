@@ -4,7 +4,7 @@
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
 //! of worker threads runs the pipeline (audio → VAD and levels → transcript
-//! → speakers → word edges on the audio → word times from the aligner →
+//! → word edges on the audio → word times from the aligner → speakers →
 //! sounds, music and sound vectors → beats → shot changes) and caches the
 //! result by fingerprint, so an item is only ever analyzed once (principle
 //! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
@@ -19,12 +19,21 @@ mod bpe;
 mod cache;
 #[cfg(feature = "sounds")]
 mod clap;
-#[cfg(any(feature = "whisper", feature = "aligner", feature = "sounds"))]
+#[cfg(feature = "diarizer")]
+mod diarize;
+#[cfg(any(
+    feature = "whisper",
+    feature = "aligner",
+    feature = "diarizer",
+    feature = "sounds"
+))]
 mod download;
+#[cfg(feature = "diarizer")]
+mod fbank;
 mod ffmpeg;
 #[cfg(feature = "aligner")]
 mod forced;
-#[cfg(any(feature = "aligner", feature = "sounds"))]
+#[cfg(any(feature = "aligner", feature = "diarizer", feature = "sounds"))]
 mod onnx;
 #[cfg(feature = "sounds")]
 mod sounds;
@@ -95,7 +104,6 @@ struct Task {
 
 struct Shared {
     options: Options,
-    #[cfg_attr(not(feature = "whisper"), allow(dead_code))]
     diarizer: Box<dyn Diarizer>,
     jobs: Arc<Mutex<Vec<JobStatus>>>,
     results: Mutex<HashMap<Fingerprint, Arc<Analysis>>>,
@@ -126,10 +134,14 @@ impl Default for LocalAnalysis {
 
 impl LocalAnalysis {
     pub fn new(options: Options) -> Self {
-        Self::with_diarizer(options, Box::new(SingleSpeaker))
+        #[cfg(feature = "diarizer")]
+        let diarizer = Box::new(diarize::Pyannote::default());
+        #[cfg(not(feature = "diarizer"))]
+        let diarizer = Box::new(SingleSpeaker);
+        Self::with_diarizer(options, diarizer)
     }
 
-    /// Use `diarizer` for speaker labels instead of a single "Speaker 1".
+    /// Use `diarizer` for speaker labels instead of the built-in one.
     pub fn with_diarizer(options: Options, diarizer: Box<dyn Diarizer>) -> Self {
         let workers = options.workers.max(1);
         let shared = Arc::new(Shared {
@@ -340,6 +352,7 @@ enum Step {
     Audio,
     Transcript,
     Words,
+    Speakers,
     Sounds,
     Beats,
     Shots,
@@ -401,6 +414,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
         if cfg!(feature = "aligner") && !aligned {
             steps.push((Step::Words, 3.0));
         }
+        steps.push((Step::Speakers, 3.0));
         if cfg!(feature = "sounds") {
             steps.push((Step::Sounds, 4.0));
             steps.push((Step::Beats, 1.0));
@@ -445,15 +459,24 @@ fn run(shared: &Shared, task: &Task) -> JobState {
                 None => transcript(shared, task, stream, &audio, &analysis.speech, &progress),
             };
             match transcript {
-                Ok(Some(t)) if aligned => analysis.transcript = Some(t),
                 Ok(Some(mut t)) => {
-                    align::refine(&mut t.words, &levels, &sound);
-                    if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
-                        // The edges measured on the audio are what the
-                        // version before the aligner found; a later run
-                        // with the model upgrades them.
-                        problems.push(format!("word alignment: {e:#}"));
-                        version = version.min(WITHOUT_ALIGNER);
+                    if !aligned {
+                        align::refine(&mut t.words, &levels, &sound);
+                        if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
+                            // The edges measured on the audio are what the
+                            // version before the aligner found; a later run
+                            // with the model upgrades them.
+                            problems.push(format!("word alignment: {e:#}"));
+                            version = version.min(WITHOUT_ALIGNER);
+                        }
+                    }
+                    // After the aligner, so each word is heard where it is.
+                    if let Err(e) = attribute_speakers(shared, &audio, &mut t, &progress) {
+                        // One speaker for all, as the version before the
+                        // diarizer had; a later run with the models
+                        // tells them apart.
+                        problems.push(format!("speakers: {e:#}"));
+                        version = version.min(WITHOUT_DIARIZER);
                     }
                     analysis.transcript = Some(t);
                 }
@@ -546,13 +569,12 @@ fn transcript(
         words = out.words;
         detected = Some(out.language);
     }
-    let speakers = speakers::attribute(&*shared.diarizer, audio, &mut words);
     Ok(Some(Transcript {
         fingerprint: task.fingerprint.clone(),
         audio_stream: stream,
         language: detected.unwrap_or_else(|| "und".into()),
         words,
-        speakers,
+        speakers: Vec::new(),
     }))
 }
 
@@ -665,9 +687,47 @@ fn align_words(
     Ok(())
 }
 
+/// Tell the voices in `transcript` apart. When the diarizer can't, its
+/// words keep the speakers they had, or get one for all.
+fn attribute_speakers(
+    shared: &Shared,
+    audio: &[f32],
+    transcript: &mut Transcript,
+    progress: &Progress,
+) -> anyhow::Result<()> {
+    if transcript.words.is_empty() {
+        transcript.speakers.clear();
+        return Ok(());
+    }
+    let labels = fetch_model(shared, |start| shared.diarizer.prepare(start)).and_then(|()| {
+        shared
+            .diarizer
+            .diarize(audio, &transcript.words, &progress.step(Step::Speakers))
+    });
+    match labels {
+        Ok(labels) => {
+            transcript.speakers = speakers::apply(labels, &mut transcript.words);
+            Ok(())
+        }
+        Err(e) => {
+            if transcript.speakers.is_empty() {
+                let one = SingleSpeaker.diarize(audio, &transcript.words, &|_| {})?;
+                transcript.speakers = speakers::apply(one, &mut transcript.words);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Version of a result whose speakers are one "Speaker 1". Without the
+/// diarizer, that is as good as this build gets.
+#[cfg(feature = "diarizer")]
+const WITHOUT_DIARIZER: u32 = 3;
+#[cfg(not(feature = "diarizer"))]
+const WITHOUT_DIARIZER: u32 = ANALYSIS_VERSION;
+
 /// Run `ensure`, which may download a model, showing the download as a job
 /// of its own.
-#[cfg(any(feature = "whisper", feature = "aligner", feature = "sounds"))]
 fn fetch_model<T>(
     shared: &Shared,
     ensure: impl FnOnce(&dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>) -> anyhow::Result<T>,
