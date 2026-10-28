@@ -14,6 +14,14 @@ pub const BASE: ModelFile = ModelFile {
     size: 147_951_465,
 };
 
+pub const SMALL: ModelFile = ModelFile {
+    name: "ggml-small.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+    env: ENV,
+    what: "Whisper small model",
+    size: 487_601_967,
+};
+
 pub const MEDIUM: ModelFile = ModelFile {
     name: "ggml-medium.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin",
@@ -22,12 +30,12 @@ pub const MEDIUM: ModelFile = ModelFile {
     size: 1_533_763_059,
 };
 
-pub const LARGE: ModelFile = ModelFile {
-    name: "ggml-large-v3.bin",
-    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",
+pub const TURBO: ModelFile = ModelFile {
+    name: "ggml-large-v3-turbo.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
     env: ENV,
-    what: "Whisper large-v3 model",
-    size: 3_095_033_483,
+    what: "Whisper large-v3-turbo model",
+    size: 1_624_555_275,
 };
 
 /// Threads at most; more stop paying off, and leave none to the rest of

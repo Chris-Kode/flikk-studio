@@ -1,6 +1,8 @@
 //! Whisper (MIT, OpenAI) as ggml, run by whisper.cpp, with word times, in
-//! three sizes: base by default, medium and large-v3 for fewer mistakes at
-//! several times the memory and time.
+//! four sizes: base by default; small and medium for fewer mistakes at
+//! several times the memory and time; large-v3-turbo, large-v3 with its
+//! decoder cut from 32 layers to 4, near large-v3's accuracy at about
+//! medium's size.
 //!
 //! Whisper given music or a long silence makes words up there, often a
 //! verbatim repeat of what was said before, and its timestamps come loose
@@ -23,17 +25,23 @@ pub const BASE: Model = Model {
     files: &[config::BASE],
 };
 
+pub const SMALL: Model = Model {
+    id: "whisper-small",
+    name: "Whisper small",
+    files: &[config::SMALL],
+};
+
 pub const MEDIUM: Model = Model {
     id: "whisper-medium",
     name: "Whisper medium",
     files: &[config::MEDIUM],
 };
 
-pub const LARGE: Model = Model {
-    id: "whisper-large-v3",
-    name: "Whisper large-v3",
-    files: &[config::LARGE],
+pub const TURBO: Model = Model {
+    id: "whisper-large-v3-turbo",
+    name: "Whisper large-v3-turbo",
+    files: &[config::TURBO],
 };
 
 /// Every size, smallest first.
-pub const SIZES: [&Model; 3] = [&BASE, &MEDIUM, &LARGE];
+pub const SIZES: [&Model; 4] = [&BASE, &SMALL, &MEDIUM, &TURBO];
