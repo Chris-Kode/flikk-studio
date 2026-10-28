@@ -40,8 +40,10 @@ const EMBEDDING_URL: &str = "https://huggingface.co/Wespeaker/wespeaker-voxceleb
 
 /// Samples the segmentation model hears at once.
 const WINDOW: usize = 10 * SAMPLE_RATE as usize;
-/// Samples between windows; a multiple of [`fbank::SHIFT`].
-const STEP: usize = SAMPLE_RATE as usize;
+/// Samples between windows; a multiple of [`fbank::SHIFT`]. pyannote
+/// uses 1 s; 2.5 s told voices apart as well on AMI meetings in a third
+/// of the time, 5 s merged voices.
+const STEP: usize = SAMPLE_RATE as usize * 5 / 2;
 /// Segmentation frames per window, and samples between them.
 const FRAMES: usize = 589;
 const FRAME_STEP: usize = 270;
@@ -414,7 +416,7 @@ fn reconstruct(
             }
         }
     }
-    let mut active = vec![false; total * voices];
+    let mut active = vec![0f32; total * voices];
     let mut order: Vec<usize> = (0..voices).collect();
     for t in 0..total {
         let at_once = if windows[t] > 0 {
@@ -433,9 +435,7 @@ fn reconstruct(
         order.sort_by(|&a, &b| level(b).total_cmp(&level(a)));
         for &k in order.iter().take(at_once) {
             // A voice no window put here does not speak here.
-            if level(k) > 0.0 {
-                active[t * voices + k] = true;
-            }
+            active[t * voices + k] = level(k);
         }
     }
     Voices {
@@ -445,11 +445,13 @@ fn reconstruct(
     }
 }
 
-/// Voices speaking in each segmentation frame of the item.
+/// Voices speaking in each segmentation frame of the item, each with the
+/// share of the windows hearing the frame that heard it there (0 when it
+/// does not speak).
 struct Voices {
     count: usize,
     frames: usize,
-    active: Vec<bool>,
+    active: Vec<f32>,
 }
 
 impl Voices {
@@ -463,19 +465,20 @@ impl Voices {
         index(from)..index(to)
     }
 
-    fn votes(&self, frames: std::ops::Range<usize>) -> Vec<usize> {
-        let mut votes = vec![0; self.count];
+    fn votes(&self, frames: std::ops::Range<usize>) -> Vec<f32> {
+        let mut votes = vec![0.0; self.count];
         for t in frames {
             for (k, v) in votes.iter_mut().enumerate() {
-                *v += self.active[t * self.count + k] as usize;
+                *v += self.active[t * self.count + k];
             }
         }
         votes
     }
 }
 
-/// The voice that speaks through most of `word`, and the share of the
-/// speaking it has there.
+/// The voice that speaks through most of `word`, and its share of the
+/// speaking there. Where two speak at once, the windows' agreement on
+/// each decides.
 fn attribute(voices: &Voices, word: &Word) -> Option<(usize, f32)> {
     if voices.count == 0 {
         return None;
@@ -488,10 +491,10 @@ fn attribute(voices: &Voices, word: &Word) -> Option<(usize, f32)> {
         frames = at.min(voices.frames - 1)..(at + 1).min(voices.frames);
     }
     let mut votes = voices.votes(frames);
-    if votes.iter().all(|&v| v == 0) {
+    if votes.iter().all(|&v| v == 0.0) {
         votes = voices.votes(voices.frames_in(start - REACH, end + REACH));
     }
-    let all: usize = votes.iter().sum();
-    let best = (0..votes.len()).max_by_key(|&k| votes[k])?;
-    (all > 0).then(|| (best, votes[best] as f32 / all as f32))
+    let all: f32 = votes.iter().sum();
+    let best = (0..votes.len()).max_by(|&a, &b| votes[a].total_cmp(&votes[b]))?;
+    (all > 0.0).then(|| (best, votes[best] / all))
 }
