@@ -6,6 +6,7 @@
 
 use super::param::{Key, format_value};
 use super::{InspectorPanel, section};
+use crate::ui::caption_style::Target;
 use crate::ui::library::{FxGlyph, fx_glyph};
 use crate::ui::mixer::clip::ClipAudioFx;
 use crate::ui::timeline::glyph::{Glyph, glyph};
@@ -59,7 +60,6 @@ impl ClipKind {
 pub(super) struct ClipTrack {
     pub id: TrackId,
     pub kind: ClipKind,
-    pub caption_style: Option<String>,
 }
 
 /// The tabs of a picture clip; Color for media only, Audio only when it has
@@ -83,7 +83,6 @@ impl InspectorPanel {
             let info = ClipTrack {
                 id: track.id,
                 kind: ClipKind::of(track, clip),
-                caption_style: track.caption_style.clone(),
             };
             Some((info, clip.clone()))
         })
@@ -385,7 +384,6 @@ impl InspectorPanel {
             let info = ClipTrack {
                 id: track.id,
                 kind: ClipKind::Audio,
-                caption_style: None,
             };
             (info, audio.clone())
         });
@@ -515,7 +513,10 @@ impl InspectorPanel {
             .gap_4()
             .child(section("Text", cx).child(Textarea::new(&self.text)));
         if track.kind == ClipKind::Caption {
-            body = body.child(self.caption_style_picker(track, cx));
+            let target = Target::Track(track.id);
+            self.caption_style
+                .update(cx, |p, cx| p.set_target(target, cx));
+            body = body.child(self.caption_style.clone());
         }
         body.into_any_element()
     }
@@ -637,80 +638,6 @@ impl InspectorPanel {
             Edge::End => TimeRange::new(range.start, t),
         };
         (next != range && next.end > next.start).then_some(next)
-    }
-
-    /// The caption track's style preset.
-    fn caption_style_picker(&self, track: &ClipTrack, cx: &mut Context<Self>) -> Div {
-        let state = self.state.clone();
-        let styles: Vec<String> = self
-            .state
-            .read(cx)
-            .presets
-            .caption_styles
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        let current = track
-            .caption_style
-            .clone()
-            .or_else(|| styles.first().cloned())
-            .unwrap_or_default();
-        let track_id = track.id;
-        let picked = current.clone();
-        section("Style", cx).child(
-            Button::new("caption-style")
-                .outline()
-                .small()
-                .w_full()
-                .label(current)
-                .dropdown_caret(true)
-                .dropdown_menu(move |mut menu, _, _| {
-                    for (i, name) in styles.iter().enumerate() {
-                        let state = state.clone();
-                        let style = name.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(name.clone())
-                                .checked(*name == picked)
-                                .on_click(move |_, _, cx| {
-                                    state.update(cx, |s, cx| {
-                                        set_caption_style(s, track_id, i, style.clone(), cx)
-                                    })
-                                }),
-                        );
-                    }
-                    menu
-                }),
-        )
-    }
-}
-
-/// Style the caption track. The first caption track's style is also the
-/// one new captions use.
-fn set_caption_style(
-    s: &mut crate::state::EditorState,
-    track: TrackId,
-    index: usize,
-    style: String,
-    cx: &mut Context<crate::state::EditorState>,
-) {
-    let first = s
-        .bus
-        .project()
-        .timeline
-        .tracks
-        .iter()
-        .find(|t| t.kind == TrackKind::Caption)
-        .map(|t| t.id);
-    if first == Some(track) {
-        s.pick_caption_style(index, cx);
-    } else {
-        s.execute(
-            Command::SetCaptionStyle {
-                track,
-                style: Some(style),
-            },
-            cx,
-        );
     }
 }
 

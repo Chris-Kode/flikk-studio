@@ -341,6 +341,7 @@ fn project() -> Demo {
             ClipContent::Caption {
                 text: text.into(),
                 speaker: None,
+                words: Vec::new(),
             },
         ));
     }

@@ -39,7 +39,7 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
             v["title"] = json!(text);
             v["template"] = json!(template);
         }
-        ClipContent::Caption { text, speaker } => {
+        ClipContent::Caption { text, speaker, .. } => {
             v["caption"] = json!(text);
             if let Some(s) = speaker {
                 v["speaker"] = json!(short(s));

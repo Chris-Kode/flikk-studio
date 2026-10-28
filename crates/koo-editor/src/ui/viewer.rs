@@ -12,6 +12,7 @@ mod audio;
 mod cache;
 mod player;
 
+use super::lettering::{self, Lettering, Place};
 use super::timeline::glyph::{Glyph, glyph};
 use super::timeline::{
     NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
@@ -24,7 +25,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use koo_core::compose::{self, Stills};
-use koo_core::memory::{CaptionPosition, CaptionStyle};
+use koo_core::memory::CaptionStyle;
 use koo_core::model::{ClipContent, Project, TrackKind};
 use koo_core::query::topmost_video_clip;
 use koo_core::services::{PixelOrder, Services};
@@ -403,28 +404,7 @@ impl Focusable for ViewerPanel {
     }
 }
 
-/// Where a block of text sits, as the burned-in ASS styles place it.
-#[derive(Clone, Copy)]
-enum Anchor {
-    Top,
-    Middle,
-    Bottom,
-    /// Left-aligned, 6% in and 12% up.
-    LowerThird,
-}
-
-/// Text drawn over the picture at the playhead, styled like the render
-/// (`koo_deliver::captions::to_ass`): sizes in 1080p units, bold white
-/// with a black outline and a half-transparent shadow.
-struct Lettering {
-    lines: Vec<SharedString>,
-    font: SharedString,
-    size: f32,
-    outline: f32,
-    shadow: f32,
-    anchor: Anchor,
-}
-
+/// Captions and titles at `t`, as the render draws them.
 fn lettering(project: &Project, styles: &[CaptionStyle], t: Time) -> Vec<Lettering> {
     let mut out = Vec::new();
     for track in project.timeline.tracks.iter().filter(|t| !t.mix.mute) {
@@ -433,36 +413,24 @@ fn lettering(project: &Project, styles: &[CaptionStyle], t: Time) -> Vec<Letteri
         };
         match (&clip.content, track.kind) {
             (ClipContent::Title { text, template }, _) => {
-                let lower = template.contains("lower");
-                out.push(Lettering {
-                    lines: text.lines().map(|l| l.to_string().into()).collect(),
-                    font: "Inter".into(),
-                    size: if lower { 54. } else { 96. },
-                    outline: if lower { 2. } else { 3. },
-                    shadow: 0.,
-                    anchor: if lower {
-                        Anchor::LowerThird
-                    } else {
-                        Anchor::Middle
-                    },
-                });
+                out.push(Lettering::title(text, template.contains("lower")));
             }
-            (ClipContent::Caption { text, .. }, TrackKind::Caption) if !text.trim().is_empty() => {
+            (ClipContent::Caption { text, words, .. }, TrackKind::Caption)
+                if !text.trim().is_empty() =>
+            {
                 let style = captions::style_for(track, styles);
+                let duration = clip.duration.as_secs_f64();
+                let at = (t - clip.start).as_secs_f64();
+                let starts = captions::word_starts(text, words, duration);
                 out.push(Lettering {
                     lines: captions::wrap(text, &style)
                         .into_iter()
                         .map(Into::into)
                         .collect(),
-                    font: style.font.clone().into(),
-                    size: style.size,
-                    outline: style.outline,
-                    shadow: style.shadow,
-                    anchor: match style.position {
-                        CaptionPosition::Top => Anchor::Top,
-                        CaptionPosition::Middle => Anchor::Middle,
-                        CaptionPosition::Bottom => Anchor::Bottom,
-                    },
+                    pose: captions::pose_at(&style, duration, at),
+                    spoken: captions::spoken(&starts, at),
+                    style: style.into_owned(),
+                    place: Place::Caption,
                 });
             }
             _ => {}
@@ -487,7 +455,7 @@ impl Render for ViewerPanel {
         let settings = project.timeline.settings.clone();
         let aspect = settings.width.max(1) as f32 / settings.height.max(1) as f32;
         let picture = self.picture.clone();
-        let letters = lettering(project, &state.presets.caption_styles, t);
+        let letters = lettering(project, &state.caption_styles(), t);
         let bg = cx.theme().background;
         let width_cell = self.frame_width.clone();
 
@@ -508,8 +476,9 @@ impl Render for ViewerPanel {
                         let _ =
                             window.paint_image(frame, frame, Corners::default(), image, 0, false);
                     }
+                    let k = f32::from(frame.size.height) / 1080.;
                     for l in &letters {
-                        paint_text(l, frame, window, cx);
+                        lettering::paint(l, frame, k, window, cx);
                     }
                 });
             },
@@ -577,82 +546,4 @@ fn fit(bounds: Bounds<Pixels>, aspect: f32, pad: Pixels) -> Bounds<Pixels> {
         ),
         size(fw, fh),
     )
-}
-
-fn paint_text(l: &Lettering, frame: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    let (w, h) = (frame.size.width, frame.size.height);
-    let k = f32::from(h) / 1080.;
-    let font_size = px((l.size * k).max(4.));
-    let line_h = font_size * 1.2;
-    let block = line_h * l.lines.len() as f32;
-    let margin = h * 0.07;
-    let top = match l.anchor {
-        Anchor::Top => frame.top() + margin,
-        Anchor::Middle => frame.center().y - block / 2.,
-        Anchor::Bottom => frame.bottom() - margin - block,
-        Anchor::LowerThird => frame.bottom() - h * 0.12 - block,
-    };
-    let mut font = window.text_style().font();
-    font.family = l.font.clone();
-    font.weight = FontWeight::BOLD;
-    let outline = l.outline * k;
-    let shadow = l.shadow * k;
-    // Outline as copies of the line around the glyphs.
-    let ring: Vec<Point<Pixels>> = if outline > 0. {
-        let steps = if outline > 2. { 16 } else { 8 };
-        (0..steps)
-            .map(|i| {
-                let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-                point(px(a.cos() * outline), px(a.sin() * outline))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for (i, text) in l.lines.iter().enumerate() {
-        let line = shape(window, text, font.clone(), font_size, white());
-        let x = match l.anchor {
-            Anchor::LowerThird => frame.origin.x + w * 0.06,
-            _ => frame.center().x - line.width / 2.,
-        };
-        let origin = point(x, top + line_h * i as f32);
-        if shadow > 0. {
-            let dark = shape(window, text, font.clone(), font_size, black().opacity(0.5));
-            let _ = dark.paint(
-                origin + point(px(shadow), px(shadow)),
-                line_h,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-        if !ring.is_empty() {
-            let dark = shape(window, text, font.clone(), font_size, black());
-            for offset in &ring {
-                let _ = dark.paint(origin + *offset, line_h, TextAlign::Left, None, window, cx);
-            }
-        }
-        let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
-    }
-}
-
-fn shape(
-    window: &mut Window,
-    text: &SharedString,
-    font: Font,
-    font_size: Pixels,
-    color: Hsla,
-) -> ShapedLine {
-    let run = TextRun {
-        len: text.len(),
-        font,
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text.clone(), font_size, &[run], None)
 }
