@@ -12,7 +12,7 @@ use ort::value::Tensor;
 
 pub const MODEL: ModelFile = ModelFile {
     name: "beat-this-final0.onnx",
-    url: "https://huggingface.co/Chris-Kode/beat-this-final0-onnx/resolve/main/beat-this-final0.onnx",
+    url: "https://huggingface.co/Chris-Kode/beat-this-final0-onnx/resolve/49876475cff9b3abe3eec5303fa539cff06843fd/beat-this-final0.onnx",
     env: "KOOEDITOR_BEATS_MODEL",
     what: "beat tracker",
 };

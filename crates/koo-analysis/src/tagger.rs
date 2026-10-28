@@ -20,7 +20,7 @@ use ort::value::Tensor;
 
 pub const MODEL: ModelFile = ModelFile {
     name: "efficientat-mn10-as.onnx",
-    url: "https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx/resolve/main/efficientat-mn10-as.onnx",
+    url: "https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx/resolve/81f0e383972c52b354de924778fec25b2a4a29d3/efficientat-mn10-as.onnx",
     env: "KOOEDITOR_TAGGER_MODEL",
     what: "sound tagger",
 };
