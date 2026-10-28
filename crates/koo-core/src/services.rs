@@ -173,6 +173,11 @@ pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
     /// item; a no-op if cached for its fingerprint.
     fn analyze(&self, item: &MediaItem) -> JobId;
+    /// Like [`AnalysisService::analyze`], but replacing the cached
+    /// results, on the models picked now.
+    fn analyze_again(&self, item: &MediaItem) -> JobId {
+        self.analyze(item)
+    }
     fn jobs(&self) -> Vec<JobStatus>;
     /// Cached results, if analysis has run.
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>>;

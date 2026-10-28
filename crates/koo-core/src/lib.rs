@@ -25,6 +25,7 @@ pub mod grade;
 pub mod heard;
 pub mod history;
 pub mod ids;
+pub mod jobs;
 pub mod memory;
 pub mod model;
 pub mod ops;

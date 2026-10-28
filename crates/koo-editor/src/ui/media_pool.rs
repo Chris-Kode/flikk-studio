@@ -9,7 +9,7 @@ use crate::ui::MediaDrag;
 use crate::ui::timeline::glyph::{Glyph, glyph};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -148,7 +148,35 @@ impl MediaPoolPanel {
         }
     }
 
+    /// The item's "Analyze" entry; `None` for images, which are not
+    /// analyzed. Disabled while a task's picked model is missing, or the
+    /// item is queued or analyzing.
+    fn analyze_entry(&self, id: MediaId, cx: &App) -> Option<AnalyzeEntry> {
+        let state = self.state.read(cx);
+        let item = state.bus.project().media(id)?;
+        let analysis = state.services.analysis.as_ref()?;
+        if item.kind == MediaKind::Image {
+            return None;
+        }
+        let busy = self
+            .jobs
+            .iter()
+            .rev()
+            .find(|j| j.media == Some(id))
+            .is_some_and(|j| matches!(j.state, JobState::Queued | JobState::Running { .. }));
+        let fp = item.fingerprint.as_ref();
+        Some(AnalyzeEntry {
+            again: fp.and_then(|fp| analysis.analysis(fp)).is_some(),
+            enabled: fp.is_some() && state.models_ready() && !busy,
+        })
+    }
+
     // ------------------------------------------------------------ actions
+
+    fn analyze(&mut self, id: MediaId, again: bool, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.analyze(id, again, cx));
+        self.poll(cx);
+    }
 
     fn prompt_import(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -475,6 +503,14 @@ impl MediaPoolPanel {
                 .children(progress.map(|p| progress_bar(p, cx)))
         };
         let panel = cx.entity();
+        let more = Button::new(ElementId::Name(format!("media-menu-{id}").into()))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .dropdown_menu({
+                let panel = panel.clone();
+                move |menu, _, cx| item_menu(menu, &panel, id, cx)
+            });
         let base = div()
             .id(ElementId::Name(format!("media-{id}").into()))
             .rounded_md()
@@ -493,7 +529,12 @@ impl MediaPoolPanel {
                 .flex_col()
                 .gap_1()
                 .child(thumb_box(px(116.)))
-                .child(div().text_xs().truncate().child(name)),
+                .child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(div().flex_1().min_w_0().text_xs().truncate().child(name))
+                        .child(more),
+                ),
             Layout::List => base
                 .h(px(32.))
                 .px_1()
@@ -507,23 +548,11 @@ impl MediaPoolPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .children(item.info.as_ref().map(|i| clock(i.duration))),
-                ),
+                )
+                .child(more),
         };
-        base.context_menu(move |menu, _, _| {
-            let (open, remove) = (panel.clone(), panel.clone());
-            menu.item(
-                PopupMenuItem::new("Open in viewer").on_click(move |_, window, cx| {
-                    open.update(cx, |this, cx| this.select(id, true, window, cx))
-                }),
-            )
-            .item(PopupMenuItem::separator())
-            .item(
-                PopupMenuItem::new("Remove from project").on_click(move |_, window, cx| {
-                    remove.update(cx, |this, cx| this.confirm_remove(id, window, cx))
-                }),
-            )
-        })
-        .into_any_element()
+        base.context_menu(move |menu, _, cx| item_menu(menu, &panel, id, cx))
+            .into_any_element()
     }
 
     fn details(&self, item: &MediaItem, cx: &mut Context<Self>) -> AnyElement {
@@ -667,6 +696,43 @@ impl Render for MediaPoolPanel {
             )
             .children(selected.map(|item| self.details(&item, cx)))
     }
+}
+
+/// The "Analyze" entry of an item's menu.
+#[derive(Clone, Copy)]
+struct AnalyzeEntry {
+    /// The item has results, which analyzing replaces.
+    again: bool,
+    enabled: bool,
+}
+
+/// The menu of item `id`, from its "⋯" button or a right click; built as
+/// it opens, so what it offers is current.
+fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &App) -> PopupMenu {
+    let mut menu = menu;
+    if let Some(entry) = panel.read(cx).analyze_entry(id, cx) {
+        let panel = panel.clone();
+        let label = if entry.again {
+            "Analyze again"
+        } else {
+            "Analyze"
+        };
+        menu = menu.item(PopupMenuItem::new(label).disabled(!entry.enabled).on_click(
+            move |_, _, cx| panel.update(cx, |this, cx| this.analyze(id, entry.again, cx)),
+        ));
+    }
+    let (open, remove) = (panel.clone(), panel.clone());
+    menu.item(
+        PopupMenuItem::new("Open in viewer").on_click(move |_, window, cx| {
+            open.update(cx, |this, cx| this.select(id, true, window, cx))
+        }),
+    )
+    .item(PopupMenuItem::separator())
+    .item(
+        PopupMenuItem::new("Remove from project").on_click(move |_, window, cx| {
+            remove.update(cx, |this, cx| this.confirm_remove(id, window, cx))
+        }),
+    )
 }
 
 #[derive(Clone, Copy)]

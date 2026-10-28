@@ -6,21 +6,20 @@ use crate::model::Fingerprint;
 use crate::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Bumped when analysis learns something older results lack; those are
-/// upgraded the next time the item is analyzed.
-pub const ANALYSIS_VERSION: u32 = 6;
+/// Bumped when results change shape or meaning. Results of another version
+/// are not read: the item is not analyzed until the user analyzes it again.
+pub const ANALYSIS_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
-    /// Where the word sounds: Whisper's estimate, moved onto the audio
-    /// (from version 1) so that its edges sit at the pauses around it, then
-    /// (from version 2) onto the letters a forced aligner hears.
+    /// Where the word sounds: Whisper's estimate, moved onto the audio so
+    /// that its edges sit at the pauses around it, then onto the letters a
+    /// forced aligner hears.
     pub range: TimeRange,
     pub text: String,
     /// 0..1 from the recognizer; the caption pass flags low values (PRD recipes).
     pub confidence: f32,
-    /// The voice heard saying it (from version 4; one for all before), or
-    /// `None` when that is unclear.
+    /// The voice heard saying it, or `None` when that is unclear.
     pub speaker: Option<SpeakerId>,
 }
 
@@ -39,11 +38,6 @@ pub struct Transcript {
     pub language: String,
     pub words: Vec<Word>,
     pub speakers: Vec<Speaker>,
-    /// The [`ANALYSIS_VERSION`] that transcribed it, kept while later
-    /// versions reuse it; 0 before version 5, which transcribes only the
-    /// speech a voice activity model hears.
-    #[serde(default)]
-    pub version: u32,
 }
 
 impl Transcript {
@@ -52,7 +46,7 @@ impl Transcript {
     }
 }
 
-/// A sound other than speech or music (from version 3): the AudioSet
+/// A sound other than speech or music: the AudioSet
 /// classes the sound tagger heard, under the name the sound script uses.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sound {
@@ -64,7 +58,7 @@ pub struct Sound {
     pub confidence: f32,
 }
 
-/// A stretch of music (from version 3), with its beat when one was found.
+/// A stretch of music, with its beat when one was found.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Music {
     pub range: TimeRange,
@@ -111,7 +105,7 @@ fn typical_gap(times: &[Time]) -> Option<f64> {
 }
 
 /// What a source sounds like, as unit vectors a description of a sound can
-/// be matched against (from version 3): one for every `step`, each heard
+/// be matched against: one for every `step`, each heard
 /// over `window` from its start. Kept apart from [`Analysis`] (an hour is
 /// 1.8 MB), as bytes of int8 with a scale per vector.
 #[derive(Clone, Debug, PartialEq)]
@@ -250,9 +244,9 @@ impl SoundVectors {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     pub transcript: Option<Transcript>,
-    /// Speech regions from voice activity detection: Silero's from version
-    /// 6, which leaves music out, else an energy VAD's, which takes music
-    /// for speech.
+    /// Speech regions from voice activity detection: Silero's, which leaves
+    /// music out, or in a build without it an energy VAD's, which takes
+    /// music for speech.
     pub speech: Vec<TimeRange>,
     pub shot_changes: Vec<Time>,
     /// Loudness of the analyzed audio stream, for placing cuts in pauses.
@@ -262,7 +256,7 @@ pub struct Analysis {
     pub sounds: Vec<Sound>,
     #[serde(default)]
     pub music: Vec<Music>,
-    /// The [`ANALYSIS_VERSION`] that made it; 0 before versions existed.
+    /// The [`ANALYSIS_VERSION`] that made it.
     #[serde(default)]
     pub version: u32,
 }

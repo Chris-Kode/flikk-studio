@@ -9,7 +9,7 @@ use super::view::{image_content, save_png};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, range_json, secs, short};
 use crate::bridge::{Content, ToolResult};
-use koo_core::analysis::{ANALYSIS_VERSION, SoundVectors};
+use koo_core::analysis::SoundVectors;
 use koo_core::heard::{self, HeardMusic};
 use koo_core::model::{Clip, Fingerprint, MediaKind, Project, TrackKind};
 use koo_core::services::{
@@ -170,7 +170,7 @@ pub fn unheard_note(project: &Project, services: &Services, range: TimeRange) ->
             m.fingerprint
                 .as_ref()
                 .and_then(|fp| service.analysis(fp))
-                .is_none_or(|a| a.version < ANALYSIS_VERSION)
+                .is_none()
         })
         .count();
     (unheard > 0).then(|| {

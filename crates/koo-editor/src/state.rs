@@ -164,25 +164,7 @@ impl EditorState {
         this.refresh_model_notices();
         this.load_agent_memory();
         this.load_presets();
-        this.analyze_media();
         this
-    }
-
-    /// Analysis is cached per file, so this only runs for media never
-    /// analyzed or analyzed by an older version (which gains, e.g., word
-    /// times measured on the audio).
-    fn analyze_media(&self) {
-        let Some(analysis) = &self.services.analysis else {
-            return;
-        };
-        for item in &self.bus.project().media {
-            if item.kind != koo_core::model::MediaKind::Image
-                && item.fingerprint.is_some()
-                && item.path.is_file()
-            {
-                analysis.analyze(item);
-            }
-        }
     }
 
     /// Hand the agent its role, its recipes, the approved rules of the
@@ -787,7 +769,6 @@ impl EditorState {
         self.status = persistence::take_notice();
         self.load_agent_memory();
         self.load_presets();
-        self.analyze_media();
         cx.notify();
     }
 
@@ -937,14 +918,35 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Every task analysis runs on a model has the model picked for it
+    /// downloaded, so media can be analyzed.
+    pub fn models_ready(&self) -> bool {
+        self.model_tasks.iter().all(|t| t.model().is_downloaded())
+    }
+
+    /// Analyze `media` (again, replacing its results, when `again`): the
+    /// user asked. Waits its turn behind the items queued before it.
+    pub fn analyze(&mut self, media: koo_core::MediaId, again: bool, cx: &mut Context<Self>) {
+        let (Some(analysis), Some(item)) =
+            (&self.services.analysis, self.bus.project().media(media))
+        else {
+            return;
+        };
+        if again {
+            analysis.analyze_again(item);
+        } else {
+            analysis.analyze(item);
+        }
+        cx.notify();
+    }
+
     pub fn dismiss_notice(&mut self, key: &str, cx: &mut Context<Self>) {
         self.notices.dismiss(key);
         cx.notify();
     }
 
     /// When a download ends or a model file appears or goes, bring the
-    /// notices up to date; when a model arrives, analyze again what went
-    /// without it.
+    /// notices up to date.
     fn poll_models(&mut self, cx: &mut Context<Self>) {
         let seen = (
             self.model_tasks
@@ -956,15 +958,7 @@ impl EditorState {
         if seen == self.models_seen {
             return;
         }
-        let arrived = seen
-            .0
-            .iter()
-            .zip(&self.models_seen.0)
-            .any(|(now, before)| *now && !*before);
         self.models_seen = seen;
-        if arrived {
-            self.analyze_media();
-        }
         if self.refresh_model_notices() {
             cx.notify();
         }

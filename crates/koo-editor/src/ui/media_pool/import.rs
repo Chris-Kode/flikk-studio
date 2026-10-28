@@ -1,5 +1,5 @@
 //! Import: probe and fingerprint off-thread, add with `ImportMedia`, then
-//! queue analysis and the playback proxy (PRD M1, M3, M4).
+//! make the playback proxy (PRD M1, M4). Analysis waits for the user.
 
 use super::MediaPoolPanel;
 use gpui_kit::*;
@@ -67,11 +67,6 @@ impl MediaPoolPanel {
             return;
         }
         self.selected = Some(item.id);
-        if let Some(analysis) = &services.analysis
-            && item.kind != MediaKind::Image
-        {
-            analysis.analyze(&item);
-        }
         if let Some(media) = services.media
             && item.kind == MediaKind::Video
             && item.proxy.is_none()

@@ -2,15 +2,14 @@
 //! sounds, music and beats, sound vectors, shot changes, silences and
 //! loudness. Implements `koo_core::services::AnalysisService`.
 //!
-//! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
-//! of worker threads runs the pipeline (audio → the speech Silero hears, or
-//! the energy VAD's without it, and levels → transcript of that speech →
-//! word edges on the audio → word times from the aligner → speakers →
-//! sounds, music and sound vectors → beats → shot changes) and caches the
-//! result by fingerprint, so an item is only ever analyzed once (principle
-//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
-//! reusing their shot changes and a transcript from version 5 on (aligned
-//! words too, from version 2).
+//! [`LocalAnalysis::analyze`] queues a job and returns at once; the jobs run
+//! one at a time, in the order queued, on a [`JobQueue`]. Each runs the
+//! pipeline (audio → the speech Silero hears, or the energy VAD's without
+//! it, and levels → transcript of that speech → word edges on the audio →
+//! word times from the aligner → speakers → sounds, music and sound vectors
+//! → beats → shot changes) and caches the result by fingerprint, so an item
+//! is analyzed once (principle 4) until the user analyzes it again. Results
+//! of another [`ANALYSIS_VERSION`] are not read.
 
 mod align;
 mod cache;
@@ -22,24 +21,26 @@ mod vad;
 
 use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript};
 use koo_core::ids::JobId;
+use koo_core::jobs::{JobProgress, JobQueue};
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
-use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, ServiceResult};
+use koo_core::services::{AnalysisService, JobStatus, ServiceError, ServiceResult};
 use koo_core::time::{Time, TimeRange};
 use koo_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use ffmpeg::binary as ffmpeg_binary;
 
+/// Items analyzed at once. Each already keeps several cores busy, and the
+/// large models a lot of memory.
+const JOBS_AT_ONCE: usize = 1;
+
 /// Engine-wide settings.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Items analyzed at once. Whisper already uses several cores per item.
-    pub workers: usize,
     /// ffmpeg scene score (0..1) above which a frame starts a new shot.
     pub scene_threshold: f32,
 }
@@ -47,7 +48,6 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            workers: 2,
             scene_threshold: 0.3,
         }
     }
@@ -70,11 +70,11 @@ pub struct AnalyzeOptions {
 /// The [`AnalysisService`] that runs everything on this machine.
 pub struct LocalAnalysis {
     shared: Arc<Shared>,
-    queue: Sender<Task>,
+    /// Keyed by fingerprint, so the same file is analyzed once at a time.
+    queue: JobQueue<Fingerprint>,
 }
 
 struct Task {
-    job: JobId,
     item: MediaItem,
     fingerprint: Fingerprint,
     options: AnalyzeOptions,
@@ -83,10 +83,7 @@ struct Task {
 struct Shared {
     options: Options,
     diarizer: Box<dyn Diarizer>,
-    jobs: Arc<Mutex<Vec<JobStatus>>>,
     results: Mutex<HashMap<Fingerprint, Arc<Analysis>>>,
-    /// Fingerprints queued or running, so the same file is analyzed once.
-    in_flight: Mutex<HashMap<Fingerprint, JobId>>,
     /// Results kept in memory although a step failed; analyzed again on
     /// the next request.
     incomplete: Mutex<HashSet<Fingerprint>>,
@@ -154,13 +151,10 @@ impl LocalAnalysis {
     /// Use `diarizer` for speaker labels instead of the selected speakers
     /// model. The other tasks run on their selected models.
     pub fn with_diarizer(options: Options, diarizer: Box<dyn Diarizer>) -> Self {
-        let workers = options.workers.max(1);
         let shared = Arc::new(Shared {
             options,
             diarizer,
-            jobs: Arc::default(),
             results: Mutex::default(),
-            in_flight: Mutex::default(),
             incomplete: Mutex::default(),
             #[cfg(feature = "whisper")]
             voice: koo_models::voice_activity::runner(ModelTask::VoiceActivity.model()),
@@ -172,17 +166,10 @@ impl LocalAnalysis {
             sounds: Default::default(),
             vectors: Mutex::default(),
         });
-        let (queue, rx) = channel::<Task>();
-        let rx = Arc::new(Mutex::new(rx));
-        for i in 0..workers {
-            let shared = shared.clone();
-            let rx = rx.clone();
-            std::thread::Builder::new()
-                .name(format!("koo-analysis-{i}"))
-                .spawn(move || worker(&shared, &rx))
-                .expect("spawn analysis worker");
+        Self {
+            shared,
+            queue: JobQueue::new("koo-analysis", JOBS_AT_ONCE),
         }
-        Self { shared, queue }
     }
 
     /// Whether this build can transcribe (the `whisper` feature).
@@ -191,8 +178,8 @@ impl LocalAnalysis {
     }
 
     /// The tasks this build runs on a model, in the order it runs them.
-    /// Each model is downloaded only when the user asks; until then its
-    /// task is left out, and results are upgraded once it is there.
+    /// Each model is downloaded only when the user asks; a step whose model
+    /// is missing fails, and the result is kept for the session only.
     pub fn model_tasks() -> Vec<ModelTask> {
         let mut tasks = Vec::new();
         if cfg!(feature = "whisper") {
@@ -217,58 +204,31 @@ impl LocalAnalysis {
     /// Like [`AnalysisService::analyze`], choosing the audio stream and
     /// language, or forcing a fresh run.
     pub fn analyze_with(&self, item: &MediaItem, options: AnalyzeOptions) -> JobId {
-        let shared = &self.shared;
-        let id = JobId::new();
         let label = format!("Analyze {}", file_name(&item.path));
-        let finished = |state| {
-            lock(&shared.jobs).push(JobStatus {
-                id,
-                label: label.clone(),
-                media: Some(item.id),
-                state,
-            });
-            id
-        };
         let Some(fp) = item.fingerprint.clone() else {
-            return finished(JobState::Failed {
-                message: format!(
-                    "{} has no fingerprint yet; analysis is keyed by it",
-                    file_name(&item.path)
-                ),
-            });
+            let message = format!(
+                "{} has no fingerprint yet; analysis is keyed by it",
+                file_name(&item.path)
+            );
+            return self.queue.finished(label, Some(item.id), Err(message));
         };
-        let mut in_flight = lock(&shared.in_flight);
-        if let Some(&running) = in_flight.get(&fp) {
-            return running;
+        if !options.refresh && self.shared.complete(&fp) {
+            return self.queue.finished(label, Some(item.id), Ok(()));
         }
-        if !options.refresh && shared.complete(&fp) {
-            return finished(JobState::Done);
-        }
-        in_flight.insert(fp.clone(), id);
-        drop(in_flight);
-        finished(JobState::Queued);
+        let shared = self.shared.clone();
         let task = Task {
-            job: id,
             item: item.clone(),
             fingerprint: fp.clone(),
             options,
         };
-        if self.queue.send(task).is_err() {
-            lock(&shared.in_flight).remove(&fp);
-            shared.set_state(
-                id,
-                JobState::Failed {
-                    message: "analysis workers stopped".into(),
-                },
-            );
-        }
-        id
+        self.queue.push(fp, label, Some(item.id), move |job| {
+            run(&shared, &task, job)
+        })
     }
 
     /// Drop finished and failed jobs from [`AnalysisService::jobs`].
     pub fn clear_finished(&self) {
-        lock(&self.shared.jobs)
-            .retain(|j| matches!(j.state, JobState::Queued | JobState::Running { .. }));
+        self.queue.clear_finished();
     }
 }
 
@@ -277,8 +237,16 @@ impl AnalysisService for LocalAnalysis {
         self.analyze_with(item, AnalyzeOptions::default())
     }
 
+    fn analyze_again(&self, item: &MediaItem) -> JobId {
+        let options = AnalyzeOptions {
+            refresh: true,
+            ..AnalyzeOptions::default()
+        };
+        self.analyze_with(item, options)
+    }
+
     fn jobs(&self) -> Vec<JobStatus> {
-        lock(&self.shared.jobs).clone()
+        self.queue.jobs()
     }
 
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>> {
@@ -312,6 +280,8 @@ impl AnalysisService for LocalAnalysis {
         if let Some(v) = lock(&shared.vectors).get(fingerprint) {
             return Some(v.clone());
         }
+        // Vectors beside a result of another version are not read either.
+        shared.cached(fingerprint)?;
         let loaded = Arc::new(cache::load_vectors(fingerprint)?);
         lock(&shared.vectors).insert(fingerprint.clone(), loaded.clone());
         Some(loaded)
@@ -328,18 +298,9 @@ impl AnalysisService for LocalAnalysis {
 }
 
 impl Shared {
-    fn set_state(&self, id: JobId, state: JobState) {
-        if let Some(job) = lock(&self.jobs).iter_mut().find(|j| j.id == id) {
-            job.state = state;
-        }
-    }
-
-    /// Whether full, current results are in memory.
+    /// Whether full results are in memory or on disk.
     fn complete(&self, fp: &Fingerprint) -> bool {
-        lock(&self.results)
-            .get(fp)
-            .is_some_and(|a| a.version >= ANALYSIS_VERSION)
-            && !lock(&self.incomplete).contains(fp)
+        self.cached(fp).is_some() && !lock(&self.incomplete).contains(fp)
     }
 
     /// Memory first, then the disk cache.
@@ -353,30 +314,9 @@ impl Shared {
     }
 }
 
-fn worker(shared: &Arc<Shared>, rx: &Mutex<Receiver<Task>>) {
-    loop {
-        let task = match lock(rx).recv() {
-            Ok(task) => task,
-            Err(_) => return, // the service was dropped
-        };
-        let state = if !task.options.refresh
-            && shared.cached(&task.fingerprint).is_some()
-            && shared.complete(&task.fingerprint)
-        {
-            JobState::Done
-        } else {
-            shared.set_state(task.job, JobState::Running { fraction: 0.0 });
-            run(shared, &task)
-        };
-        lock(&shared.in_flight).remove(&task.fingerprint);
-        shared.set_state(task.job, state);
-    }
-}
-
 /// Maps each pipeline step onto its share of the job's progress bar.
 struct Progress {
-    jobs: Arc<Mutex<Vec<JobStatus>>>,
-    job: JobId,
+    job: JobProgress,
     steps: Vec<(Step, f32)>,
 }
 
@@ -405,50 +345,29 @@ impl Progress {
         let before: f32 = self.steps[..at.unwrap_or(0)].iter().map(|s| s.1).sum();
         let span = at.map_or(0.0, |i| self.steps[i].1);
         let (from, span) = (before / total, span / total);
-        let (jobs, job) = (self.jobs.clone(), self.job);
-        move |f: f32| {
-            if let Some(j) = lock(&jobs).iter_mut().find(|j| j.id == job) {
-                j.state = JobState::Running {
-                    fraction: (from + span * f.clamp(0.0, 1.0)).min(1.0),
-                };
-            }
-        }
+        let job = self.job.clone();
+        move |f: f32| job.set(from + span * f.clamp(0.0, 1.0))
     }
 }
 
-/// The whole pipeline for one item. Partial results are kept in memory
-/// even when a step fails, but only complete ones are written to disk, so
-/// a later session tries again.
-fn run(shared: &Shared, task: &Task) -> JobState {
+/// The whole pipeline for one item. A step that fails leaves its part out
+/// (or a stand-in: the energy VAD's speech, one speaker for all) and the
+/// rest goes on; such a result is kept in memory for this session but only
+/// complete ones are written to disk.
+fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     let item = &task.item;
     let duration = item.info.as_ref().map(|i| i.duration);
     let audio_wanted = has_audio(item);
     let video_wanted = has_video(item);
     let stream = choose_stream(shared, item, &task.options);
-    // A complete result of an older version keeps what is still good.
-    let previous = (!task.options.refresh)
-        .then(|| shared.cached(&task.fingerprint))
-        .flatten()
-        .filter(|a| {
-            a.version < ANALYSIS_VERSION && !lock(&shared.incomplete).contains(&task.fingerprint)
-        });
-    let reused_transcript = previous
-        .as_ref()
-        .and_then(|a| a.transcript.clone())
-        .filter(|t| t.audio_stream == stream && t.version >= SPEECH_ONLY);
-    // Its words came from the aligner (or as near as this build gets).
-    let aligned =
-        reused_transcript.is_some() && previous.as_ref().is_some_and(|a| a.version >= ALIGNED);
     let mut steps = Vec::new();
     if audio_wanted {
         steps.push((Step::Audio, 1.0));
         if cfg!(feature = "whisper") {
             steps.push((Step::Speech, 0.5));
         }
-        if reused_transcript.is_none() {
-            steps.push((Step::Transcript, 6.0));
-        }
-        if cfg!(feature = "aligner") && !aligned {
+        steps.push((Step::Transcript, 6.0));
+        if cfg!(feature = "aligner") {
             steps.push((Step::Words, 3.0));
         }
         steps.push((Step::Speakers, 3.0));
@@ -457,21 +376,19 @@ fn run(shared: &Shared, task: &Task) -> JobState {
             steps.push((Step::Beats, 1.0));
         }
     }
-    if video_wanted && previous.is_none() {
+    if video_wanted {
         steps.push((Step::Shots, 2.0));
     }
     let progress = Progress {
-        jobs: shared.jobs.clone(),
-        job: task.job,
+        job: job.clone(),
         steps,
     };
 
     let mut analysis = Analysis::default();
     let mut problems: Vec<String> = Vec::new();
-    // A step failed in a way a rerun could fix.
-    let mut incomplete = false;
+    // This build cannot transcribe: keep the rest for this session, but
+    // leave the disk cache for a build that can.
     let mut unpersisted = false;
-    let mut version = ANALYSIS_VERSION;
 
     if audio_wanted {
         let audio = match ffmpeg::extract_audio(
@@ -484,76 +401,51 @@ fn run(shared: &Shared, task: &Task) -> JobState {
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => None,
             Err(e) => {
                 problems.push(format!("audio: {e:#}"));
-                incomplete = true;
                 None
             }
         };
         if let Some(audio) = audio {
             let Voice { speech, stretches } =
                 listen(shared, &audio, &progress).unwrap_or_else(|e| {
-                    // Music and all; a later run with the model finds the
-                    // speech again.
                     problems.push(format!("voice activity: {e:#}"));
-                    version = version.min(WITHOUT_SILERO);
                     Voice::energy(&audio)
                 });
             analysis.speech = speech;
             let (levels, sound) = align::measure(&audio);
-            let transcript = match reused_transcript {
-                Some(t) => Ok(Some(t)),
-                None => transcript(
-                    shared,
-                    task,
-                    stream,
-                    &audio,
-                    &analysis.speech,
-                    stretches.as_deref(),
-                    &progress,
-                ),
-            };
+            let transcript = transcript(
+                shared,
+                task,
+                stream,
+                &audio,
+                &analysis.speech,
+                stretches.as_deref(),
+                &progress,
+            );
             match transcript {
                 Ok(Some(mut t)) => {
-                    if !aligned {
-                        align::refine(&mut t.words, &levels, &sound);
-                        if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
-                            // The edges measured on the audio are what the
-                            // version before the aligner found; a later run
-                            // with the model upgrades them.
-                            problems.push(format!("word alignment: {e:#}"));
-                            version = version.min(WITHOUT_ALIGNER);
-                        }
+                    align::refine(&mut t.words, &levels, &sound);
+                    if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
+                        // The edges measured on the audio stand.
+                        problems.push(format!("word alignment: {e:#}"));
                     }
                     // After the aligner, so each word is heard where it is.
                     if let Err(e) = attribute_speakers(shared, &audio, &mut t, &progress) {
-                        // One speaker for all, as the version before the
-                        // diarizer had; a later run with the models
-                        // tells them apart.
                         problems.push(format!("speakers: {e:#}"));
-                        version = version.min(WITHOUT_DIARIZER);
                     }
                     analysis.transcript = Some(t);
                 }
-                // This build cannot transcribe: keep the rest for this
-                // session, but leave the disk cache for a build that can.
                 Ok(None) => unpersisted = true,
-                Err(e) => {
-                    problems.push(format!("transcript: {e:#}"));
-                    incomplete = true;
-                }
+                Err(e) => problems.push(format!("transcript: {e:#}")),
             }
             drop(audio);
             analysis.levels = Some(levels);
             if let Err(e) = hear(shared, task, stream, &mut analysis, &progress) {
-                // Speech is still good; a later run adds the sounds.
                 problems.push(format!("sounds: {e:#}"));
-                version = version.min(WITHOUT_SOUNDS);
             }
         }
     }
 
-    if let Some(previous) = &previous {
-        analysis.shot_changes = previous.shot_changes.clone();
-    } else if video_wanted {
+    if video_wanted {
         match ffmpeg::shot_changes(
             &item.path,
             shared.options.scene_threshold,
@@ -562,40 +454,29 @@ fn run(shared: &Shared, task: &Task) -> JobState {
         ) {
             Ok(shots) => analysis.shot_changes = shots,
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => {}
-            Err(e) => {
-                problems.push(format!("shot changes: {e:#}"));
-                incomplete = true;
-            }
+            Err(e) => problems.push(format!("shot changes: {e:#}")),
         }
     }
 
     let fp = &task.fingerprint;
-    analysis.version = version;
-    if incomplete && previous.is_some() {
-        // The upgrade failed: keep what the older version found, and try
-        // again on the next request.
-        return JobState::Failed {
-            message: problems.join("; "),
-        };
-    }
-    if !incomplete
+    analysis.version = ANALYSIS_VERSION;
+    let complete = problems.is_empty();
+    if complete
         && !unpersisted
         && let Err(e) = cache::store(fp, &analysis)
     {
         problems.push(format!("cache: {e:#}"));
     }
     lock(&shared.results).insert(fp.clone(), Arc::new(analysis));
-    if incomplete {
-        lock(&shared.incomplete).insert(fp.clone());
-    } else {
+    if complete {
         lock(&shared.incomplete).remove(fp);
+    } else {
+        lock(&shared.incomplete).insert(fp.clone());
     }
     if problems.is_empty() {
-        JobState::Done
+        Ok(())
     } else {
-        JobState::Failed {
-            message: problems.join("; "),
-        }
+        Err(problems.join("; "))
     }
 }
 
@@ -632,14 +513,6 @@ fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result
 fn listen(_shared: &Shared, audio: &[f32], _progress: &Progress) -> anyhow::Result<Voice> {
     Ok(Voice::energy(audio))
 }
-
-/// Version of a result whose speech is the energy VAD's, because the voice
-/// activity model could not be had. Without it, that is as good as this
-/// build gets.
-#[cfg(feature = "whisper")]
-const WITHOUT_SILERO: u32 = 5;
-#[cfg(not(feature = "whisper"))]
-const WITHOUT_SILERO: u32 = ANALYSIS_VERSION;
 
 /// The words in the `stretches` of `audio` Silero heard; without them,
 /// only an item the energy VAD finds no `speech` in is transcribed (as
@@ -684,37 +557,12 @@ fn transcript(
         language: detected.unwrap_or_else(|| "und".into()),
         words,
         speakers: Vec::new(),
-        version: ANALYSIS_VERSION,
     }))
 }
 
-/// Transcript version from which Whisper hears only the speech Silero
-/// finds. Older transcripts can hold words made up over music or silence,
-/// so they are transcribed again.
-const SPEECH_ONLY: u32 = 5;
-
-/// Version of a result whose words the aligner did not place. Without the
-/// aligner, edges measured on the audio are as good as this build gets.
-#[cfg(feature = "aligner")]
-const WITHOUT_ALIGNER: u32 = 1;
-#[cfg(not(feature = "aligner"))]
-const WITHOUT_ALIGNER: u32 = ANALYSIS_VERSION;
-
-/// Version from which words come from the aligner (in a build without it,
-/// from the audio levels, as near as that build gets); they are reused as
-/// they are.
-const ALIGNED: u32 = 2;
-
-/// Version of a result without the sounds a missing model would have
-/// found; a later run with the model adds them.
-#[cfg(feature = "sounds")]
-const WITHOUT_SOUNDS: u32 = 2;
-#[cfg(not(feature = "sounds"))]
-const WITHOUT_SOUNDS: u32 = ANALYSIS_VERSION;
-
 /// Sounds, music, beats and sound vectors for `analysis`, whose levels are
-/// measured. A model that could not be had is an error, so the result is
-/// upgraded once it is there; what the others heard is kept.
+/// measured. A model that could not be had is an error; what the others
+/// heard is kept.
 #[cfg(feature = "sounds")]
 fn hear(
     shared: &Shared,
@@ -786,7 +634,7 @@ fn align_words(
 }
 
 /// Tell the voices in `transcript` apart. When the diarizer can't, its
-/// words keep the speakers they had, or get one for all.
+/// words get one speaker for all.
 fn attribute_speakers(
     shared: &Shared,
     audio: &[f32],
@@ -806,21 +654,12 @@ fn attribute_speakers(
             Ok(())
         }
         Err(e) => {
-            if transcript.speakers.is_empty() {
-                let one = SingleSpeaker.diarize(audio, &transcript.words, &|_| {})?;
-                transcript.speakers = speakers::apply(one, &mut transcript.words);
-            }
+            let one = SingleSpeaker.diarize(audio, &transcript.words, &|_| {})?;
+            transcript.speakers = speakers::apply(one, &mut transcript.words);
             Err(e)
         }
     }
 }
-
-/// Version of a result whose speakers are one "Speaker 1". Without the
-/// diarizer, that is as good as this build gets.
-#[cfg(feature = "diarizer")]
-const WITHOUT_DIARIZER: u32 = 3;
-#[cfg(not(feature = "diarizer"))]
-const WITHOUT_DIARIZER: u32 = ANALYSIS_VERSION;
 
 #[cfg(not(feature = "whisper"))]
 fn transcript(
