@@ -9,6 +9,7 @@ use koo_core::audiofx::{AudioFx, AudioFxKind};
 use koo_core::command::{Command, Edge, InsertMode, PlacedClip};
 use koo_core::cuts::{FADE, Speech};
 use koo_core::fx::ParamKind;
+use koo_core::heard::{self, Target};
 use koo_core::memory::Presets;
 use koo_core::model::{
     BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Grade, MarkerKind, Property,
@@ -27,17 +28,21 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         .to_owned();
     let commands = match tool {
         "blade" => {
-            let (at, note) = off_words(ctx, args, args.time("at")?)?;
+            let (t, aligned_note) = aligned(ctx, args, args.time("at")?)?;
+            let (at, note) = off_words(ctx, args, t)?;
             let commands = vec![Command::Blade {
                 at,
                 tracks: track_scope(ctx.project(), args)?,
             }];
-            return Ok(with_notes(propose(ctx, commands, &reason), note).into());
+            let notes = aligned_note.into_iter().chain(note);
+            return Ok(with_notes(propose(ctx, commands, &reason), notes).into());
         }
         "ripple_delete" => {
             let range = args.range("range")?;
-            let (start, a) = off_words(ctx, args, range.start)?;
-            let (end, b) = off_words(ctx, args, range.end)?;
+            let (start, start_aligned) = aligned(ctx, args, range.start)?;
+            let (end, end_aligned) = aligned(ctx, args, range.end)?;
+            let (start, a) = off_words(ctx, args, start)?;
+            let (end, b) = off_words(ctx, args, end)?;
             if start >= end {
                 return fail(format!(
                     "{range} lies inside one word; remove whole words with `cut_words`, \
@@ -49,7 +54,8 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 tracks: track_scope(ctx.project(), args)?,
                 fade: FADE,
             }];
-            return Ok(with_notes(propose(ctx, commands, &reason), a.into_iter().chain(b)).into());
+            let notes = [start_aligned, end_aligned, a, b].into_iter().flatten();
+            return Ok(with_notes(propose(ctx, commands, &reason), notes).into());
         }
         "cut_words" => return cut_words(ctx, args, &reason),
         "insert_clip" => insert_clip(ctx, args)?,
@@ -352,6 +358,56 @@ fn speech_near<'p>(
         analysis.analysis(fp)
     });
     Some((Speech::new(project, |fp| analysis.analysis(fp)), words))
+}
+
+/// `t` moved onto the beat, downbeat or onset the call's `align` asks for,
+/// preferring one clear of spoken words, with a line for the model saying
+/// where.
+fn aligned(ctx: &ToolCtx, args: &Args, t: Time) -> ToolResultOf<(Time, Option<String>)> {
+    let Some(name) = args.opt_str("align")? else {
+        return Ok((t, None));
+    };
+    let Some(target) = Target::parse(name) else {
+        return fail(format!(
+            "unknown align `{name}`: use beat, downbeat or onset"
+        ));
+    };
+    let Some(analysis) = ctx.services.analysis.as_ref() else {
+        return fail("Analysis is not available in this build yet.");
+    };
+    let found = heard::cut_targets(ctx.project(), t, target, |fp| analysis.analysis(fp));
+    let Some(&nearest) = found.first() else {
+        return Ok((
+            t,
+            Some(format!(
+                "No {} near {t}; the cut stays there.",
+                target.name()
+            )),
+        ));
+    };
+    let clear = speech_near(ctx, t).and_then(|(speech, words)| {
+        found
+            .iter()
+            .copied()
+            .find(|&c| speech.snap(&words, c).is_none())
+    });
+    let at = clear.unwrap_or(nearest);
+    let mut note = if at == t {
+        format!("{t} is on a {}.", target.name())
+    } else {
+        format!(
+            "{t} moved {:+.2} s to the {} at {at}.",
+            (at - t).as_secs_f64(),
+            target.name()
+        )
+    };
+    if at != nearest {
+        note.push_str(&format!(
+            " The {} at {nearest} is on a word.",
+            target.name()
+        ));
+    }
+    Ok((at, Some(note)))
 }
 
 /// `t`, or the nearest pause when it falls on a word (unless `snap` is

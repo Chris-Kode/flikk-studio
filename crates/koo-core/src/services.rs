@@ -1,7 +1,7 @@
 //! Interfaces implemented by `koo-media` and `koo-analysis`, so the UI and the
 //! agent host can be written against them independently.
 
-use crate::analysis::{Analysis, Loudness};
+use crate::analysis::{Analysis, Loudness, SoundVectors};
 use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MediaId};
 use crate::model::{BlendMode, Fingerprint, MediaInfo, MediaItem};
@@ -57,6 +57,49 @@ pub struct Collage {
     pub rows: u32,
 }
 
+/// A picture of the audio heard over a timeline range, for the agent's
+/// `view_audio`: a spectrogram lane per track, with marks under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioPictureRequest {
+    /// Timeline range across the picture.
+    pub range: TimeRange,
+    pub lanes: Vec<AudioLane>,
+    pub marks: Vec<AudioMark>,
+    pub width: u32,
+}
+
+/// One track's audio: the stretches of source it plays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioLane {
+    pub name: String,
+    pub segments: Vec<AudioSegment>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioSegment {
+    pub path: PathBuf,
+    /// Position in `MediaInfo::audio`.
+    pub stream: u32,
+    pub source: TimeRange,
+    pub timeline: TimeRange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioMarkKind {
+    Word,
+    Sound,
+    Beat,
+    Downbeat,
+}
+
+/// Something drawn under the lanes at its timeline range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioMark {
+    pub at: TimeRange,
+    pub kind: AudioMarkKind,
+    pub label: String,
+}
+
 /// Sequential decode for playback, from a long-lived decoder process.
 pub trait FrameStream: Send {
     /// Next frame and its source time; `None` at the end of the media.
@@ -101,6 +144,12 @@ pub trait MediaService: Send + Sync {
     ) -> ServiceResult<Vec<f32>>;
     /// Create the playback proxy if missing; long-running.
     fn ensure_proxy(&self, item: &MediaItem, progress: &dyn Fn(f32)) -> ServiceResult<PathBuf>;
+    /// Draw the audio of a timeline range (see [`AudioPictureRequest`]).
+    fn audio_picture(&self, _request: &AudioPictureRequest) -> ServiceResult<Frame> {
+        Err(ServiceError(
+            "Audio pictures are not available in this build.".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,6 +179,19 @@ pub trait AnalysisService: Send + Sync {
     /// Gaps without speech longer than `min`, in source time (PRD E4).
     fn silences(&self, item: &MediaItem, min: Time) -> ServiceResult<Vec<TimeRange>>;
     fn loudness(&self, path: &Path, range: Option<TimeRange>) -> ServiceResult<Loudness>;
+    /// What `fingerprint`'s audio sounds like, for finding a sound by
+    /// description, once analysis has made them.
+    fn sound_vectors(&self, _fingerprint: &Fingerprint) -> Option<Arc<SoundVectors>> {
+        None
+    }
+    /// The vector of a description of a sound, to score against
+    /// [`AnalysisService::sound_vectors`]. Slow the first time: it loads
+    /// (and may download) a model.
+    fn describe_sound(&self, _text: &str) -> ServiceResult<Vec<f32>> {
+        Err(ServiceError(
+            "Sound search is not available in this build.".into(),
+        ))
+    }
 }
 
 /// One evaluated FX program: what to run, its parameter values and clock.

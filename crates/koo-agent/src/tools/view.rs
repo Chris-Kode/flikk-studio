@@ -1,11 +1,11 @@
 //! View tools: the model sees video as collages of at most 30 timestamped
-//! frames plus the transcript (PRD V1–V7). Decoding runs off-thread on a
+//! frames plus the sound script (PRD V1–V7). Decoding runs off-thread on a
 //! snapshot of the project. Where the range uses effects, transitions,
 //! generators, blend modes, crop, flip or speed, frames are the composited
 //! program (`koo_core::compose`, as the viewer and the render show it);
 //! otherwise the cached source collage.
 
-use super::analysis::{timeline_words, transcript_lines};
+use super::audio::{script, unheard_note};
 use super::preview::{collage, columns};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, range_json};
@@ -66,18 +66,19 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
     let tile_width = ctx.settings.vision.tile_width.clamp(64, 640);
     let samples = koo_core::query::sample_points(project, range, n);
 
-    // Transcript is cheap; build it here so the job only decodes.
-    let transcript = match timeline_words(project, ctx.services, range) {
-        Ok((words, speakers)) if !words.is_empty() => {
-            transcript_lines(&words, &speakers, false).join("\n")
-        }
-        Ok(_) => "(no speech)".to_owned(),
+    // The sound script is cheap; build it here so the job only decodes.
+    let transcript = match script(project, ctx.services, range) {
+        Ok(lines) if !lines.is_empty() => lines.join("\n"),
+        Ok(_) => "(nothing heard)".to_owned(),
         Err(ToolError(e)) => format!("({e})"),
     };
     let facts = super::analysis::facts_for(project, &ctx.memory.facts, range);
     let name = if detail { "detail" } else { "range" };
 
-    let mut header = format!("Transcript {range}:\n{transcript}");
+    let mut header = format!("Audio {range}:\n{transcript}");
+    if let Some(note) = unheard_note(project, ctx.services, range) {
+        header.push_str(&format!("\n{note}"));
+    }
     if !facts.is_empty() {
         header.push_str(&format!(
             "\n\nSource facts: {}",

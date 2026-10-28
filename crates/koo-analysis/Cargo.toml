@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner"]
+default = ["whisper", "aligner", "sounds"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["dep:whisper-rs", "dep:ureq"]
@@ -12,6 +12,10 @@ whisper = ["dep:whisper-rs", "dep:ureq"]
 # downloaded and linked statically at build time; without it word edges are
 # measured on the audio levels alone.
 aligner = ["dep:ort", "dep:unicode-normalization", "dep:ureq"]
+# Sounds, music and beats, and vectors for finding a sound by description,
+# from three models run by ONNX Runtime; without it analysis stops at
+# speech.
+sounds = ["dep:ort", "dep:unicode-normalization", "dep:ureq"]
 
 [dependencies]
 anyhow.workspace = true

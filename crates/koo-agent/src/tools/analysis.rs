@@ -119,6 +119,18 @@ fn speaker_label(speakers: &[Speaker], id: Option<SpeakerId>) -> String {
 
 /// Lines of `[start–end] Speaker: word@t word@t …`.
 pub fn transcript_lines(words: &[TlWord], speakers: &[Speaker], with_times: bool) -> Vec<String> {
+    transcript_entries(words, speakers, with_times)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect()
+}
+
+/// [`transcript_lines`] with the timeline time each line starts at.
+pub fn transcript_entries(
+    words: &[TlWord],
+    speakers: &[Speaker],
+    with_times: bool,
+) -> Vec<(Time, String)> {
     let mut lines = Vec::new();
     let mut i = 0;
     while i < words.len() {
@@ -141,12 +153,15 @@ pub fn transcript_lines(words: &[TlWord], speakers: &[Speaker], with_times: bool
                 }
             })
             .collect();
-        lines.push(format!(
-            "[{}–{}] {}: {}",
+        lines.push((
             words[i].range.start,
-            words[j - 1].range.end,
-            speaker_label(speakers, words[i].speaker),
-            text.join(" ")
+            format!(
+                "[{}–{}] {}: {}",
+                words[i].range.start,
+                words[j - 1].range.end,
+                speaker_label(speakers, words[i].speaker),
+                text.join(" ")
+            ),
         ));
         i = j;
     }

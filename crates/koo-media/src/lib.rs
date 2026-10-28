@@ -1,17 +1,19 @@
 //! Media engine on FFmpeg: probe, fingerprint, proxies, frame decode,
-//! collages and waveforms. Implements `koo_core::services::MediaService`.
+//! collages, waveforms and audio pictures. Implements `koo_core::services::MediaService`.
 //!
 //! FFmpeg is used as a pair of binaries (`KOOEDITOR_FFMPEG` /
 //! `KOOEDITOR_FFPROBE`, else `PATH`), never linked. Every call blocks; callers
 //! run them off the UI thread. Derived files live under `paths::cache()`,
 //! keyed by fingerprint, and sources are only ever read.
 
+mod canvas;
 mod collage;
 mod decode;
 mod fingerprint;
 mod font;
 mod probe;
 mod proxy;
+mod spectrogram;
 mod waveform;
 
 pub use probe::media_kind;
@@ -20,8 +22,8 @@ pub use proxy::proxy_path;
 use decode::FrameCache;
 use koo_core::model::{Fingerprint, MediaInfo, MediaItem};
 use koo_core::services::{
-    Collage, CollageRequest, Frame, FrameStream, MediaService, PcmStream, ServiceError,
-    ServiceResult,
+    AudioPictureRequest, Collage, CollageRequest, Frame, FrameStream, MediaService, PcmStream,
+    ServiceError, ServiceResult,
 };
 use koo_core::time::{Time, TimeRange};
 use std::collections::HashMap;
@@ -143,6 +145,10 @@ impl MediaService for FfmpegMedia {
 
     fn ensure_proxy(&self, item: &MediaItem, progress: &dyn Fn(f32)) -> ServiceResult<PathBuf> {
         proxy::ensure_proxy(self, item, progress)
+    }
+
+    fn audio_picture(&self, request: &AudioPictureRequest) -> ServiceResult<Frame> {
+        spectrogram::audio_picture(self, request)
     }
 }
 

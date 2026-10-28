@@ -13,6 +13,11 @@ use std::process::{Command, Stdio};
 /// Sample rate Whisper and the VAD work at.
 pub const SAMPLE_RATE: u32 = 16_000;
 
+/// Sample rate the sound models work at: 16 kHz would drop everything
+/// above 8 kHz (cymbals, glass, sibilance).
+#[cfg(feature = "sounds")]
+pub const SOUND_RATE: u32 = 32_000;
+
 /// `$KOOEDITOR_FFMPEG`, else `ffmpeg` from `PATH`.
 pub fn binary() -> PathBuf {
     std::env::var_os("KOOEDITOR_FFMPEG")
@@ -123,22 +128,8 @@ pub fn extract_audio(
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
 ) -> Result<Vec<f32>> {
-    let mut args = strs(["-v", "error"]);
-    args.extend(input(path));
-    args.extend(strs([
-        "-map".to_string(),
-        format!("0:a:{n}"),
-        "-vn".into(),
-        "-ac".into(),
-        "1".into(),
-        "-ar".into(),
-        SAMPLE_RATE.to_string(),
-        "-f".into(),
-        "f32le".into(),
-        "-".into(),
-    ]));
     let mut bytes = Vec::new();
-    run(&args, duration, progress, |r| {
+    run(&pcm(path, n, SAMPLE_RATE, None), duration, progress, |r| {
         r.read_to_end(&mut bytes)?;
         Ok(())
     })?;
@@ -148,6 +139,78 @@ pub fn extract_audio(
         .iter()
         .map(|b| f32::from_le_bytes(*b))
         .collect())
+}
+
+/// The `n`th audio stream as mono `f32` at `rate`, over the source range
+/// `range` when given, handed to `sink` about a second at a time so that a
+/// long file never sits in memory.
+#[cfg(feature = "sounds")]
+pub fn stream_audio(
+    path: &Path,
+    n: u32,
+    rate: u32,
+    range: Option<TimeRange>,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+    sink: &mut dyn FnMut(&[f32]) -> Result<()>,
+) -> Result<()> {
+    let duration = range.map(|r| r.duration()).or(duration);
+    run(&pcm(path, n, rate, range), duration, progress, |r| {
+        let mut buf = vec![0u8; rate as usize * 4];
+        let mut filled = 0;
+        let mut samples = Vec::with_capacity(rate as usize);
+        loop {
+            let read = r.read(&mut buf[filled..])?;
+            filled += read;
+            let whole = filled / 4 * 4;
+            if read == 0 || whole == buf.len() {
+                samples.clear();
+                samples.extend(
+                    buf[..whole]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b)),
+                );
+                if !samples.is_empty() {
+                    sink(&samples)?;
+                }
+                buf.copy_within(whole..filled, 0);
+                filled -= whole;
+            }
+            if read == 0 {
+                return Ok(());
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// ffmpeg arguments that write mono `f32` PCM at `rate` to stdout.
+fn pcm(path: &Path, n: u32, rate: u32, range: Option<TimeRange>) -> Vec<OsString> {
+    let mut args = strs(["-v", "error"]);
+    if let Some(r) = range {
+        args.extend(strs([
+            "-ss".to_string(),
+            format!("{:.6}", r.start.as_secs_f64()),
+            "-t".into(),
+            format!("{:.6}", r.duration().as_secs_f64().max(0.0)),
+        ]));
+    }
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        format!("0:a:{n}"),
+        "-vn".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        rate.to_string(),
+        "-f".into(),
+        "f32le".into(),
+        "-".into(),
+    ]));
+    args
 }
 
 /// Source times where the picture cuts, from ffmpeg's scene score.

@@ -181,31 +181,7 @@ impl Aligner {
 }
 
 fn load(files: &Files) -> Result<Session> {
-    let env = ort::init()
-        .build()
-        .map_err(|e| anyhow!("could not start ONNX Runtime: {e}"))?;
-    Session::builder(&env)
-        .map_err(|e| anyhow!("{e}"))?
-        .with_intra_threads(threads())
-        .map_err(|e| anyhow!("{e}"))?
-        // Idle threads would spin and slow a Whisper job running next to
-        // this one.
-        .with_intra_op_spinning(false)
-        .map_err(|e| anyhow!("{e}"))?
-        // Repacked weights cost 180 MB for no speed gain here, and an
-        // arena would keep each run's working memory (500 MB for 30 s of
-        // audio) for good.
-        .with_prepacking(false)
-        .map_err(|e| anyhow!("{e}"))?
-        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|e| anyhow!("{e}"))?
-        .commit_from_file(&files.model)
-        .map_err(|e| {
-            anyhow!(
-                "could not load alignment model {}: {e}",
-                files.model.display()
-            )
-        })
+    crate::onnx::session(&files.model, "alignment model")
 }
 
 /// The model's answer for each of `ids`, heard against `samples`.
@@ -379,10 +355,4 @@ fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
         // Both edges in one 80 ms step: still a word.
         w.range.end = r.end.max(w.range.start + Levels::FRAME);
     }
-}
-
-fn threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
-        .unwrap_or(4)
 }

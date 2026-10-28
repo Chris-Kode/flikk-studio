@@ -108,6 +108,15 @@ fn audio_effect_item() -> Value {
     })
 }
 
+/// Where a cut may move to, on music or onto the start of a sound.
+fn align() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["beat", "downbeat", "onset"],
+        "description": "Move the cut onto the nearest beat (within half a beat), downbeat (within half a bar) or onset, the start of a sound (within 150 ms); one clear of words wins over a nearer one on a word"
+    })
+}
+
 fn string(desc: &str) -> Value {
     json!({ "type": "string", "description": desc })
 }
@@ -261,11 +270,40 @@ pub fn catalog() -> Vec<ToolSpec> {
             "Timeline times where the picture cuts to a new shot.",
             object(json!({ "range": range("Timeline range") }), &[]),
         ),
+        spec(
+            "get_audio",
+            Some(ReadAnalysis),
+            "The sound script of a timeline range, in time order: transcript lines, [sounds] (\"?\" when unsure), ♪ music with its genre, mood, tempo and first downbeat, where the music gets louder or softer, and (silence).",
+            object(json!({ "range": range("Timeline range") }), &["range"]),
+        ),
+        spec(
+            "get_music",
+            Some(ReadAnalysis),
+            "Music in a range: tags, tempo, bar length, beats and downbeats in timeline seconds, and where it gets louder or softer (a drop, a breakdown).",
+            object(
+                json!({ "range": range("Timeline range (default: whole timeline)") }),
+                &[],
+            ),
+        ),
+        spec(
+            "search_sounds",
+            Some(ReadAnalysis),
+            "Find where the audio sounds like a description (\"glass breaking\", \"crowd cheering\") or like a range of the timeline. Returns ranked ranges, good to about 2 s, with similarity scores and what the sound script hears there.",
+            object(
+                json!({
+                    "text": string("What it sounds like, in a few words"),
+                    "like": range("Or: a timeline range that sounds like what to find"),
+                    "range": range("Where to look (default: whole timeline)"),
+                    "limit": number("Most matches (default 8)")
+                }),
+                &[],
+            ),
+        ),
         // ---- view
         spec(
             "view_range",
             Some(View),
-            "See a range: its transcript plus a collage of up to 30 frames spread evenly over it, each stamped with its timeline time.",
+            "See a range: its sound script plus a collage of up to 30 frames spread evenly over it, each stamped with its timeline time.",
             object(json!({ "range": range("Timeline range") }), &["range"]),
         ),
         spec(
@@ -282,6 +320,15 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(View),
             "One full frame of the program at a timeline time.",
             object(json!({ "t": time("Timeline seconds") }), &["t"]),
+        ),
+        spec(
+            "view_audio",
+            Some(View),
+            "Look at up to 30 s of audio: a spectrogram per track under a time ruler, words, sounds and beats marked below, and the sound script. For an exact edge or the shape of a sound.",
+            object(
+                json!({ "range": range("Timeline range, at most 30 s") }),
+                &["range"],
+            ),
         ),
         spec(
             "get_scopes",
@@ -326,18 +373,18 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "blade",
             Some(EditTimeline),
-            "Propose cutting clips at a time. A time that falls on a spoken word moves to the nearest pause; the result says so.",
+            "Propose cutting clips at a time. With `align` the cut moves onto the nearest beat, downbeat or onset first. A time that falls on a spoken word moves to the nearest pause; the result says so.",
             object(
-                json!({ "at": time("Timeline seconds"), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move off spoken words (default true)"), "reason": reason() }),
+                json!({ "at": time("Timeline seconds"), "align": align(), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move off spoken words (default true)"), "reason": reason() }),
                 &["at"],
             ),
         ),
         spec(
             "ripple_delete",
             Some(EditTimeline),
-            "Propose removing a range and closing the gap, with a short audio fade at the join. An edge that falls on a spoken word moves to the nearest pause; the result says so. To remove words, prefer `cut_words`.",
+            "Propose removing a range and closing the gap, with a short audio fade at the join. With `align` both edges move onto the nearest beat, downbeat or onset first. An edge that falls on a spoken word moves to the nearest pause; the result says so. To remove words, prefer `cut_words`.",
             object(
-                json!({ "range": range("Timeline range to remove"), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move edges off spoken words (default true)"), "reason": reason() }),
+                json!({ "range": range("Timeline range to remove"), "align": align(), "tracks": strings("Track names or ids (default: all unlocked)"), "snap": boolean("Move edges off spoken words (default true)"), "reason": reason() }),
                 &["range"],
             ),
         ),

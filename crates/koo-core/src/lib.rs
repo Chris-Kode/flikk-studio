@@ -22,6 +22,7 @@ pub mod edit;
 pub mod error;
 pub mod fx;
 pub mod grade;
+pub mod heard;
 pub mod history;
 pub mod ids;
 pub mod memory;

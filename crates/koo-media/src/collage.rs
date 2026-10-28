@@ -1,8 +1,9 @@
 //! Collages for the agent's eyes (PRD V1–V3, V6): up to 30 frames in a 6 × 5
 //! grid, each stamped with its timeline and source time, cached as PNG.
 
+use crate::canvas::Canvas;
 use crate::decode::still;
-use crate::{FfmpegMedia, err, font, proxy, write_atomic};
+use crate::{FfmpegMedia, err, proxy, write_atomic};
 use koo_core::paths;
 use koo_core::services::MediaService;
 use koo_core::services::{
@@ -152,104 +153,4 @@ fn source_of(tile: &SamplePoint) -> PathBuf {
         .map(proxy::proxy_path)
         .filter(|p| p.is_file())
         .unwrap_or_else(|| tile.path.clone())
-}
-
-struct Canvas {
-    width: u32,
-    height: u32,
-    rgb: Vec<u8>,
-}
-
-impl Canvas {
-    fn new(width: u32, height: u32, color: [u8; 3]) -> Self {
-        let rgb = color.repeat((width * height) as usize);
-        Self { width, height, rgb }
-    }
-
-    fn put(&mut self, x: u32, y: u32, c: [u8; 3]) {
-        if x < self.width && y < self.height {
-            let i = ((y * self.width + x) * 3) as usize;
-            self.rgb[i..i + 3].copy_from_slice(&c);
-        }
-    }
-
-    fn fill(&mut self, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
-        for yy in y..y + h {
-            for xx in x..x + w {
-                self.put(xx, yy, c);
-            }
-        }
-    }
-
-    /// Darken a box, so stamps read on any picture.
-    fn shade(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        for yy in y..(y + h).min(self.height) {
-            for xx in x..(x + w).min(self.width) {
-                let i = ((yy * self.width + xx) * 3) as usize;
-                for v in &mut self.rgb[i..i + 3] {
-                    *v /= 4;
-                }
-            }
-        }
-    }
-
-    /// Draw `frame` centered in the box, scaled to fit (nearest neighbour;
-    /// frames are already decoded near tile size).
-    fn fit(&mut self, frame: &Frame, x: u32, y: u32, w: u32, h: u32) {
-        let (fw, fh) = (frame.width.max(1) as u64, frame.height.max(1) as u64);
-        let (dw, dh) = if fw * h as u64 > fh * w as u64 {
-            (w, ((fh * w as u64 / fw) as u32).max(1))
-        } else {
-            (((fw * h as u64 / fh) as u32).max(1), h)
-        };
-        self.fill(x, y, w, h, [0, 0, 0]);
-        let (ox, oy) = (x + (w - dw) / 2, y + (h - dh) / 2);
-        for yy in 0..dh {
-            let sy = (yy as u64 * fh / dh as u64) as u32;
-            for xx in 0..dw {
-                let sx = (xx as u64 * fw / dw as u64) as u32;
-                let i = ((sy * frame.width + sx) * 4) as usize;
-                let p = &frame.rgba[i..i + 3];
-                self.put(ox + xx, oy + yy, [p[0], p[1], p[2]]);
-            }
-        }
-    }
-
-    /// Text in a shaded box at the tile's top-left corner, or bottom-left
-    /// when `bottom` (then `y` is the tile's bottom edge).
-    fn label(&mut self, lines: &[&str], x: u32, y: u32, scale: u32, bottom: bool) {
-        let pad = scale * 2;
-        let (tw, th) = font::measure(lines);
-        let (bw, bh) = (tw * scale + pad * 2, th * scale + pad * 2);
-        let by = if bottom { y.saturating_sub(bh) } else { y };
-        self.shade(x, by, bw, bh);
-        for (row, line) in lines.iter().enumerate() {
-            let ly = by + pad + row as u32 * font::LINE * scale;
-            for (col, c) in line.chars().enumerate() {
-                let lx = x + pad + col as u32 * font::ADVANCE * scale;
-                for (gy, bits) in font::glyph(c).iter().enumerate() {
-                    for gx in 0..font::WIDTH {
-                        if bits & (0x10 >> gx) != 0 {
-                            let (px, py) = (lx + gx * scale, ly + gy as u32 * scale);
-                            self.fill(px, py, scale, scale, [255, 255, 255]);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn png(&self) -> ServiceResult<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut encoder = png::Encoder::new(&mut out, self.width, self.height);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| err("png", e))?;
-        writer
-            .write_image_data(&self.rgb)
-            .map_err(|e| err("png", e))?;
-        writer.finish().map_err(|e| err("png", e))?;
-        Ok(out)
-    }
 }

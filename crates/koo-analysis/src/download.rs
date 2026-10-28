@@ -1,10 +1,50 @@
 //! Model files fetched into `paths::models()` on first use.
 
 use anyhow::{Context, Result, bail};
+use koo_core::paths;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Starts a download's job, given the file's name, and reports its
+/// progress, 0..1.
+#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+pub type StartDownload<'a> = &'a dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>;
+
+/// One model file: its name in `paths::models()`, where it downloads from
+/// and the environment variable that points at a copy instead.
+#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+pub struct ModelFile {
+    pub name: &'static str,
+    pub url: &'static str,
+    /// A path, never fetched.
+    pub env: &'static str,
+    /// What the user reads in errors and the download job: "sound tagger".
+    pub what: &'static str,
+}
+
+#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+impl ModelFile {
+    /// The file on disk, downloading it first if needed.
+    pub fn ensure(&self, download: &Download, start: StartDownload) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os(self.env).filter(|v| !v.is_empty()) {
+            let path = PathBuf::from(path);
+            if !path.is_file() {
+                bail!(
+                    "{} not found at {} (from {})",
+                    self.what,
+                    path.display(),
+                    self.env
+                );
+            }
+            return Ok(path);
+        }
+        let path = paths::models().join(self.name);
+        download.ensure(&path, self.url, self.what, || start(self.name))?;
+        Ok(path)
+    }
+}
 
 /// How long a failed download is reported before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(120);
