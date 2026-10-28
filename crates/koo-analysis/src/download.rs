@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 /// Starts a download's job, given the file's name, and reports its
 /// progress, 0..1.
-#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "whisper", feature = "sounds")), allow(dead_code))]
 pub type StartDownload<'a> = &'a dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>;
 
 /// One model file: its name in `paths::models()`, where it downloads from
 /// and the environment variable that points at a copy instead.
-#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "whisper", feature = "sounds")), allow(dead_code))]
 pub struct ModelFile {
     pub name: &'static str,
     pub url: &'static str,
@@ -24,7 +24,7 @@ pub struct ModelFile {
     pub what: &'static str,
 }
 
-#[cfg_attr(not(feature = "sounds"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "whisper", feature = "sounds")), allow(dead_code))]
 impl ModelFile {
     /// The file on disk, downloading it first if needed.
     pub fn ensure(&self, download: &Download, start: StartDownload) -> Result<PathBuf> {

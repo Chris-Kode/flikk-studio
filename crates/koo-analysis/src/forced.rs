@@ -155,11 +155,15 @@ impl Aligner {
                 continue;
             }
             let classes = classes(session, &audio[from..to], &ids)?;
+            // Given more words than the audio holds, the model answers past
+            // its end; those words stay at the end, not in the next run's
+            // audio, where they would come before its words.
+            let heard = ((to - from) * 1000 / SAMPLE_RATE as usize) as i64;
             let steps: Vec<i64> = ids
                 .iter()
                 .zip(&classes)
                 .filter(|(id, _)| **id == TIMESTAMP)
-                .map(|(_, c)| c * STEP_MS)
+                .map(|(_, c)| (c * STEP_MS).min(heard))
                 .collect();
             if steps.len() != 2 * owner.len() {
                 bail!(
@@ -328,31 +332,26 @@ fn chunks(words: &[Word], end: Time) -> Vec<(std::ops::Range<usize>, TimeRange)>
 
 /// Give each aligned word its range, its start [`EARLIER`] without
 /// reaching the word before; the others stay between their aligned
-/// neighbours.
+/// neighbours, so words stay in order.
 fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
-    let heard: Vec<TimeRange> = words
-        .iter()
-        .zip(aligned)
-        .map(|(w, a)| a.unwrap_or(w.range))
-        .collect();
-    for (i, w) in words.iter_mut().enumerate() {
+    for i in 0..words.len() {
         let Some(r) = aligned[i] else {
-            // Between the aligned words around it, where they leave room.
+            // Inside the room the aligned words around it leave.
             let lo = aligned[..i].iter().rev().find_map(|a| *a).map(|a| a.end);
             let hi = aligned[i + 1..].iter().find_map(|a| *a).map(|a| a.start);
             let lo = lo.unwrap_or(Time::ZERO);
-            let hi = hi.unwrap_or(Time(i64::MAX));
-            let clamped = TimeRange::new(w.range.start.max(lo), w.range.end.min(hi));
-            if clamped.start < clamped.end {
-                w.range = clamped;
-            }
+            let hi = hi.unwrap_or(Time(i64::MAX)).max(lo);
+            let w = &mut words[i].range;
+            let start = w.start.clamp(lo, hi);
+            *w = TimeRange::new(start, w.end.clamp(start, hi));
             continue;
         };
         let lo = i
             .checked_sub(1)
-            .map_or(Time::ZERO, |p| heard[p].end.min(r.start));
-        w.range.start = (r.start - EARLIER).max(lo);
+            .map_or(Time::ZERO, |p| words[p].range.end.min(r.start));
+        let w = &mut words[i].range;
+        w.start = (r.start - EARLIER).max(lo);
         // Both edges in one 80 ms step: still a word.
-        w.range.end = r.end.max(w.range.start + Levels::FRAME);
+        w.end = r.end.max(w.start + Levels::FRAME);
     }
 }
