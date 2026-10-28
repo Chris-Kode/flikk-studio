@@ -7,18 +7,16 @@ edition.workspace = true
 default = ["whisper", "aligner", "diarizer", "sounds"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
-whisper = ["dep:whisper-rs"]
-# Word times from a forced-alignment model run by ONNX Runtime, which is
-# downloaded and linked statically at build time; without it word edges are
+whisper = ["koo-models/whisper"]
+# Word times from a forced-alignment model; without it word edges are
 # measured on the audio levels alone.
-aligner = ["dep:ort", "dep:unicode-normalization"]
+aligner = ["koo-models/aligner"]
 # Speakers told apart by pyannote's segmentation model and WeSpeaker
-# voiceprints, run by ONNX Runtime; without it every word is "Speaker 1".
-diarizer = ["dep:ort"]
-# Sounds, music and beats, and vectors for finding a sound by description,
-# from three models run by ONNX Runtime; without it analysis stops at
-# speech.
-sounds = ["dep:ort", "dep:unicode-normalization"]
+# voiceprints; without it every word is "Speaker 1".
+diarizer = ["koo-models/diarizer"]
+# Sounds, music and beats, and vectors for finding a sound by description;
+# without it analysis stops at speech.
+sounds = ["koo-models/sounds"]
 
 [dependencies]
 anyhow.workspace = true
@@ -26,6 +24,3 @@ koo-core.workspace = true
 koo-models.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-unicode-normalization = { version = "0.1", optional = true }
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
-whisper-rs = { version = "0.16", optional = true }

@@ -1,86 +1,42 @@
-//! Word times from a forced aligner: Qwen3-ForcedAligner-0.6B
-//! (Apache-2.0) hears a stretch of audio with the words said in it and
-//! gives each word a start and an end, in 80 ms steps. Whisper only knows
-//! roughly where a word is, sometimes puts it on the wrong sound and
-//! drifts by a second in conversation; the aligner does not. It knows 11
-//! languages ([`supports`]); elsewhere, and for words with no letters or
-//! digits, the edges [`crate::align`] measured stay.
+//! The aligner hearing runs of words up to [`MAX_CHUNK`] long, each
+//! against the audio around it, and the times it answers put in order.
 
+use super::config::{
+    EARLIER, FILE, LANGUAGES, MAX_CHUNK, MERGES, SLACK, STEP_MS, TIMESTAMP, VOCAB,
+};
+use crate::SPEECH_RATE;
 use crate::bpe::Bpe;
-use crate::ffmpeg::SAMPLE_RATE;
 use crate::onnx;
+use crate::word_timing::Aligner;
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::{Levels, Word};
-use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
+use koo_core::time::{Time, TimeRange};
 use ort::session::Session;
 use ort::value::Tensor;
-use std::path::PathBuf;
 use std::sync::Mutex;
-
-/// Follows each unit twice; the model answers with its start and its end.
-const TIMESTAMP: i64 = 151705;
-/// One step of those answers.
-const STEP_MS: i64 = 80;
-/// Longest run of words aligned at once.
-const MAX_CHUNK: Time = Time(FLICKS_PER_SECOND * 30);
-/// Audio either side of a run, so a word Whisper misplaced is still in it.
-const SLACK: Time = Time(FLICKS_PER_SECOND * 5);
-/// The model's starts come a little late; they move this much earlier,
-/// never into the word before. Measured on hand-labelled English.
-const EARLIER: Time = Time(FLICKS_PER_SECOND * 20 / 1000);
-
-/// Whether the model knows `language` (Whisper's code).
-pub fn supports(language: &str) -> bool {
-    matches!(
-        language,
-        "en" | "es" | "fr" | "de" | "it" | "pt" | "ru" | "zh" | "yue" | "ja" | "ko"
-    )
-}
-
-/// The model and its tokenizer on disk.
-pub struct Files {
-    model: PathBuf,
-    vocab: PathBuf,
-    merges: PathBuf,
-}
 
 /// Loaded model, shared by every job. Runs one chunk at a time.
 #[derive(Default)]
-pub struct Aligner {
+pub struct Qwen3Aligner {
     loaded: Mutex<Option<(Session, Bpe)>>,
 }
 
-impl Aligner {
-    /// The model and its tokenizer, if they are downloaded.
-    pub fn model(&self) -> Result<Files> {
-        use koo_models::files::{ALIGNER, ALIGNER_MERGES, ALIGNER_VOCAB};
-        Ok(Files {
-            model: ALIGNER.locate()?,
-            vocab: ALIGNER_VOCAB.locate()?,
-            merges: ALIGNER_MERGES.locate()?,
-        })
+impl Aligner for Qwen3Aligner {
+    fn supports(&self, language: &str) -> bool {
+        LANGUAGES.contains(&language)
     }
 
-    /// Move `words` onto where the model hears them in 16 kHz mono
-    /// `audio`. Their times only need to be roughly right; they decide
-    /// which stretch of audio each word is looked for in.
-    pub fn align(
-        &self,
-        files: &Files,
-        audio: &[f32],
-        words: &mut [Word],
-        progress: impl Fn(f32),
-    ) -> Result<()> {
+    fn align(&self, audio: &[f32], words: &mut [Word], progress: &dyn Fn(f32)) -> Result<()> {
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
         if loaded.is_none() {
             *loaded = Some((
-                onnx::session(&files.model, "alignment model")?,
-                Bpe::load(&files.vocab, &files.merges)?,
+                onnx::session(&FILE.locate()?, FILE.what)?,
+                Bpe::load(&VOCAB.locate()?, &MERGES.locate()?)?,
             ));
         }
         let (session, bpe) = loaded.as_mut().expect("loaded above");
 
-        let end = Time::from_secs_f64(audio.len() as f64 / SAMPLE_RATE as f64);
+        let end = Time::from_secs_f64(audio.len() as f64 / SPEECH_RATE as f64);
         let chunks = chunks(words, end);
         let mut aligned = vec![None; words.len()];
         for (n, (span, window)) in chunks.iter().enumerate() {
@@ -95,9 +51,9 @@ impl Aligner {
                 }
             }
             // Features are 10 ms frames: whole ones only, and at least ten.
-            let at = |t: Time| ((t.as_secs_f64() * SAMPLE_RATE as f64) as usize).min(audio.len());
+            let at = |t: Time| ((t.as_secs_f64() * SPEECH_RATE as f64) as usize).min(audio.len());
             let from = at(window.start);
-            let frame = SAMPLE_RATE as usize / 100;
+            let frame = SPEECH_RATE as usize / 100;
             let to = from + (at(window.end) - from) / frame * frame;
             if owner.is_empty() || to - from < 10 * frame {
                 continue;
@@ -106,7 +62,7 @@ impl Aligner {
             // Given more words than the audio holds, the model answers past
             // its end; those words stay at the end, not in the next run's
             // audio, where they would come before its words.
-            let heard = ((to - from) * 1000 / SAMPLE_RATE as usize) as i64;
+            let heard = ((to - from) * 1000 / SPEECH_RATE as usize) as i64;
             let steps: Vec<i64> = ids
                 .iter()
                 .zip(&classes)

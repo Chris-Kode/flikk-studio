@@ -1,69 +1,20 @@
-//! Who speaks when, as pyannote's speaker-diarization-3.1 pipeline finds
-//! it, on ONNX Runtime:
-//!
-//! 1. pyannote segmentation-3.0 (MIT) hears 10 s windows a [`STEP`]
-//!    apart and says, every 17 ms, which of up to three voices of that
-//!    window speak, overlaps included;
-//! 2. WeSpeaker ResNet34-LM (CC-BY-4.0, trained on VoxCeleb) turns each
-//!    window's voice, heard where it speaks alone, into a 256-number
-//!    voiceprint;
-//! 3. the voiceprints are clustered (centroid linkage, cut at pyannote's
-//!    tuned threshold, small clusters folded into the nearest large one),
-//!    so each cluster is one voice across the whole item;
-//! 4. each window's voices are renamed after their clusters, the windows
-//!    are averaged, and every 17 ms keeps as many voices as the windows
-//!    heard speaking at once there.
-//!
-//! A word goes to the voice that speaks through most of it.
+//! The four steps of the pipeline, and a word's voice read off the
+//! voices they find.
 
-use crate::fbank::{self, Fbank};
-use crate::ffmpeg::SAMPLE_RATE;
+use super::config::{
+    BATCH, BLOCK, CLASSES, EMBEDDING, FRAME_SPAN, FRAME_STEP, FRAMES, LOCAL, MAX_FITTED,
+    MIN_CLUSTER, MIN_FEATURES, REACH, SEGMENTATION, STEP, THRESHOLD, WINDOW,
+};
+use super::fbank::{self, Fbank};
+use crate::SPEECH_RATE;
 use crate::onnx;
 use crate::speakers::{Diarizer, Labels};
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::Word;
-use koo_core::time::{FLICKS_PER_SECOND, Time};
+use koo_core::time::Time;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
-
-// The models' files are `koo_models::files::SEGMENTATION`, pyannote
-// segmentation-3.0 as ONNX (16 kHz samples in, a powerset class per frame
-// out: nobody, one of three voices, or two of them), and `EMBEDDING`,
-// WeSpeaker's own ONNX export of ResNet34-LM ([`fbank`] features in, a
-// 256-number voiceprint out).
-
-/// Samples the segmentation model hears at once.
-const WINDOW: usize = 10 * SAMPLE_RATE as usize;
-/// Samples between windows; a multiple of [`fbank::SHIFT`]. pyannote
-/// uses 1 s; 2.5 s told voices apart as well on AMI meetings in a third
-/// of the time, 5 s merged voices.
-const STEP: usize = SAMPLE_RATE as usize * 5 / 2;
-/// Segmentation frames per window, and samples between them.
-const FRAMES: usize = 589;
-const FRAME_STEP: usize = 270;
-/// Samples each segmentation frame hears.
-const FRAME_SPAN: usize = 991;
-/// Voices a window tells apart, one bit each per frame.
-const LOCAL: usize = 3;
-/// Bits for each powerset class.
-const CLASSES: [u8; 7] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110];
-/// Windows segmented per model run.
-const BATCH: usize = 4;
-/// Features a voiceprint needs; fewer give none.
-const MIN_FEATURES: usize = 10;
-/// Windows whose features are computed together.
-const BLOCK: usize = 60;
-/// pyannote 3.1's clustering: centroids further apart than this (unit
-/// voiceprints, Euclidean) are different voices…
-const THRESHOLD: f32 = 0.704_565_5;
-/// …and clusters of fewer voiceprints join the nearest larger one.
-const MIN_CLUSTER: usize = 12;
-/// Voiceprints the clustering is fitted on; longer items use an even
-/// sample and match the rest to its clusters.
-const MAX_FITTED: usize = 2000;
-/// How far around a word to look when nobody speaks in it.
-const REACH: Time = Time(FLICKS_PER_SECOND / 2);
 
 /// The models, loaded on first use and shared by every job.
 #[derive(Default)]
@@ -72,19 +23,12 @@ pub struct Pyannote {
 }
 
 impl Diarizer for Pyannote {
-    fn prepare(&self) -> Result<()> {
-        koo_models::files::SEGMENTATION.locate()?;
-        koo_models::files::EMBEDDING.locate()?;
-        Ok(())
-    }
-
     fn diarize(&self, audio: &[f32], words: &[Word], progress: &dyn Fn(f32)) -> Result<Labels> {
         if words.is_empty() || audio.is_empty() {
             return Ok((0, vec![None; words.len()]));
         }
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
         if loaded.is_none() {
-            use koo_models::files::{EMBEDDING, SEGMENTATION};
             *loaded = Some((
                 onnx::session(&SEGMENTATION.locate()?, SEGMENTATION.what)?,
                 onnx::session(&EMBEDDING.locate()?, EMBEDDING.what)?,
@@ -447,7 +391,7 @@ impl Voices {
     fn frames_in(&self, from: Time, to: Time) -> std::ops::Range<usize> {
         let middle = FRAME_SPAN as f64 / 2.0;
         let index = |t: Time| {
-            let sample = t.as_secs_f64().max(0.0) * SAMPLE_RATE as f64;
+            let sample = t.as_secs_f64().max(0.0) * SPEECH_RATE as f64;
             (((sample - middle) / FRAME_STEP as f64).ceil().max(0.0) as usize).min(self.frames)
         };
         index(from)..index(to)

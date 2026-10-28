@@ -46,16 +46,16 @@ behaviour and this file wins on structure.
 | `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
 | `koo-store` | SQLite persistence, autosave, crash recovery, settings, memory stores | core, rusqlite |
 | `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms, audio pictures | core, image |
-| `koo-analysis` | Background jobs: Whisper transcript, forced word alignment, VAD, speakers, sounds, music and beats, sound vectors, shot changes, silences, loudness | core, models, whisper-rs, ort |
+| `koo-analysis` | Background jobs: the analysis pipeline (voice activity, transcript, word times, speakers, sounds, music and beats, sound vectors) over the task interfaces of `koo-models`; shot changes, silences, loudness, the energy VAD | core, models |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
 | `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock | core, tungstenite |
-| `koo-models` | The model catalog (each task, the models that can do it, their files pinned to a commit), whether they are on disk, and the downloads the user starts | core, ureq |
+| `koo-models` | Everything about the models: a folder per task (its interface, the models that can do it) and per model (its files pinned to a commit, its config, its runner); whether the files are on disk, and the downloads the user starts | core, ureq, whisper-rs, ort |
 | `koo-editor` | GPUI app: layout, `EditorState`, panels, wiring of all of the above | all |
 
 Crates other than `koo-editor` depend only on `koo-core`, never on each other,
-except `koo-analysis`, which finds the files it runs through `koo-models`.
+except `koo-analysis`, which runs its models through `koo-models`.
 
 ## 2. Key decisions
 
@@ -183,7 +183,7 @@ All nine streams are merged. What runs today:
   feature. The model is in `paths::models()` once the user downloads it
   (Models, below), or set `KOOEDITOR_WHISPER_MODEL` to a path or a ggml
   file name there. Speech, and so silences, comes from Silero
-  VAD v6.2 (`koo-analysis/src/silero.rs`, from version 6;
+  VAD v6.2 (`koo-models/src/voice_activity/silero/`, from version 6;
   `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit,
   or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until
   under 0.35, pauses under 250 ms kept, 60 ms before each range. Music is
@@ -194,19 +194,19 @@ All nine streams are merged. What runs today:
   before it, and a window is speech when either finds it: music holds it
   down for seconds after, and a block that starts during a sentence
   doubts the rest of it. Whisper hears only speech
-  (`koo-analysis/src/transcribe.rs`, from version 5): given music, a long
+  (`koo-models/src/transcription/whisper/`, from version 5): given music, a long
   silence, or a 30 s window that starts with either, it made words up,
   often repeating what was said before, and its times came loose. It hears
   the stretches Silero finds as faster-whisper's VAD filter does (pauses
   under 2 s kept, 400 ms either side), each on its own, without the text
   of the window before, in the language of the longest; its notes such as
   "(upbeat music)" are dropped. Word times come from a forced aligner
-  (`koo-analysis/src/forced.rs`, behind the default `aligner` feature):
+  (`koo-models/src/word_timing/qwen3_aligner/`, behind the default `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
   and answers with each word's start and end, in 80 ms steps; starts then
   move 20 ms earlier, never into the word before. It knows English,
   Spanish, French, German, Italian, Portuguese, Russian, Chinese,
-  Cantonese, Japanese and Korean. Its tokenizer (`bpe.rs`) comes from
+  Cantonese, Japanese and Korean. Its tokenizer (`koo-models/src/bpe.rs`) comes from
   Qwen's repository and the model from ours (below), or set
   `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages, and words
   with neither letters nor digits, keep word edges measured on the audio
@@ -221,7 +221,7 @@ All nine streams are merged. What runs today:
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
-  with its build scripts (`koo-models/src/catalog.rs` pins the commit;
+  with its build scripts (its `config.rs` pins the commit;
   589,447,679 bytes, SHA-256 `228f127b…9ab49df`). The graph takes 16 kHz
   samples (a multiple of 160) and the text's token ids, and returns the
   argmax of the 5,000 timestamp classes for each token. Inside it: the
@@ -238,7 +238,7 @@ All nine streams are merged. What runs today:
   points of clean cuts after; dynamic int8 quantization breaks it. The
   repository carries the Apache-2.0 licence text and states that it is a
   modified (exported, quantized) Qwen3-ForcedAligner-0.6B.
-* **Speakers** (`koo-analysis/src/diarize.rs`, behind the default
+* **Speakers** (`koo-models/src/speakers/pyannote/`, behind the default
   `diarizer` feature) follow pyannote's speaker-diarization-3.1 on ONNX
   Runtime. pyannote segmentation-3.0 (MIT) hears 10 s windows 2.5 s
   apart and says, every 17 ms, which of up to three voices of the window
@@ -254,12 +254,12 @@ All nine streams are merged. What runs today:
   in order of appearance, and attributed after the aligner. Both models
   come from their own Hugging Face repositories
   (`onnx-community/pyannote-segmentation-3.0`, 6 MB, and
-  `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; `koo-models` pins
+  `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; its `config.rs` pins
   the commits). When they can't be loaded, every word is "Speaker 1"
   and the result is version 3, told apart once the models are there; a
   voice that takes over most of an earlier speaker's words keeps its id.
   ONNX Runtime allows one environment per process, so the aligner, the
-  diarizer and the sound models share it (`onnx.rs`).
+  diarizer and the sound models share it (`koo-models/src/onnx.rs`).
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both, on a frame boundary when the pause holds one, with
   a 10 ms audio fade at the join. The transcript panel's word delete and
@@ -267,8 +267,9 @@ All nine streams are merged. What runs today:
   that falls on a word into the nearest pause and say so.
 * **Sounds, music and beats** (behind the default `sounds` feature): after
   the transcript, the audio is decoded once more at 32 kHz and streamed
-  through the sound tagger (`tagger.rs`) and CLAP's audio tower
-  (`clap.rs`) together; then the beat tracker (`beats.rs`) hears each
+  through the sound tagger (`sound_tagging/efficientat/` in `koo-models`)
+  and CLAP's audio tower (`sound_search/clap/`) together; then the beat
+  tracker (`beats/beat_this/`) hears each
   stretch of music the tagger found, with 1 s either side. Runs of tagged
   windows become `Analysis::sounds` and `music` (version 3): a run starts
   up to 2 s before its sound, so it is shrunk by that much, and a sound
@@ -291,9 +292,10 @@ All nine streams are merged. What runs today:
   [Chris-Kode/efficientat-mn10-as-onnx](https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx),
   [Chris-Kode/beat-this-final0-onnx](https://huggingface.co/Chris-Kode/beat-this-final0-onnx)
   and [Chris-Kode/larger-clap-general-onnx](https://huggingface.co/Chris-Kode/larger-clap-general-onnx);
-  `koo-models` pins their URLs to a commit. JKU's server was unreachable, so the Beat This! export was made
-  from the `safe-models/beat-this-final0` mirror, whose weights have not
-  been compared with JKU's. Each graph takes 32 kHz mono samples and holds
+  each model's `config.rs` pins their URLs to a commit. JKU's server was
+  unreachable, so the Beat This! export was made from the
+  `safe-models/beat-this-final0` mirror, whose weights have not been
+  compared with JKU's. Each graph takes 32 kHz mono samples and holds
   its model's own front end, so analysis decodes once for all three:
   `efficientat-mn10-as.onnx` (20 MB; windows × samples in, 527
   probabilities out; matches EfficientAT's pipeline to 2e-6),
@@ -307,21 +309,31 @@ All nine streams are merged. What runs today:
   pinned commit (`bpe.rs` encodes it). `KOOEDITOR_TAGGER_MODEL`,
   `KOOEDITOR_BEATS_MODEL`, `KOOEDITOR_CLAP_AUDIO_MODEL` and
   `KOOEDITOR_CLAP_TEXT_MODEL` point at local copies instead.
-* **Models** (`koo-models`): each model file, pinned to a commit with
-  its size, belongs to a model, and each analysis task (voice activity,
+* **Models** (`koo-models`): one folder per task (voice activity,
   transcription, word timing, speakers, sounds and music, beats, sound
-  search) lists the models that can do it and runs on the first; picking
-  another comes later. Nothing downloads on its own. Settings → Models
-  (the gear in the top bar, or cmd-,) lists each task with its model and
-  downloads one or all of them, with progress and cancel, through
-  `<file>.part`; a failed download stays there with Retry.
-  `LocalAnalysis::model_tasks` says which tasks a build runs. Analysis
-  only looks for the files (`ModelFile::locate`): a step whose model is
-  missing is left out as before, and when one arrives the project's
-  media is analyzed again, which upgrades those results. While a model
-  is missing, the top bar's warning button lists them; its notices
-  (warnings and errors, such as a failed download) can be dismissed for
-  the session.
+  search). Its `mod.rs` holds the task's interface, the trait analysis
+  calls (`VoiceActivity`, `Transcriber`, `Aligner`, `Diarizer`, `Tagger`,
+  `BeatTracker`, `SoundSearch`); `MODELS`, the models that can do it, the
+  default first; and `runner`, which builds the runner of one of them. In
+  it, one folder per model: `mod.rs` is the model as the user sees it,
+  `config.rs` its files (pinned to a commit, with their sizes) and the
+  settings it runs with, `runner.rs` the code that loads and runs it
+  (behind its feature) and finds its own files. What models share sits
+  at the crate root: the catalog types, the audio rates, the downloads,
+  ONNX Runtime and the BPE tokenizer. Analysis only orchestrates: it asks
+  each task's runner for the selected model (`Task::model`, the default
+  until the user can pick another) and never names a model. A new model
+  is a folder under its task, its `MODEL` in `MODELS` and an arm in
+  `runner`. Nothing downloads on its own. Settings → Models (the gear in
+  the top bar, or cmd-,) lists each task with its model and downloads
+  one or all of them, with progress and cancel, through `<file>.part`; a
+  failed download stays there with Retry. `LocalAnalysis::model_tasks`
+  says which tasks a build runs. A runner whose files are missing fails
+  ("… is not downloaded"), its step is left out as before, and when the
+  model arrives the project's media is analyzed again, which upgrades
+  those results. While a model is missing, the top bar's warning button
+  lists them; its notices (warnings and errors, such as a failed
+  download) can be dismissed for the session.
 * **Hearing tools:** `view_range` and `view_detail` open with the sound
   script instead of the bare transcript; `get_audio` returns it for any
   range, `get_music` lists tempo, beats, downbeats and level changes,

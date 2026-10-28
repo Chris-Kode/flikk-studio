@@ -1,6 +1,7 @@
-//! Byte-level BPE tokenizers in GPT-2's scheme: Qwen's for the units the
-//! aligner is given (letters, digits and apostrophes only, see
-//! `forced::units`), and RoBERTa's for the text of a sound search. Their
+//! Byte-level BPE tokenizers in GPT-2's scheme, shared by models of two
+//! tasks: Qwen's for the units the aligner is given (letters, digits and
+//! apostrophes only, see `word_timing::qwen3_aligner`), and RoBERTa's for
+//! the text of a sound search (`sound_search::clap`). Their
 //! pre-tokenizers reduce to a few rules instead of a regex.
 
 use anyhow::{Context, Result};

@@ -1,30 +1,19 @@
-//! Word-level transcription with whisper.cpp, and the ggml model it needs.
-//!
-//! Whisper given music or a long silence makes words up there, often a
-//! verbatim repeat of what was said before, and its timestamps come loose
-//! around them. So, as faster-whisper's VAD filter does, Silero finds the
-//! speech first (`silero.rs`) and Whisper hears only that, each stretch on
-//! its own: one that starts with music Silero took for speech would throw
-//! the times of the speech after it.
+//! Whisper hearing each stretch of speech on its own, the longest first,
+//! and its tokens put together into words.
 
-use crate::ffmpeg::SAMPLE_RATE;
+use super::config::{FILE, MAX_THREADS};
+use crate::SPEECH_RATE;
+use crate::transcription::{Progress, Transcribed, Transcriber};
 use anyhow::{Context, Result};
 use koo_core::analysis::Word;
 use koo_core::time::{Time, TimeRange};
 use std::cmp::Reverse;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
     WhisperTokenId,
 };
-
-/// Recognized words and the detected (or given) language.
-pub struct Output {
-    pub language: String,
-    pub words: Vec<Word>,
-}
 
 /// The loaded model, shared by every job. Loading takes a moment, so it
 /// happens once on first use.
@@ -34,17 +23,12 @@ pub struct Whisper {
 }
 
 impl Whisper {
-    /// The model's file, if it is downloaded. `$KOOEDITOR_WHISPER_MODEL`
-    /// picks another: a path, or a ggml file name in `paths::models()`.
-    pub fn model(&self) -> Result<PathBuf> {
-        koo_models::files::WHISPER_BASE.locate()
-    }
-
-    fn context(&self, model: &Path) -> Result<Arc<WhisperContext>> {
+    fn context(&self) -> Result<Arc<WhisperContext>> {
         let mut ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ctx) = &*ctx {
             return Ok(ctx.clone());
         }
+        let model = FILE.locate()?;
         let path = model.to_str().context("model path is not valid UTF-8")?;
         let loaded = WhisperContext::new_with_params(path, WhisperContextParameters::default())
             .with_context(|| format!("could not load Whisper model {}", model.display()))?;
@@ -52,25 +36,24 @@ impl Whisper {
         *ctx = Some(loaded.clone());
         Ok(loaded)
     }
+}
 
-    /// Transcribe the stretches `speech` of 16 kHz mono `audio`, in
-    /// samples. `language` is an ISO 639-1 hint; `None` detects it.
-    pub fn transcribe(
+impl Transcriber for Whisper {
+    fn transcribe(
         &self,
-        model: &Path,
         audio: &[f32],
         speech: &[Range<usize>],
         language: Option<&str>,
-        progress: impl Fn(f32) + Send + 'static,
-    ) -> Result<Output> {
+        progress: Progress,
+    ) -> Result<Transcribed> {
         // Route whisper.cpp's chatter through `log` instead of stderr.
         whisper_rs::install_logging_hooks();
-        let ctx = self.context(model)?;
+        let ctx = self.context()?;
         let mut state = ctx
             .create_state()
             .context("could not create Whisper state")?;
         let eot = ctx.token_eot();
-        let time = |sample: usize| Time::from_secs_f64(sample as f64 / SAMPLE_RATE as f64);
+        let time = |sample: usize| Time::from_secs_f64(sample as f64 / SPEECH_RATE as f64);
         // The longest stretch first, and the others in its language, so a
         // short one is not taken for another.
         let mut order: Vec<usize> = (0..speech.len()).collect();
@@ -78,7 +61,6 @@ impl Whisper {
         let mut language = language.map(str::to_string);
         let mut heard = vec![Vec::new(); speech.len()];
         let total = speech.iter().map(|r| r.len()).sum::<usize>() as f32;
-        let progress = Arc::new(progress);
         let mut done = 0.0;
         for i in order {
             let r = speech[i].clone();
@@ -108,16 +90,23 @@ impl Whisper {
             heard[i] = words(&state, eot, time(r.start), time(r.end));
             done += share;
         }
-        Ok(Output {
+        Ok(Transcribed {
             language: language.unwrap_or_else(|| "und".into()),
             words: heard.concat(),
         })
+    }
+
+    fn language(&self, tag: &str) -> Option<&'static str> {
+        (tag.len() == 2)
+            .then(|| whisper_rs::get_lang_id(tag))
+            .flatten()
+            .and_then(whisper_rs::get_lang_str)
     }
 }
 
 /// The words Whisper heard in `state`, moved to `start` and never past
 /// `end`. Its notes on what is not speech, "(upbeat music)" or
-/// "[BLANK_AUDIO]", are left out.
+/// "\[BLANK_AUDIO\]", are left out.
 fn words(state: &WhisperState, eot: WhisperTokenId, start: Time, end: Time) -> Vec<Word> {
     let mut words = Vec::new();
     for segment in state.as_iter() {
@@ -234,6 +223,6 @@ fn starts_cjk(bytes: &[u8]) -> bool {
 
 fn threads() -> i32 {
     std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
+        .map(|n| n.get().min(MAX_THREADS))
         .unwrap_or(4) as i32
 }

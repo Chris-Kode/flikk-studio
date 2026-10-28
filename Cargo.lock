@@ -3568,11 +3568,8 @@ dependencies = [
  "anyhow",
  "koo-core",
  "koo-models",
- "ort",
  "serde",
  "serde_json",
- "unicode-normalization",
- "whisper-rs",
 ]
 
 [[package]]
@@ -3658,7 +3655,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "koo-core",
+ "ort",
+ "serde_json",
+ "unicode-normalization",
  "ureq",
+ "whisper-rs",
 ]
 
 [[package]]

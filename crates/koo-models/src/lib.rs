@@ -1,22 +1,74 @@
-//! The models the editor runs on this machine: the task each one serves,
-//! the files it needs in `paths::models()`, whether they are there, and
-//! fetching them. Nothing is downloaded unless the user asks
-//! ([`Downloads::start`]); until then a task whose model is missing is left
-//! out, and [`ModelFile::locate`] says so.
+//! Everything about the models the editor runs on this machine: one
+//! folder per task, and in it one folder per model.
 //!
-//! Each [`Task`] lists the models that can do it ([`Task::models`]) and
-//! runs on one of them ([`Task::model`]). Today every task has one model;
-//! more are added to its list, and the user picks among them, later.
+//! - `<task>/mod.rs`: what the task does, as the trait the analysis
+//!   pipeline calls; `MODELS`, the models that can do it, the default
+//!   first; and `runner`, which builds the runner of one of them.
+//! - `<task>/<model>/mod.rs`: the model as the user sees it, its
+//!   [`Model`].
+//! - `<task>/<model>/config.rs`: its files, where they download from, and
+//!   every number it is run with.
+//! - `<task>/<model>/runner.rs`: loading and running it, behind the
+//!   task's feature.
+//!
+//! What the models share sits here: the catalog ([`Task`], [`Model`],
+//! [`ModelFile`]), the audio rates they hear, [`Downloads`], ONNX Runtime
+//! (`onnx.rs`) and the BPE tokenizer (`bpe.rs`).
+//!
+//! Nothing is downloaded unless the user asks ([`Downloads::start`]);
+//! until then a runner whose files are missing fails, saying so
+//! ([`ModelFile::locate`]). A new model is a folder under its task, its
+//! `MODEL` in the task's `MODELS` and an arm in the task's `runner`.
 
-mod catalog;
+pub mod beats;
+#[cfg(any(feature = "aligner", feature = "sounds"))]
+mod bpe;
 mod download;
+#[cfg(any(feature = "aligner", feature = "diarizer", feature = "sounds"))]
+mod onnx;
+pub mod sound_search;
+pub mod sound_tagging;
+pub mod speakers;
+pub mod transcription;
+pub mod voice_activity;
+pub mod word_timing;
 
-pub use catalog::{files, models};
 pub use download::{Downloads, Status};
 
 use anyhow::{Result, bail};
 use koo_core::paths;
+use koo_core::time::Time;
 use std::path::PathBuf;
+
+/// Samples per second of the mono audio the speech models hear: voice
+/// activity, transcription, word timing and speakers.
+pub const SPEECH_RATE: u32 = 16_000;
+
+/// Samples per second of the mono audio the sound models hear: sound
+/// tagging, beats and sound search. 16 kHz would drop everything above
+/// 8 kHz (cymbals, glass, sibilance).
+pub const SOUND_RATE: u32 = 32_000;
+
+/// How a sound model hears a stream of [`SOUND_RATE`] audio: windows of
+/// `len` samples every `step`, run `batch` at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Windows {
+    pub len: usize,
+    pub step: usize,
+    pub batch: usize,
+}
+
+impl Windows {
+    /// The time a window spans.
+    pub fn len_time(&self) -> Time {
+        Time::from_secs_f64(self.len as f64 / SOUND_RATE as f64)
+    }
+
+    /// The time between the starts of windows.
+    pub fn step_time(&self) -> Time {
+        Time::from_secs_f64(self.step as f64 / SOUND_RATE as f64)
+    }
+}
 
 /// What a model is used for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -57,13 +109,13 @@ impl Task {
     /// The models that can do this task, the default first.
     pub fn models(self) -> &'static [&'static Model] {
         match self {
-            Task::VoiceActivity => &[&models::SILERO_VAD],
-            Task::Transcription => &[&models::WHISPER_BASE],
-            Task::WordTiming => &[&models::QWEN3_ALIGNER],
-            Task::Speakers => &[&models::PYANNOTE],
-            Task::SoundTagging => &[&models::EFFICIENTAT],
-            Task::Beats => &[&models::BEAT_THIS],
-            Task::SoundSearch => &[&models::CLAP],
+            Task::VoiceActivity => voice_activity::MODELS,
+            Task::Transcription => transcription::MODELS,
+            Task::WordTiming => word_timing::MODELS,
+            Task::Speakers => speakers::MODELS,
+            Task::SoundTagging => sound_tagging::MODELS,
+            Task::Beats => beats::MODELS,
+            Task::SoundSearch => sound_search::MODELS,
         }
     }
 

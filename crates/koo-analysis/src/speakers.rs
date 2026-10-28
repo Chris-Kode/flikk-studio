@@ -1,31 +1,16 @@
-//! Speaker attribution (PRD P1). [`crate::diarize::Pyannote`] tells voices
-//! apart when the `diarizer` feature is on; [`SingleSpeaker`] labels every
-//! word "Speaker 1" otherwise, and when the diarizer fails. Another
-//! diarizer implements [`Diarizer`] and slots into
+//! Speaker attribution (PRD P1). A speakers model from `koo-models` tells
+//! voices apart when the `diarizer` feature is on; [`SingleSpeaker`]
+//! labels every word "Speaker 1" otherwise, and when the model fails.
+//! Another diarizer implements [`Diarizer`] and slots into
 //! [`crate::LocalAnalysis::with_diarizer`].
 
 use anyhow::Result;
 use koo_core::analysis::{Speaker, Word};
 use koo_core::ids::SpeakerId;
+pub use koo_models::speakers::{Diarizer, Labels};
 
 /// Words below this attribution confidence keep `speaker: None` (PRD F3).
 pub const MIN_CONFIDENCE: f32 = 0.6;
-
-/// Number of distinct voices and, for each word, the index of its voice
-/// with a 0..1 confidence (`None` when it cannot tell).
-pub type Labels = (usize, Vec<Option<(usize, f32)>>);
-
-/// Groups words by voice.
-pub trait Diarizer: Send + Sync {
-    /// Get ready to run; fails when a model it needs is not downloaded.
-    fn prepare(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// The voice of each of `words`. `audio` is 16 kHz mono for the same
-    /// source times as the words; `progress` takes 0..1.
-    fn diarize(&self, audio: &[f32], words: &[Word], progress: &dyn Fn(f32)) -> Result<Labels>;
-}
 
 /// One voice for the whole item.
 pub struct SingleSpeaker;

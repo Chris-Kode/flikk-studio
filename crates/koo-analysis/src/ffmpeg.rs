@@ -10,13 +10,12 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Sample rate Whisper and the VAD work at.
-pub const SAMPLE_RATE: u32 = 16_000;
-
-/// Sample rate the sound models work at: 16 kHz would drop everything
-/// above 8 kHz (cymbals, glass, sibilance).
+/// Sample rate the sound models hear.
 #[cfg(feature = "sounds")]
-pub const SOUND_RATE: u32 = 32_000;
+pub use koo_models::SOUND_RATE;
+/// Sample rate the speech models hear, and the energy VAD and levels are
+/// measured at.
+pub use koo_models::SPEECH_RATE as SAMPLE_RATE;
 
 /// `$KOOEDITOR_FFMPEG`, else `ffmpeg` from `PATH`.
 pub fn binary() -> PathBuf {

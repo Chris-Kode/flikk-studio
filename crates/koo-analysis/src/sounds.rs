@@ -1,16 +1,16 @@
 //! The sound pass of analysis: the audio decoded once at 32 kHz and heard
-//! by the sound tagger and CLAP's audio tower as it streams, then the beat
-//! tracker on each stretch of music the tagger found.
+//! by the sound tagger and the sound search model as it streams, then the
+//! beat tracker on each stretch of music the tagger found.
 
-use crate::beats::{BeatModel, Tracker};
-use crate::clap::{self, ClapAudio, ClapText, TextFiles};
 use crate::ffmpeg::{self, SOUND_RATE};
-use crate::tagger::{self, Scores, Tagger};
 use anyhow::Result;
 use koo_core::analysis::{Levels, Music, Sound, SoundVectors};
 use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use koo_models::Task as ModelTask;
+use koo_models::beats::{self, BeatTracker};
+use koo_models::sound_search::{self, SoundSearch};
+use koo_models::sound_tagging::{self, Scores, Tagger};
+use std::path::Path;
 
 /// Audio either side of a stretch of music the beat tracker also hears,
 /// since the tagger's edges are only good to about half a second.
@@ -18,22 +18,21 @@ const MUSIC_MARGIN: Time = Time(FLICKS_PER_SECOND);
 /// Beats kept past the edges of the music.
 const BEAT_SLACK: Time = Time(FLICKS_PER_SECOND / 4);
 
-/// The sound models, loaded on first use and shared by every job; each
-/// runs one batch at a time.
-#[derive(Default)]
+/// The models of the three tasks, shared by every job.
 pub struct SoundModels {
-    tagger: Mutex<Option<(PathBuf, Tagger)>>,
-    beats: Mutex<Option<(PathBuf, BeatModel)>>,
-    clap: Mutex<Option<(PathBuf, ClapAudio)>>,
-    text: Mutex<Option<ClapText>>,
+    tagger: Box<dyn Tagger>,
+    beats: Box<dyn BeatTracker>,
+    search: Box<dyn SoundSearch>,
 }
 
-/// The model files a pass uses; the tagger is required, the others are
-/// left out (with the reason) when they could not be had.
-pub struct Files {
-    pub tagger: PathBuf,
-    pub beats: Result<PathBuf>,
-    pub clap: Result<PathBuf>,
+impl Default for SoundModels {
+    fn default() -> Self {
+        Self {
+            tagger: sound_tagging::runner(ModelTask::SoundTagging.model()),
+            beats: beats::runner(ModelTask::Beats.model()),
+            search: sound_search::runner(ModelTask::SoundSearch.model()),
+        }
+    }
 }
 
 /// What a pass heard, and what it could not do.
@@ -44,72 +43,51 @@ pub struct Heard {
     pub problems: Vec<String>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// `slot`'s model, loading it from `path` when it holds none or another.
-fn loaded<'a, T>(
-    slot: &'a Mutex<Option<(PathBuf, T)>>,
-    path: &Path,
-    load: impl FnOnce(&Path) -> Result<T>,
-) -> Result<MutexGuard<'a, Option<(PathBuf, T)>>> {
-    let mut guard = lock(slot);
-    if guard.as_ref().is_none_or(|(p, _)| p != path) {
-        *guard = Some((path.to_path_buf(), load(path)?));
-    }
-    Ok(guard)
-}
-
 impl SoundModels {
     /// Hear audio stream `stream` of `path`. `levels` are the 10 ms levels
     /// of the same stream, for the edges of short sounds; `hearing` and
-    /// `beating` report the two halves' progress.
-    #[allow(clippy::too_many_arguments)]
+    /// `beating` report the two halves' progress. The tagger is required;
+    /// without the sound search model or the beat tracker the pass goes on,
+    /// noting why.
     pub fn hear(
         &self,
         path: &Path,
         stream: u32,
         duration: Option<Time>,
         levels: Option<&Levels>,
-        files: Files,
         hearing: &(dyn Fn(f32) + Sync),
         beating: &(dyn Fn(f32) + Sync),
     ) -> Result<Heard> {
         let mut problems = Vec::new();
-        let clap_path = match files.clap {
-            Ok(p) => Some(p),
-            Err(e) => {
-                problems.push(format!("sound search: {e:#}"));
-                None
-            }
-        };
-        let mut tags = Slider::new(tagger::WINDOW, tagger::STEP);
-        let mut clips = Slider::new(clap::WINDOW, clap::STEP);
+        let (tagged, searched) = (self.tagger.windows(), self.search.windows());
+        let mut tags = Slider::new(tagged.len, tagged.step);
+        let mut clips = Slider::new(searched.len, searched.step);
         let mut scores: Vec<Scores> = Vec::new();
-        let mut vectors = clap_path
-            .as_ref()
-            .map(|_| SoundVectors::new(clap::STEP_TIME, clap::WINDOW_TIME));
+        // Until the sound search model fails.
+        let mut vectors = Some(SoundVectors::new(searched.step_time(), searched.len_time()));
         let mut pending_tags = Vec::new();
         let mut pending_clips = Vec::new();
         let mut run = |tags_left: &mut Vec<Vec<f32>>, clips_left: &mut Vec<Vec<f32>>, all: bool| {
-            while tags_left.len() >= tagger::BATCH || (all && !tags_left.is_empty()) {
-                let n = tags_left.len().min(tagger::BATCH);
+            while tags_left.len() >= tagged.batch || (all && !tags_left.is_empty()) {
+                let n = tags_left.len().min(tagged.batch);
                 let batch: Vec<Vec<f32>> = tags_left.drain(..n).collect();
-                let mut model = loaded(&self.tagger, &files.tagger, Tagger::load)?;
-                scores.extend(model.as_mut().expect("loaded").1.run(&batch)?);
+                scores.extend(self.tagger.score(&batch)?);
             }
-            if let (Some(path), Some(vectors)) = (&clap_path, vectors.as_mut()) {
-                while clips_left.len() >= clap::BATCH || (all && !clips_left.is_empty()) {
-                    let n = clips_left.len().min(clap::BATCH);
-                    let batch: Vec<Vec<f32>> = clips_left.drain(..n).collect();
-                    let windows: Vec<&[f32]> = batch.iter().map(Vec::as_slice).collect();
-                    let mut model = loaded(&self.clap, path, ClapAudio::load)?;
-                    for v in model.as_mut().expect("loaded").1.embed(&windows)? {
-                        vectors.push(&v);
+            while let Some(found) = vectors.as_mut()
+                && (clips_left.len() >= searched.batch || (all && !clips_left.is_empty()))
+            {
+                let n = clips_left.len().min(searched.batch);
+                let batch: Vec<Vec<f32>> = clips_left.drain(..n).collect();
+                let windows: Vec<&[f32]> = batch.iter().map(Vec::as_slice).collect();
+                match self.search.embed(&windows) {
+                    Ok(embedded) => embedded.iter().for_each(|v| found.push(v)),
+                    Err(e) => {
+                        problems.push(format!("sound search: {e:#}"));
+                        vectors = None;
                     }
                 }
-            } else {
+            }
+            if vectors.is_none() {
                 clips_left.clear();
             }
             anyhow::Ok(())
@@ -135,41 +113,32 @@ impl SoundModels {
         run(&mut pending_tags, &mut pending_clips, true)?;
 
         let end = Time::from_secs_f64(total as f64 / SOUND_RATE as f64);
-        let (sounds, mut music) = tagger::read(&scores, end, levels);
-        match files.beats {
-            Ok(model) => {
-                let all: i64 = music.iter().map(|m| m.range.duration().0).sum();
-                let mut done = 0;
-                for m in music.iter_mut() {
-                    beating(done as f32 / all.max(1) as f32);
-                    done += m.range.duration().0;
-                    let stretch = TimeRange::new(
-                        (m.range.start - MUSIC_MARGIN).max(Time::ZERO),
-                        (m.range.end + MUSIC_MARGIN).min(end),
-                    );
-                    match self.beats_of(path, stream, stretch, &model) {
-                        Ok((beats, downbeats)) => {
-                            // The tracker carries the beat on a little
-                            // past where the music is.
-                            let near = TimeRange::new(
-                                m.range.start - BEAT_SLACK,
-                                m.range.end + BEAT_SLACK,
-                            );
-                            m.beats = beats.into_iter().filter(|t| near.contains(*t)).collect();
-                            m.downbeats = downbeats
-                                .into_iter()
-                                .filter(|t| near.contains(*t))
-                                .collect();
-                        }
-                        Err(e) => {
-                            problems.push(format!("beats: {e:#}"));
-                            break;
-                        }
-                    }
+        let (sounds, mut music) = self.tagger.read(&scores, end, levels);
+        let all: i64 = music.iter().map(|m| m.range.duration().0).sum();
+        let mut done = 0;
+        for m in music.iter_mut() {
+            beating(done as f32 / all.max(1) as f32);
+            done += m.range.duration().0;
+            let stretch = TimeRange::new(
+                (m.range.start - MUSIC_MARGIN).max(Time::ZERO),
+                (m.range.end + MUSIC_MARGIN).min(end),
+            );
+            match self.beats_of(path, stream, stretch) {
+                Ok((beats, downbeats)) => {
+                    // The tracker carries the beat on a little past where
+                    // the music is.
+                    let near = TimeRange::new(m.range.start - BEAT_SLACK, m.range.end + BEAT_SLACK);
+                    m.beats = beats.into_iter().filter(|t| near.contains(*t)).collect();
+                    m.downbeats = downbeats
+                        .into_iter()
+                        .filter(|t| near.contains(*t))
+                        .collect();
+                }
+                Err(e) => {
+                    problems.push(format!("beats: {e:#}"));
+                    break;
                 }
             }
-            Err(e) if !music.is_empty() => problems.push(format!("beats: {e:#}")),
-            Err(_) => {}
         }
         beating(1.0);
         Ok(Heard {
@@ -186,31 +155,17 @@ impl SoundModels {
         path: &Path,
         stream: u32,
         stretch: TimeRange,
-        model: &Path,
     ) -> Result<(Vec<Time>, Vec<Time>)> {
-        let mut guard = loaded(&self.beats, model, BeatModel::load)?;
-        let mut tracker = Tracker::new(&mut guard.as_mut().expect("loaded").1);
-        ffmpeg::stream_audio(
-            path,
-            stream,
-            SOUND_RATE,
-            Some(stretch),
-            None,
-            &|_| {},
-            &mut |samples| tracker.push(samples),
-        )?;
-        let (beats, downbeats) = tracker.finish()?;
+        let (beats, downbeats) = self.beats.track(&mut |sink| {
+            ffmpeg::stream_audio(path, stream, SOUND_RATE, Some(stretch), None, &|_| {}, sink)
+        })?;
         let shift = |t: Vec<Time>| t.into_iter().map(|t| t + stretch.start).collect();
         Ok((shift(beats), shift(downbeats)))
     }
 
-    /// The vector of `text`, loading the text tower first if needed.
-    pub fn describe(&self, files: &TextFiles, text: &str) -> Result<Vec<f32>> {
-        let mut guard = lock(&self.text);
-        if guard.is_none() {
-            *guard = Some(ClapText::load(files)?);
-        }
-        guard.as_mut().expect("loaded above").embed(text)
+    /// The vector of `text`.
+    pub fn describe(&self, text: &str) -> Result<Vec<f32>> {
+        self.search.describe(text)
     }
 }
 

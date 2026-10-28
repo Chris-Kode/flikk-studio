@@ -1,4 +1,5 @@
-//! ONNX Runtime sessions for the models analysis runs on the CPU.
+//! ONNX Runtime sessions for the models run on the CPU. The process has one
+//! ONNX Runtime environment, so every model shares it.
 
 use anyhow::{Result, anyhow};
 use ort::environment::Environment;
