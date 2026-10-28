@@ -1,13 +1,13 @@
-//! Word-level transcription with whisper.cpp, and the ggml models it needs.
+//! Word-level transcription with whisper.cpp, and the ggml model it needs.
 //!
 //! Whisper given music or a long silence makes words up there, often a
 //! verbatim repeat of what was said before, and its timestamps come loose
 //! around them. So, as faster-whisper's VAD filter does, Silero finds the
-//! speech first and Whisper hears only that, each stretch on its own: one
-//! that starts with music Silero took for speech would throw the times of
-//! the speech after it.
+//! speech first (`silero.rs`) and Whisper hears only that, each stretch on
+//! its own: one that starts with music Silero took for speech would throw
+//! the times of the speech after it.
 
-use crate::download::{Download, ModelFile, StartDownload};
+use crate::download::{Download, StartDownload};
 use crate::ffmpeg::SAMPLE_RATE;
 use anyhow::{Context, Result, bail};
 use koo_core::analysis::Word;
@@ -19,38 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-    WhisperTokenId, WhisperVadContext, WhisperVadContextParams,
+    WhisperTokenId,
 };
 
 pub const DEFAULT_MODEL: &str = "ggml-base.bin";
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
-
-/// Silero VAD as ggml, which whisper.cpp runs.
-const VAD: ModelFile = ModelFile {
-    name: "ggml-silero-v6.2.0.bin",
-    url: "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
-    env: "KOOEDITOR_VAD_MODEL",
-    what: "voice activity model",
-};
-/// Silero hears 16 kHz audio in windows of this many samples.
-const WINDOW: usize = 512;
-/// Music holds Silero down for seconds after it ends, missing the first
-/// words said, so it hears the audio in 4 s blocks, each after the second
-/// before it, instead of in one go.
-const BLOCK: usize = 125 * WINDOW;
-const WARM_UP: usize = 32 * WINDOW;
-/// faster-whisper's VAD filter: speech starts where Silero is sure of it,
-/// ends once Silero has doubted it for 2 s, and takes 400 ms either side.
-const THRESHOLD: f32 = 0.5;
-const DOUBT: f32 = THRESHOLD - 0.15;
-const MIN_SILENCE: usize = 2 * SAMPLE_RATE as usize;
-const SPEECH_PAD: usize = SAMPLE_RATE as usize * 400 / 1000;
-
-/// The models on disk.
-pub struct Files {
-    model: PathBuf,
-    vad: PathBuf,
-}
 
 /// Recognized words and the detected (or given) language.
 pub struct Output {
@@ -58,30 +31,28 @@ pub struct Output {
     pub words: Vec<Word>,
 }
 
-/// Loaded models, shared by every job. Loading takes a moment, so it
+/// The loaded model, shared by every job. Loading takes a moment, so it
 /// happens once on first use.
 #[derive(Default)]
 pub struct Whisper {
     ctx: Mutex<Option<Arc<WhisperContext>>>,
-    /// Silero; hears one item at a time.
-    vad: Mutex<Option<WhisperVadContext>>,
-    downloads: [Download; 2],
+    download: Download,
 }
 
 impl Whisper {
-    /// The models' files, downloading them first if needed;
-    /// `start_download` returns a progress callback for each download.
-    pub fn ensure_model(&self, start_download: StartDownload) -> Result<Files> {
+    /// The model's file, downloading it first if needed; `start_download`
+    /// returns a progress callback for the download.
+    pub fn ensure_model(&self, start_download: StartDownload) -> Result<PathBuf> {
         let (model, name) = model_location()?;
         if !model.is_file() {
             let Some(name) = name else {
                 bail!("Whisper model not found at {}", model.display());
             };
             let url = format!("{MODEL_URL}{name}");
-            self.downloads[0].ensure(&model, &url, "Whisper model", || start_download(&name))?;
+            self.download
+                .ensure(&model, &url, "Whisper model", || start_download(&name))?;
         }
-        let vad = VAD.ensure(&self.downloads[1], start_download)?;
-        Ok(Files { model, vad })
+        Ok(model)
     }
 
     fn context(&self, model: &Path) -> Result<Arc<WhisperContext>> {
@@ -97,50 +68,19 @@ impl Whisper {
         Ok(loaded)
     }
 
-    /// Where Silero hears speech in 16 kHz mono `audio`, in samples.
-    fn speech(&self, model: &Path, audio: &[f32]) -> Result<Vec<Range<usize>>> {
-        let mut vad = self.vad.lock().unwrap_or_else(|e| e.into_inner());
-        if vad.is_none() {
-            let path = model.to_str().context("model path is not valid UTF-8")?;
-            // Too small a model to gain from threads: one runs three times
-            // faster than four.
-            let mut params = WhisperVadContextParams::default();
-            params.set_n_threads(1);
-            let loaded = WhisperVadContext::new(path, params).with_context(|| {
-                format!("could not load voice activity model {}", model.display())
-            })?;
-            *vad = Some(loaded);
-        }
-        let vad = vad.as_mut().expect("loaded above");
-        let mut probs = Vec::with_capacity(audio.len().div_ceil(WINDOW));
-        for from in (0..audio.len()).step_by(BLOCK) {
-            let warm = from.saturating_sub(WARM_UP);
-            vad.detect_speech(&audio[warm..(from + BLOCK).min(audio.len())])
-                .context("voice activity detection failed")?;
-            probs.extend_from_slice(&vad.probabilities()[(from - warm) / WINDOW..]);
-        }
-        Ok(stretches(&probs, audio.len()))
-    }
-
-    /// Transcribe 16 kHz mono `audio`. `language` is an ISO 639-1 hint;
-    /// `None` detects it.
+    /// Transcribe the stretches `speech` of 16 kHz mono `audio`, in
+    /// samples. `language` is an ISO 639-1 hint; `None` detects it.
     pub fn transcribe(
         &self,
-        files: &Files,
+        model: &Path,
         audio: &[f32],
+        speech: &[Range<usize>],
         language: Option<&str>,
         progress: impl Fn(f32) + Send + 'static,
     ) -> Result<Output> {
         // Route whisper.cpp's chatter through `log` instead of stderr.
         whisper_rs::install_logging_hooks();
-        let speech = self.speech(&files.vad, audio)?;
-        if speech.is_empty() {
-            return Ok(Output {
-                language: language.unwrap_or("und").to_string(),
-                words: Vec::new(),
-            });
-        }
-        let ctx = self.context(&files.model)?;
+        let ctx = self.context(model)?;
         let mut state = ctx
             .create_state()
             .context("could not create Whisper state")?;
@@ -188,35 +128,6 @@ impl Whisper {
             words: heard.concat(),
         })
     }
-}
-
-/// Stretches of speech, in samples of audio `len` long, from Silero's
-/// chance of speech in each window. They are at least [`MIN_SILENCE`]
-/// apart, so their padding never meets.
-fn stretches(probs: &[f32], len: usize) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    // Where the current stretch started, and where Silero began to doubt it.
-    let mut start = None;
-    let mut doubt = None;
-    for (i, &p) in probs.iter().enumerate() {
-        let at = i * WINDOW;
-        if p >= THRESHOLD {
-            start.get_or_insert(at);
-            doubt = None;
-        } else if p < DOUBT
-            && let Some(s) = start
-        {
-            let d = *doubt.get_or_insert(at);
-            if at - d >= MIN_SILENCE {
-                out.push(s..d);
-                (start, doubt) = (None, None);
-            }
-        }
-    }
-    out.extend(start.map(|s| s..len));
-    out.into_iter()
-        .map(|r| r.start.saturating_sub(SPEECH_PAD)..(r.end + SPEECH_PAD).min(len))
-        .collect()
 }
 
 /// The words Whisper heard in `state`, moved to `start` and never past
