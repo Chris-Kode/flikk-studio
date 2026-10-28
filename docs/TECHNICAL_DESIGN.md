@@ -244,8 +244,10 @@ All nine streams are merged. What runs today:
   [Chris-Kode/efficientat-mn10-as-onnx](https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx),
   [Chris-Kode/beat-this-final0-onnx](https://huggingface.co/Chris-Kode/beat-this-final0-onnx)
   and [Chris-Kode/larger-clap-general-onnx](https://huggingface.co/Chris-Kode/larger-clap-general-onnx);
-  the URLs in `tagger.rs`, `beats.rs` and `clap.rs` read `main` until they
-  are pinned to a commit. Each graph takes 32 kHz mono samples and holds
+  the URLs in `tagger.rs`, `beats.rs` and `clap.rs` are pinned to a
+  commit. JKU's server was unreachable, so the Beat This! export was made
+  from the `safe-models/beat-this-final0` mirror, whose weights have not
+  been compared with JKU's. Each graph takes 32 kHz mono samples and holds
   its model's own front end, so analysis decodes once for all three:
   `efficientat-mn10-as.onnx` (20 MB; windows × samples in, 527
   probabilities out; matches EfficientAT's pipeline to 2e-6),
