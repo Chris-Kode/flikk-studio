@@ -307,9 +307,11 @@ compositor feature on real FFmpeg-made media).
   at about 6 s per minute of audio on 4 CPU threads.
 * Speakers were measured on four AMI test meetings (four people each,
   headset mix; pyannote's word-based reference): 4.1% of the speech of
-  one person at a time went to the wrong voice. On one meeting's
-  Whisper words, 98% of the words of one speaker got a speaker (99.5% of
-  them right) and 64% of the words said over someone else. Voices are
+  one person at a time went to the wrong voice. On two meetings'
+  Whisper words, 98% of the words said by one person alone got a speaker
+  (98.5% of them right), and 59% of those said over someone else (96%
+  right; weighing overlaps by the windows labelled 8 points more of
+  them than leaving ties unattributed, no less right). Voices are
   told apart within one item only; across items "Speaker 1" is not the
   same person. Diarization runs at about 3% of the audio's length on 4
   CPU threads (10 s for 5 minutes); the clustering fits on at most 2,000
