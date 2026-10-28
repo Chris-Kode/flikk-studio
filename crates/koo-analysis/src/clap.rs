@@ -15,13 +15,13 @@ use std::path::PathBuf;
 
 pub const AUDIO: ModelFile = ModelFile {
     name: "larger-clap-general-audio.onnx",
-    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/main/larger-clap-general-audio.onnx",
+    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/ccfced4f8df016a4123b6d938821f600a5be7a00/larger-clap-general-audio.onnx",
     env: "KOOEDITOR_CLAP_AUDIO_MODEL",
     what: "sound search model",
 };
 pub const TEXT: ModelFile = ModelFile {
     name: "larger-clap-general-text.onnx",
-    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/main/larger-clap-general-text.onnx",
+    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/ccfced4f8df016a4123b6d938821f600a5be7a00/larger-clap-general-text.onnx",
     env: "KOOEDITOR_CLAP_TEXT_MODEL",
     what: "sound search text model",
 };

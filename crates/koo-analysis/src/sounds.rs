@@ -137,7 +137,6 @@ impl SoundModels {
         // A last vector only for a window that is mostly there.
         clips.finish(&mut pending_clips, SOUND_RATE as usize);
         run(&mut pending_tags, &mut pending_clips, true)?;
-        drop(run);
 
         let end = Time::from_secs_f64(total as f64 / SOUND_RATE as f64);
         let (sounds, mut music) = tagger::read(&scores, end, levels);
