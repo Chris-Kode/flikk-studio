@@ -403,6 +403,10 @@ pub enum ClipContent {
     Caption {
         text: String,
         speaker: Option<SpeakerId>,
+        /// When each word of `text` is spoken, from the clip's start; empty
+        /// when unknown. Highlights spread unknown words by their length.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        words: Vec<Time>,
     },
     /// Image/asset overlay tied optionally to a speaker (PRD C5).
     Overlay {

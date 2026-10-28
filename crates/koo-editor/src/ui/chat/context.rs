@@ -334,7 +334,7 @@ fn clip_lines(out: &mut Out, i: usize, project: &Project, track: &Track, c: &Cli
                 format!("content: title, template {template}, text {text:?}"),
             );
         }
-        ClipContent::Caption { text, speaker } => {
+        ClipContent::Caption { text, speaker, .. } => {
             let speaker = speaker
                 .map(|s| format!(", speaker {s}"))
                 .unwrap_or_default();

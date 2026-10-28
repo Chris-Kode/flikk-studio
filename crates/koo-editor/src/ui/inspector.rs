@@ -14,8 +14,10 @@ mod param;
 mod transition;
 
 pub(crate) use clip::sound_clip;
+pub(crate) use param::format_value;
 
 use crate::state::EditorState;
+use crate::ui::caption_style::{self, CaptionStylePanel};
 use clip::PictureTab;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -47,6 +49,8 @@ pub struct InspectorPanel {
     start_field: Entity<InputState>,
     end_field: Entity<InputState>,
     timing_clip: Option<ClipId>,
+    /// Style of the selected caption's track.
+    caption_style: Entity<CaptionStylePanel>,
     /// FX parameter controls, by owner and parameter.
     fx_controls: HashMap<controls::ControlKey, controls::Control>,
     /// Effects folded to their header.
@@ -106,6 +110,9 @@ impl InspectorPanel {
                 }
             }),
         ];
+        let caption_style = cx.new(|cx| {
+            CaptionStylePanel::new(state.clone(), caption_style::Target::Active, window, cx)
+        });
         let presets = state.read(cx).presets.clone();
         let lufs_target = cx.new(|cx| {
             InputState::new(window, cx).default_value(param::format_value(presets.loudness_lufs, 1))
@@ -130,6 +137,7 @@ impl InspectorPanel {
             start_field,
             end_field,
             timing_clip: None,
+            caption_style,
             fx_controls: HashMap::new(),
             collapsed_fx: HashSet::new(),
             name_field,
@@ -347,7 +355,7 @@ impl Render for InspectorPanel {
 }
 
 /// Group title above a block of controls.
-fn section(title: &'static str, cx: &App) -> Div {
+pub(crate) fn section(title: &'static str, cx: &App) -> Div {
     v_flex().gap_0p5().child(
         div()
             .pb_1()
@@ -359,7 +367,7 @@ fn section(title: &'static str, cx: &App) -> Div {
 }
 
 /// Group title with actions on the right.
-fn section_with(title: &'static str, actions: impl IntoElement, cx: &App) -> Div {
+pub(crate) fn section_with(title: &'static str, actions: impl IntoElement, cx: &App) -> Div {
     v_flex().gap_0p5().child(
         h_flex()
             .h(px(22.))

@@ -65,6 +65,7 @@ impl TranscriptPanel {
         commands.extend(phrases.into_iter().map(|p| Command::AddCaption {
             track: track.id,
             range: p.range,
+            words: p.word_times(&words),
             text: p.text,
             speaker: p.speaker,
         }));
@@ -179,11 +180,7 @@ impl TranscriptPanel {
             .any(|w| w.word.confidence < LOW_CONFIDENCE && w.timeline.overlaps(&range))
     }
 
-    pub(super) fn captions_view(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn captions_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.refresh_captions(cx);
         let body = if self.captions.is_empty() {
             div()
@@ -210,12 +207,7 @@ impl TranscriptPanel {
                 .vertical_scrollbar(&self.caption_list)
                 .into_any_element()
         };
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(body)
-            .child(self.style_view(window, cx))
-            .into_any_element()
+        v_flex().flex_1().min_h_0().child(body).into_any_element()
     }
 
     fn caption_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {

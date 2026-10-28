@@ -47,6 +47,9 @@ pub struct EditorState {
     pub presets: koo_core::memory::Presets,
     /// Index into `presets.caption_styles` used for new captions.
     pub caption_style: usize,
+    /// Unsaved caption style the viewer shows while a control is dragged,
+    /// with its index.
+    caption_live: Option<(usize, koo_core::memory::CaptionStyle)>,
     // --- timeline/viewer
     /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
     pub play_speed: f64,
@@ -108,6 +111,7 @@ impl EditorState {
             source_media: None,
             presets: koo_core::memory::Presets::default(),
             caption_style: 0,
+            caption_live: None,
             play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
@@ -469,6 +473,90 @@ impl EditorState {
                 .position(|s| s.name == name)
         }) {
             self.caption_style = i;
+        }
+    }
+
+    /// Caption styles as the viewer shows them: with the one being dragged.
+    pub fn caption_styles(&self) -> std::borrow::Cow<'_, [koo_core::memory::CaptionStyle]> {
+        let styles = &self.presets.caption_styles;
+        match &self.caption_live {
+            Some((i, live)) if *i < styles.len() => {
+                let mut styles = styles.clone();
+                styles[*i] = live.clone();
+                std::borrow::Cow::Owned(styles)
+            }
+            _ => std::borrow::Cow::Borrowed(styles),
+        }
+    }
+
+    /// Show caption style `index` as `style` without saving it.
+    pub fn show_caption_style(
+        &mut self,
+        index: usize,
+        style: koo_core::memory::CaptionStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.caption_live = Some((index, style));
+        cx.notify();
+    }
+
+    /// Change caption style `index` and save it.
+    pub fn edit_caption_style(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut koo_core::memory::CaptionStyle),
+        cx: &mut Context<Self>,
+    ) {
+        self.caption_live = None;
+        self.edit_presets(
+            |p| {
+                if let Some(style) = p.caption_styles.get_mut(index) {
+                    f(style);
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// The preset index caption `track` is styled with: its named preset,
+    /// else the first.
+    pub fn track_caption_style(&self, track: koo_core::TrackId) -> usize {
+        self.bus
+            .project()
+            .timeline
+            .track(track)
+            .and_then(|t| t.caption_style.as_deref())
+            .and_then(|name| {
+                self.presets
+                    .caption_styles
+                    .iter()
+                    .position(|s| s.name == name)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Style caption `track` with preset `index`. The first caption track's
+    /// style is also the one new captions use.
+    pub fn set_track_caption_style(
+        &mut self,
+        track: koo_core::TrackId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let first = self
+            .bus
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .find(|t| t.kind == koo_core::model::TrackKind::Caption)
+            .map(|t| t.id);
+        if first == Some(track) {
+            self.pick_caption_style(index, cx);
+        } else if let Some(style) = self.presets.caption_styles.get(index) {
+            let style = Some(style.name.clone());
+            self.execute(Command::SetCaptionStyle { track, style }, cx);
         }
     }
 

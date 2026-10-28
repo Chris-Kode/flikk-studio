@@ -116,6 +116,7 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             range,
             text,
             speaker,
+            words,
         } => insert_new(
             tl,
             *track,
@@ -123,17 +124,33 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             ClipContent::Caption {
                 text: text.clone(),
                 speaker: *speaker,
+                words: words.clone(),
             },
         ),
         Command::EditCaption { clip, text, range } => update_clip(tl, *clip, |c| {
-            if let (
-                Some(new),
-                ClipContent::Caption { text: old, .. } | ClipContent::Title { text: old, .. },
-            ) = (text, &mut c.content)
-            {
-                *old = new.clone();
+            match (text, &mut c.content) {
+                (
+                    Some(new),
+                    ClipContent::Caption {
+                        text: old, words, ..
+                    },
+                ) => {
+                    // A fixed typo keeps the word timing; other rewrites lose it.
+                    if new.split_whitespace().count() != old.split_whitespace().count() {
+                        words.clear();
+                    }
+                    *old = new.clone();
+                }
+                (Some(new), ClipContent::Title { text: old, .. }) => *old = new.clone(),
+                _ => {}
             }
             if let Some(r) = range {
+                // Retiming leaves the words where they are spoken.
+                if let ClipContent::Caption { words, .. } = &mut c.content {
+                    for w in words {
+                        *w = *w + c.start - r.start;
+                    }
+                }
                 c.start = r.start;
                 c.duration = r.duration();
             }
@@ -1735,6 +1752,11 @@ pub fn trim_start(clip: &Clip, at: Time) -> Clip {
     match &mut c.content {
         ClipContent::Media { source_in, .. } => *source_in = *source_in + offset.scale(clip.speed),
         ClipContent::Generator { fx } => fx.shift_keyframes(-offset),
+        ClipContent::Caption { words, .. } => {
+            for w in words {
+                *w = *w - offset;
+            }
+        }
         _ => {}
     }
     for e in &mut c.effects {

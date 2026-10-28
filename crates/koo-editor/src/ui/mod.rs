@@ -2,10 +2,12 @@
 //! Every panel is built with `new(state, window, cx)`, observes the shared
 //! [`EditorState`](crate::state::EditorState) and renders itself.
 
+pub mod caption_style;
 pub mod chat;
 pub mod code_editor;
 pub mod deliver;
 pub mod inspector;
+pub mod lettering;
 pub mod library;
 pub mod media_pool;
 pub mod mixer;
