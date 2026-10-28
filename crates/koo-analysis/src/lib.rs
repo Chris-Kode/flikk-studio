@@ -4,12 +4,12 @@
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
 //! of worker threads runs the pipeline (audio → VAD and levels → transcript
-//! → word edges on the audio → word times from the aligner → speakers →
-//! sounds, music and sound vectors → beats → shot changes) and caches the
-//! result by fingerprint, so an item is only ever analyzed once (principle
-//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
-//! reusing their transcript (aligned words too, from version 2) and shot
-//! changes.
+//! of the speech Silero hears → word edges on the audio → word times from
+//! the aligner → speakers → sounds, music and sound vectors → beats → shot
+//! changes) and caches the result by fingerprint, so an item is only ever
+//! analyzed once (principle 4). Results of an older [`ANALYSIS_VERSION`]
+//! are upgraded in place, reusing their shot changes and a transcript from
+//! version 5 on (aligned words too, from version 2).
 
 mod align;
 #[cfg(feature = "sounds")]
@@ -401,7 +401,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     let reused_transcript = previous
         .as_ref()
         .and_then(|a| a.transcript.clone())
-        .filter(|t| t.audio_stream == stream);
+        .filter(|t| t.audio_stream == stream && t.version >= SPEECH_ONLY);
     // Its words came from the aligner (or as near as this build gets).
     let aligned =
         reused_transcript.is_some() && previous.as_ref().is_some_and(|a| a.version >= ALIGNED);
@@ -561,11 +561,11 @@ fn transcript(
     let mut detected = language.map(str::to_string);
     // Whisper invents words in silence; only run it when someone talks.
     if !speech.is_empty() {
-        let model = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
+        let files = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
         let out =
             shared
                 .whisper
-                .transcribe(&model, audio, language, progress.step(Step::Transcript))?;
+                .transcribe(&files, audio, language, progress.step(Step::Transcript))?;
         words = out.words;
         detected = Some(out.language);
     }
@@ -575,8 +575,14 @@ fn transcript(
         language: detected.unwrap_or_else(|| "und".into()),
         words,
         speakers: Vec::new(),
+        version: ANALYSIS_VERSION,
     }))
 }
+
+/// Transcript version from which Whisper hears only the speech Silero
+/// finds. Older transcripts can hold words made up over music or silence,
+/// so they are transcribed again.
+const SPEECH_ONLY: u32 = 5;
 
 /// Version of a result whose words the aligner did not place. Without the
 /// aligner, edges measured on the audio are as good as this build gets.

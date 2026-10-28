@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped when analysis learns something older results lack; those are
 /// upgraded the next time the item is analyzed.
-pub const ANALYSIS_VERSION: u32 = 4;
+pub const ANALYSIS_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -39,6 +39,11 @@ pub struct Transcript {
     pub language: String,
     pub words: Vec<Word>,
     pub speakers: Vec<Speaker>,
+    /// The [`ANALYSIS_VERSION`] that transcribed it, kept while later
+    /// versions reuse it; 0 before version 5, which transcribes only the
+    /// speech a voice activity model hears.
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl Transcript {

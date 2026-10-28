@@ -179,7 +179,18 @@ All nine streams are merged. What runs today:
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness,
   speakers (below); Whisper transcription behind the default `whisper`
   feature. The model downloads to `paths::models()` on first use, or set
-  `KOOEDITOR_WHISPER_MODEL`. Word times come from a forced aligner
+  `KOOEDITOR_WHISPER_MODEL`. Whisper hears only speech
+  (`koo-analysis/src/transcribe.rs`, from version 5): given music, a long
+  silence, or a 30 s window that starts with either, it made words up,
+  often repeating what was said before, and its times came loose. Silero
+  VAD v6.2 (`ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned
+  commit, or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp, finds the
+  stretches of speech as faster-whisper's VAD filter does (pauses under
+  2 s kept, 400 ms either side). It hears the audio in 4 s blocks, each
+  after the second before it, since music holds it down for seconds
+  after. Whisper then hears each stretch on its own, without the text of
+  the window before, in the language of the longest; its notes such as
+  "(upbeat music)" are dropped. Word times come from a forced aligner
   (`koo-analysis/src/forced.rs`, behind the default `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
   and answers with each word's start and end, in 80 ms steps; starts then
@@ -192,8 +203,11 @@ All nine streams are merged. What runs today:
   levels (`koo-analysis/src/align.rs`). When the model can't be loaded,
   the result keeps those edges as version 1 and is aligned once the model
   is there. Running that measurement after the aligner made cuts worse,
-  so it is only the fallback. Results of an older `ANALYSIS_VERSION` are
-  upgraded when a project opens, without running Whisper again.
+  so it is only the fallback. The aligner's times never pass the audio
+  it was given, so words stay in order. Results of an older
+  `ANALYSIS_VERSION` are upgraded when a project opens, without running
+  Whisper again unless their transcript is from before version 5
+  (`Transcript::version`).
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
