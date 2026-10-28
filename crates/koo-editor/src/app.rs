@@ -2,6 +2,7 @@
 //! left, the agent chat docked on the right in every workspace (PRD AG1).
 
 use crate::state::EditorState;
+use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::{
     chat::ChatPanel, code_editor::CodeEditorPanel, deliver::DeliverPanel,
     inspector::InspectorPanel, library::LibraryPanel, media_pool::MediaPoolPanel,
@@ -13,6 +14,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::*;
 use koo_core::agent::Workspace;
@@ -47,6 +49,7 @@ pub struct KooEditor {
     media_pool: Entity<MediaPoolPanel>,
     inspector: Entity<InspectorPanel>,
     transcript: Entity<TranscriptPanel>,
+    caption_style: Entity<CaptionStylePanel>,
     deliver: Entity<DeliverPanel>,
     chat: Entity<ChatPanel>,
     scopes: Entity<ScopesPanel>,
@@ -70,6 +73,8 @@ impl KooEditor {
             media_pool: cx.new(|cx| MediaPoolPanel::new(state.clone(), window, cx)),
             inspector: cx.new(|cx| InspectorPanel::new(state.clone(), window, cx)),
             transcript: cx.new(|cx| TranscriptPanel::new(state.clone(), window, cx)),
+            caption_style: cx
+                .new(|cx| CaptionStylePanel::new(state.clone(), Target::Active, window, cx)),
             deliver: cx.new(|cx| DeliverPanel::new(state.clone(), window, cx)),
             chat: cx.new(|cx| ChatPanel::new(state.clone(), window, cx)),
             scopes: cx.new(|cx| ScopesPanel::new(state.clone(), window, cx)),
@@ -210,10 +215,19 @@ impl KooEditor {
                     h_resizable("captions-top")
                         .child(
                             resizable_panel()
-                                .size(px(380.))
+                                .size(px(340.))
                                 .child(self.transcript.clone()),
                         )
-                        .child(resizable_panel().child(self.viewer.clone())),
+                        .child(resizable_panel().child(self.viewer.clone()))
+                        .child(
+                            resizable_panel().size(px(300.)).child(
+                                div()
+                                    .id("caption-style")
+                                    .size_full()
+                                    .overflow_y_scrollbar()
+                                    .child(div().p_3().child(self.caption_style.clone())),
+                            ),
+                        ),
                 )
                 .into_any_element(),
             Workspace::Color => self

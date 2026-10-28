@@ -70,6 +70,20 @@ impl CaptionPhrase {
     pub fn needs_review(&self) -> bool {
         !self.low_confidence.is_empty()
     }
+
+    /// When each word of `text` is spoken, from the phrase's start (see
+    /// `ClipContent::Caption`).
+    pub fn word_times(&self, words: &[Word]) -> Vec<Time> {
+        words[self.words.clone()]
+            .iter()
+            .filter(|w| !clean(&w.text).is_empty())
+            .flat_map(|w| {
+                // A recognized token may hold several words.
+                let n = clean(&w.text).split_whitespace().count();
+                std::iter::repeat_n(w.range.start - self.range.start, n)
+            })
+            .collect()
+    }
 }
 
 /// Group `words` (sorted by start, in one time base) into caption phrases.

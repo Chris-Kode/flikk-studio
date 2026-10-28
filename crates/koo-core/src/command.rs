@@ -253,6 +253,10 @@ pub enum Command {
         range: TimeRange,
         text: String,
         speaker: Option<SpeakerId>,
+        /// When each word is spoken, from `range.start` (see
+        /// `ClipContent::Caption`).
+        #[serde(default)]
+        words: Vec<Time>,
     },
     /// Retext or retime a caption; titles take the same edits.
     EditCaption {

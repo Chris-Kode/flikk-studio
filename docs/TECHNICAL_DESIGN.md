@@ -120,7 +120,7 @@ the explaining":
 | E4 silences | `AnalysisService::silences` + timeline toolbar |
 | E5 transform, keyframes | `Command::AddZoom/SetKeyframe`, `ui/inspector.rs`, viewer preview |
 | E8 timecode readout | `Clip::to_source`, viewer |
-| C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `koo-deliver` SRT/ASS |
+| C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle` (`koo-core/src/memory.rs`), `ui/caption_style.rs`, `koo-deliver` SRT/ASS; the viewer letters captions like the ASS burn-in (`ui/lettering.rs`, `koo-deliver/src/captions/motion.rs`) |
 | K1 primary grade | `model::Grade`, `ui/inspector.rs`, render graph |
 | A1–A3 mixer, loudness, ducking | `ui/inspector.rs`, `AnalysisService::loudness`, render graph |
 | D1 render | `koo-deliver`, `ui/deliver.rs` |

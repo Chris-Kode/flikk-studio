@@ -1067,14 +1067,19 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
         {
             end = next.range.start;
         }
+        let start = words[i].range.start;
+        let spoken = words[i..j]
+            .iter()
+            .flat_map(|w| {
+                std::iter::repeat_n(w.range.start - start, w.text.split_whitespace().count())
+            })
+            .collect();
         commands.push(Command::AddCaption {
             track,
-            range: TimeRange::new(
-                words[i].range.start,
-                end.max(words[i].range.start + Time::from_millis(300)),
-            ),
+            range: TimeRange::new(start, end.max(start + Time::from_millis(300))),
             text,
             speaker: words[i].speaker,
+            words: spoken,
         });
         i = j;
     }
@@ -1084,9 +1089,12 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
             Command::AddCaption { range, .. } => range.end,
             _ => continue,
         };
-        if let Command::AddCaption { range, .. } = &mut commands[k]
+        if let Command::AddCaption { range, words, .. } = &mut commands[k]
             && range.start < prev_end
         {
+            for w in words.iter_mut() {
+                *w = *w + range.start - prev_end;
+            }
             range.start = prev_end;
             if range.end <= range.start {
                 range.end = range.start + Time::from_millis(200);

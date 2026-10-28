@@ -1,9 +1,8 @@
 //! Transcript and captions (PRD E3, C1–C3): the words under the timeline in
-//! timeline order, text-based ripple delete, caption generation, inline
-//! caption edits and caption styles.
+//! timeline order, text-based ripple delete, caption generation and inline
+//! caption edits. Caption styles have their own panel (`caption_style`).
 
 mod captions;
-mod style;
 mod words;
 
 use crate::state::EditorState;
@@ -72,7 +71,6 @@ pub struct TranscriptPanel {
     captions: Vec<captions::CaptionRow>,
     captions_key: Option<(u64, Option<WordsKey>, Option<ClipId>)>,
     caption_list: ListState,
-    font: Entity<InputState>,
     /// Demo only: open on generated captions.
     demo_captions: bool,
     _subscriptions: Vec<Subscription>,
@@ -82,7 +80,6 @@ pub struct TranscriptPanel {
 impl TranscriptPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| InputState::new(window, cx));
-        let font = cx.new(|cx| InputState::new(window, cx).placeholder("Font"));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, input, ev, window, cx| match ev {
@@ -91,14 +88,6 @@ impl TranscriptPanel {
                     this.finish_edit(Some(text), window, cx);
                 }
                 _ => {}
-            }),
-            cx.subscribe_in(&font, window, |this, input, ev, _, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    let font = input.read(cx).value().trim().to_owned();
-                    if !font.is_empty() {
-                        this.edit_style(|s| s.font = font, cx);
-                    }
-                }
             }),
         ];
         let _poll = cx.spawn(async move |this, cx| {
@@ -132,7 +121,6 @@ impl TranscriptPanel {
             captions: Vec::new(),
             captions_key: None,
             caption_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            font,
             demo_captions: crate::demo::enabled()
                 && std::env::var("KOOEDITOR_DEMO_VIEW").is_ok_and(|v| v == "captions"),
             _subscriptions,
@@ -513,7 +501,7 @@ fn paragraphs(
 }
 
 impl Render for TranscriptPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_words(cx);
         if self.demo_captions && !self.words.is_empty() {
             self.demo_captions = false;
@@ -521,7 +509,7 @@ impl Render for TranscriptPanel {
         }
         let body = match self.view {
             View::Transcript => self.transcript_view(cx),
-            View::Captions => self.captions_view(window, cx),
+            View::Captions => self.captions_view(cx),
         };
         v_flex()
             .size_full()
