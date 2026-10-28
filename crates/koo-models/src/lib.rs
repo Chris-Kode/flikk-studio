@@ -5,14 +5,15 @@
 //!   pipeline calls; `MODELS`, the models that can do it, the default
 //!   first; and `runner`, which builds the runner of one of them.
 //! - `<task>/<model>/mod.rs`: the model as the user sees it, its
-//!   [`Model`].
+//!   [`Model`] (one per size, when it comes in several).
 //! - `<task>/<model>/config.rs`: its files, where they download from, and
 //!   every number it is run with.
 //! - `<task>/<model>/runner.rs`: loading and running it, behind the
 //!   task's feature.
 //!
 //! What the models share sits here: the catalog ([`Task`], [`Model`],
-//! [`ModelFile`]), the audio rates they hear, [`Downloads`], ONNX Runtime
+//! [`ModelFile`]), the model the user picked for each task
+//! ([`Task::pick`]), the audio rates they hear, [`Downloads`], ONNX Runtime
 //! (`onnx.rs`) and the BPE tokenizer (`bpe.rs`).
 //!
 //! Nothing is downloaded unless the user asks ([`Downloads::start`]);
@@ -39,6 +40,7 @@ use anyhow::{Result, bail};
 use koo_core::paths;
 use koo_core::time::Time;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 /// Samples per second of the mono audio the speech models hear: voice
 /// activity, transcription, word timing and speakers.
@@ -119,17 +121,60 @@ impl Task {
         }
     }
 
-    /// The model this task runs on: the default, until the user can pick
-    /// another.
+    /// The model this task runs on: the one the user picked, else the
+    /// default.
     pub fn model(self) -> &'static Model {
-        self.models()[0]
+        let models = self.models();
+        let picked = picked_lock();
+        models
+            .iter()
+            .find(|m| picked.contains(&m.id))
+            .copied()
+            .unwrap_or(models[0])
+    }
+
+    /// Run this task on `model`, one of its [`models`](Self::models), from
+    /// now on.
+    pub fn pick(self, model: &'static Model) {
+        let models = self.models();
+        let mut picked = picked_lock();
+        picked.retain(|id| models.iter().all(|m| m.id != *id));
+        if models[1..].iter().any(|m| m.id == model.id) {
+            picked.push(model.id);
+        }
+    }
+}
+
+/// The models the user picked over their task's default, by id.
+static PICKED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+fn picked_lock() -> MutexGuard<'static, Vec<&'static str>> {
+    PICKED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The ids of the models picked over their task's default, to save.
+pub fn picked() -> Vec<&'static str> {
+    picked_lock().clone()
+}
+
+/// Pick the model with each of `ids` again, as [`picked`] gave them. Ids
+/// no task has any more are skipped.
+pub fn restore_picks(ids: &[String]) {
+    for task in Task::ALL {
+        let saved = task
+            .models()
+            .iter()
+            .find(|m| ids.iter().any(|id| id == m.id));
+        if let Some(model) = saved {
+            task.pick(model);
+        }
     }
 }
 
 /// One model as the user sees it: a name, and the files it is made of.
 #[derive(Debug)]
 pub struct Model {
-    /// Stable key for downloads and settings: "whisper-base".
+    /// Stable key for downloads and settings: "whisper-small-q8".
     pub id: &'static str,
     pub name: &'static str,
     pub files: &'static [ModelFile],

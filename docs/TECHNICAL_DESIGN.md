@@ -178,23 +178,40 @@ All nine streams are merged. What runs today:
   change sets, protected-range warnings and conflict-safe accept.
 * **Media:** FFmpeg probe, fingerprint, frames, playback/audio streams,
   proxies, 6 × 5 collages (cached) and waveforms.
-* **Analysis:** background jobs, VAD, silences, shot changes, loudness,
-  speakers (below); Whisper transcription behind the default `whisper`
-  feature. The model is in `paths::models()` once the user downloads it
-  (Models, below), or set `KOOEDITOR_WHISPER_MODEL` to a path or a ggml
-  file name there. Speech, and so silences, comes from Silero
-  VAD v6.2 (`koo-models/src/voice_activity/silero/`, from version 6;
+* **Analysis jobs:** analysis starts only when the user asks, from an
+  item's "⋯" menu in the media pool (or its right-click menu): "Analyze",
+  or "Analyze again" once it has results, which runs every step anew on
+  the models picked now. It is disabled while any task's picked model is
+  missing, or while the item is queued or analyzing; images are not
+  analyzed. Items are analyzed one at a time, in the order asked, on a
+  `JobQueue` (`koo-core/src/jobs.rs`): at most `limit` jobs at once on
+  threads of its own, work under a key already queued or running is that
+  job, and a job that panics fails without stopping the queue. Other
+  heavy work can have a queue of its own. A result is written to
+  `cache/analysis/<fp>.json` only when every step succeeded; otherwise it
+  is kept for the session and the job fails, naming the steps.
+  `ANALYSIS_VERSION` (1) marks the results: those of another version, and
+  the sound vectors beside them, are not read, so the item is not
+  analyzed until the user analyzes it again.
+* **Analysis:** VAD, silences, shot changes, loudness, speakers (below);
+  Whisper transcription behind the default `whisper` feature, in small
+  (264 MB, the default) or large (large-v3-turbo, 874 MB), both with
+  8-bit weights, picked in Settings → Models. The picked size is in
+  `paths::models()` once the user downloads it (Models, below), or set
+  `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
+  stands in for whichever size is picked. Speech, and so silences, comes
+  from Silero VAD v6.2 (`koo-models/src/voice_activity/silero/`;
   `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit,
   or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until
   under 0.35, pauses under 250 ms kept, 60 ms before each range. Music is
   not speech to it. The energy VAD (`vad.rs`), which took a music bed for
-  speech, stands in without the `whisper` feature, or while the model
-  can't be had (that result is version 5, and upgraded later). Silero
+  speech, stands in without the `whisper` feature, or for the session
+  when the model can't be had. Silero
   hears the audio in one go and in 4 s blocks, each after the second
   before it, and a window is speech when either finds it: music holds it
   down for seconds after, and a block that starts during a sentence
   doubts the rest of it. Whisper hears only speech
-  (`koo-models/src/transcription/whisper/`, from version 5): given music, a long
+  (`koo-models/src/transcription/whisper/`): given music, a long
   silence, or a 30 s window that starts with either, it made words up,
   often repeating what was said before, and its times came loose. It hears
   the stretches Silero finds as faster-whisper's VAD filter does (pauses
@@ -211,13 +228,10 @@ All nine streams are merged. What runs today:
   `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages, and words
   with neither letters nor digits, keep word edges measured on the audio
   levels (`koo-analysis/src/align.rs`). When the model can't be loaded,
-  the result keeps those edges as version 1 and is aligned once the model
-  is there. Running that measurement after the aligner made cuts worse,
-  so it is only the fallback. The aligner's times never pass the audio
-  it was given, so words stay in order. Results of an older
-  `ANALYSIS_VERSION` are upgraded when a project opens, without running
-  Whisper again unless their transcript is from before version 5
-  (`Transcript::version`).
+  the result keeps those edges for the session. Running that measurement
+  after the aligner made cuts worse, so it is only the fallback. The
+  aligner's times never pass the audio it was given, so words stay in
+  order.
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
@@ -256,8 +270,7 @@ All nine streams are merged. What runs today:
   (`onnx-community/pyannote-segmentation-3.0`, 6 MB, and
   `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; its `config.rs` pins
   the commits). When they can't be loaded, every word is "Speaker 1"
-  and the result is version 3, told apart once the models are there; a
-  voice that takes over most of an earlier speaker's words keeps its id.
+  for the session.
   ONNX Runtime allows one environment per process, so the aligner, the
   diarizer and the sound models share it (`koo-models/src/onnx.rs`).
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
@@ -271,18 +284,16 @@ All nine streams are merged. What runs today:
   and CLAP's audio tower (`sound_search/clap/`) together; then the beat
   tracker (`beats/beat_this/`) hears each
   stretch of music the tagger found, with 1 s either side. Runs of tagged
-  windows become `Analysis::sounds` and `music` (version 3): a run starts
+  windows become `Analysis::sounds` and `music`: a run starts
   up to 2 s before its sound, so it is shrunk by that much, and a sound
   under a second long moves onto the loudest stretch of the 10 ms levels
   around it. Silence alone scores 0.25 as music, so music needs 0.5 to
   start; bells, claps and other musical sounds inside music are dropped.
   Music carries tags (genre, mood, vocals, lead instruments), beats and
   downbeats; its tempo is the mean beat interval near the median. The
-  vectors go to `cache/analysis/<fp>.vectors`. A result from version 2 on
-  keeps its aligned words and runs only the speakers and this pass. A
-  model that cannot be had
-  leaves the result at version 2 (with what the others found) until it
-  is. On 4 CPU threads the pass takes about 2 minutes per hour of audio
+  vectors go to `cache/analysis/<fp>.vectors`. A model that cannot be
+  had leaves the sounds out, and what the others found is kept for the
+  session. On 4 CPU threads the pass takes about 2 minutes per hour of audio
   for the tagger and 6 for CLAP, plus the beat tracker on music.
   `koo-core/src/heard.rs` maps sounds, music, beats, level changes and
   silences onto the timeline, and finds beats, downbeats and onsets (a
@@ -321,17 +332,21 @@ All nine streams are merged. What runs today:
   (behind its feature) and finds its own files. What models share sits
   at the crate root: the catalog types, the audio rates, the downloads,
   ONNX Runtime and the BPE tokenizer. Analysis only orchestrates: it asks
-  each task's runner for the selected model (`Task::model`, the default
-  until the user can pick another) and never names a model. A new model
-  is a folder under its task, its `MODEL` in `MODELS` and an arm in
-  `runner`. Nothing downloads on its own. Settings → Models (the gear in
-  the top bar, or cmd-,) lists each task with its model and downloads
-  one or all of them, with progress and cancel, through `<file>.part`; a
-  failed download stays there with Retry. `LocalAnalysis::model_tasks`
-  says which tasks a build runs. A runner whose files are missing fails
-  ("… is not downloaded"), its step is left out as before, and when the
-  model arrives the project's media is analyzed again, which upgrades
-  those results. While a model is missing, the top bar's warning button
+  each task's runner for the selected model (`Task::model`: the one the
+  user picked, else the default) and never names a model; a new pick of
+  transcription model applies from the next transcript, and results made
+  already stay. A new model is a folder under its task, its `MODEL` in
+  `MODELS` and an arm in `runner`; a model in several sizes (Whisper) has
+  a `MODEL` for each in one folder. Nothing downloads on its own.
+  Settings → Models (the gear in the top bar, or cmd-,) lists each task
+  with its model, picked there when the task has more than one (saved per
+  user in the store), and downloads one or all of them, with progress
+  and cancel, through `<file>.part`; a failed download stays there with
+  Retry. `LocalAnalysis::model_tasks`
+  says which tasks a build runs; "Analyze" stays disabled until each has
+  its picked model downloaded. A runner whose files are missing fails
+  ("… is not downloaded") and its step is left out. While a model is
+  missing, the top bar's warning button
   lists them; its notices (warnings and errors, such as a failed
   download) can be dismissed for the session.
 * **Hearing tools:** `view_range` and `view_detail` open with the sound

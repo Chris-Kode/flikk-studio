@@ -471,7 +471,6 @@ fn interview_analysis(demo: &Demo) -> (Fingerprint, Analysis) {
             language: "en".into(),
             words,
             speakers: vec![maya],
-            version: ANALYSIS_VERSION,
         }),
         speech,
         shot_changes: Vec::new(),

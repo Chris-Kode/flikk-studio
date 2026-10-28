@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 /// The models that can do it, the default first.
-pub const MODELS: &[&Model] = &[&whisper::MODEL];
+pub const MODELS: &[&Model] = &whisper::SIZES;
 
 /// Turns speech into words.
 pub trait Transcriber: Send + Sync {
@@ -42,7 +42,9 @@ pub struct Transcribed {
 #[cfg(feature = "whisper")]
 pub fn runner(model: &Model) -> Box<dyn Transcriber> {
     match model.id {
-        whisper::ID => Box::<whisper::Whisper>::default(),
+        id if whisper::SIZES.iter().any(|m| m.id == id) => {
+            Box::new(whisper::Whisper::new(&model.files[0]))
+        }
         id => unreachable!("{id} is not a transcription model"),
     }
 }

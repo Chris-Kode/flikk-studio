@@ -2,7 +2,7 @@
 //! beside it as `<fingerprint>.vectors`, written atomically.
 
 use anyhow::{Context, Result};
-use koo_core::analysis::{Analysis, SoundVectors};
+use koo_core::analysis::{ANALYSIS_VERSION, Analysis, SoundVectors};
 use koo_core::model::Fingerprint;
 use koo_core::paths;
 use std::path::{Path, PathBuf};
@@ -28,10 +28,11 @@ fn file(fp: &Fingerprint, extension: &str) -> PathBuf {
         .join(format!("{name}.{extension}"))
 }
 
-/// `None` when missing or unreadable (an old format is simply recomputed).
+/// `None` when missing, unreadable or of another [`ANALYSIS_VERSION`].
 pub fn load(fp: &Fingerprint) -> Option<Analysis> {
     let bytes = std::fs::read(path(fp)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let analysis: Analysis = serde_json::from_slice(&bytes).ok()?;
+    (analysis.version == ANALYSIS_VERSION).then_some(analysis)
 }
 
 pub fn store(fp: &Fingerprint, analysis: &Analysis) -> Result<()> {
