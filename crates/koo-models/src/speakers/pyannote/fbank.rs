@@ -3,14 +3,14 @@
 //! removed, pre-emphasis 0.97, a 512-point power spectrum and 80 mel bins
 //! from 20 Hz to 8 kHz. Matches `torchaudio.compliance.kaldi.fbank`.
 
-use crate::ffmpeg::SAMPLE_RATE;
+use crate::SPEECH_RATE;
 
 /// Mel bins per frame.
 pub const BINS: usize = 80;
 /// Samples per frame.
-const LENGTH: usize = SAMPLE_RATE as usize * 25 / 1000;
+const LENGTH: usize = SPEECH_RATE as usize * 25 / 1000;
 /// Samples between frame starts.
-pub const SHIFT: usize = SAMPLE_RATE as usize / 100;
+pub const SHIFT: usize = SPEECH_RATE as usize / 100;
 const FFT: usize = 512;
 const PREEMPHASIS: f32 = 0.97;
 const LOW_HZ: f32 = 20.0;
@@ -33,9 +33,9 @@ impl Default for Fbank {
             })
             .collect();
         let mel = |hz: f32| 1127.0 * (1.0 + hz / 700.0).ln();
-        let (low, high) = (mel(LOW_HZ), mel(SAMPLE_RATE as f32 / 2.0));
+        let (low, high) = (mel(LOW_HZ), mel(SPEECH_RATE as f32 / 2.0));
         let delta = (high - low) / (BINS + 1) as f32;
-        let bin_hz = SAMPLE_RATE as f32 / FFT as f32;
+        let bin_hz = SPEECH_RATE as f32 / FFT as f32;
         let filters = (0..BINS)
             .map(|b| {
                 let (left, center, right) = (

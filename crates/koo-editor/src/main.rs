@@ -1,6 +1,7 @@
 mod agent_link;
 mod app;
 mod demo;
+mod notices;
 mod persistence;
 mod state;
 mod ui;

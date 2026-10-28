@@ -3567,12 +3567,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "koo-core",
- "ort",
+ "koo-models",
  "serde",
  "serde_json",
- "unicode-normalization",
- "ureq",
- "whisper-rs",
 ]
 
 [[package]]
@@ -3610,6 +3607,7 @@ dependencies = [
  "koo-gpu",
  "koo-html",
  "koo-media",
+ "koo-models",
  "koo-store",
  "serde",
  "serde_json",
@@ -3649,6 +3647,19 @@ dependencies = [
  "koo-core",
  "png 0.18.1",
  "serde_json",
+]
+
+[[package]]
+name = "koo-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "koo-core",
+ "ort",
+ "serde_json",
+ "unicode-normalization",
+ "ureq",
+ "whisper-rs",
 ]
 
 [[package]]

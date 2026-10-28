@@ -1,0 +1,26 @@
+[package]
+name = "koo-models"
+version.workspace = true
+edition.workspace = true
+
+# Each feature builds the runners of a family of tasks; without it the
+# models stay in the catalog (listed, downloadable) but cannot be run.
+[features]
+# Voice activity and transcription, run by whisper.cpp.
+whisper = ["dep:whisper-rs"]
+# Word timing, run by ONNX Runtime, which is downloaded and linked
+# statically at build time.
+aligner = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+# Speakers, run by ONNX Runtime.
+diarizer = ["dep:ort"]
+# Sound tagging, beats and sound search, run by ONNX Runtime.
+sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+
+[dependencies]
+anyhow.workspace = true
+koo-core.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
+serde_json = { workspace = true, optional = true }
+unicode-normalization = { version = "0.1", optional = true }
+whisper-rs = { version = "0.16", optional = true }

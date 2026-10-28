@@ -13,38 +13,11 @@
 //! words too, from version 2).
 
 mod align;
-#[cfg(feature = "sounds")]
-mod beats;
-#[cfg(any(feature = "aligner", feature = "sounds"))]
-mod bpe;
 mod cache;
-#[cfg(feature = "sounds")]
-mod clap;
-#[cfg(feature = "diarizer")]
-mod diarize;
-#[cfg(any(
-    feature = "whisper",
-    feature = "aligner",
-    feature = "diarizer",
-    feature = "sounds"
-))]
-mod download;
-#[cfg(feature = "diarizer")]
-mod fbank;
 mod ffmpeg;
-#[cfg(feature = "aligner")]
-mod forced;
-#[cfg(any(feature = "aligner", feature = "diarizer", feature = "sounds"))]
-mod onnx;
-#[cfg(feature = "whisper")]
-mod silero;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
-#[cfg(feature = "sounds")]
-mod tagger;
-#[cfg(feature = "whisper")]
-mod transcribe;
 mod vad;
 
 use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript};
@@ -52,6 +25,7 @@ use koo_core::ids::JobId;
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
 use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, ServiceResult};
 use koo_core::time::{Time, TimeRange};
+use koo_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -117,11 +91,11 @@ struct Shared {
     /// the next request.
     incomplete: Mutex<HashSet<Fingerprint>>,
     #[cfg(feature = "whisper")]
-    silero: silero::Silero,
+    voice: Box<dyn koo_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
-    whisper: transcribe::Whisper,
+    transcriber: Box<dyn koo_models::transcription::Transcriber>,
     #[cfg(feature = "aligner")]
-    aligner: forced::Aligner,
+    aligner: Box<dyn koo_models::word_timing::Aligner>,
     #[cfg(feature = "sounds")]
     sounds: sounds::SoundModels,
     /// Sound vectors read so far, by fingerprint.
@@ -141,13 +115,14 @@ impl Default for LocalAnalysis {
 impl LocalAnalysis {
     pub fn new(options: Options) -> Self {
         #[cfg(feature = "diarizer")]
-        let diarizer = Box::new(diarize::Pyannote::default());
+        let diarizer = koo_models::speakers::runner(ModelTask::Speakers.model());
         #[cfg(not(feature = "diarizer"))]
         let diarizer = Box::new(SingleSpeaker);
         Self::with_diarizer(options, diarizer)
     }
 
-    /// Use `diarizer` for speaker labels instead of the built-in one.
+    /// Use `diarizer` for speaker labels instead of the selected speakers
+    /// model. The other tasks run on their selected models.
     pub fn with_diarizer(options: Options, diarizer: Box<dyn Diarizer>) -> Self {
         let workers = options.workers.max(1);
         let shared = Arc::new(Shared {
@@ -158,11 +133,11 @@ impl LocalAnalysis {
             in_flight: Mutex::default(),
             incomplete: Mutex::default(),
             #[cfg(feature = "whisper")]
-            silero: Default::default(),
+            voice: koo_models::voice_activity::runner(ModelTask::VoiceActivity.model()),
             #[cfg(feature = "whisper")]
-            whisper: Default::default(),
+            transcriber: koo_models::transcription::runner(ModelTask::Transcription.model()),
             #[cfg(feature = "aligner")]
-            aligner: Default::default(),
+            aligner: koo_models::word_timing::runner(ModelTask::WordTiming.model()),
             #[cfg(feature = "sounds")]
             sounds: Default::default(),
             vectors: Mutex::default(),
@@ -183,6 +158,30 @@ impl LocalAnalysis {
     /// Whether this build can transcribe (the `whisper` feature).
     pub fn transcription_available() -> bool {
         cfg!(feature = "whisper")
+    }
+
+    /// The tasks this build runs on a model, in the order it runs them.
+    /// Each model is downloaded only when the user asks; until then its
+    /// task is left out, and results are upgraded once it is there.
+    pub fn model_tasks() -> Vec<ModelTask> {
+        let mut tasks = Vec::new();
+        if cfg!(feature = "whisper") {
+            tasks.extend([ModelTask::VoiceActivity, ModelTask::Transcription]);
+        }
+        if cfg!(feature = "aligner") {
+            tasks.push(ModelTask::WordTiming);
+        }
+        if cfg!(feature = "diarizer") {
+            tasks.push(ModelTask::Speakers);
+        }
+        if cfg!(feature = "sounds") {
+            tasks.extend([
+                ModelTask::SoundTagging,
+                ModelTask::Beats,
+                ModelTask::SoundSearch,
+            ]);
+        }
+        tasks
     }
 
     /// Like [`AnalysisService::analyze`], choosing the audio stream and
@@ -265,7 +264,7 @@ impl AnalysisService for LocalAnalysis {
         if !has_audio(item) {
             return Ok(vad::complement(&[], duration.unwrap_or(Time::ZERO), min));
         }
-        let stream = choose_stream(item, &AnalyzeOptions::default());
+        let stream = choose_stream(&self.shared, item, &AnalyzeOptions::default());
         match ffmpeg::silences(&item.path, stream, min, duration, &|_| {}) {
             Err(e) if ffmpeg::is_missing_stream(&e) => {
                 Ok(vad::complement(&[], duration.unwrap_or(Time::ZERO), min))
@@ -291,13 +290,9 @@ impl AnalysisService for LocalAnalysis {
     #[cfg(feature = "sounds")]
     fn describe_sound(&self, text: &str) -> ServiceResult<Vec<f32>> {
         let shared = &self.shared;
-        let files = fetch_model(shared, |start| {
-            clap::text_files(&shared.sounds.text_downloads, start)
-        })
-        .map_err(|e| ServiceError(format!("{e:#}")))?;
         shared
             .sounds
-            .describe(&files, text)
+            .describe(text)
             .map_err(|e| ServiceError(format!("{e:#}")))
     }
 }
@@ -399,7 +394,7 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     let duration = item.info.as_ref().map(|i| i.duration);
     let audio_wanted = has_audio(item);
     let video_wanted = has_video(item);
-    let stream = choose_stream(item, &task.options);
+    let stream = choose_stream(shared, item, &task.options);
     // A complete result of an older version keeps what is still good.
     let previous = (!task.options.refresh)
         .then(|| shared.cached(&task.fingerprint))
@@ -592,17 +587,14 @@ impl Voice {
     }
 }
 
-/// What Silero hears in `audio`; the energy VAD stands in for it in a build
-/// without it.
+/// What the voice activity model hears in `audio`; the energy VAD stands
+/// in for it in a build without it.
 #[cfg(feature = "whisper")]
 fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result<Voice> {
-    let model = fetch_model(shared, |start| shared.silero.ensure_model(start))?;
-    let heard = shared
-        .silero
-        .hear(&model, audio, &progress.step(Step::Speech))?;
+    let heard = shared.voice.hear(audio, &progress.step(Step::Speech))?;
     Ok(Voice {
-        speech: heard.speech(),
-        stretches: Some(heard.stretches()),
+        speech: heard.ranges,
+        stretches: Some(heard.stretches),
     })
 }
 
@@ -611,9 +603,9 @@ fn listen(_shared: &Shared, audio: &[f32], _progress: &Progress) -> anyhow::Resu
     Ok(Voice::energy(audio))
 }
 
-/// Version of a result whose speech is the energy VAD's, because Silero's
-/// model could not be had. Without Silero, that is as good as this build
-/// gets.
+/// Version of a result whose speech is the energy VAD's, because the voice
+/// activity model could not be had. Without it, that is as good as this
+/// build gets.
 #[cfg(feature = "whisper")]
 const WITHOUT_SILERO: u32 = 5;
 #[cfg(not(feature = "whisper"))]
@@ -632,7 +624,11 @@ fn transcript(
     stretches: Option<&[Range<usize>]>,
     progress: &Progress,
 ) -> anyhow::Result<Option<Transcript>> {
-    let language = task.options.language.as_deref().and_then(iso_639_1);
+    let language = task
+        .options
+        .language
+        .as_deref()
+        .and_then(|tag| iso_639_1(shared, tag));
     let mut words = Vec::new();
     let mut detected = language.map(str::to_string);
     // Whisper invents words in silence and over music; it hears only the
@@ -643,13 +639,11 @@ fn transcript(
         None => anyhow::bail!("Whisper waits for the voice activity model"),
     };
     if !stretches.is_empty() {
-        let model = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
-        let out = shared.whisper.transcribe(
-            &model,
+        let out = shared.transcriber.transcribe(
             audio,
             stretches,
             language,
-            progress.step(Step::Transcript),
+            Arc::new(progress.step(Step::Transcript)),
         )?;
         words = out.words;
         detected = Some(out.language);
@@ -699,24 +693,11 @@ fn hear(
     analysis: &mut Analysis,
     progress: &Progress,
 ) -> anyhow::Result<()> {
-    let models = &shared.sounds;
-    let files = sounds::Files {
-        tagger: fetch_model(shared, |start| {
-            tagger::MODEL.ensure(&models.downloads[0], start)
-        })?,
-        beats: fetch_model(shared, |start| {
-            beats::MODEL.ensure(&models.downloads[1], start)
-        }),
-        clap: fetch_model(shared, |start| {
-            clap::AUDIO.ensure(&models.downloads[2], start)
-        }),
-    };
-    let heard = models.hear(
+    let heard = shared.sounds.hear(
         &task.item.path,
         stream,
         task.item.info.as_ref().map(|i| i.duration),
         analysis.levels.as_ref(),
-        files,
         &progress.step(Step::Sounds),
         &progress.step(Step::Beats),
     )?;
@@ -756,16 +737,12 @@ fn align_words(
     transcript: &mut Transcript,
     progress: &Progress,
 ) -> anyhow::Result<()> {
-    if transcript.words.is_empty() || !forced::supports(&transcript.language) {
+    if transcript.words.is_empty() || !shared.aligner.supports(&transcript.language) {
         return Ok(());
     }
-    let files = fetch_model(shared, |start| shared.aligner.ensure_model(start))?;
-    shared.aligner.align(
-        &files,
-        audio,
-        &mut transcript.words,
-        progress.step(Step::Words),
-    )
+    shared
+        .aligner
+        .align(audio, &mut transcript.words, &progress.step(Step::Words))
 }
 
 #[cfg(not(feature = "aligner"))]
@@ -790,11 +767,9 @@ fn attribute_speakers(
         transcript.speakers.clear();
         return Ok(());
     }
-    let labels = fetch_model(shared, |start| shared.diarizer.prepare(start)).and_then(|()| {
-        shared
-            .diarizer
-            .diarize(audio, &transcript.words, &progress.step(Step::Speakers))
-    });
+    let labels = shared
+        .diarizer
+        .diarize(audio, &transcript.words, &progress.step(Step::Speakers));
     match labels {
         Ok(labels) => {
             transcript.speakers = speakers::apply(labels, &mut transcript.words);
@@ -816,41 +791,6 @@ fn attribute_speakers(
 const WITHOUT_DIARIZER: u32 = 3;
 #[cfg(not(feature = "diarizer"))]
 const WITHOUT_DIARIZER: u32 = ANALYSIS_VERSION;
-
-/// Run `ensure`, which may download a model, showing the download as a job
-/// of its own.
-fn fetch_model<T>(
-    shared: &Shared,
-    ensure: impl FnOnce(&dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let download = Mutex::new(None);
-    let start = |name: &str| -> Box<dyn Fn(f32) + Send + Sync> {
-        let id = JobId::new();
-        *lock(&download) = Some(id);
-        lock(&shared.jobs).push(JobStatus {
-            id,
-            label: format!("Download {name}"),
-            media: None,
-            state: JobState::Running { fraction: 0.0 },
-        });
-        let jobs = shared.jobs.clone();
-        Box::new(move |f: f32| {
-            if let Some(j) = lock(&jobs).iter_mut().find(|j| j.id == id) {
-                j.state = if f >= 1.0 {
-                    JobState::Done
-                } else {
-                    JobState::Running { fraction: f }
-                };
-            }
-        })
-    };
-    let model = ensure(&start);
-    if let (Err(e), Some(id)) = (&model, *lock(&download)) {
-        let message = format!("{e:#}");
-        shared.set_state(id, JobState::Failed { message });
-    }
-    model
-}
 
 #[cfg(not(feature = "whisper"))]
 fn transcript(
@@ -880,24 +820,27 @@ fn has_video(item: &MediaItem) -> bool {
 }
 
 /// Position in `MediaInfo::audio` to analyze.
-fn choose_stream(item: &MediaItem, options: &AnalyzeOptions) -> u32 {
+fn choose_stream(shared: &Shared, item: &MediaItem, options: &AnalyzeOptions) -> u32 {
     if let Some(n) = options.audio_stream {
         return n;
     }
-    let wanted = options.language.as_deref().and_then(iso_639_1);
+    let code = |tag: &str| iso_639_1(shared, tag);
+    let wanted = options.language.as_deref().and_then(code);
     let tagged = item.info.as_ref().zip(wanted).and_then(|(info, wanted)| {
         info.audio.iter().position(|a| {
             a.language
                 .as_deref()
-                .and_then(iso_639_1)
+                .and_then(code)
                 .is_some_and(|l| l == wanted)
         })
     });
     tagged.unwrap_or(0) as u32
 }
 
-/// Whisper's two-letter code for a 639-1 or common 639-2 tag.
-fn iso_639_1(tag: &str) -> Option<&'static str> {
+/// The two-letter code of a 639-1 or common 639-2 tag, as the
+/// transcription model knows it.
+#[cfg_attr(not(feature = "whisper"), allow(unused_variables))]
+fn iso_639_1(shared: &Shared, tag: &str) -> Option<&'static str> {
     const CODES: &[(&str, &[&str])] = &[
         ("en", &["eng"]),
         ("es", &["spa"]),
@@ -927,8 +870,8 @@ fn iso_639_1(tag: &str) -> Option<&'static str> {
         return Some(code);
     }
     #[cfg(feature = "whisper")]
-    if tag.len() == 2 && whisper_rs::get_lang_id(tag).is_some() {
-        return whisper_rs::get_lang_str(whisper_rs::get_lang_id(tag)?);
+    if let Some(code) = shared.transcriber.language(tag) {
+        return Some(code);
     }
     None
 }

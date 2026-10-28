@@ -1,71 +1,61 @@
-//! Beats and downbeats in music with Beat This! (MIT, CPJKU), its `final0`
-//! checkpoint: logits for every 20 ms frame of up to 30 s at a time, read
-//! as Beat This!'s own "minimal" postprocessor does (peaks above 0.5
-//! within 70 ms, neighbours averaged, downbeats moved onto beats).
+//! The tracker run over a stretch in chunks as it decodes, keeping each
+//! chunk's reliable middle, and its logits read into beats.
 
-use crate::download::ModelFile;
-use crate::ffmpeg::SOUND_RATE;
+use super::config::{BORDER, CHUNK, FILE, FRAME, FRAME_TIME, HOP};
+use crate::beats::{BeatTracker, Stream};
+use crate::onnx;
 use anyhow::{Result, anyhow, bail};
-use koo_core::time::{FLICKS_PER_SECOND, Time};
+use koo_core::time::Time;
 use ort::session::Session;
 use ort::value::Tensor;
+use std::sync::Mutex;
 
-pub const MODEL: ModelFile = ModelFile {
-    name: "beat-this-final0.onnx",
-    url: "https://huggingface.co/Chris-Kode/beat-this-final0-onnx/resolve/49876475cff9b3abe3eec5303fa539cff06843fd/beat-this-final0.onnx",
-    env: "KOOEDITOR_BEATS_MODEL",
-    what: "beat tracker",
-};
-
-/// Samples per 20 ms frame.
-const FRAME: usize = SOUND_RATE as usize / 50;
-/// Frames the model hears at once, as it was trained.
-const CHUNK: usize = 1500;
-/// Frames at each end of a chunk whose predictions are unreliable.
-const BORDER: usize = 6;
-const HOP: usize = CHUNK - 2 * BORDER;
-const FRAME_TIME: Time = Time(FLICKS_PER_SECOND / 50);
-
-pub struct BeatModel {
-    session: Session,
+/// The model, loaded on first use and shared by every job; it tracks one
+/// stretch at a time.
+#[derive(Default)]
+pub struct BeatThis {
+    session: Mutex<Option<Session>>,
 }
 
-impl BeatModel {
-    pub fn load(model: &std::path::Path) -> Result<Self> {
-        Ok(Self {
-            session: crate::onnx::session(model, MODEL.what)?,
-        })
-    }
-
-    /// Beat and downbeat logits of each frame of `samples`.
-    fn logits(&mut self, samples: &[f32]) -> Result<(Vec<f32>, Vec<f32>)> {
-        let input =
-            Tensor::from_array(([samples.len()], samples.to_vec())).map_err(|e| anyhow!("{e}"))?;
-        let outputs = self
-            .session
-            .run(ort::inputs!["samples" => input])
-            .map_err(|e| anyhow!("beat tracker failed: {e}"))?;
-        let get = |name: &str| -> Result<Vec<f32>> {
-            let (_, v) = outputs[name]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| anyhow!("{e}"))?;
-            Ok(v.to_vec())
-        };
-        let (beat, down) = (get("beat")?, get("downbeat")?);
-        if beat.len() != down.len() {
-            bail!(
-                "beat tracker gave {} beats and {} downbeats",
-                beat.len(),
-                down.len()
-            );
+impl BeatTracker for BeatThis {
+    fn track(&self, stream: Stream) -> Result<(Vec<Time>, Vec<Time>)> {
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if session.is_none() {
+            *session = Some(onnx::session(&FILE.locate()?, FILE.what)?);
         }
-        Ok((beat, down))
+        let mut tracker = Tracker::new(session.as_mut().expect("loaded above"));
+        stream(&mut |samples| tracker.push(samples))?;
+        tracker.finish()
     }
+}
+
+/// Beat and downbeat logits of each frame of `samples`.
+fn logits(session: &mut Session, samples: &[f32]) -> Result<(Vec<f32>, Vec<f32>)> {
+    let input =
+        Tensor::from_array(([samples.len()], samples.to_vec())).map_err(|e| anyhow!("{e}"))?;
+    let outputs = session
+        .run(ort::inputs!["samples" => input])
+        .map_err(|e| anyhow!("beat tracker failed: {e}"))?;
+    let get = |name: &str| -> Result<Vec<f32>> {
+        let (_, v) = outputs[name]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow!("{e}"))?;
+        Ok(v.to_vec())
+    };
+    let (beat, down) = (get("beat")?, get("downbeat")?);
+    if beat.len() != down.len() {
+        bail!(
+            "beat tracker gave {} beats and {} downbeats",
+            beat.len(),
+            down.len()
+        );
+    }
+    Ok((beat, down))
 }
 
 /// Beat tracking over one stretch of audio, fed to it as it decodes.
-pub struct Tracker<'m> {
-    model: &'m mut BeatModel,
+struct Tracker<'m> {
+    session: &'m mut Session,
     /// Audio not yet past a chunk, starting `BORDER` frames before the
     /// first frame still to predict (silence before the stretch).
     buf: Vec<f32>,
@@ -75,9 +65,9 @@ pub struct Tracker<'m> {
 }
 
 impl<'m> Tracker<'m> {
-    pub fn new(model: &'m mut BeatModel) -> Self {
+    fn new(session: &'m mut Session) -> Self {
         Self {
-            model,
+            session,
             buf: vec![0.0; BORDER * FRAME],
             pushed: 0,
             beat: Vec::new(),
@@ -85,11 +75,11 @@ impl<'m> Tracker<'m> {
         }
     }
 
-    pub fn push(&mut self, samples: &[f32]) -> Result<()> {
+    fn push(&mut self, samples: &[f32]) -> Result<()> {
         self.buf.extend_from_slice(samples);
         self.pushed += samples.len();
         while self.buf.len() >= CHUNK * FRAME {
-            let (beat, down) = self.model.logits(&self.buf[..CHUNK * FRAME])?;
+            let (beat, down) = logits(self.session, &self.buf[..CHUNK * FRAME])?;
             self.keep(&beat, &down, HOP);
             self.buf.drain(..HOP * FRAME);
         }
@@ -105,13 +95,13 @@ impl<'m> Tracker<'m> {
     }
 
     /// Beats and downbeats from the start of the stretch.
-    pub fn finish(mut self) -> Result<(Vec<Time>, Vec<Time>)> {
+    fn finish(mut self) -> Result<(Vec<Time>, Vec<Time>)> {
         let total = self.pushed.div_ceil(FRAME);
         let left = total.saturating_sub(self.beat.len());
         if left > 0 {
             self.buf.resize(self.buf.len() + BORDER * FRAME, 0.0);
             let buf = std::mem::take(&mut self.buf);
-            let (beat, down) = self.model.logits(&buf)?;
+            let (beat, down) = logits(self.session, &buf)?;
             self.keep(&beat, &down, left);
         }
         let beats = peaks(&self.beat);

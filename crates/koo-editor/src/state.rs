@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 use crate::agent_link::{AgentLink, approve};
+use crate::notices::{Level, Notice, NoticeAction, Notices};
 use crate::persistence;
 use gpui_kit::*;
 use koo_agent::PendingApproval;
@@ -18,6 +19,10 @@ use std::time::{Duration, Instant};
 
 /// How often agent output and tool calls are drained on the UI thread.
 const AGENT_PUMP: Duration = Duration::from_millis(33);
+/// How often the model files are looked for on disk.
+const MODELS_POLL: Duration = Duration::from_secs(1);
+/// Key of the notice listing the models not downloaded.
+const MODELS_NOTICE: &str = "models-missing";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -72,6 +77,17 @@ pub struct EditorState {
     // --- library (effects library, inspector, FX code editor)
     /// FX program open in the code editor; built-ins open read-only.
     pub editing_fx: Option<koo_core::fx::FxRef>,
+    // --- models
+    /// The tasks analysis runs on a model, in the order it runs them.
+    pub model_tasks: Vec<koo_models::Task>,
+    /// Model downloads, started only by the user. Clones share them.
+    pub models: koo_models::Downloads,
+    /// Warnings and errors under the top bar's notice button.
+    pub notices: Notices,
+    /// Which of `model_tasks` had their model, and `models.finished()`, when
+    /// the notices were last brought up to date.
+    models_seen: (Vec<bool>, u64),
+    _models_poll: Task<()>,
 }
 
 impl EditorState {
@@ -94,6 +110,19 @@ impl EditorState {
                 }
             }
         });
+        let models_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(MODELS_POLL).await;
+                if this.update(cx, |this, cx| this.poll_models(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let model_tasks = koo_analysis::LocalAnalysis::model_tasks();
+        let downloaded = model_tasks
+            .iter()
+            .map(|t| t.model().is_downloaded())
+            .collect();
         let mut this = Self {
             bus,
             services: services(),
@@ -122,7 +151,13 @@ impl EditorState {
             _pump: pump,
             settled: Vec::new(),
             render_queue: koo_deliver::RenderQueue::new(),
+            models_seen: (downloaded, 0),
+            model_tasks,
+            models: koo_models::Downloads::default(),
+            notices: Notices::default(),
+            _models_poll: models_poll,
         };
+        this.refresh_model_notices();
         this.load_agent_memory();
         this.load_presets();
         this.analyze_media();
@@ -864,6 +899,100 @@ fn services() -> Services {
         fx,
         html,
     }
+}
+
+// --- models
+impl EditorState {
+    /// Download `model`: the user asked for it.
+    pub fn download_model(&mut self, model: &'static koo_models::Model, cx: &mut Context<Self>) {
+        self.notices.clear(&download_notice(model));
+        self.models.start(model);
+        cx.notify();
+    }
+
+    pub fn cancel_download(&mut self, model: &koo_models::Model, cx: &mut Context<Self>) {
+        self.models.cancel(model);
+        cx.notify();
+    }
+
+    pub fn dismiss_notice(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.notices.dismiss(key);
+        cx.notify();
+    }
+
+    /// When a download ends or a model file appears or goes, bring the
+    /// notices up to date; when a model arrives, analyze again what went
+    /// without it.
+    fn poll_models(&mut self, cx: &mut Context<Self>) {
+        let seen = (
+            self.model_tasks
+                .iter()
+                .map(|t| t.model().is_downloaded())
+                .collect::<Vec<_>>(),
+            self.models.finished(),
+        );
+        if seen == self.models_seen {
+            return;
+        }
+        let arrived = seen
+            .0
+            .iter()
+            .zip(&self.models_seen.0)
+            .any(|(now, before)| *now && !*before);
+        self.models_seen = seen;
+        if arrived {
+            self.analyze_media();
+        }
+        if self.refresh_model_notices() {
+            cx.notify();
+        }
+    }
+
+    /// One notice listing the models not downloaded, and one for each
+    /// download that failed. Whether any changed.
+    fn refresh_model_notices(&mut self) -> bool {
+        let mut changed = false;
+        let mut missing = Vec::new();
+        for task in &self.model_tasks {
+            let model = task.model();
+            let key = download_notice(model);
+            match self.models.status(model) {
+                koo_models::Status::Downloaded => {
+                    changed |= self.notices.clear(&key);
+                    continue;
+                }
+                koo_models::Status::Failed(message) => {
+                    changed |= self.notices.set(Notice {
+                        key,
+                        level: Level::Error,
+                        title: format!("Could not download {}", model.name),
+                        items: Vec::new(),
+                        detail: Some(message),
+                        action: Some(NoticeAction::OpenModels),
+                    });
+                }
+                koo_models::Status::Missing | koo_models::Status::Downloading(_) => {}
+            }
+            missing.push(format!("{} · {}", task.label(), model.name));
+        }
+        changed |= if missing.is_empty() {
+            self.notices.clear(MODELS_NOTICE)
+        } else {
+            self.notices.set(Notice {
+                key: MODELS_NOTICE.into(),
+                level: Level::Warning,
+                title: "Some models are not downloaded".into(),
+                items: missing,
+                detail: Some("Features that use them may not be available.".into()),
+                action: Some(NoticeAction::OpenModels),
+            })
+        };
+        changed
+    }
+}
+
+fn download_notice(model: &koo_models::Model) -> String {
+    format!("download-failed:{}", model.id)
 }
 
 // --- timeline/viewer
