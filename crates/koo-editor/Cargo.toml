@@ -17,5 +17,6 @@ koo-agent.workspace = true
 koo-deliver.workspace = true
 koo-gpu.workspace = true
 koo-html.workspace = true
+koo-models.workspace = true
 cpal = "0.16"
 image = { version = "0.25", default-features = false }

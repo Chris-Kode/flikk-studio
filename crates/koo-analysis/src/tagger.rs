@@ -10,20 +10,12 @@
 //! is shrunk by that much, and a short sound is then moved onto the
 //! loudest stretch of the audio levels around it.
 
-use crate::download::ModelFile;
 use crate::ffmpeg::SOUND_RATE;
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::{Levels, Music, Sound};
 use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use ort::session::Session;
 use ort::value::Tensor;
-
-pub const MODEL: ModelFile = ModelFile {
-    name: "efficientat-mn10-as.onnx",
-    url: "https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx/resolve/81f0e383972c52b354de924778fec25b2a4a29d3/efficientat-mn10-as.onnx",
-    env: "KOOEDITOR_TAGGER_MODEL",
-    what: "sound tagger",
-};
 
 /// Samples the tagger hears at once, and between the starts of windows.
 pub const WINDOW: usize = 2 * SOUND_RATE as usize;
@@ -344,7 +336,7 @@ pub struct Tagger {
 impl Tagger {
     pub fn load(model: &std::path::Path) -> Result<Self> {
         Ok(Self {
-            session: crate::onnx::session(model, MODEL.what)?,
+            session: crate::onnx::session(model, koo_models::files::TAGGER.what)?,
         })
     }
 

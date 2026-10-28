@@ -22,13 +22,6 @@ mod cache;
 mod clap;
 #[cfg(feature = "diarizer")]
 mod diarize;
-#[cfg(any(
-    feature = "whisper",
-    feature = "aligner",
-    feature = "diarizer",
-    feature = "sounds"
-))]
-mod download;
 #[cfg(feature = "diarizer")]
 mod fbank;
 mod ffmpeg;
@@ -52,6 +45,7 @@ use koo_core::ids::JobId;
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
 use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, ServiceResult};
 use koo_core::time::{Time, TimeRange};
+use koo_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -185,6 +179,30 @@ impl LocalAnalysis {
         cfg!(feature = "whisper")
     }
 
+    /// The tasks this build runs on a model, in the order it runs them.
+    /// Each model is downloaded only when the user asks; until then its
+    /// task is left out, and results are upgraded once it is there.
+    pub fn model_tasks() -> Vec<ModelTask> {
+        let mut tasks = Vec::new();
+        if cfg!(feature = "whisper") {
+            tasks.extend([ModelTask::VoiceActivity, ModelTask::Transcription]);
+        }
+        if cfg!(feature = "aligner") {
+            tasks.push(ModelTask::WordTiming);
+        }
+        if cfg!(feature = "diarizer") {
+            tasks.push(ModelTask::Speakers);
+        }
+        if cfg!(feature = "sounds") {
+            tasks.extend([
+                ModelTask::SoundTagging,
+                ModelTask::Beats,
+                ModelTask::SoundSearch,
+            ]);
+        }
+        tasks
+    }
+
     /// Like [`AnalysisService::analyze`], choosing the audio stream and
     /// language, or forcing a fresh run.
     pub fn analyze_with(&self, item: &MediaItem, options: AnalyzeOptions) -> JobId {
@@ -291,10 +309,7 @@ impl AnalysisService for LocalAnalysis {
     #[cfg(feature = "sounds")]
     fn describe_sound(&self, text: &str) -> ServiceResult<Vec<f32>> {
         let shared = &self.shared;
-        let files = fetch_model(shared, |start| {
-            clap::text_files(&shared.sounds.text_downloads, start)
-        })
-        .map_err(|e| ServiceError(format!("{e:#}")))?;
+        let files = clap::text_files().map_err(|e| ServiceError(format!("{e:#}")))?;
         shared
             .sounds
             .describe(&files, text)
@@ -596,7 +611,7 @@ impl Voice {
 /// without it.
 #[cfg(feature = "whisper")]
 fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result<Voice> {
-    let model = fetch_model(shared, |start| shared.silero.ensure_model(start))?;
+    let model = shared.silero.model()?;
     let heard = shared
         .silero
         .hear(&model, audio, &progress.step(Step::Speech))?;
@@ -643,7 +658,7 @@ fn transcript(
         None => anyhow::bail!("Whisper waits for the voice activity model"),
     };
     if !stretches.is_empty() {
-        let model = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
+        let model = shared.whisper.model()?;
         let out = shared.whisper.transcribe(
             &model,
             audio,
@@ -699,19 +714,13 @@ fn hear(
     analysis: &mut Analysis,
     progress: &Progress,
 ) -> anyhow::Result<()> {
-    let models = &shared.sounds;
+    use koo_models::files::{BEATS, CLAP_AUDIO, TAGGER};
     let files = sounds::Files {
-        tagger: fetch_model(shared, |start| {
-            tagger::MODEL.ensure(&models.downloads[0], start)
-        })?,
-        beats: fetch_model(shared, |start| {
-            beats::MODEL.ensure(&models.downloads[1], start)
-        }),
-        clap: fetch_model(shared, |start| {
-            clap::AUDIO.ensure(&models.downloads[2], start)
-        }),
+        tagger: TAGGER.locate()?,
+        beats: BEATS.locate(),
+        clap: CLAP_AUDIO.locate(),
     };
-    let heard = models.hear(
+    let heard = shared.sounds.hear(
         &task.item.path,
         stream,
         task.item.info.as_ref().map(|i| i.duration),
@@ -759,7 +768,7 @@ fn align_words(
     if transcript.words.is_empty() || !forced::supports(&transcript.language) {
         return Ok(());
     }
-    let files = fetch_model(shared, |start| shared.aligner.ensure_model(start))?;
+    let files = shared.aligner.model()?;
     shared.aligner.align(
         &files,
         audio,
@@ -790,7 +799,7 @@ fn attribute_speakers(
         transcript.speakers.clear();
         return Ok(());
     }
-    let labels = fetch_model(shared, |start| shared.diarizer.prepare(start)).and_then(|()| {
+    let labels = shared.diarizer.prepare().and_then(|()| {
         shared
             .diarizer
             .diarize(audio, &transcript.words, &progress.step(Step::Speakers))
@@ -816,41 +825,6 @@ fn attribute_speakers(
 const WITHOUT_DIARIZER: u32 = 3;
 #[cfg(not(feature = "diarizer"))]
 const WITHOUT_DIARIZER: u32 = ANALYSIS_VERSION;
-
-/// Run `ensure`, which may download a model, showing the download as a job
-/// of its own.
-fn fetch_model<T>(
-    shared: &Shared,
-    ensure: impl FnOnce(&dyn Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let download = Mutex::new(None);
-    let start = |name: &str| -> Box<dyn Fn(f32) + Send + Sync> {
-        let id = JobId::new();
-        *lock(&download) = Some(id);
-        lock(&shared.jobs).push(JobStatus {
-            id,
-            label: format!("Download {name}"),
-            media: None,
-            state: JobState::Running { fraction: 0.0 },
-        });
-        let jobs = shared.jobs.clone();
-        Box::new(move |f: f32| {
-            if let Some(j) = lock(&jobs).iter_mut().find(|j| j.id == id) {
-                j.state = if f >= 1.0 {
-                    JobState::Done
-                } else {
-                    JobState::Running { fraction: f }
-                };
-            }
-        })
-    };
-    let model = ensure(&start);
-    if let (Err(e), Some(id)) = (&model, *lock(&download)) {
-        let message = format!("{e:#}");
-        shared.set_state(id, JobState::Failed { message });
-    }
-    model
-}
 
 #[cfg(not(feature = "whisper"))]
 fn transcript(

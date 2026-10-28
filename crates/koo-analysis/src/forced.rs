@@ -7,38 +7,15 @@
 //! digits, the edges [`crate::align`] measured stay.
 
 use crate::bpe::Bpe;
-use crate::download::Download;
 use crate::ffmpeg::SAMPLE_RATE;
 use crate::onnx;
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::{Levels, Word};
-use koo_core::paths;
 use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::PathBuf;
 use std::sync::Mutex;
-
-/// The model as ONNX, with its Whisper-style features built in (16 kHz
-/// samples and token ids in, a class per token out), weights quantized to
-/// 4 bits.
-pub const MODEL: &str = "qwen3-forced-aligner-0.6b-q4.onnx";
-/// Where [`MODEL`] is downloaded from. Qwen publishes no ONNX export; how
-/// this one is made and hosted is in `docs/TECHNICAL_DESIGN.md`.
-const MODEL_URL: Option<&str> = Some(
-    "https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx/resolve/c1386c6a094f575f2067cf82632c30238c1b1f9d/qwen3-forced-aligner-0.6b-q4.onnx",
-);
-/// Qwen's tokenizer, from the model's own repository.
-const TOKENIZER: [(&str, &str); 2] = [
-    (
-        "qwen3-forced-aligner-vocab.json",
-        "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/vocab.json",
-    ),
-    (
-        "qwen3-forced-aligner-merges.txt",
-        "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/merges.txt",
-    ),
-];
 
 /// Follows each unit twice; the model answers with its start and its end.
 const TIMESTAMP: i64 = 151705;
@@ -71,45 +48,16 @@ pub struct Files {
 #[derive(Default)]
 pub struct Aligner {
     loaded: Mutex<Option<(Session, Bpe)>>,
-    downloads: [Download; 3],
 }
 
 impl Aligner {
-    /// The model's files, downloading them first if needed;
-    /// `start_download` returns a progress callback for each download.
-    pub fn ensure_model(
-        &self,
-        start_download: impl Fn(&str) -> Box<dyn Fn(f32) + Send + Sync>,
-    ) -> Result<Files> {
-        // `$KOOEDITOR_ALIGNER_MODEL` is a path, never fetched.
-        let model = match std::env::var_os("KOOEDITOR_ALIGNER_MODEL").filter(|v| !v.is_empty()) {
-            Some(path) => PathBuf::from(path),
-            None => {
-                let path = paths::models().join(MODEL);
-                if let Some(url) = MODEL_URL {
-                    self.downloads[0]
-                        .ensure(&path, url, "alignment model", || start_download(MODEL))?;
-                }
-                path
-            }
-        };
-        if !model.is_file() {
-            bail!(
-                "alignment model not found at {} (set KOOEDITOR_ALIGNER_MODEL)",
-                model.display()
-            );
-        }
-        let mut tokenizer = Vec::new();
-        for ((name, url), download) in TOKENIZER.iter().zip(&self.downloads[1..]) {
-            let path = paths::models().join(name);
-            download.ensure(&path, url, "alignment tokenizer", || start_download(name))?;
-            tokenizer.push(path);
-        }
-        let [vocab, merges] = <[PathBuf; 2]>::try_from(tokenizer).expect("two files");
+    /// The model and its tokenizer, if they are downloaded.
+    pub fn model(&self) -> Result<Files> {
+        use koo_models::files::{ALIGNER, ALIGNER_MERGES, ALIGNER_VOCAB};
         Ok(Files {
-            model,
-            vocab,
-            merges,
+            model: ALIGNER.locate()?,
+            vocab: ALIGNER_VOCAB.locate()?,
+            merges: ALIGNER_MERGES.locate()?,
         })
     }
 

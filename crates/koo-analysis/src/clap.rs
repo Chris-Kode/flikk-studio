@@ -4,7 +4,6 @@
 //! one, and the closer two are the better the description fits.
 
 use crate::bpe::Bpe;
-use crate::download::{Download, ModelFile, StartDownload};
 use crate::ffmpeg::SOUND_RATE;
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::SoundVectors;
@@ -12,32 +11,6 @@ use koo_core::time::{FLICKS_PER_SECOND, Time};
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::PathBuf;
-
-pub const AUDIO: ModelFile = ModelFile {
-    name: "larger-clap-general-audio.onnx",
-    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/ccfced4f8df016a4123b6d938821f600a5be7a00/larger-clap-general-audio.onnx",
-    env: "KOOEDITOR_CLAP_AUDIO_MODEL",
-    what: "sound search model",
-};
-pub const TEXT: ModelFile = ModelFile {
-    name: "larger-clap-general-text.onnx",
-    url: "https://huggingface.co/Chris-Kode/larger-clap-general-onnx/resolve/ccfced4f8df016a4123b6d938821f600a5be7a00/larger-clap-general-text.onnx",
-    env: "KOOEDITOR_CLAP_TEXT_MODEL",
-    what: "sound search text model",
-};
-/// RoBERTa's tokenizer, from the model's own repository.
-const VOCAB: ModelFile = ModelFile {
-    name: "larger-clap-general-vocab.json",
-    url: "https://huggingface.co/laion/larger_clap_general/resolve/ada0c23a36c4e8582805bb38fec3905903f18b41/vocab.json",
-    env: "KOOEDITOR_CLAP_VOCAB",
-    what: "sound search vocabulary",
-};
-const MERGES: ModelFile = ModelFile {
-    name: "larger-clap-general-merges.txt",
-    url: "https://huggingface.co/laion/larger_clap_general/resolve/ada0c23a36c4e8582805bb38fec3905903f18b41/merges.txt",
-    env: "KOOEDITOR_CLAP_MERGES",
-    what: "sound search vocabulary",
-};
 
 /// Samples in a window, and between the starts of windows.
 pub const WINDOW: usize = 4 * SOUND_RATE as usize;
@@ -62,7 +35,7 @@ pub struct ClapAudio {
 impl ClapAudio {
     pub fn load(model: &std::path::Path) -> Result<Self> {
         Ok(Self {
-            session: crate::onnx::session(model, AUDIO.what)?,
+            session: crate::onnx::session(model, koo_models::files::CLAP_AUDIO.what)?,
         })
     }
 
@@ -129,7 +102,7 @@ pub struct ClapText {
 impl ClapText {
     pub fn load(files: &TextFiles) -> Result<Self> {
         Ok(Self {
-            session: crate::onnx::session(&files.model, TEXT.what)?,
+            session: crate::onnx::session(&files.model, koo_models::files::CLAP_TEXT.what)?,
             bpe: Bpe::load(&files.vocab, &files.merges)?,
         })
     }
@@ -164,11 +137,12 @@ pub struct TextFiles {
     merges: PathBuf,
 }
 
-/// The text tower's files, downloading them first if needed.
-pub fn text_files(downloads: &[Download; 3], start: StartDownload) -> Result<TextFiles> {
+/// The text tower's files, if they are downloaded.
+pub fn text_files() -> Result<TextFiles> {
+    use koo_models::files::{CLAP_MERGES, CLAP_TEXT, CLAP_VOCAB};
     Ok(TextFiles {
-        model: TEXT.ensure(&downloads[0], start)?,
-        vocab: VOCAB.ensure(&downloads[1], start)?,
-        merges: MERGES.ensure(&downloads[2], start)?,
+        model: CLAP_TEXT.locate()?,
+        vocab: CLAP_VOCAB.locate()?,
+        merges: CLAP_MERGES.locate()?,
     })
 }

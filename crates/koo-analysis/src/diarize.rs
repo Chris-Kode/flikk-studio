@@ -16,27 +16,22 @@
 //!
 //! A word goes to the voice that speaks through most of it.
 
-use crate::download::Download;
 use crate::fbank::{self, Fbank};
 use crate::ffmpeg::SAMPLE_RATE;
 use crate::onnx;
-use crate::speakers::{Diarizer, DownloadProgress, Labels};
+use crate::speakers::{Diarizer, Labels};
 use anyhow::{Result, anyhow, bail};
 use koo_core::analysis::Word;
-use koo_core::paths;
 use koo_core::time::{FLICKS_PER_SECOND, Time};
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
 
-/// pyannote segmentation-3.0 as ONNX: 16 kHz samples in, a powerset
-/// class (nobody, one of three voices, or two of them) per frame out.
-pub const SEGMENTATION: &str = "pyannote-segmentation-3.0.onnx";
-const SEGMENTATION_URL: &str = "https://huggingface.co/onnx-community/pyannote-segmentation-3.0/resolve/733a93b6473d019a773298e08cefa686894b1854/onnx/model.onnx";
-/// WeSpeaker's own ONNX export of ResNet34-LM: [`fbank`] features in, a
-/// 256-number voiceprint out.
-pub const EMBEDDING: &str = "wespeaker-voxceleb-resnet34-lm.onnx";
-const EMBEDDING_URL: &str = "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/f0c48c298fd835726c27956a5d617bad7115627e/voxceleb_resnet34_LM.onnx";
+// The models' files are `koo_models::files::SEGMENTATION`, pyannote
+// segmentation-3.0 as ONNX (16 kHz samples in, a powerset class per frame
+// out: nobody, one of three voices, or two of them), and `EMBEDDING`,
+// WeSpeaker's own ONNX export of ResNet34-LM ([`fbank`] features in, a
+// 256-number voiceprint out).
 
 /// Samples the segmentation model hears at once.
 const WINDOW: usize = 10 * SAMPLE_RATE as usize;
@@ -74,19 +69,12 @@ const REACH: Time = Time(FLICKS_PER_SECOND / 2);
 #[derive(Default)]
 pub struct Pyannote {
     loaded: Mutex<Option<(Session, Session)>>,
-    downloads: [Download; 2],
 }
 
 impl Diarizer for Pyannote {
-    fn prepare(&self, start_download: &dyn Fn(&str) -> DownloadProgress) -> Result<()> {
-        for ((name, url), download) in
-            [(SEGMENTATION, SEGMENTATION_URL), (EMBEDDING, EMBEDDING_URL)]
-                .into_iter()
-                .zip(&self.downloads)
-        {
-            let path = paths::models().join(name);
-            download.ensure(&path, url, "speaker model", || start_download(name))?;
-        }
+    fn prepare(&self) -> Result<()> {
+        koo_models::files::SEGMENTATION.locate()?;
+        koo_models::files::EMBEDDING.locate()?;
         Ok(())
     }
 
@@ -96,10 +84,10 @@ impl Diarizer for Pyannote {
         }
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
         if loaded.is_none() {
-            let models = paths::models();
+            use koo_models::files::{EMBEDDING, SEGMENTATION};
             *loaded = Some((
-                onnx::session(&models.join(SEGMENTATION), "speaker segmentation model")?,
-                onnx::session(&models.join(EMBEDDING), "speaker embedding model")?,
+                onnx::session(&SEGMENTATION.locate()?, SEGMENTATION.what)?,
+                onnx::session(&EMBEDDING.locate()?, EMBEDDING.what)?,
             ));
         }
         let (segmentation, embedding) = loaded.as_mut().expect("loaded above");

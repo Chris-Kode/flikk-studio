@@ -15,14 +15,10 @@ pub const MIN_CONFIDENCE: f32 = 0.6;
 /// with a 0..1 confidence (`None` when it cannot tell).
 pub type Labels = (usize, Vec<Option<(usize, f32)>>);
 
-/// Takes a download's 0..1.
-pub type DownloadProgress = Box<dyn Fn(f32) + Send + Sync>;
-
 /// Groups words by voice.
 pub trait Diarizer: Send + Sync {
-    /// Get ready to run, fetching models if needed; `start_download`
-    /// returns a progress callback for each download.
-    fn prepare(&self, _start_download: &dyn Fn(&str) -> DownloadProgress) -> Result<()> {
+    /// Get ready to run; fails when a model it needs is not downloaded.
+    fn prepare(&self) -> Result<()> {
         Ok(())
     }
 

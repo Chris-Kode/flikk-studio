@@ -1,25 +1,28 @@
-//! Window layout: workspace switcher on top, the workspace's panels on the
-//! left, the agent chat docked on the right in every workspace (PRD AG1).
+//! Window layout: workspace switcher on top, between the project menu and
+//! the notice and Settings buttons; the workspace's panels on the left, the
+//! agent chat docked on the right in every workspace (PRD AG1).
 
+use crate::notices::NoticeAction;
 use crate::state::EditorState;
 use crate::ui::caption_style::{CaptionStylePanel, Target};
+use crate::ui::editor_settings::{EditorSettings, SettingsTab};
 use crate::ui::{
     chat::ChatPanel, code_editor::CodeEditorPanel, deliver::DeliverPanel,
     inspector::InspectorPanel, library::LibraryPanel, media_pool::MediaPoolPanel,
     mixer::MixerPanel, scopes::ScopesPanel, timeline::TimelinePanel, transcript::TranscriptPanel,
     viewer::ViewerPanel,
 };
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 use koo_core::agent::Workspace;
 
-actions!(koo, [Undo, Redo, TogglePlay, Quit]);
+actions!(koo, [Undo, Redo, TogglePlay, OpenSettings, Quit]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -30,6 +33,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-y", Redo, None),
         KeyBinding::new("space", TogglePlay, Some("Timeline")),
         KeyBinding::new("space", TogglePlay, Some("Viewer")),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -56,7 +61,10 @@ pub struct KooEditor {
     mixer: Entity<MixerPanel>,
     library: Entity<LibraryPanel>,
     code_editor: Entity<CodeEditorPanel>,
+    settings: Entity<EditorSettings>,
     left_tab: LeftTab,
+    /// The notice list is dropped down.
+    notices_open: bool,
     _observe: Subscription,
 }
 
@@ -81,6 +89,8 @@ impl KooEditor {
             mixer: cx.new(|cx| MixerPanel::new(state.clone(), window, cx)),
             library: cx.new(|cx| LibraryPanel::new(state.clone(), window, cx)),
             code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
+            settings: cx.new(|cx| EditorSettings::new(state.clone(), window, cx)),
+            notices_open: false,
             left_tab: match crate::demo::fx_view().as_deref() {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
@@ -121,6 +131,54 @@ impl KooEditor {
                 }
                 menu
             })
+    }
+
+    fn open_settings(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.notices_open = false;
+        cx.notify();
+        EditorSettings::open(&self.settings, tab, window, cx);
+    }
+
+    /// The notice button, while there are notices, and Settings.
+    fn top_right(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.state.read(cx).notices.is_empty() {
+            self.notices_open = false;
+        }
+        let this = cx.entity().downgrade();
+        let notices = crate::ui::notices::button(
+            &self.state,
+            self.notices_open,
+            {
+                let this = this.clone();
+                move |open, _, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.notices_open = *open;
+                        cx.notify();
+                    });
+                }
+            },
+            move |action, window, cx| {
+                let _ = this.update(cx, |this, cx| match action {
+                    NoticeAction::OpenModels => this.open_settings(SettingsTab::Models, window, cx),
+                });
+            },
+            cx,
+        );
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .children(notices)
+            .child(
+                Button::new("settings")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Settings)
+                    .tooltip("Settings")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(SettingsTab::Models, window, cx)
+                    })),
+            )
     }
 
     fn workspace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -281,8 +339,12 @@ impl Render for KooEditor {
             .on_action(
                 cx.listener(|this, _: &Redo, _, cx| this.state.update(cx, |s, cx| s.redo(cx))),
             )
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(SettingsTab::Models, window, cx)
+            }))
             .child(
-                // Project menu on the left; workspaces stay centred.
+                // Project menu on the left, notices and Settings on the
+                // right; workspaces stay centred.
                 div()
                     .relative()
                     .flex()
@@ -300,7 +362,17 @@ impl Render for KooEditor {
                             .items_center()
                             .child(self.project_menu(cx)),
                     )
-                    .child(self.workspace_tabs(cx)),
+                    .child(self.workspace_tabs(cx))
+                    .child(
+                        div()
+                            .absolute()
+                            .right_2()
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
+                            .child(self.top_right(cx)),
+                    ),
             )
             .child(
                 div().flex_1().min_h_0().child(

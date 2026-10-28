@@ -3,19 +3,11 @@
 //! as Beat This!'s own "minimal" postprocessor does (peaks above 0.5
 //! within 70 ms, neighbours averaged, downbeats moved onto beats).
 
-use crate::download::ModelFile;
 use crate::ffmpeg::SOUND_RATE;
 use anyhow::{Result, anyhow, bail};
 use koo_core::time::{FLICKS_PER_SECOND, Time};
 use ort::session::Session;
 use ort::value::Tensor;
-
-pub const MODEL: ModelFile = ModelFile {
-    name: "beat-this-final0.onnx",
-    url: "https://huggingface.co/Chris-Kode/beat-this-final0-onnx/resolve/49876475cff9b3abe3eec5303fa539cff06843fd/beat-this-final0.onnx",
-    env: "KOOEDITOR_BEATS_MODEL",
-    what: "beat tracker",
-};
 
 /// Samples per 20 ms frame.
 const FRAME: usize = SOUND_RATE as usize / 50;
@@ -33,7 +25,7 @@ pub struct BeatModel {
 impl BeatModel {
     pub fn load(model: &std::path::Path) -> Result<Self> {
         Ok(Self {
-            session: crate::onnx::session(model, MODEL.what)?,
+            session: crate::onnx::session(model, koo_models::files::BEATS.what)?,
         })
     }
 

@@ -7,11 +7,9 @@
 //! its own: one that starts with music Silero took for speech would throw
 //! the times of the speech after it.
 
-use crate::download::{Download, StartDownload};
 use crate::ffmpeg::SAMPLE_RATE;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use koo_core::analysis::Word;
-use koo_core::paths;
 use koo_core::time::{Time, TimeRange};
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -21,9 +19,6 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
     WhisperTokenId,
 };
-
-pub const DEFAULT_MODEL: &str = "ggml-base.bin";
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 
 /// Recognized words and the detected (or given) language.
 pub struct Output {
@@ -36,23 +31,13 @@ pub struct Output {
 #[derive(Default)]
 pub struct Whisper {
     ctx: Mutex<Option<Arc<WhisperContext>>>,
-    download: Download,
 }
 
 impl Whisper {
-    /// The model's file, downloading it first if needed; `start_download`
-    /// returns a progress callback for the download.
-    pub fn ensure_model(&self, start_download: StartDownload) -> Result<PathBuf> {
-        let (model, name) = model_location()?;
-        if !model.is_file() {
-            let Some(name) = name else {
-                bail!("Whisper model not found at {}", model.display());
-            };
-            let url = format!("{MODEL_URL}{name}");
-            self.download
-                .ensure(&model, &url, "Whisper model", || start_download(&name))?;
-        }
-        Ok(model)
+    /// The model's file, if it is downloaded. `$KOOEDITOR_WHISPER_MODEL`
+    /// picks another: a path, or a ggml file name in `paths::models()`.
+    pub fn model(&self) -> Result<PathBuf> {
+        koo_models::files::WHISPER_BASE.locate()
     }
 
     fn context(&self, model: &Path) -> Result<Arc<WhisperContext>> {
@@ -251,25 +236,4 @@ fn threads() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4) as i32
-}
-
-/// `$KOOEDITOR_WHISPER_MODEL` (a path, or a ggml file name to fetch into
-/// `paths::models()`), else `models()/ggml-base.bin`. The name is set when
-/// the file may be downloaded.
-fn model_location() -> Result<(PathBuf, Option<String>)> {
-    match std::env::var("KOOEDITOR_WHISPER_MODEL") {
-        Ok(v) if !v.is_empty() => {
-            let path = PathBuf::from(&v);
-            let bare = path.components().count() == 1;
-            if bare && v.starts_with("ggml-") && v.ends_with(".bin") {
-                Ok((paths::models().join(&v), Some(v)))
-            } else {
-                Ok((path, None))
-            }
-        }
-        _ => Ok((
-            paths::models().join(DEFAULT_MODEL),
-            Some(DEFAULT_MODEL.to_string()),
-        )),
-    }
 }

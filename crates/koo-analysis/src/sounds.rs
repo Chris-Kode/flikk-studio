@@ -4,7 +4,6 @@
 
 use crate::beats::{BeatModel, Tracker};
 use crate::clap::{self, ClapAudio, ClapText, TextFiles};
-use crate::download::Download;
 use crate::ffmpeg::{self, SOUND_RATE};
 use crate::tagger::{self, Scores, Tagger};
 use anyhow::Result;
@@ -27,9 +26,6 @@ pub struct SoundModels {
     beats: Mutex<Option<(PathBuf, BeatModel)>>,
     clap: Mutex<Option<(PathBuf, ClapAudio)>>,
     text: Mutex<Option<ClapText>>,
-    /// Tagger, beat tracker, CLAP audio, then CLAP text and its tokenizer.
-    pub downloads: [Download; 3],
-    pub text_downloads: [Download; 3],
 }
 
 /// The model files a pass uses; the tagger is required, the others are

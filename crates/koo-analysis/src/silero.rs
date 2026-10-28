@@ -4,7 +4,6 @@
 //! tight speech ranges of `Analysis::speech`, for silences and cuts, and
 //! the looser stretches Whisper hears.
 
-use crate::download::{Download, ModelFile, StartDownload};
 use crate::ffmpeg::SAMPLE_RATE;
 use crate::vad;
 use anyhow::{Context, Result};
@@ -14,13 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use whisper_rs::{WhisperVadContext, WhisperVadContextParams};
 
-/// Silero VAD as ggml, which whisper.cpp runs.
-const MODEL: ModelFile = ModelFile {
-    name: "ggml-silero-v6.2.0.bin",
-    url: "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
-    env: "KOOEDITOR_VAD_MODEL",
-    what: "voice activity model",
-};
 /// Silero hears 16 kHz audio in windows of this many samples.
 const WINDOW: usize = 512;
 /// Music holds Silero down for seconds after it ends, missing the first
@@ -42,13 +34,13 @@ const SPEECH_PAD: usize = SAMPLE_RATE as usize * 400 / 1000;
 pub struct Silero {
     /// Hears one item at a time.
     vad: Mutex<Option<WhisperVadContext>>,
-    download: Download,
 }
 
 impl Silero {
-    /// The model's file, downloading it first if needed.
-    pub fn ensure_model(&self, start_download: StartDownload) -> Result<PathBuf> {
-        MODEL.ensure(&self.download, start_download)
+    /// The model's file (Silero VAD as ggml, which whisper.cpp runs), if
+    /// it is downloaded.
+    pub fn model(&self) -> Result<PathBuf> {
+        koo_models::files::SILERO.locate()
     }
 
     /// Silero's chance of speech through 16 kHz mono `audio`.
