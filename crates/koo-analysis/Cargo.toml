@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner"]
+default = ["whisper", "aligner", "diarizer"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["dep:whisper-rs", "dep:ureq"]
@@ -12,6 +12,9 @@ whisper = ["dep:whisper-rs", "dep:ureq"]
 # downloaded and linked statically at build time; without it word edges are
 # measured on the audio levels alone.
 aligner = ["dep:ort", "dep:unicode-normalization", "dep:ureq"]
+# Speakers told apart by pyannote's segmentation model and WeSpeaker
+# voiceprints, run by ONNX Runtime; without it every word is "Speaker 1".
+diarizer = ["dep:ort", "dep:ureq"]
 
 [dependencies]
 anyhow.workspace = true
