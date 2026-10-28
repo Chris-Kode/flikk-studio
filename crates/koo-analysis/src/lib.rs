@@ -93,7 +93,7 @@ struct Shared {
     #[cfg(feature = "whisper")]
     voice: Box<dyn koo_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
-    transcriber: Box<dyn koo_models::transcription::Transcriber>,
+    transcriber: Picked<dyn koo_models::transcription::Transcriber>,
     #[cfg(feature = "aligner")]
     aligner: Box<dyn koo_models::word_timing::Aligner>,
     #[cfg(feature = "sounds")]
@@ -104,6 +104,36 @@ struct Shared {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The runner of the model a task runs on, made again when the user picks
+/// another. A job keeps the runner it started with.
+#[cfg(feature = "whisper")]
+struct Picked<R: ?Sized> {
+    task: ModelTask,
+    make: fn(&koo_models::Model) -> Box<R>,
+    runner: Mutex<(&'static str, Arc<R>)>,
+}
+
+#[cfg(feature = "whisper")]
+impl<R: ?Sized> Picked<R> {
+    fn new(task: ModelTask, make: fn(&koo_models::Model) -> Box<R>) -> Self {
+        let model = task.model();
+        Self {
+            task,
+            make,
+            runner: Mutex::new((model.id, make(model).into())),
+        }
+    }
+
+    fn get(&self) -> Arc<R> {
+        let model = self.task.model();
+        let mut runner = lock(&self.runner);
+        if runner.0 != model.id {
+            *runner = (model.id, (self.make)(model).into());
+        }
+        runner.1.clone()
+    }
 }
 
 impl Default for LocalAnalysis {
@@ -135,7 +165,7 @@ impl LocalAnalysis {
             #[cfg(feature = "whisper")]
             voice: koo_models::voice_activity::runner(ModelTask::VoiceActivity.model()),
             #[cfg(feature = "whisper")]
-            transcriber: koo_models::transcription::runner(ModelTask::Transcription.model()),
+            transcriber: Picked::new(ModelTask::Transcription, koo_models::transcription::runner),
             #[cfg(feature = "aligner")]
             aligner: koo_models::word_timing::runner(ModelTask::WordTiming.model()),
             #[cfg(feature = "sounds")]
@@ -639,7 +669,7 @@ fn transcript(
         None => anyhow::bail!("Whisper waits for the voice activity model"),
     };
     if !stretches.is_empty() {
-        let out = shared.transcriber.transcribe(
+        let out = shared.transcriber.get().transcribe(
             audio,
             stretches,
             language,
@@ -870,7 +900,7 @@ fn iso_639_1(shared: &Shared, tag: &str) -> Option<&'static str> {
         return Some(code);
     }
     #[cfg(feature = "whisper")]
-    if let Some(code) = shared.transcriber.language(tag) {
+    if let Some(code) = shared.transcriber.get().language(tag) {
         return Some(code);
     }
     None

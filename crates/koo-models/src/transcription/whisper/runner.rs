@@ -1,9 +1,9 @@
 //! Whisper hearing each stretch of speech on its own, the longest first,
 //! and its tokens put together into words.
 
-use super::config::{FILE, MAX_THREADS};
-use crate::SPEECH_RATE;
+use super::config::MAX_THREADS;
 use crate::transcription::{Progress, Transcribed, Transcriber};
+use crate::{ModelFile, SPEECH_RATE};
 use anyhow::{Context, Result};
 use koo_core::analysis::Word;
 use koo_core::time::{Time, TimeRange};
@@ -17,18 +17,26 @@ use whisper_rs::{
 
 /// The loaded model, shared by every job. Loading takes a moment, so it
 /// happens once on first use.
-#[derive(Default)]
 pub struct Whisper {
+    file: &'static ModelFile,
     ctx: Mutex<Option<Arc<WhisperContext>>>,
 }
 
 impl Whisper {
+    /// Runs the size in `file`, one of [`super::config`]'s.
+    pub fn new(file: &'static ModelFile) -> Self {
+        Self {
+            file,
+            ctx: Mutex::default(),
+        }
+    }
+
     fn context(&self) -> Result<Arc<WhisperContext>> {
         let mut ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ctx) = &*ctx {
             return Ok(ctx.clone());
         }
-        let model = FILE.locate()?;
+        let model = self.file.locate()?;
         let path = model.to_str().context("model path is not valid UTF-8")?;
         let loaded = WhisperContext::new_with_params(path, WhisperContextParameters::default())
             .with_context(|| format!("could not load Whisper model {}", model.display()))?;

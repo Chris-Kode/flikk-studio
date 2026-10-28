@@ -1,11 +1,12 @@
 //! Settings → Models: each task analysis runs on a model, the model it
-//! runs on and whether that is downloaded. Models are only ever downloaded
-//! from here, when the user asks.
+//! runs on (picked here when it has more than one) and whether that is
+//! downloaded. Models are only ever downloaded from here, when the user
+//! asks.
 
 use crate::state::EditorState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::select::{SearchableVec, Select, SelectState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex, v_flex,
@@ -27,13 +28,14 @@ pub struct ModelsTab {
     /// A download was running at the last poll.
     busy: bool,
     _observe: Subscription,
+    _picks: Vec<Subscription>,
     _poll: Task<()>,
 }
 
 impl ModelsTab {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tasks = state.read(cx).model_tasks.clone();
-        let pickers = tasks
+        let pickers: Vec<_> = tasks
             .into_iter()
             .map(|task| {
                 let models = task.models();
@@ -53,6 +55,19 @@ impl ModelsTab {
                 (task, picker)
             })
             .collect();
+        let _picks = pickers
+            .iter()
+            .map(|&(task, ref picker)| {
+                cx.subscribe(
+                    picker,
+                    move |this, _, event: &SelectEvent<ModelList>, cx| {
+                        if let SelectEvent::Confirm(Some(name)) = event {
+                            this.pick(task, name, cx);
+                        }
+                    },
+                )
+            })
+            .collect();
         let _poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(PROGRESS_POLL).await;
@@ -66,6 +81,7 @@ impl ModelsTab {
             state,
             pickers,
             busy: false,
+            _picks,
             _poll,
         }
     }
@@ -77,6 +93,13 @@ impl ModelsTab {
             cx.notify();
         }
         self.busy = busy;
+    }
+
+    /// Run `task` on the model named `name` in its picker.
+    fn pick(&mut self, task: ModelTask, name: &str, cx: &mut Context<Self>) {
+        if let Some(&model) = task.models().iter().find(|m| m.name == name) {
+            self.state.update(cx, |s, cx| s.pick_model(task, model, cx));
+        }
     }
 
     fn download(&mut self, model: &'static Model, cx: &mut Context<Self>) {
@@ -211,12 +234,11 @@ impl Render for ModelsTab {
                                         div().w(px(130.)).flex_none().text_sm().child(task.label()),
                                     )
                                     .child(
-                                        // Picking another model comes once a task has
-                                        // more than one to run on.
-                                        div()
-                                            .w(px(240.))
-                                            .flex_none()
-                                            .child(Select::new(&picker).small().disabled(true)),
+                                        div().w(px(240.)).flex_none().child(
+                                            Select::new(&picker)
+                                                .small()
+                                                .disabled(task.models().len() < 2),
+                                        ),
                                     )
                                     .child(
                                         h_flex().flex_1().min_w_0().justify_end().child(

@@ -11,6 +11,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const USER_SETTINGS: &str = "agent_settings";
+/// The models the user picked over each task's default, by id.
+const MODEL_PICKS: &str = "model_picks";
 
 /// Per-project overrides. `None` inherits the user setting. The backend is
 /// per user only.
@@ -170,6 +172,15 @@ impl Store {
         Ok(self
             .project_overrides(project)?
             .apply(&self.user_settings()?))
+    }
+
+    /// Ids of the models the user picked in Settings → Models, per user.
+    pub fn model_picks(&self) -> Result<Vec<String>> {
+        Ok(self.meta(MODEL_PICKS)?.unwrap_or_default())
+    }
+
+    pub fn save_model_picks(&self, ids: &[&str]) -> Result<()> {
+        self.set_meta(MODEL_PICKS, ids)
     }
 }
 

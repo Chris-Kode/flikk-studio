@@ -98,6 +98,10 @@ impl EditorState {
             settings,
             ..
         } = persistence::load_session();
+        // Before analysis is wired, so it runs on the models the user picked.
+        koo_models::restore_picks(
+            &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
+        );
         let chats = persistence::load_chats(project.id);
         let chat = active_messages(&chats);
         let mut bus = CommandBus::with_history(project, history);
@@ -912,6 +916,24 @@ impl EditorState {
 
     pub fn cancel_download(&mut self, model: &koo_models::Model, cx: &mut Context<Self>) {
         self.models.cancel(model);
+        cx.notify();
+    }
+
+    /// Run `task` on `model` from now on: the user picked it. Media
+    /// analyzed already keeps its results.
+    pub fn pick_model(
+        &mut self,
+        task: koo_models::Task,
+        model: &'static koo_models::Model,
+        cx: &mut Context<Self>,
+    ) {
+        if task.model().id == model.id {
+            return;
+        }
+        task.pick(model);
+        persistence::with_store(|s| s.save_model_picks(&koo_models::picked()));
+        self.poll_models(cx);
+        self.refresh_model_notices();
         cx.notify();
     }
 

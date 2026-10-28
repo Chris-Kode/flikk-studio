@@ -1,4 +1,6 @@
-//! Whisper (MIT, OpenAI) as ggml, run by whisper.cpp, with word times.
+//! Whisper (MIT, OpenAI) as ggml, run by whisper.cpp, with word times, in
+//! three sizes: base by default, medium and large-v3 for fewer mistakes at
+//! several times the memory and time.
 //!
 //! Whisper given music or a long silence makes words up there, often a
 //! verbatim repeat of what was said before, and its timestamps come loose
@@ -15,10 +17,23 @@ use crate::Model;
 #[cfg(feature = "whisper")]
 pub use runner::Whisper;
 
-pub const ID: &str = "whisper-base";
-
-pub const MODEL: Model = Model {
-    id: ID,
+pub const BASE: Model = Model {
+    id: "whisper-base",
     name: "Whisper base",
-    files: &[config::FILE],
+    files: &[config::BASE],
 };
+
+pub const MEDIUM: Model = Model {
+    id: "whisper-medium",
+    name: "Whisper medium",
+    files: &[config::MEDIUM],
+};
+
+pub const LARGE: Model = Model {
+    id: "whisper-large-v3",
+    name: "Whisper large-v3",
+    files: &[config::LARGE],
+};
+
+/// Every size, smallest first.
+pub const SIZES: [&Model; 3] = [&BASE, &MEDIUM, &LARGE];

@@ -180,9 +180,11 @@ All nine streams are merged. What runs today:
   proxies, 6 × 5 collages (cached) and waveforms.
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness,
   speakers (below); Whisper transcription behind the default `whisper`
-  feature. The model is in `paths::models()` once the user downloads it
-  (Models, below), or set `KOOEDITOR_WHISPER_MODEL` to a path or a ggml
-  file name there. Speech, and so silences, comes from Silero
+  feature, in base (148 MB, the default), medium (1.5 GB) or large-v3
+  (3.1 GB), picked in Settings → Models. The picked size is in
+  `paths::models()` once the user downloads it (Models, below), or set
+  `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
+  stands in for whichever size is picked. Speech, and so silences, comes from Silero
   VAD v6.2 (`koo-models/src/voice_activity/silero/`, from version 6;
   `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit,
   or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until
@@ -321,12 +323,15 @@ All nine streams are merged. What runs today:
   (behind its feature) and finds its own files. What models share sits
   at the crate root: the catalog types, the audio rates, the downloads,
   ONNX Runtime and the BPE tokenizer. Analysis only orchestrates: it asks
-  each task's runner for the selected model (`Task::model`, the default
-  until the user can pick another) and never names a model. A new model
-  is a folder under its task, its `MODEL` in `MODELS` and an arm in
-  `runner`. Nothing downloads on its own. Settings → Models (the gear in
-  the top bar, or cmd-,) lists each task with its model and downloads
-  one or all of them, with progress and cancel, through `<file>.part`; a
+  each task's runner for the selected model (`Task::model`: the one the
+  user picked, else the default) and never names a model; a new pick of
+  transcription model applies from the next transcript, and results made
+  already stay. A new model is a folder under its task, its `MODEL` in
+  `MODELS` and an arm in `runner`; a model in several sizes (Whisper) has
+  a `MODEL` for each in one folder. Nothing downloads on its own.
+  Settings → Models (the gear in the top bar, or cmd-,) lists each task
+  with its model, picked there when the task has more than one (saved per
+  user in the store), and downloads one or all of them, with progress and cancel, through `<file>.part`; a
   failed download stays there with Retry. `LocalAnalysis::model_tasks`
   says which tasks a build runs. A runner whose files are missing fails
   ("… is not downloaded"), its step is left out as before, and when the
