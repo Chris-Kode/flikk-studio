@@ -179,17 +179,24 @@ All nine streams are merged. What runs today:
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness,
   speakers (below); Whisper transcription behind the default `whisper`
   feature. The model downloads to `paths::models()` on first use, or set
-  `KOOEDITOR_WHISPER_MODEL`. Whisper hears only speech
+  `KOOEDITOR_WHISPER_MODEL`. Speech, and so silences, comes from Silero
+  VAD v6.2 (`koo-analysis/src/silero.rs`, from version 6;
+  `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit,
+  or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until
+  under 0.35, pauses under 250 ms kept, 60 ms before each range. Music is
+  not speech to it. The energy VAD (`vad.rs`), which took a music bed for
+  speech, stands in without the `whisper` feature, or while the model
+  can't be had (that result is version 5, and upgraded later). Silero
+  hears the audio in one go and in 4 s blocks, each after the second
+  before it, and a window is speech when either finds it: music holds it
+  down for seconds after, and a block that starts during a sentence
+  doubts the rest of it. Whisper hears only speech
   (`koo-analysis/src/transcribe.rs`, from version 5): given music, a long
   silence, or a 30 s window that starts with either, it made words up,
-  often repeating what was said before, and its times came loose. Silero
-  VAD v6.2 (`ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned
-  commit, or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp, finds the
-  stretches of speech as faster-whisper's VAD filter does (pauses under
-  2 s kept, 400 ms either side). It hears the audio in 4 s blocks, each
-  after the second before it, since music holds it down for seconds
-  after. Whisper then hears each stretch on its own, without the text of
-  the window before, in the language of the longest; its notes such as
+  often repeating what was said before, and its times came loose. It hears
+  the stretches Silero finds as faster-whisper's VAD filter does (pauses
+  under 2 s kept, 400 ms either side), each on its own, without the text
+  of the window before, in the language of the longest; its notes such as
   "(upbeat music)" are dropped. Word times come from a forced aligner
   (`koo-analysis/src/forced.rs`, behind the default `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
@@ -396,8 +403,14 @@ compositor feature on real FFmpeg-made media).
   laughter, glass, knocks, a dog, applause, the music and its tempo were
   found, rain under speech was not. Sounds the tagger is unsure of carry
   "?" in the script.
-* Whisper still invents words over music and effects (the VAD reads them
-  as speech); the script shows them as speech, marked "?" when unsure.
+* Silero misses some quiet or short speech. On 5 minutes of an AMI
+  meeting (headset mix), its ranges covered 89% of the labelled speech
+  and left 13 s of it in silences of 0.5 s or more; the energy VAD
+  covered 92% and left 5.5 s, but called 33 s outside the labels speech
+  (Silero 5 s). Where both found speech, Silero's ranges started 10 ms
+  and ended 30 ms later (medians). Whisper may still invent words over
+  sounds Silero takes for speech; the script shows them as speech, marked
+  "?" when unsure.
 * The Beat This! export was verified here from a mirrored copy of the
   `final0` weights; the hosted file must be built from the official
   checkpoint (`export_beat_this.py` downloads it from JKU's server).

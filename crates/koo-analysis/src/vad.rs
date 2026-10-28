@@ -1,8 +1,8 @@
 //! Energy and zero-crossing voice activity detection on 16 kHz mono audio.
 //!
-//! Good enough for talking-head material; music beds read as speech. A model
-//! VAD (Silero via whisper.cpp, or webrtc-vad) can replace [`speech_ranges`]
-//! without touching the callers.
+//! Good enough for talking-head material; music beds read as speech. It
+//! stands in for Silero (`silero.rs`) in a build without the `whisper`
+//! feature, or while Silero's model can't be had.
 
 use crate::ffmpeg::SAMPLE_RATE;
 use koo_core::time::{Time, TimeRange};
@@ -38,15 +38,23 @@ pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
         })
         .collect();
 
-    let frame_time = |i: usize| Time::from_secs_f64((i * FRAME) as f64 / SAMPLE_RATE as f64);
-    let end = Time::from_secs_f64(samples.len() as f64 / SAMPLE_RATE as f64);
-    let mut ranges: Vec<TimeRange> = Vec::new();
+    ranges(&voiced, FRAME, samples.len(), Time::from_millis(PAD_MS))
+}
+
+/// Speech in audio `len` samples long, from whether each frame of `frame`
+/// samples is voiced: pauses under [`BRIDGE_MS`] kept inside, bursts under
+/// [`MIN_SPEECH_MS`] dropped, and [`PAD_MS`] before each range and `tail`
+/// after it.
+pub(crate) fn ranges(voiced: &[bool], frame: usize, len: usize, tail: Time) -> Vec<TimeRange> {
+    let frame_time = |i: usize| Time::from_secs_f64((i * frame) as f64 / SAMPLE_RATE as f64);
+    let end = Time::from_secs_f64(len as f64 / SAMPLE_RATE as f64);
+    let mut runs: Vec<TimeRange> = Vec::new();
     let mut start = None;
     for (i, v) in voiced.iter().chain([&false]).enumerate() {
         match (start, *v) {
             (None, true) => start = Some(i),
             (Some(s), false) => {
-                ranges.push(TimeRange::new(frame_time(s), frame_time(i).min(end)));
+                runs.push(TimeRange::new(frame_time(s), frame_time(i).min(end)));
                 start = None;
             }
             _ => {}
@@ -55,7 +63,7 @@ pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
 
     let bridge = Time::from_millis(BRIDGE_MS);
     let mut merged: Vec<TimeRange> = Vec::new();
-    for r in ranges {
+    for r in runs {
         match merged.last_mut() {
             Some(last) if r.start - last.end < bridge => last.end = r.end,
             _ => merged.push(r),
@@ -66,7 +74,7 @@ pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
     let pad = Time::from_millis(PAD_MS);
     let mut padded: Vec<TimeRange> = Vec::new();
     for r in merged {
-        let r = TimeRange::new((r.start - pad).max(Time::ZERO), (r.end + pad).min(end));
+        let r = TimeRange::new((r.start - pad).max(Time::ZERO), (r.end + tail).min(end));
         match padded.last_mut() {
             Some(last) if r.start <= last.end => last.end = r.end,
             _ => padded.push(r),

@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped when analysis learns something older results lack; those are
 /// upgraded the next time the item is analyzed.
-pub const ANALYSIS_VERSION: u32 = 5;
+pub const ANALYSIS_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -250,7 +250,9 @@ impl SoundVectors {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     pub transcript: Option<Transcript>,
-    /// Speech regions from voice activity detection.
+    /// Speech regions from voice activity detection: Silero's from version
+    /// 6, which leaves music out, else an energy VAD's, which takes music
+    /// for speech.
     pub speech: Vec<TimeRange>,
     pub shot_changes: Vec<Time>,
     /// Loudness of the analyzed audio stream, for placing cuts in pauses.

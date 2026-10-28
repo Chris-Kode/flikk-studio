@@ -3,13 +3,14 @@
 //! loudness. Implements `koo_core::services::AnalysisService`.
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; a small pool
-//! of worker threads runs the pipeline (audio → VAD and levels → transcript
-//! of the speech Silero hears → word edges on the audio → word times from
-//! the aligner → speakers → sounds, music and sound vectors → beats → shot
-//! changes) and caches the result by fingerprint, so an item is only ever
-//! analyzed once (principle 4). Results of an older [`ANALYSIS_VERSION`]
-//! are upgraded in place, reusing their shot changes and a transcript from
-//! version 5 on (aligned words too, from version 2).
+//! of worker threads runs the pipeline (audio → the speech Silero hears, or
+//! the energy VAD's without it, and levels → transcript of that speech →
+//! word edges on the audio → word times from the aligner → speakers →
+//! sounds, music and sound vectors → beats → shot changes) and caches the
+//! result by fingerprint, so an item is only ever analyzed once (principle
+//! 4). Results of an older [`ANALYSIS_VERSION`] are upgraded in place,
+//! reusing their shot changes and a transcript from version 5 on (aligned
+//! words too, from version 2).
 
 mod align;
 #[cfg(feature = "sounds")]
@@ -35,6 +36,8 @@ mod ffmpeg;
 mod forced;
 #[cfg(any(feature = "aligner", feature = "diarizer", feature = "sounds"))]
 mod onnx;
+#[cfg(feature = "whisper")]
+mod silero;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -51,6 +54,7 @@ use koo_core::services::{AnalysisService, JobState, JobStatus, ServiceError, Ser
 use koo_core::time::{Time, TimeRange};
 use speakers::{Diarizer, SingleSpeaker};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -113,6 +117,8 @@ struct Shared {
     /// the next request.
     incomplete: Mutex<HashSet<Fingerprint>>,
     #[cfg(feature = "whisper")]
+    silero: silero::Silero,
+    #[cfg(feature = "whisper")]
     whisper: transcribe::Whisper,
     #[cfg(feature = "aligner")]
     aligner: forced::Aligner,
@@ -151,6 +157,8 @@ impl LocalAnalysis {
             results: Mutex::default(),
             in_flight: Mutex::default(),
             incomplete: Mutex::default(),
+            #[cfg(feature = "whisper")]
+            silero: Default::default(),
             #[cfg(feature = "whisper")]
             whisper: Default::default(),
             #[cfg(feature = "aligner")]
@@ -350,6 +358,7 @@ struct Progress {
 #[derive(Clone, Copy, PartialEq)]
 enum Step {
     Audio,
+    Speech,
     Transcript,
     Words,
     Speakers,
@@ -408,6 +417,9 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     let mut steps = Vec::new();
     if audio_wanted {
         steps.push((Step::Audio, 1.0));
+        if cfg!(feature = "whisper") {
+            steps.push((Step::Speech, 0.5));
+        }
         if reused_transcript.is_none() {
             steps.push((Step::Transcript, 6.0));
         }
@@ -452,11 +464,27 @@ fn run(shared: &Shared, task: &Task) -> JobState {
             }
         };
         if let Some(audio) = audio {
-            analysis.speech = vad::speech_ranges(&audio);
+            let Voice { speech, stretches } =
+                listen(shared, &audio, &progress).unwrap_or_else(|e| {
+                    // Music and all; a later run with the model finds the
+                    // speech again.
+                    problems.push(format!("voice activity: {e:#}"));
+                    version = version.min(WITHOUT_SILERO);
+                    Voice::energy(&audio)
+                });
+            analysis.speech = speech;
             let (levels, sound) = align::measure(&audio);
             let transcript = match reused_transcript {
                 Some(t) => Ok(Some(t)),
-                None => transcript(shared, task, stream, &audio, &analysis.speech, &progress),
+                None => transcript(
+                    shared,
+                    task,
+                    stream,
+                    &audio,
+                    &analysis.speech,
+                    stretches.as_deref(),
+                    &progress,
+                ),
             };
             match transcript {
                 Ok(Some(mut t)) => {
@@ -546,7 +574,54 @@ fn run(shared: &Shared, task: &Task) -> JobState {
     }
 }
 
-/// `Ok(None)` when this build cannot transcribe.
+/// Where someone talks in an item's audio.
+struct Voice {
+    speech: Vec<TimeRange>,
+    /// The stretches of it Whisper hears, in samples; `None` when Silero
+    /// did not hear them.
+    stretches: Option<Vec<Range<usize>>>,
+}
+
+impl Voice {
+    /// The energy VAD's speech, which takes music for speech.
+    fn energy(audio: &[f32]) -> Self {
+        Self {
+            speech: vad::speech_ranges(audio),
+            stretches: None,
+        }
+    }
+}
+
+/// What Silero hears in `audio`; the energy VAD stands in for it in a build
+/// without it.
+#[cfg(feature = "whisper")]
+fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result<Voice> {
+    let model = fetch_model(shared, |start| shared.silero.ensure_model(start))?;
+    let heard = shared
+        .silero
+        .hear(&model, audio, &progress.step(Step::Speech))?;
+    Ok(Voice {
+        speech: heard.speech(),
+        stretches: Some(heard.stretches()),
+    })
+}
+
+#[cfg(not(feature = "whisper"))]
+fn listen(_shared: &Shared, audio: &[f32], _progress: &Progress) -> anyhow::Result<Voice> {
+    Ok(Voice::energy(audio))
+}
+
+/// Version of a result whose speech is the energy VAD's, because Silero's
+/// model could not be had. Without Silero, that is as good as this build
+/// gets.
+#[cfg(feature = "whisper")]
+const WITHOUT_SILERO: u32 = 5;
+#[cfg(not(feature = "whisper"))]
+const WITHOUT_SILERO: u32 = ANALYSIS_VERSION;
+
+/// The words in the `stretches` of `audio` Silero heard; without them,
+/// only an item the energy VAD finds no `speech` in is transcribed (as
+/// nothing). `Ok(None)` when this build cannot transcribe.
 #[cfg(feature = "whisper")]
 fn transcript(
     shared: &Shared,
@@ -554,18 +629,28 @@ fn transcript(
     stream: u32,
     audio: &[f32],
     speech: &[TimeRange],
+    stretches: Option<&[Range<usize>]>,
     progress: &Progress,
 ) -> anyhow::Result<Option<Transcript>> {
     let language = task.options.language.as_deref().and_then(iso_639_1);
     let mut words = Vec::new();
     let mut detected = language.map(str::to_string);
-    // Whisper invents words in silence; only run it when someone talks.
-    if !speech.is_empty() {
-        let files = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
-        let out =
-            shared
-                .whisper
-                .transcribe(&files, audio, language, progress.step(Step::Transcript))?;
+    // Whisper invents words in silence and over music; it hears only the
+    // speech Silero finds, and only runs when someone talks.
+    let stretches = match stretches {
+        Some(stretches) => stretches,
+        None if speech.is_empty() => &[],
+        None => anyhow::bail!("Whisper waits for the voice activity model"),
+    };
+    if !stretches.is_empty() {
+        let model = fetch_model(shared, |start| shared.whisper.ensure_model(start))?;
+        let out = shared.whisper.transcribe(
+            &model,
+            audio,
+            stretches,
+            language,
+            progress.step(Step::Transcript),
+        )?;
         words = out.words;
         detected = Some(out.language);
     }
@@ -774,6 +859,7 @@ fn transcript(
     _stream: u32,
     _audio: &[f32],
     _speech: &[TimeRange],
+    _stretches: Option<&[Range<usize>]>,
     _progress: &Progress,
 ) -> anyhow::Result<Option<Transcript>> {
     Ok(None)
