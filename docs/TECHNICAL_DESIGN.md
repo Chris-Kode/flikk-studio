@@ -180,8 +180,8 @@ All nine streams are merged. What runs today:
   proxies, 6 × 5 collages (cached) and waveforms.
 * **Analysis:** background jobs, VAD, silences, shot changes, loudness,
   speakers (below); Whisper transcription behind the default `whisper`
-  feature, in base (148 MB, the default), small (488 MB), medium
-  (1.5 GB) or large-v3-turbo (1.6 GB), picked in Settings → Models. The picked size is in
+  feature, in small (264 MB, the default) or large (large-v3-turbo,
+  874 MB), both with 8-bit weights, picked in Settings → Models. The picked size is in
   `paths::models()` once the user downloads it (Models, below), or set
   `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
   stands in for whichever size is picked. Speech, and so silences, comes from Silero

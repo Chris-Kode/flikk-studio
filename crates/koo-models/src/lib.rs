@@ -174,7 +174,7 @@ pub fn restore_picks(ids: &[String]) {
 /// One model as the user sees it: a name, and the files it is made of.
 #[derive(Debug)]
 pub struct Model {
-    /// Stable key for downloads and settings: "whisper-base".
+    /// Stable key for downloads and settings: "whisper-small-q8".
     pub id: &'static str,
     pub name: &'static str,
     pub files: &'static [ModelFile],
