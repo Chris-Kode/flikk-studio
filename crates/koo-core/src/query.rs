@@ -44,7 +44,17 @@ impl Transform {
             Property::CropTop => self.crop[1],
             Property::CropRight => self.crop[2],
             Property::CropBottom => self.crop[3],
+            Property::ScaleX => self.stretch[0],
+            Property::ScaleY => self.stretch[1],
+            Property::SkewX => self.skew_deg[0],
+            Property::SkewY => self.skew_deg[1],
+            Property::AnchorX => self.anchor[0],
+            Property::AnchorY => self.anchor[1],
             Property::Volume => 0.0,
+            p => match pin_index(p) {
+                Some((corner, axis)) => self.corner_pin[corner][axis],
+                None => 0.0,
+            },
         }
     }
 
@@ -60,9 +70,26 @@ impl Transform {
             Property::CropTop => self.crop[1] = value,
             Property::CropRight => self.crop[2] = value,
             Property::CropBottom => self.crop[3] = value,
+            Property::ScaleX => self.stretch[0] = value,
+            Property::ScaleY => self.stretch[1] = value,
+            Property::SkewX => self.skew_deg[0] = value,
+            Property::SkewY => self.skew_deg[1] = value,
+            Property::AnchorX => self.anchor[0] = value,
+            Property::AnchorY => self.anchor[1] = value,
             Property::Volume => {}
+            p => {
+                if let Some((corner, axis)) = pin_index(p) {
+                    self.corner_pin[corner][axis] = value;
+                }
+            }
         }
     }
+}
+
+/// The corner and axis of a [`Property::PIN`] property.
+fn pin_index(p: Property) -> Option<(usize, usize)> {
+    let i = Property::PIN.iter().position(|q| *q == p)?;
+    Some((i / 2, i % 2))
 }
 
 impl Clip {

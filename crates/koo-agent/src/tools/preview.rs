@@ -699,7 +699,15 @@ fn glyph(c: char) -> [u8; 7] {
     }
 }
 
-fn draw_text(buf: &mut [u8], width: u32, text: &str, x: u32, y: u32, scale: u32, rgb: [u8; 3]) {
+pub(super) fn draw_text(
+    buf: &mut [u8],
+    width: u32,
+    text: &str,
+    x: u32,
+    y: u32,
+    scale: u32,
+    rgb: [u8; 3],
+) {
     let height = buf.len() as u32 / 4 / width.max(1);
     for (i, c) in text.chars().enumerate() {
         let gx = x + i as u32 * 6 * scale;

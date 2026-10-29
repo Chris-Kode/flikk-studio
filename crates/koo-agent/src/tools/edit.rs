@@ -135,19 +135,11 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 at: args.time("at")?,
             }]
         }
-        "set_transform" => {
-            let p = ctx.project();
-            let clip = clip_id(p, args.str("clip")?)?;
-            let current = p
-                .timeline
-                .clip(clip)
-                .map(|(_, c)| c.transform.clone())
-                .unwrap_or_default();
-            vec![Command::SetTransform {
-                clip,
-                transform: merge_transform(current, args)?,
-            }]
-        }
+        "set_transform" => return set_transform(ctx, args, &reason),
+        "set_mask" => return super::masks::set_mask(ctx, args, &reason),
+        "remove_mask" => super::masks::remove_mask(ctx, args)?,
+        "place" => return super::layout::place(ctx, args, &reason),
+        "animate" => super::layout::animate(ctx, args)?,
 
         "set_speed" => {
             let speed = args.f64("speed")?;
@@ -436,7 +428,7 @@ fn off_words(ctx: &ToolCtx, args: &Args, t: Time) -> ToolResultOf<(Time, Option<
 }
 
 /// Append `notes` to a proposal's result.
-fn with_notes(mut done: Done, notes: impl IntoIterator<Item = String>) -> Done {
+pub(super) fn with_notes(mut done: Done, notes: impl IntoIterator<Item = String>) -> Done {
     for note in notes {
         if let Some(Content::Text { text }) = done.result.content.first_mut() {
             text.push('\n');
@@ -734,16 +726,114 @@ fn rgb(args: &Args, key: &str, current: [f32; 3]) -> ToolResultOf<[f32; 3]> {
     numbers(args, key, current, "[r, g, b]")
 }
 
-fn merge_transform(mut t: Transform, args: &Args) -> ToolResultOf<Transform> {
-    t.position = numbers(args, "position", t.position, "[x, y]")?;
+/// `clip` and `clips` together: the clips a transform tool changes.
+pub(super) fn target_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<koo_core::ClipId>> {
+    let p = ctx.project();
+    let mut ids = Vec::new();
+    if let Some(c) = args.opt_str("clip")? {
+        ids.push(clip_id(p, c)?);
+    }
+    if args.has("clips") {
+        ids.extend(clip_ids(p, &args.strings("clips")?)?);
+    }
+    if ids.is_empty() {
+        return fail("give `clip` or `clips`");
+    }
+    Ok(ids)
+}
+
+/// The static transform of each clip, or with `at`, the transform there:
+/// keyframed properties get a keyframe at `at`, the rest change statically.
+fn set_transform(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    if args.opt_bool("group")? == Some(true) {
+        return super::layout::transform_group(ctx, args, reason);
+    }
+    let p = ctx.project();
+    let at = args.opt_time("at")?;
+    let relative = args.opt_bool("relative")?.unwrap_or(false);
+    let mut commands = Vec::new();
+    let mut notes = Vec::new();
+    for id in target_clips(ctx, args)? {
+        let (_, clip) = p
+            .timeline
+            .clip(id)
+            .ok_or_else(|| ToolError("clip not found".into()))?;
+        match at {
+            Some(t) => {
+                if t < clip.start || t > clip.end() {
+                    return fail(format!(
+                        "{t} is outside clip {} ({} – {})",
+                        short(id),
+                        clip.start,
+                        clip.end()
+                    ));
+                }
+                let local = t - clip.start;
+                let tf = merge_transform(clip.transform_at(local), args, relative)?;
+                commands.extend(Command::transform_at(clip, local, &tf));
+            }
+            None => {
+                let tf = merge_transform(clip.transform.clone(), args, relative)?;
+                let keyed: Vec<&str> = Property::TRANSFORM
+                    .into_iter()
+                    .filter(|p| (tf.get(*p) - clip.transform.get(*p)).abs() > 1e-6)
+                    .filter(|p| clip.keyframes.iter().any(|k| k.property == *p))
+                    .map(|p| p.name())
+                    .collect();
+                if !keyed.is_empty() {
+                    notes.push(format!(
+                        "Clip {}: {} has keyframes, which override the static value; pass `at` to key it there.",
+                        short(id),
+                        keyed.join(", ")
+                    ));
+                }
+                if tf != clip.transform {
+                    commands.push(Command::SetTransform {
+                        clip: id,
+                        transform: tf,
+                    });
+                }
+            }
+        }
+    }
+    if commands.is_empty() {
+        return Ok(Done::text("no change", "Nothing changes.").into());
+    }
+    Ok(with_notes(propose(ctx, commands, reason), notes).into())
+}
+
+/// `t` with the values in `args`. With `relative`, position, rotation,
+/// skew, anchor and corner pin add to the current values, and scale,
+/// stretch and opacity multiply them; crop, flip and blend are always set.
+fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultOf<Transform> {
+    let add = |current: f32, v: f32| if relative { current + v } else { v };
+    let times = |current: f32, v: f32| if relative { current * v } else { v };
+    let pair = |key: &str, current: [f32; 2], f: &dyn Fn(f32, f32) -> f32| {
+        let given = numbers(args, key, [f32::NAN; 2], "[x, y]")?;
+        Ok::<_, ToolError>(if given[0].is_nan() {
+            current
+        } else {
+            [f(current[0], given[0]), f(current[1], given[1])]
+        })
+    };
+    t.position = pair("position", t.position, &add)?;
+    t.stretch = pair("stretch", t.stretch, &times)?.map(|v| v.max(0.0));
+    t.skew_deg = pair("skew", t.skew_deg, &add)?
+        .map(|v| v.clamp(-koo_core::compose::MAX_SKEW, koo_core::compose::MAX_SKEW));
+    t.anchor = pair("anchor", t.anchor, &add)?;
+    if let Some(pin) = corner_points(args, "corner_pin")? {
+        for (corner, given) in t.corner_pin.iter_mut().zip(pin) {
+            *corner = [add(corner[0], given[0]), add(corner[1], given[1])];
+        }
+    }
     if let Some(v) = args.opt_f64("scale")? {
-        t.scale = v as f32;
+        t.scale = times(t.scale, v as f32).max(0.0);
     }
     if let Some(v) = args.opt_f64("rotation")? {
-        t.rotation_deg = v as f32;
+        t.rotation_deg = add(t.rotation_deg, v as f32);
     }
     if let Some(v) = args.opt_f64("opacity")? {
-        t.opacity = v.clamp(0.0, 1.0) as f32;
+        t.opacity = times(t.opacity, v as f32).clamp(0.0, 1.0);
     }
     t.crop = numbers(
         args,
@@ -766,6 +856,28 @@ fn merge_transform(mut t: Transform, args: &Args) -> ToolResultOf<Transform> {
             .ok_or_else(|| ToolError(format!("unknown blend mode `{name}`")))?;
     }
     Ok(t)
+}
+
+/// Four `[x, y]` points (top-left, top-right, bottom-right, bottom-left)
+/// under `key`, if given.
+pub(super) fn corner_points(args: &Args, key: &str) -> ToolResultOf<Option<[[f32; 2]; 4]>> {
+    let Some(v) = args.value(key) else {
+        return Ok(None);
+    };
+    let points: Option<Vec<[f32; 2]>> = v.as_array().filter(|a| a.len() == 4).and_then(|a| {
+        a.iter()
+            .map(|p| {
+                let p = p.as_array().filter(|p| p.len() == 2)?;
+                Some([p[0].as_f64()? as f32, p[1].as_f64()? as f32])
+            })
+            .collect()
+    });
+    match points {
+        Some(p) => Ok(Some([p[0], p[1], p[2], p[3]])),
+        None => fail(format!(
+            "`{key}` is four [x, y] points: top-left, top-right, bottom-right, bottom-left"
+        )),
+    }
 }
 
 pub(super) fn blend_name(b: BlendMode) -> String {

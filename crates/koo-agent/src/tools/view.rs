@@ -6,7 +6,7 @@
 //! otherwise the cached source collage.
 
 use super::audio::{script, unheard_note};
-use super::preview::{collage, columns};
+use super::preview::{collage, columns, draw_text};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, range_json};
 use crate::bridge::{Content, ToolResult};
@@ -44,6 +44,99 @@ fn sample_at(project: &Project, t: Time) -> Option<SamplePoint> {
                 source: clip.to_source(t)?,
             })
         })
+}
+
+/// Whether frames of `range` come from the compositor: when the graph
+/// would differ, or to letter captions and titles.
+fn wants_program(project: &Project, range: TimeRange, services: &Services) -> bool {
+    compose::needs_compositor(project, range)
+        || (services.lettering.is_some()
+            && project.timeline.tracks.iter().any(|tr| {
+                !tr.mix.mute
+                    && tr.clips.iter().any(|c| {
+                        c.enabled && c.range().overlaps(&range) && compose::is_lettering(tr, c)
+                    })
+            }))
+}
+
+/// How the program frames were drawn, for the model.
+fn program_note(services: &Services) -> &'static str {
+    if services.lettering.is_some() {
+        "effects, transitions, generators, blend modes, captions and titles drawn"
+    } else {
+        "effects, transitions, generators and blend modes applied; captions not drawn"
+    }
+}
+
+/// Colors of numbered boxes, by item.
+const MARKS: [[u8; 3]; 6] = [
+    [255, 80, 200],
+    [60, 220, 255],
+    [255, 210, 40],
+    [120, 255, 120],
+    [255, 140, 60],
+    [180, 140, 255],
+];
+
+/// `frame` with each of `shapes` outlined and numbered from 1.
+fn annotated(frame: &Frame, shapes: &[compose::Shape]) -> Frame {
+    let (w, h) = (frame.width, frame.height);
+    let mut buf = frame.rgba.to_vec();
+    let dot = |buf: &mut [u8], x: f32, y: f32, rgb: [u8; 3]| {
+        for dy in 0..2 {
+            for dx in 0..2 {
+                let (px, py) = (x as i64 + dx, y as i64 + dy);
+                if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                    let d = ((py as u32 * w + px as u32) * 4) as usize;
+                    buf[d..d + 3].copy_from_slice(&rgb);
+                    buf[d + 3] = 255;
+                }
+            }
+        }
+    };
+    for (i, shape) in shapes.iter().enumerate() {
+        let rgb = MARKS[i % MARKS.len()];
+        let corners = shape.corners();
+        for k in 0..4 {
+            let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            let len = (b[0] - a[0]).hypot(b[1] - a[1]).ceil().max(1.0) as usize * 2;
+            for j in 0..=len {
+                let f = j as f32 / len as f32;
+                dot(
+                    &mut buf,
+                    a[0] + (b[0] - a[0]) * f,
+                    a[1] + (b[1] - a[1]) * f,
+                    rgb,
+                );
+            }
+        }
+        // The number on a dark tab above the box's top-left (inside it when
+        // there is no room), kept on screen.
+        let [x0, y0, ..] = shape.bounds();
+        let label = (i + 1).to_string();
+        let scale = 3;
+        let (tw, th) = (label.len() as u32 * 6 * scale + 4, 7 * scale + 4);
+        let x = (x0.max(0.0) as u32).min(w.saturating_sub(tw));
+        let above = y0 - th as f32 - 2.0;
+        let y = if above >= 0.0 {
+            above as u32
+        } else {
+            y0.max(0.0) as u32 + 2
+        };
+        let y = y.min(h.saturating_sub(th));
+        for py in y..(y + th).min(h) {
+            for px in x..(x + tw).min(w) {
+                let d = ((py * w + px) * 4) as usize;
+                buf[d..d + 4].copy_from_slice(&[16, 16, 20, 255]);
+            }
+        }
+        draw_text(&mut buf, w, &label, x + 2, y + 2, scale, rgb);
+    }
+    Frame {
+        width: w,
+        height: h,
+        rgba: Arc::from(buf),
+    }
 }
 
 pub(super) fn image_content(path: &Path) -> Result<Content, ToolError> {
@@ -85,7 +178,7 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
             serde_json::to_string(&facts).unwrap_or_default()
         ));
     }
-    if compose::needs_compositor(project, range) {
+    if wants_program(project, range, ctx.services) {
         let times = program_times(project, range, n);
         let project = Arc::new(project.clone());
         let services = ctx.services.clone();
@@ -211,7 +304,8 @@ fn program_collage(
         .collect();
     let cols = columns(tiles.len());
     let text = format!(
-        "{header}\n\nComposited program (effects, transitions, generators and blend modes applied; captions not drawn): {} frames, {cols} columns × {} rows, left to right then top to bottom. Tile timeline times: {}",
+        "{header}\n\nComposited program ({}): {} frames, {cols} columns × {} rows, left to right then top to bottom. Tile timeline times: {}",
+        program_note(services),
         tiles.len(),
         tiles.len().div_ceil(cols),
         stamps.join(", ")
@@ -231,26 +325,35 @@ fn program_collage(
 pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let t = args.time("t")?;
+    let annotate = args.opt_bool("annotate")?.unwrap_or(false);
     let rate = project.timeline.settings.rate;
     let t = t.max(Time::ZERO).floor_to_frame(rate);
-    if compose::needs_compositor(project, TimeRange::new(t, t + rate.frame_duration())) {
+    let span = TimeRange::new(t, t + rate.frame_duration());
+    if annotate || wants_program(project, span, ctx.services) {
         let project = Arc::new(project.clone());
         let services = ctx.services.clone();
         let job: Job = Box::new(move || {
             let size = compose::size_for_width(&project, FRAME_WIDTH);
             let mut stills = Stills::new(services.media.clone(), FRAME_WIDTH);
-            let frame = compose::program(&project, t, size, &services, &mut stills);
+            let mut frame = compose::program(&project, t, size, &services, &mut stills);
+            let mut text = format!("Program frame at {t} ({}).", program_note(&services));
+            if annotate {
+                let shapes = compose::layout(&project, t, size, &services, &mut stills);
+                frame = annotated(&frame, &shapes);
+                let legend = super::layout::legend(&project, &shapes);
+                if legend.is_empty() {
+                    text.push_str("\nNothing is drawn.");
+                } else {
+                    text.push_str("\nNumbered boxes, topmost first:");
+                    for (i, line) in legend.iter().enumerate() {
+                        text.push_str(&format!("\n{}: {line}", i + 1));
+                    }
+                }
+            }
             match save_png(&frame).and_then(|path| Ok((image_content(&path)?, path))) {
                 Ok((image, path)) => JobDone::Done(Done {
                     result: ToolResult {
-                        content: vec![
-                            Content::Text {
-                                text: format!(
-                                    "Program frame at {t}, composited (captions not drawn)."
-                                ),
-                            },
-                            image,
-                        ],
+                        content: vec![Content::Text { text }, image],
                         is_error: false,
                     },
                     summary: format!("frame at {t}"),

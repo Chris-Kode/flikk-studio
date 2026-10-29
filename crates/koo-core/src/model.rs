@@ -7,6 +7,7 @@
 use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
+use crate::mask::Mask;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -295,6 +296,10 @@ pub struct Clip {
     /// clip has no `transition_in`.
     #[serde(default)]
     pub transition_out: Option<Transition>,
+    /// Shapes that keep or cut away parts of the picture, in order (see
+    /// [`crate::mask`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<Mask>,
 }
 
 impl Clip {
@@ -315,6 +320,7 @@ impl Clip {
             effects: Vec::new(),
             transition_in: None,
             transition_out: None,
+            masks: Vec::new(),
         }
     }
 
@@ -495,11 +501,25 @@ impl ClipColor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Transform {
-    /// Normalized offset, (0, 0) = centered.
+    /// Offset from where the picture rests (centred, or where the style
+    /// puts a caption), as a fraction of the canvas: (0, 0) = at rest, (0.5,
+    /// 0) = its anchor moved half the frame width to the right.
     pub position: [f32; 2],
     pub scale: f32,
+    /// Clockwise, about the anchor.
     pub rotation_deg: f32,
     pub opacity: f32,
+    /// Per-axis scale on top of `scale`, [x, y]; 1 = none.
+    pub stretch: [f32; 2],
+    /// Slant in degrees, [x, y]: x leans vertical edges to the right going
+    /// down, y leans horizontal edges down going right; 0 = none.
+    pub skew_deg: [f32; 2],
+    /// The point of the picture it is scaled, skewed and rotated about, as
+    /// a fraction of its size from its centre: (0, 0) = centre, (-0.5,
+    /// -0.5) = top-left corner. It stays where it rests (plus `position`),
+    /// so moving it shifts a scaled, rotated or skewed picture; the
+    /// viewer's anchor handle moves `position` to keep the picture still.
+    pub anchor: [f32; 2],
     /// Fractions of the source picture cut away before scaling:
     /// [left, top, right, bottom], each 0..1, 0 = none.
     pub crop: [f32; 4],
@@ -507,6 +527,12 @@ pub struct Transform {
     pub flip: [bool; 2],
     /// How the clip composites over the tracks below it.
     pub blend: BlendMode,
+    /// Corner pin: how far each corner of the picture moves, [top-left,
+    /// top-right, bottom-right, bottom-left] as [x, y] fractions of its
+    /// size, before it is stretched, scaled, skewed and turned; all zero =
+    /// none. The picture is drawn in perspective onto the quad its corners
+    /// make (a screen, a sign).
+    pub corner_pin: [[f32; 2]; 4],
 }
 
 impl Default for Transform {
@@ -516,10 +542,21 @@ impl Default for Transform {
             scale: 1.0,
             rotation_deg: 0.0,
             opacity: 1.0,
+            stretch: [1.0, 1.0],
+            skew_deg: [0.0, 0.0],
+            anchor: [0.0, 0.0],
             crop: [0.0; 4],
             flip: [false; 2],
             blend: BlendMode::Normal,
+            corner_pin: [[0.0; 2]; 4],
         }
+    }
+}
+
+impl Transform {
+    /// Whether any corner is pinned away from where it rests.
+    pub fn is_pinned(&self) -> bool {
+        self.corner_pin.iter().flatten().any(|v| v.abs() > 1e-6)
     }
 }
 
@@ -578,7 +615,16 @@ pub enum Property {
     PositionX,
     PositionY,
     Scale,
+    /// [`Transform::stretch`].
+    ScaleX,
+    ScaleY,
     Rotation,
+    /// [`Transform::skew_deg`].
+    SkewX,
+    SkewY,
+    /// [`Transform::anchor`].
+    AnchorX,
+    AnchorY,
     Opacity,
     CropLeft,
     CropTop,
@@ -587,33 +633,97 @@ pub enum Property {
     /// Clip gain in dB; keyframes override [`ClipAudio::gain_db`]
     /// (volume automation).
     Volume,
+    /// [`Transform::corner_pin`], corner by corner.
+    PinTopLeftX,
+    PinTopLeftY,
+    PinTopRightX,
+    PinTopRightY,
+    PinBottomRightX,
+    PinBottomRightY,
+    PinBottomLeftX,
+    PinBottomLeftY,
 }
 
 impl Property {
-    pub const ALL: [Property; 10] = [
+    pub const ALL: [Property; 24] = [
         Self::PositionX,
         Self::PositionY,
         Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
         Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
         Self::Opacity,
         Self::CropLeft,
         Self::CropTop,
         Self::CropRight,
         Self::CropBottom,
         Self::Volume,
+        Self::PinTopLeftX,
+        Self::PinTopLeftY,
+        Self::PinTopRightX,
+        Self::PinTopRightY,
+        Self::PinBottomRightX,
+        Self::PinBottomRightY,
+        Self::PinBottomLeftX,
+        Self::PinBottomLeftY,
     ];
 
     /// The properties stored in [`Transform`].
-    pub const TRANSFORM: [Property; 9] = [
+    pub const TRANSFORM: [Property; 23] = [
         Self::PositionX,
         Self::PositionY,
         Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
         Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
         Self::Opacity,
         Self::CropLeft,
         Self::CropTop,
         Self::CropRight,
         Self::CropBottom,
+        Self::PinTopLeftX,
+        Self::PinTopLeftY,
+        Self::PinTopRightX,
+        Self::PinTopRightY,
+        Self::PinBottomRightX,
+        Self::PinBottomRightY,
+        Self::PinBottomLeftX,
+        Self::PinBottomLeftY,
+    ];
+
+    /// The properties that place the picture: everything in [`Transform`]
+    /// but opacity, crop and the corner pin.
+    pub const GEOMETRY: [Property; 10] = [
+        Self::PositionX,
+        Self::PositionY,
+        Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
+        Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
+    ];
+
+    /// [`Transform::corner_pin`] as properties: corner by corner, x then y.
+    pub const PIN: [Property; 8] = [
+        Self::PinTopLeftX,
+        Self::PinTopLeftY,
+        Self::PinTopRightX,
+        Self::PinTopRightY,
+        Self::PinBottomRightX,
+        Self::PinBottomRightY,
+        Self::PinBottomLeftX,
+        Self::PinBottomLeftY,
     ];
 
     /// Tool / JSON name, e.g. `crop_left`.
@@ -629,6 +739,20 @@ impl Property {
             Self::CropRight => "crop_right",
             Self::CropBottom => "crop_bottom",
             Self::Volume => "volume",
+            Self::ScaleX => "scale_x",
+            Self::ScaleY => "scale_y",
+            Self::SkewX => "skew_x",
+            Self::SkewY => "skew_y",
+            Self::AnchorX => "anchor_x",
+            Self::AnchorY => "anchor_y",
+            Self::PinTopLeftX => "pin_top_left_x",
+            Self::PinTopLeftY => "pin_top_left_y",
+            Self::PinTopRightX => "pin_top_right_x",
+            Self::PinTopRightY => "pin_top_right_y",
+            Self::PinBottomRightX => "pin_bottom_right_x",
+            Self::PinBottomRightY => "pin_bottom_right_y",
+            Self::PinBottomLeftX => "pin_bottom_left_x",
+            Self::PinBottomLeftY => "pin_bottom_left_y",
         }
     }
 

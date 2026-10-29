@@ -1,7 +1,8 @@
 //! Renders through the compositor: every output frame is composed by
 //! [`koo_core::compose::program`] at render size and piped into FFmpeg as
 //! raw RGBA, where the graph ([`GraphSpec::piped`]) burns in captions and
-//! builds the audio in the same process.
+//! titles (so the compositor leaves them out) and builds the audio in the
+//! same process.
 
 use crate::ffmpeg::{self, command};
 use crate::graph::{Graph, GraphSpec};
@@ -45,7 +46,8 @@ impl Pictures for Originals {
 /// Composes the frames of `spec`'s range in order.
 pub(crate) struct Frames<'a> {
     project: &'a Project,
-    services: &'a Services,
+    /// Without lettering.
+    services: Services,
     spec: &'a GraphSpec,
     pictures: Originals,
 }
@@ -55,7 +57,10 @@ impl<'a> Frames<'a> {
         let pictures = Originals(Streams::new(services.media.clone(), spec.width, spec.rate));
         Self {
             project,
-            services,
+            services: Services {
+                lettering: None,
+                ..services.clone()
+            },
             spec,
             pictures,
         }
@@ -70,7 +75,7 @@ impl<'a> Frames<'a> {
             self.project,
             t,
             (self.spec.width, self.spec.height),
-            self.services,
+            &self.services,
             &mut self.pictures,
         )
     }

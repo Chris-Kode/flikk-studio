@@ -72,6 +72,11 @@ impl FxBatch for CpuBatch {
         Ok(self.push(frame))
     }
 
+    fn mask(&mut self, picture: Surface, mask: Surface) -> ServiceResult<Surface> {
+        let frame = crate::mask::apply(self.get(picture)?, self.get(mask)?);
+        Ok(self.push(frame))
+    }
+
     fn premultiply(&mut self, surface: Surface) -> ServiceResult<Surface> {
         let frame = cpu::premultiplied(self.get(surface)?);
         Ok(self.push(frame))

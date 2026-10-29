@@ -110,6 +110,7 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
         Command::SetTransform { clip, transform } => {
             update_clip(tl, *clip, |c| c.transform = transform.clone())
         }
+        Command::SetMasks { clip, masks } => update_clip(tl, *clip, |c| c.masks = masks.clone()),
 
         Command::AddCaption {
             track,
@@ -1143,6 +1144,9 @@ fn set_speed(project: &Project, id: ClipId, speed: f64, ripple: bool) -> Result<
     for e in &mut c.effects {
         e.scale_keyframes(ratio);
     }
+    for m in &mut c.masks {
+        m.scale_keyframes(ratio);
+    }
     c.audio.fade_in = c.audio.fade_in.min(duration);
     c.audio.fade_out = c.audio.fade_out.min(duration);
     let shift = if ripple {
@@ -1537,6 +1541,9 @@ pub fn with_duration(clip: &Clip, duration: Time) -> Clip {
     c.duration = duration;
     if duration < clip.duration {
         c.keyframes = keyframes_until(clip, duration);
+        for m in &mut c.masks {
+            m.keep_until(duration);
+        }
     }
     c.audio.fade_in = c.audio.fade_in.min(duration);
     c.audio.fade_out = c.audio.fade_out.min(duration);
@@ -1761,6 +1768,13 @@ pub fn trim_start(clip: &Clip, at: Time) -> Clip {
     }
     for e in &mut c.effects {
         e.shift_keyframes(-offset);
+    }
+    for m in &mut c.masks {
+        if offset > Time::ZERO {
+            m.keep_from(offset);
+        } else {
+            m.keyframes.iter_mut().for_each(|k| k.at = k.at - offset);
+        }
     }
     c.keyframes = if offset > Time::ZERO {
         keyframes_from(clip, offset)

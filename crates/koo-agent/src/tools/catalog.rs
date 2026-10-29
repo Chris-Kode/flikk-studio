@@ -2,6 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
+use super::{layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
 use koo_core::model::{BlendMode, ClipColor, Property};
@@ -197,7 +198,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_clip",
             Some(ReadProject),
-            "Everything about one clip: source, name, color, speed, enabled, transform (crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
+            "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
             object(json!({ "clip": string("Clip id") }), &["clip"]),
         ),
         spec(
@@ -318,8 +319,23 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "view_frame",
             Some(View),
-            "One full frame of the program at a timeline time.",
-            object(json!({ "t": time("Timeline seconds") }), &["t"]),
+            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip.",
+            object(
+                json!({
+                    "t": time("Timeline seconds"),
+                    "annotate": boolean("Box and number each visible item")
+                }),
+                &["t"],
+            ),
+        ),
+        spec(
+            "get_layout",
+            Some(View),
+            "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform, whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",
+            object(
+                json!({ "t": time("Timeline seconds (default: the playhead)") }),
+                &[],
+            ),
         ),
         spec(
             "view_audio",
@@ -573,20 +589,113 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_transform",
             Some(Transform),
-            "Propose a clip's static transform. Only the values given change.",
+            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip, blend and corner pin (the render burns them in without them). With `group`, several clips move, scale and turn as one about the centre of what they draw together.",
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "position": numbers(2, "[x, y] offset, (0, 0) = centered"),
-                    "scale": number("1 = fit"),
-                    "rotation": number("Degrees"),
+                    "clips": strings("More clip ids, changed alike"),
+                    "position": numbers(2, "[x, y] offset from where it rests (centred; captions where their style puts them), as a fraction of the frame: [0.25, 0] moves it a quarter of the frame width right"),
+                    "scale": number("1 = fitted (captions: their style's size)"),
+                    "stretch": numbers(2, "[x, y] per-axis scale on top of `scale`, 1 = none"),
+                    "rotation": number("Degrees clockwise, about the anchor"),
+                    "skew": numbers(2, "[x, y] slant in degrees, ±80: x leans vertical edges right going down, y leans horizontal edges down going right"),
+                    "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. It stays where it rests, so changing it shifts a scaled, rotated or skewed picture: set it first, then place it"),
                     "opacity": number("0..1"),
                     "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
                     "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
                     "blend": one_of(&blends, "Composite mode over the tracks below"),
+                    "corner_pin": { "type": "array", "items": numbers(2, "[x, y]"), "minItems": 4, "maxItems": 4, "description": "How far each corner moves, [top-left, top-right, bottom-right, bottom-left], as [x, y] fractions of the picture's size before the rest of the transform; the picture is drawn in perspective onto the quad they make. All [0, 0] = none. To pin onto points of the frame, use place with `pin_to`" },
+                    "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
+                    "group": boolean("Move `clips` as one group at `at` (default: the middle of the time they share): position moves the group by a fraction of the frame, scale multiplies its size, rotation turns it, about the centre of their bounds together; each clip's own transform changes to match. Only position, scale and rotation apply"),
+                    "at": time("Timeline time to set it at, keyframe-aware (see above)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "place",
+            Some(Transform),
+            "Propose putting a clip somewhere by meaning: align what it draws (its opaque part: a logo's pixels, a lower third inside its frame, a caption's box) to a corner, edge or the centre, a margin in from the frame edges, and size it. Several `clips` are placed as one group: their bounds together are aligned and sized, keeping their arrangement. Keyframe-aware at `at`. Check the result with get_layout or view_frame.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "clips": strings("Clip ids placed together as one group (with or instead of `clip`)"),
+                    "pin_to": { "type": "array", "items": numbers(2, "[x, y] frame pixels"), "minItems": 4, "maxItems": 4, "description": "Corner pin instead of aligning: put the whole picture's corners (top-left, top-right, bottom-right, bottom-left) on these frame points, in perspective, e.g. onto a screen or sign seen in the shot. One picture clip; not captions or titles" },
+                    "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
+                    "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
+                    "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),
+                    "fit": one_of(&layout::FITS, "keep its size (default); contain: fit inside the margins; cover: fill the frame, cropping; fill: stretch to the frame; width / height: `size` of the frame's width / height"),
+                    "size": number("For fit width / height: the fraction of the frame, e.g. 0.15"),
+                    "at": time("Timeline time inside the clip to place it at (default: its middle; a group: the middle of the time its clips share)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "set_mask",
+            Some(Transform),
+            "Propose a mask on a picture clip (video, image, overlay, generator), or a change to one given by `mask`: it keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
+                    "shape": {
+                        "type": "object",
+                        "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), `smooth` draws a curve through them. Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                        "properties": {
+                            "type": { "type": "string", "enum": masks::SHAPES },
+                            "center": numbers(2, "[x, y]"),
+                            "size": numbers(2, "[width, height]"),
+                            "rotation": number("Degrees clockwise"),
+                            "roundness": number("Rectangle corners, 0..1"),
+                            "points": { "type": "array", "items": numbers(2, "[x, y]") },
+                            "smooth": boolean("A curve through the points")
+                        }
+                    },
+                    "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
+                    "mode": one_of(&masks::MODES, "How it combines with the masks before it (default add)"),
+                    "invert": boolean("Cut the shape away instead of keeping it"),
+                    "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.03)"),
+                    "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height"),
+                    "opacity": number("0..1"),
+                    "enabled": boolean("Off keeps the mask but ignores it"),
+                    "at": time("Timeline time to keyframe the shape at"),
                     "reason": reason()
                 }),
                 &["clip"],
+            ),
+        ),
+        spec(
+            "remove_mask",
+            Some(Transform),
+            "Propose removing a mask from a clip, or all of them.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "mask": string("Mask id (from get_clip)"),
+                    "all": boolean("Remove every mask on the clip"),
+                    "reason": reason()
+                }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "animate",
+            Some(Transform),
+            "Propose a preset move as ordinary keyframes the user can edit, around the clip's own transform. *_in presets end at rest, *_out presets start at rest; slide_in_<side> enters from that side, slide_out_<side> leaves toward it. pulse, shake and drift play over `duration` (default: the whole clip).",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "preset": one_of(&layout::PRESETS, "The move"),
+                    "duration": number("Seconds (default 0.4; loops: the clip)"),
+                    "at": time("Timeline time it starts (default: the clip's start; *_out: so it ends with the clip)"),
+                    "distance": number("Slides: how far, as a fraction of the frame (default 0.3)"),
+                    "intensity": number("pulse, shake, drift: 1 = default strength"),
+                    "reason": reason()
+                }),
+                &["clip", "preset"],
             ),
         ),
         // ---- captions and titles

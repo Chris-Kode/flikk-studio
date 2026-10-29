@@ -408,7 +408,7 @@ impl InspectorPanel {
             (PictureTab::Effects, _) => self.effects_view(clip, window, cx),
             _ => {
                 let program = self.generator_view(clip, window, cx);
-                let transform = self.transform_view(clip, window, cx);
+                let transform = self.transform_view(clip, false, window, cx);
                 v_flex()
                     .gap_4()
                     .children(program)
@@ -509,9 +509,11 @@ impl InspectorPanel {
             self.text_clip = Some(clip.id);
             self.text.update(cx, |t, cx| t.set_value(text, window, cx));
         }
+        let transform = self.transform_view(clip, true, window, cx);
         let mut body = v_flex()
             .gap_4()
-            .child(section("Text", cx).child(Textarea::new(&self.text)));
+            .child(section("Text", cx).child(Textarea::new(&self.text)))
+            .child(transform);
         if track.kind == ClipKind::Caption {
             let target = Target::Track(track.id);
             self.caption_style

@@ -11,6 +11,8 @@ mod audio;
 pub mod catalog;
 mod edit;
 mod fx;
+mod layout;
+mod masks;
 mod preview;
 mod read;
 mod view;
@@ -231,6 +233,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "view_range" => view::view_range(ctx, &args, false),
         "view_detail" => view::view_range(ctx, &args, true),
         "view_frame" => view::view_frame(ctx, &args),
+        "get_layout" => layout::get_layout(ctx, &args),
         "view_audio" => audio::view_audio(ctx, &args),
         "get_scopes" => preview::get_scopes(ctx, &args),
         "preview_fx" => preview::preview_fx(ctx, &args),

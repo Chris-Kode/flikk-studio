@@ -282,6 +282,17 @@ fn pick<T: Copy>(kind: &str, text: &str, found: Vec<T>) -> ToolResultOf<T> {
     }
 }
 
+/// One of `clip`'s masks by id.
+pub fn mask_id(clip: &koo_core::model::Clip, text: &str) -> ToolResultOf<koo_core::MaskId> {
+    let found = clip
+        .masks
+        .iter()
+        .filter(|m| matches_id(&m.id.0, text))
+        .map(|m| m.id)
+        .collect();
+    pick("mask", text, found)
+}
+
 /// A clip by id; `@effect <clip>/<effect>` and `@transition <clip>/in`
 /// tokens name their clip too.
 pub fn clip_id(project: &Project, text: &str) -> ToolResultOf<ClipId> {

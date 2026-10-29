@@ -10,6 +10,7 @@ mod controls;
 mod edit;
 mod effects;
 mod generator;
+mod masks;
 mod param;
 mod transition;
 
@@ -222,7 +223,19 @@ impl InspectorPanel {
         let mut commands = Vec::new();
         let mut label = "edit";
         match key {
-            Key::PosX | Key::PosY | Key::Scale | Key::Rotation | Key::Opacity | Key::Crop(_) => {
+            Key::PosX
+            | Key::PosY
+            | Key::Scale
+            | Key::ScaleX
+            | Key::ScaleY
+            | Key::Rotation
+            | Key::SkewX
+            | Key::SkewY
+            | Key::AnchorX
+            | Key::AnchorY
+            | Key::Opacity
+            | Key::Crop(_)
+            | Key::Pin(_) => {
                 let Some(clip) = clips.first() else {
                     return none;
                 };
@@ -243,6 +256,24 @@ impl InspectorPanel {
                         transform,
                     });
                 }
+            }
+            Key::Mask(i, field) => {
+                let Some(clip) = clips.first() else {
+                    return none;
+                };
+                let Some(mask) = clip.masks.get(i) else {
+                    return none;
+                };
+                let at = clip_time(clip, playhead);
+                let mut now = mask.state_at(at);
+                field.set(&mut now, v);
+                let mut masks = clip.masks.clone();
+                masks[i] = mask.with_state_at(at, now);
+                commands.push(Command::SetMasks {
+                    clip: clip.id,
+                    masks,
+                });
+                label = "set_masks";
             }
             Key::TransitionDuration => {
                 let Some((clip, edge)) = state.selected_transition else {
@@ -415,12 +446,19 @@ fn property_of(key: Key) -> Option<Property> {
         Key::PosX => Property::PositionX,
         Key::PosY => Property::PositionY,
         Key::Scale => Property::Scale,
+        Key::ScaleX => Property::ScaleX,
+        Key::ScaleY => Property::ScaleY,
         Key::Rotation => Property::Rotation,
+        Key::SkewX => Property::SkewX,
+        Key::SkewY => Property::SkewY,
+        Key::AnchorX => Property::AnchorX,
+        Key::AnchorY => Property::AnchorY,
         Key::Opacity => Property::Opacity,
         Key::Crop(0) => Property::CropLeft,
         Key::Crop(1) => Property::CropTop,
         Key::Crop(2) => Property::CropRight,
         Key::Crop(_) => Property::CropBottom,
+        Key::Pin(i) => Property::PIN[i.min(7)],
         _ => return None,
     })
 }

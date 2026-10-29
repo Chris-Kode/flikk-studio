@@ -47,4 +47,6 @@ id_type!(
     EffectId,
     // A project FX asset (shader or HTML program).
     FxId,
+    // One mask on a clip.
+    MaskId,
 );

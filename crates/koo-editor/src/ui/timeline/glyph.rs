@@ -27,6 +27,12 @@ pub enum Glyph {
     PrevCut,
     NextCut,
     Trash,
+    SafeArea,
+    CornerPin,
+    Mask,
+    MaskRect,
+    MaskEllipse,
+    Pen,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -218,6 +224,64 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
             lines(&[(4.5, 8.), (11.5, 8.)], false, window);
             lines(&[(6.5, 6.), (4.5, 8.), (6.5, 10.)], false, window);
             lines(&[(9.5, 6.), (11.5, 8.), (9.5, 10.)], false, window);
+        }
+        Glyph::SafeArea => {
+            lines(
+                &[(1.5, 3.), (14.5, 3.), (14.5, 13.), (1.5, 13.)],
+                true,
+                window,
+            );
+            lines(
+                &[(4.5, 5.5), (11.5, 5.5), (11.5, 10.5), (4.5, 10.5)],
+                true,
+                window,
+            );
+        }
+        Glyph::CornerPin => {
+            let quad = [(2.5, 4.5), (13., 2.5), (12., 13.5), (4., 11.5)];
+            lines(&quad, true, window);
+            for (x, y) in quad {
+                fill(
+                    &[
+                        (x - 1.5, y - 1.5),
+                        (x + 1.5, y - 1.5),
+                        (x + 1.5, y + 1.5),
+                        (x - 1.5, y + 1.5),
+                    ],
+                    window,
+                );
+            }
+        }
+        Glyph::Mask => {
+            lines(
+                &[(1.5, 3.), (14.5, 3.), (14.5, 13.), (1.5, 13.)],
+                true,
+                window,
+            );
+            circle(8., 8., 3.2, true, window);
+        }
+        Glyph::MaskRect => {
+            lines(
+                &[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)],
+                true,
+                window,
+            );
+        }
+        Glyph::MaskEllipse => circle(8., 8., 5.5, false, window),
+        Glyph::Pen => {
+            lines(
+                &[
+                    (3., 13.),
+                    (4., 9.),
+                    (11., 2.),
+                    (14., 5.),
+                    (7., 12.),
+                    (3., 13.),
+                ],
+                false,
+                window,
+            );
+            lines(&[(9.5, 3.5), (12.5, 6.5)], false, window);
         }
         Glyph::PrevCut => {
             lines(&[(3.5, 3.5), (3.5, 12.5)], false, window);

@@ -10,11 +10,12 @@ use std::num::NonZeroU64;
 
 const SHADER: &str = r#"
 struct Layer {
-    center: vec2<f32>,
-    inv_size: vec2<f32>,
-    sin_cos: vec2<f32>,
-    frame: vec2<f32>,
+    // Canvas point -> picture uv, rows of a 3x3 matrix (Placement::uv_map).
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    m2: vec4<f32>,
     crop: vec4<f32>,
+    frame: vec2<f32>,
     flip: vec2<f32>,
     opacity: f32,
     mode: u32,
@@ -70,10 +71,12 @@ fn blend(b: f32, s: f32) -> f32 {
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let dst = textureLoad(canvas, vec2<i32>(pos.xy), 0);
-    let d = pos.xy - layer.center;
-    let s = layer.sin_cos.x;
-    let c = layer.sin_cos.y;
-    var uv = vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c) * layer.inv_size + 0.5;
+    let q = vec3<f32>(pos.xy, 1.0);
+    let w = dot(layer.m2.xyz, q);
+    if (w <= 1e-9) {
+        return dst;
+    }
+    var uv = vec2<f32>(dot(layer.m0.xyz, q), dot(layer.m1.xyz, q)) / w;
     if (layer.flip.x > 0.5) {
         uv.x = 1.0 - uv.x;
     }
@@ -106,7 +109,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 "#;
 
 /// Bytes of one layer's uniform block.
-const UNIFORM_SIZE: u64 = 64;
+const UNIFORM_SIZE: u64 = 96;
 
 /// The composite program, built with the engine.
 pub(crate) struct Compositor {
@@ -217,22 +220,29 @@ fn mode_index(mode: BlendMode) -> u32 {
 }
 
 /// The uniform block of a `frame`-sized picture at placement `p`, as laid
-/// out in [`SHADER`].
+/// out in [`SHADER`]. The batch leaves out flat pictures
+/// ([`Placement::uv_map`] is `None`).
 pub(crate) fn uniforms(p: &Placement, frame: (u32, u32)) -> [u8; UNIFORM_SIZE as usize] {
-    let (sin, cos) = p.rotation_deg.to_radians().sin_cos();
+    let m = p.uv_map().unwrap_or_default();
     let floats = [
-        p.center[0],
-        p.center[1],
-        1.0 / p.size[0],
-        1.0 / p.size[1],
-        sin,
-        cos,
-        frame.0 as f32,
-        frame.1 as f32,
+        m[0],
+        m[1],
+        m[2],
+        0.0,
+        m[3],
+        m[4],
+        m[5],
+        0.0,
+        m[6],
+        m[7],
+        m[8],
+        0.0,
         p.crop[0].clamp(0.0, 1.0),
         p.crop[1].clamp(0.0, 1.0),
         p.crop[2].clamp(0.0, 1.0),
         p.crop[3].clamp(0.0, 1.0),
+        frame.0 as f32,
+        frame.1 as f32,
         if p.flip[0] { 1.0 } else { 0.0 },
         if p.flip[1] { 1.0 } else { 0.0 },
         p.opacity.clamp(0.0, 1.0),
@@ -241,6 +251,6 @@ pub(crate) fn uniforms(p: &Placement, frame: (u32, u32)) -> [u8; UNIFORM_SIZE as
     for (i, f) in floats.iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
     }
-    out[60..64].copy_from_slice(&mode_index(p.blend).to_le_bytes());
+    out[84..88].copy_from_slice(&mode_index(p.blend).to_le_bytes());
     out
 }

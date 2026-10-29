@@ -1,6 +1,5 @@
 //! Read-project tools. Results carry only the slice asked for.
 
-use super::edit::blend_name;
 use super::fx::{asset_json, fx_asset, instance_json, kind_name as fx_kind, param_spec_json};
 use super::{Done, Step, ToolCtx};
 use crate::args::{Args, ToolError, clip_id, kind_name, range_json, secs, short};
@@ -344,16 +343,10 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     {
         v["audio_stream"] = json!(s);
     }
-    let tf = &clip.transform;
-    v["transform"] = json!({
-        "position": tf.position,
-        "scale": tf.scale,
-        "rotation": tf.rotation_deg,
-        "opacity": tf.opacity,
-        "crop": tf.crop,
-        "flip": tf.flip,
-        "blend": blend_name(tf.blend),
-    });
+    v["transform"] = super::layout::transform_json(&clip.transform);
+    if !clip.masks.is_empty() {
+        v["masks"] = super::masks::masks_json(clip);
+    }
     v["speed"] = json!(clip.speed);
     v["enabled"] = json!(clip.enabled);
     v["effects"] = clip

@@ -17,8 +17,26 @@ use koo_core::Time;
 use koo_core::command::Command;
 use koo_core::model::{BlendMode, Clip, Keyframe, Property};
 
-const TRANSFORM: [Key; 4] = [Key::PosX, Key::PosY, Key::Scale, Key::Rotation];
+const TRANSFORM: [Key; 6] = [
+    Key::PosX,
+    Key::PosY,
+    Key::Scale,
+    Key::ScaleX,
+    Key::ScaleY,
+    Key::Rotation,
+];
+const SHAPE: [Key; 4] = [Key::SkewX, Key::SkewY, Key::AnchorX, Key::AnchorY];
 const CROP: [Key; 4] = [Key::Crop(0), Key::Crop(1), Key::Crop(2), Key::Crop(3)];
+const PIN: [Key; 8] = [
+    Key::Pin(0),
+    Key::Pin(1),
+    Key::Pin(2),
+    Key::Pin(3),
+    Key::Pin(4),
+    Key::Pin(5),
+    Key::Pin(6),
+    Key::Pin(7),
+];
 
 impl InspectorPanel {
     /// The selected clip's properties for its kind, or the sequence format
@@ -41,10 +59,13 @@ impl InspectorPanel {
         }
     }
 
-    /// Transform with keyframe toggles, then the clip's keyframes.
+    /// Transform with keyframe toggles, masks, then the clip's keyframes.
+    /// Lettering (captions, titles) has no crop, flip, blend mode, corner
+    /// pin or masks: the render cannot burn them in.
     pub(super) fn transform_view(
         &mut self,
         clip: &Clip,
+        lettering: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -67,23 +88,30 @@ impl InspectorPanel {
                 .collect::<Vec<_>>()
         };
         let transform_rows = keyed_rows(&TRANSFORM, self, cx);
+        let shape_rows = keyed_rows(&SHAPE, self, cx);
         let opacity = keyed_rows(&[Key::Opacity], self, cx);
         let crop_rows = keyed_rows(&CROP, self, cx);
+        let pin_rows = keyed_rows(&PIN, self, cx);
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
         let transform = section("Transform", cx)
             .children(transform_rows)
-            .child(self.flip_row(&clip, cx));
+            .children(shape_rows)
+            .when(!lettering, |s| s.child(self.flip_row(&clip, cx)));
         let composite = section("Composite", cx)
             .children(opacity)
-            .child(self.blend_row(&clip, cx));
-        let crop = section("Crop", cx).children(crop_rows);
+            .when(!lettering, |s| s.child(self.blend_row(&clip, cx)));
+        let crop = (!lettering).then(|| section("Crop", cx).children(crop_rows));
+        let pin = (!lettering).then(|| section("Corner pin", cx).children(pin_rows));
+        let masks = (!lettering).then(|| self.masks_view(&clip, window, cx));
         let list = (!frames.is_empty()).then(|| self.keyframe_list(&clip, frames, at, frame, cx));
         v_flex()
             .gap_4()
             .child(transform)
             .child(composite)
-            .child(crop)
+            .children(crop)
+            .children(pin)
+            .children(masks)
             .children(list)
             .into_any_element()
     }
@@ -314,12 +342,18 @@ fn transform_key(p: Property) -> Option<Key> {
         Property::PositionX => Key::PosX,
         Property::PositionY => Key::PosY,
         Property::Scale => Key::Scale,
+        Property::ScaleX => Key::ScaleX,
+        Property::ScaleY => Key::ScaleY,
         Property::Rotation => Key::Rotation,
+        Property::SkewX => Key::SkewX,
+        Property::SkewY => Key::SkewY,
+        Property::AnchorX => Key::AnchorX,
+        Property::AnchorY => Key::AnchorY,
         Property::Opacity => Key::Opacity,
         Property::CropLeft => Key::Crop(0),
         Property::CropTop => Key::Crop(1),
         Property::CropRight => Key::Crop(2),
         Property::CropBottom => Key::Crop(3),
-        _ => return None,
+        p => Key::Pin(Property::PIN.iter().position(|q| *q == p)?),
     })
 }
