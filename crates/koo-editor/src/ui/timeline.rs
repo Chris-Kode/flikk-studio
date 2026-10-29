@@ -530,7 +530,7 @@ impl TimelinePanel {
         let state = self.state.read(cx);
         let project = state.bus.project();
         let rows = self.rows(&project.timeline);
-        let items = overlay::collect(&project.timeline, state.bus.change_sets());
+        let items = overlay::collect(&project.timeline, state.bus.chat_change_sets());
         let b = self.bounds.get();
         let lanes = Bounds::new(
             point(b.origin.x, b.origin.y + px(RULER_HEIGHT)),
@@ -1243,7 +1243,7 @@ impl TimelinePanel {
         let Some(item) = focused else {
             return;
         };
-        let range = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
+        let range = overlay::collect(&state.bus.project().timeline, state.bus.chat_change_sets())
             .into_iter()
             .filter(|i| i.item == item)
             .map(|i| i.range)
@@ -1494,7 +1494,7 @@ impl TimelinePanel {
         let in_out = state.in_out;
         let focused = state.focused_change().map(|i| i.id);
         let overlay: Vec<OverlayItem> =
-            overlay::collect(&project.timeline, state.bus.change_sets());
+            overlay::collect(&project.timeline, state.bus.chat_change_sets());
         let tl = &project.timeline;
         let any_solo = tl
             .tracks
@@ -2098,7 +2098,7 @@ impl TimelinePanel {
         let (set, item) = self.hovered_item?;
         let p = self.hover?;
         let state = self.state.read(cx);
-        let hovered = overlay::collect(&state.bus.project().timeline, state.bus.change_sets())
+        let hovered = overlay::collect(&state.bus.project().timeline, state.bus.chat_change_sets())
             .into_iter()
             .find(|i| i.set == set && i.item == item)?;
         let theme = cx.theme();

@@ -221,6 +221,7 @@ impl EditorState {
     fn load_agent_memory(&mut self) {
         self.agent.set_role(self.settings.role);
         self.agent.set_chat(&self.chats.active);
+        self.bus.set_chat(&self.chats.active);
         use koo_core::memory::{FactStatus, RuleStatus};
         use koo_store::{FactFilter, RuleFilter};
         let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
@@ -760,7 +761,9 @@ impl EditorState {
         self.chat = active_messages(&self.chats);
         self.settled.clear();
         self.focused_change = None;
+        self.preview = None;
         self.agent.set_chat(id);
+        self.bus.set_chat(id);
         persistence::save_chats(self.bus.project().id, &self.chats);
         cx.notify();
     }
@@ -788,6 +791,7 @@ impl EditorState {
                     self.chat.clear();
                     self.chats.active = fresh.clone();
                     self.agent.set_chat(&fresh);
+                    self.bus.set_chat(&fresh);
                 }
             }
         }
@@ -882,6 +886,9 @@ impl EditorState {
                 AgentEvent::Question { text, choices } => self.push_agent(text, choices, None),
                 AgentEvent::ChangeSetReady { change_set } => {
                     self.bus.close_change_set(change_set);
+                    // A set the chat grew over several turns is reviewed at
+                    // its latest message only.
+                    self.chat.retain(|m| m.change_set != Some(change_set));
                     let title = self
                         .bus
                         .change_set(change_set)
