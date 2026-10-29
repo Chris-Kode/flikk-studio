@@ -2,7 +2,8 @@
 //! against the audio around it, and the times it answers put in order.
 
 use super::config::{
-    EARLIER, FILE, LANGUAGES, MAX_CHUNK, MERGES, SLACK, STEP_MS, TIMESTAMP, VOCAB,
+    EARLIER, FILE, INTO_PAUSE, LANGUAGES, MAX_CHUNK, MERGES, PAUSE, SLACK, STEP_MS, TIMESTAMP,
+    VOCAB,
 };
 use crate::SPEECH_RATE;
 use crate::bpe::Bpe;
@@ -87,7 +88,7 @@ impl Aligner for Qwen3Aligner {
             }
         }
         progress(1.0);
-        place(words, &aligned);
+        place(words, &aligned, end);
         Ok(())
     }
 }
@@ -235,9 +236,10 @@ fn chunks(words: &[Word], end: Time) -> Vec<(std::ops::Range<usize>, TimeRange)>
 }
 
 /// Give each aligned word its range, its start [`EARLIER`] without
-/// reaching the word before; the others stay between their aligned
-/// neighbours, so words stay in order.
-fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
+/// reaching the word before and its edges next to a pause [`INTO_PAUSE`]
+/// into it; the others stay between their aligned neighbours, so words
+/// stay in order. `end` is where the audio ends.
+fn place(words: &mut [Word], aligned: &[Option<TimeRange>], end: Time) {
     for i in 0..words.len() {
         let Some(r) = aligned[i] else {
             // Inside the room the aligned words around it leave.
@@ -257,5 +259,25 @@ fn place(words: &mut [Word], aligned: &[Option<TimeRange>]) {
         w.start = (r.start - EARLIER).max(lo);
         // Both edges in one 80 ms step: still a word.
         w.end = r.end.max(w.start + Levels::FRAME);
+    }
+    // The room before each word, and after the last.
+    let room: Vec<Time> = (0..=words.len())
+        .map(|k| {
+            let lo = k.checked_sub(1).map_or(Time::ZERO, |p| words[p].range.end);
+            words.get(k).map_or(end, |w| w.range.start) - lo
+        })
+        .collect();
+    let into = |room: Time| {
+        if room >= PAUSE {
+            INTO_PAUSE.min(Time(room.0 / 2))
+        } else {
+            Time::ZERO
+        }
+    };
+    for (i, w) in words.iter_mut().enumerate() {
+        if aligned[i].is_some() {
+            w.range.start = w.range.start - into(room[i]);
+            w.range.end = w.range.end + into(room[i + 1]);
+        }
     }
 }

@@ -9,7 +9,9 @@
 //! around them. So, as faster-whisper's VAD filter does, voice activity
 //! finds the speech first and Whisper hears only that, each stretch on its
 //! own: one that starts with music taken for speech would throw the times
-//! of the speech after it.
+//! of the speech after it. A stretch that fits one window starts with half
+//! a second of silence: Whisper drops speech from the very start of what
+//! it hears.
 
 pub mod config;
 #[cfg(feature = "whisper")]

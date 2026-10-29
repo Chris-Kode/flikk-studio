@@ -1,7 +1,8 @@
 //! Whisper hearing each stretch of speech on its own, the longest first,
-//! and its tokens put together into words.
+//! after a short silence when it fits one window, and its tokens put
+//! together into words.
 
-use super::config::{GPU, MAX_THREADS};
+use super::config::{BEAM_SIZE, FADE, GPU, LEAD, MAX_THREADS, WINDOW};
 use crate::transcription::{Progress, Transcribed, Transcriber};
 use crate::{ModelFile, SPEECH_RATE};
 use anyhow::{Context, Result};
@@ -78,7 +79,10 @@ impl Transcriber for Whisper {
         let mut done = 0.0;
         for i in order {
             let r = speech[i].clone();
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+                beam_size: BEAM_SIZE,
+                patience: -1.0,
+            });
             params.set_language(Some(language.as_deref().unwrap_or("auto")));
             params.set_token_timestamps(true);
             // Each 30 s window on its own, not after the text of the one
@@ -94,14 +98,16 @@ impl Transcriber for Whisper {
             params.set_progress_callback_safe(move |p: i32| {
                 progress(done + share * p as f32 / 100.0)
             });
+            let lead = if LEAD + r.len() <= WINDOW { LEAD } else { 0 };
             state
-                .full(params, &audio[r.clone()])
+                .full(params, &padded(&audio[r.clone()], lead))
                 .context("Whisper failed")?;
             if language.is_none() {
                 language =
                     whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string);
             }
-            heard[i] = words(&state, eot, time(r.start), time(r.end));
+            let at = TimeRange::new(time(r.start), time(r.end));
+            heard[i] = words(&state, eot, at.start - time(lead), at);
             done += share;
         }
         Ok(Transcribed {
@@ -118,10 +124,22 @@ impl Transcriber for Whisper {
     }
 }
 
-/// The words Whisper heard in `state`, moved to `start` and never past
-/// `end`. Its notes on what is not speech, "(upbeat music)" or
-/// "\[BLANK_AUDIO\]", are left out.
-fn words(state: &WhisperState, eot: WhisperTokenId, start: Time, end: Time) -> Vec<Word> {
+/// `speech` after `lead` samples of silence, faded in from it.
+fn padded(speech: &[f32], lead: usize) -> Vec<f32> {
+    let mut out = vec![0.0; lead];
+    out.extend_from_slice(speech);
+    if lead > 0 {
+        for (k, s) in out[lead..].iter_mut().take(FADE).enumerate() {
+            *s *= k as f32 / FADE as f32;
+        }
+    }
+    out
+}
+
+/// The words Whisper heard in `state`, its times from `offset` and kept
+/// inside `stretch`, the speech it was given. Its notes on what is not
+/// speech, "(upbeat music)" or "\[BLANK_AUDIO\]", are left out.
+fn words(state: &WhisperState, eot: WhisperTokenId, offset: Time, stretch: TimeRange) -> Vec<Word> {
     let mut words = Vec::new();
     for segment in state.as_iter() {
         let mut heard = Vec::new();
@@ -159,10 +177,8 @@ fn words(state: &WhisperState, eot: WhisperTokenId, start: Time, end: Time) -> V
                 .trim_end_matches(|c: char| c.is_ascii_punctuation() && !matches!(c, ')' | ']'))
                 .ends_with([')', ']']);
             if !note {
-                w.range = TimeRange::new(
-                    (w.range.start + start).min(end),
-                    (w.range.end + start).min(end),
-                );
+                let inside = |t: Time| (t + offset).clamp(stretch.start, stretch.end);
+                w.range = TimeRange::new(inside(w.range.start), inside(w.range.end));
                 words.push(w);
             }
             note &= !closes;

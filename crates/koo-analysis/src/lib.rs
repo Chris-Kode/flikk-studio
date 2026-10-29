@@ -5,11 +5,12 @@
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; the jobs run
 //! one at a time, in the order queued, on a [`JobQueue`]. Each runs the
 //! pipeline (audio → the speech Silero hears, or the energy VAD's without
-//! it, and levels → transcript of that speech → word edges on the audio →
-//! word times from the aligner → speakers → sounds, music and sound vectors
-//! → beats → shot changes) and caches the result by fingerprint, so an item
-//! is analyzed once (principle 4) until the user analyzes it again. Results
-//! of another [`ANALYSIS_VERSION`] are not read.
+//! it, and levels → transcript of that speech → word times from the
+//! aligner, or word edges on the audio where it can't → the speech no word
+//! was heard in, heard again → speakers → sounds, music and sound vectors
+//! → beats → shot changes) and caches the result by fingerprint, so an
+//! item is analyzed once (principle 4) until the user analyzes it again.
+//! Results of another [`ANALYSIS_VERSION`] are not read.
 
 mod align;
 mod cache;
@@ -19,7 +20,7 @@ mod sounds;
 pub mod speakers;
 mod vad;
 
-use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript};
+use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript, Word};
 use koo_core::ids::JobId;
 use koo_core::jobs::{JobProgress, JobQueue};
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
@@ -257,7 +258,7 @@ impl AnalysisService for LocalAnalysis {
         let duration = item.info.as_ref().map(|i| i.duration);
         if let Some(analysis) = item.fingerprint.as_ref().and_then(|fp| self.analysis(fp)) {
             let end = duration.unwrap_or_else(|| analyzed_end(&analysis));
-            return Ok(vad::complement(&analysis.speech, end, min));
+            return Ok(vad::complement(&talking(&analysis), end, min));
         }
         if !has_audio(item) {
             return Ok(vad::complement(&[], duration.unwrap_or(Time::ZERO), min));
@@ -423,10 +424,22 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
             );
             match transcript {
                 Ok(Some(mut t)) => {
-                    align::refine(&mut t.words, &levels, &sound);
-                    if let Err(e) = align_words(shared, &audio, &mut t, &progress) {
-                        // The edges measured on the audio stand.
-                        problems.push(format!("word alignment: {e:#}"));
+                    // Edges measured on the audio only where the aligner
+                    // can't place the words: measured first, they moved
+                    // the last word of a phrase over the pause after it,
+                    // and the aligner followed.
+                    let words = progress.step(Step::Words);
+                    match align_words(shared, &audio, &t.language, &mut t.words, &words) {
+                        Ok(true) => {}
+                        Ok(false) => align::refine(&mut t.words, &levels, &sound),
+                        Err(e) => {
+                            align::refine(&mut t.words, &levels, &sound);
+                            problems.push(format!("word alignment: {e:#}"));
+                        }
+                    }
+                    // After the aligner, so that a hole is where no word is.
+                    if let Err(e) = fill_holes(shared, &audio, &analysis.speech, &mut t) {
+                        problems.push(format!("transcript: {e:#}"));
                     }
                     // After the aligner, so each word is heard where it is.
                     if let Err(e) = attribute_speakers(shared, &audio, &mut t, &progress) {
@@ -605,30 +618,88 @@ fn hear(
     Ok(())
 }
 
-/// Fit the transcript's words to the audio with the alignment model. A
-/// language it does not know keeps the edges measured on the audio, for
-/// good.
+/// Fit `words`, said in `language`, to the audio with the alignment model;
+/// whether it did. A language it does not know keeps the edges measured
+/// on the audio, for good.
 #[cfg(feature = "aligner")]
 fn align_words(
     shared: &Shared,
     audio: &[f32],
-    transcript: &mut Transcript,
-    progress: &Progress,
-) -> anyhow::Result<()> {
-    if transcript.words.is_empty() || !shared.aligner.supports(&transcript.language) {
-        return Ok(());
+    language: &str,
+    words: &mut [Word],
+    progress: &dyn Fn(f32),
+) -> anyhow::Result<bool> {
+    if words.is_empty() || !shared.aligner.supports(language) {
+        return Ok(false);
     }
-    shared
-        .aligner
-        .align(audio, &mut transcript.words, &progress.step(Step::Words))
+    shared.aligner.align(audio, words, progress)?;
+    Ok(true)
 }
 
 #[cfg(not(feature = "aligner"))]
 fn align_words(
     _shared: &Shared,
     _audio: &[f32],
+    _language: &str,
+    _words: &mut [Word],
+    _progress: &dyn Fn(f32),
+) -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+/// Hear again, on its own, the `speech` no word of `transcript` was heard
+/// in, and add the words found there, aligned. Whisper now and then gives
+/// one sentence a segment that runs on over seconds of speech it skips, or
+/// takes the short last phrase of a stretch for silence.
+#[cfg(feature = "whisper")]
+fn fill_holes(
+    shared: &Shared,
+    audio: &[f32],
+    speech: &[TimeRange],
+    transcript: &mut Transcript,
+) -> anyhow::Result<()> {
+    let holes = vad::holes(speech, &transcript.words);
+    if holes.is_empty() {
+        return Ok(());
+    }
+    let sample =
+        |t: Time| ((t.as_secs_f64() * ffmpeg::SAMPLE_RATE as f64) as usize).min(audio.len());
+    let language = Some(transcript.language.as_str()).filter(|l| *l != "und");
+    let transcriber = shared.transcriber.get();
+    for hole in holes {
+        // The hole's audio alone: the aligner looks for words seconds
+        // around where they are said, and around a hole is speech already
+        // heard, where it would put the few words found.
+        let heard = &audio[sample(hole.start)..sample(hole.end)];
+        if heard.is_empty() {
+            continue;
+        }
+        let all = 0..heard.len();
+        let mut found = transcriber
+            .transcribe(
+                heard,
+                std::slice::from_ref(&all),
+                language,
+                Arc::new(|_| {}),
+            )?
+            .words;
+        align_words(shared, heard, &transcript.language, &mut found, &|_| {})?;
+        let at = Time::from_secs_f64(sample(hole.start) as f64 / ffmpeg::SAMPLE_RATE as f64);
+        for w in &mut found {
+            w.range = w.range.shift(at);
+        }
+        transcript.words.extend(found);
+    }
+    transcript.words.sort_by_key(|w| w.range.start);
+    Ok(())
+}
+
+#[cfg(not(feature = "whisper"))]
+fn fill_holes(
+    _shared: &Shared,
+    _audio: &[f32],
+    _speech: &[TimeRange],
     _transcript: &mut Transcript,
-    _progress: &Progress,
 ) -> anyhow::Result<()> {
     Ok(())
 }
@@ -743,6 +814,17 @@ fn iso_639_1(shared: &Shared, tag: &str) -> Option<&'static str> {
         return Some(code);
     }
     None
+}
+
+/// Where someone talks: the speech voice activity found, and every word
+/// transcribed, so that a silence never takes the quiet last word of a
+/// phrase that voice activity let go of.
+fn talking(analysis: &Analysis) -> Vec<TimeRange> {
+    let words = analysis
+        .transcript
+        .iter()
+        .flat_map(|t| t.words.iter().map(|w| w.range));
+    analysis.speech.iter().copied().chain(words).collect()
 }
 
 /// Best guess at the end of an item analyzed without media info.

@@ -45,3 +45,9 @@ pub const SLACK: Time = Time(FLICKS_PER_SECOND * 5);
 /// The model's starts come a little late; they move this much earlier,
 /// never into the word before. Measured on hand-labelled English.
 pub const EARLIER: Time = Time(FLICKS_PER_SECOND * 20 / 1000);
+/// Next to a pause of at least [`PAUSE`] its starts come later still and
+/// its ends early, clipping the onset of a phrase and the tail of its last
+/// word: those edges move this much into the pause, never past its middle.
+/// Measured against forced-aligned LibriSpeech.
+pub const INTO_PAUSE: Time = Time(FLICKS_PER_SECOND * 20 / 1000);
+pub const PAUSE: Time = Time(FLICKS_PER_SECOND / 10);
