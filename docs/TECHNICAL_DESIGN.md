@@ -217,28 +217,51 @@ All nine streams are merged. What runs today:
   hears the audio in one go and in 4 s blocks, each after the second
   before it, and a window is speech when either finds it: music holds it
   down for seconds after, and a block that starts during a sentence
-  doubts the rest of it. Whisper hears only speech
-  (`koo-models/src/transcription/whisper/`): given music, a long
-  silence, or a 30 s window that starts with either, it made words up,
-  often repeating what was said before, and its times came loose. It hears
-  the stretches Silero finds as faster-whisper's VAD filter does (pauses
-  under 2 s kept, 400 ms either side), each on its own, without the text
-  of the window before, in the language of the longest; its notes such as
-  "(upbeat music)" are dropped. Word times come from a forced aligner
+  doubts the rest of it. A silence never takes a transcribed word, so
+  the quiet last word of a phrase Silero let go of stays. Whisper hears
+  only speech (`koo-models/src/transcription/whisper/`): given music, a
+  long silence, or a 30 s window that starts with either, it made words
+  up, often repeating what was said before, and its times came loose. It
+  hears the stretches Silero finds as faster-whisper's VAD filter does
+  (pauses under 2 s kept, 400 ms either side), each on its own, without
+  the text of the window before, in the language of the longest; its
+  notes such as "(upbeat music)" are dropped. A stretch that fits one
+  window starts with 0.5 s of silence: Whisper took speech from the very
+  start of what it heard for a phrase cut off and dropped it (the first
+  words of an item that starts talking), and Whisper that started on
+  speech more often left out the last phrase of the stretch too. A
+  longer stretch goes on in windows whisper.cpp starts where Whisper
+  finished a segment; silence before it moved those windows, and in
+  conversation one then ended at its first sentence and skipped the rest.
+  Decoding is a beam search of 5, as OpenAI's transcribe does. Now and
+  then Whisper gives one sentence a segment that runs on over seconds of
+  speech it skips, or takes the short last phrase of a stretch for
+  silence; so once words are aligned, Silero's speech that no word comes
+  within 250 ms of, for 600 ms or more, is heard again on its own, and
+  the words found there are aligned against that audio alone and added
+  (on the measurements below every such hole held words that had been
+  lost, and there were none otherwise). Word times come from a forced
+  aligner
   (`koo-models/src/word_timing/qwen3_aligner/`, behind the default `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
   and answers with each word's start and end, in 80 ms steps; starts then
-  move 20 ms earlier, never into the word before. It knows English,
+  move 20 ms earlier, never into the word before, and the edges of words
+  next to a pause of 100 ms or more 20 ms into it, never past its middle
+  (its starts after a pause came late and its ends before one early,
+  against forced-aligned LibriSpeech). It knows English,
   Spanish, French, German, Italian, Portuguese, Russian, Chinese,
   Cantonese, Japanese and Korean. Its tokenizer (`koo-models/src/bpe.rs`) comes from
   Qwen's repository and the model from ours (below), or set
-  `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages, and words
-  with neither letters nor digits, keep word edges measured on the audio
-  levels (`koo-analysis/src/align.rs`). When the model can't be loaded,
-  the result keeps those edges for the session. Running that measurement
-  after the aligner made cuts worse, so it is only the fallback. The
-  aligner's times never pass the audio it was given, so words stay in
-  order.
+  `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages keep word edges
+  measured on the audio levels (`koo-analysis/src/align.rs`), and so does
+  the result for the session when the model can't be loaded; words with
+  neither letters nor digits stay between the aligned words around them.
+  That measurement runs only where the aligner can't: run before it, it
+  moved words over the pause between two speakers and the aligner
+  followed (at 12 of 55 turns in four conversations, 4 without; the
+  word error rate there went from 5.9% to 7.1%), and run after it, it
+  made cuts worse. The aligner's times never pass the audio it was
+  given, so words stay in order.
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
@@ -462,6 +485,25 @@ compositor feature on real FFmpeg-made media).
   and ended 30 ms later (medians). Whisper may still invent words over
   sounds Silero takes for speech; the script shows them as speech, marked
   "?" when unsure.
+* Transcription was measured on LibriSpeech test-other and dev-clean
+  (forced-aligned word times from `gilkeyio/librispeech-alignments`)
+  made into items that start talking at once, run on for minutes with
+  short pauses, fade out at the end of every phrase, or pass between two
+  to four speakers: 5,190 words through the whole pipeline, Whisper small
+  on 4 CPU threads. The word edges measured only where the aligner can't,
+  the silence before a stretch that fits one window, the beam search and
+  the holes heard again took the word error rate from 7.7% to 6.7% and
+  the words left out from 66 to 38: 28 to 12 at the end of a phrase, 12
+  to 7 at its start, and both items that lost their first word kept it.
+  Words heard on the far side of the pause between two phrases fell from
+  26 to 8. It all takes about 15% more time on the CPU, the beam search
+  most of it. Speakers were told apart as before (92% of the words in
+  the conversations). Whisper still now and then skips a short phrase and
+  puts the next one's words in its place, which leaves no hole. Moving
+  the aligner's edges next to a pause took the ends there that came over
+  30 ms early from 40% to 25% and the starts that came over 30 ms late
+  from 40% to 23%, with as many within 50 ms. Silences that keep the
+  words clipped over 50 ms off 8 of 50 fading last words, 15 before.
 * The Beat This! export was verified here from a mirrored copy of the
   `final0` weights; the hosted file must be built from the official
   checkpoint (`export_beat_this.py` downloads it from JKU's server).

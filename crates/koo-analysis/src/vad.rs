@@ -6,7 +6,8 @@
 //! models do (`koo_models::voice_activity::ranges`).
 
 use crate::ffmpeg::SAMPLE_RATE;
-use koo_core::time::{Time, TimeRange};
+use koo_core::analysis::Word;
+use koo_core::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use koo_models::voice_activity::{PAD_MS, ranges};
 
 /// 30 ms frames.
@@ -15,6 +16,10 @@ const FRAME: usize = SAMPLE_RATE as usize * 30 / 1000;
 const FLOOR_DB: f32 = -50.0;
 /// Speech must sit this far above the estimated noise floor.
 const ABOVE_NOISE_DB: f32 = 9.0;
+/// A hole in a transcript: this much speech (600 ms)…
+const MIN_HOLE: Time = Time(FLICKS_PER_SECOND * 3 / 5);
+/// …that no word comes within this of (250 ms).
+const HOLE_REACH: Time = Time(FLICKS_PER_SECOND / 4);
 
 pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
     let frames: Vec<(f32, f32)> = samples.chunks(FRAME).map(frame_stats).collect();
@@ -62,4 +67,32 @@ pub fn complement(speech: &[TimeRange], end: Time, min: Time) -> Vec<TimeRange> 
     }
     gaps.retain(|g| g.duration() >= min && !g.is_empty());
     gaps
+}
+
+/// The holes `words` leave in `speech`: at least [`MIN_HOLE`] of it that no
+/// word comes within [`HOLE_REACH`] of, widened by that much so that each
+/// reaches the words either side.
+pub fn holes(speech: &[TimeRange], words: &[Word]) -> Vec<TimeRange> {
+    let mut near: Vec<TimeRange> = words
+        .iter()
+        .map(|w| TimeRange::new(w.range.start - HOLE_REACH, w.range.end + HOLE_REACH))
+        .collect();
+    near.sort_by_key(|r| r.start);
+    let mut holes: Vec<TimeRange> = Vec::new();
+    for s in speech {
+        let mut from = s.start;
+        let end = TimeRange::new(s.end, s.end);
+        for r in near.iter().filter(|r| r.overlaps(s)).chain([&end]) {
+            if r.start - from >= MIN_HOLE {
+                let hole =
+                    TimeRange::new((from - HOLE_REACH).max(Time::ZERO), r.start + HOLE_REACH);
+                match holes.last_mut() {
+                    Some(last) if hole.start <= last.end => last.end = hole.end,
+                    _ => holes.push(hole),
+                }
+            }
+            from = from.max(r.end);
+        }
+    }
+    holes
 }
