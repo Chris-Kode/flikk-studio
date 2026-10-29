@@ -20,3 +20,11 @@ koo-html.workspace = true
 koo-models.workspace = true
 cpal = "0.16"
 image = { version = "0.25", default-features = false }
+
+# Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
+# vendor's GPU. Build with `--features koo-models/cuda` for CUDA instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+koo-models = { workspace = true, features = ["metal"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+koo-models = { workspace = true, features = ["vulkan"] }
