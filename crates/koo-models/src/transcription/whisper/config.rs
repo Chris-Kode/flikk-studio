@@ -26,7 +26,7 @@ pub const LARGE: ModelFile = ModelFile {
 
 /// Whether whisper.cpp was built for a GPU. It still runs on the CPU when
 /// the machine has none.
-pub const GPU: bool = cfg!(any(feature = "metal", feature = "vulkan", feature = "cuda"));
+pub const GPU: bool = cfg!(any(feature = "metal", feature = "vulkan"));
 
 /// Threads at most; more stop paying off, and leave none to the rest of
 /// analysis.

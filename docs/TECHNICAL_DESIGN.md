@@ -69,7 +69,7 @@ except `koo-analysis`, which runs its models through `koo-models`.
 | FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`KOOEDITOR_FFMPEG` / `KOOEDITOR_FFPROBE`, else `PATH`, later bundled) | No libav linking on Windows/macOS; `-hwaccel auto` for GPU decode |
 | Playback | Proxies by default (720p, short GOP H.264, `cache/proxies/<fp>.mp4`); a streaming decoder pipes RGBA frames from a long-lived ffmpeg process | Smooth 1080p60 on a laptop (PRD NFR); revisit after the GPUI video spike |
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks | Fast on multi-GB files; good enough to detect replacement (F2) |
-| Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`; on the GPU (Metal on macOS, Vulkan on Windows and Linux, CUDA with `koo-models/cuda`), else the CPU | Local, word timestamps, any language; no per-use cost |
+| Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`; on the GPU (Metal on macOS, Vulkan on Windows and Linux), else the CPU | Local, word timestamps, any language; no per-use cost |
 | Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB in `paths::models()`) on ONNX Runtime (`ort`, prebuilt and linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
 | Hearing | The model never hears audio: analysis turns it into the sound script (words, `[sounds]`, `♪` music with tempo and changes, silences), beats to cut on, vectors to search by description, and spectrogram pictures | Neither backend takes audio input, and models place sounds in time far worse than in text; the transcript and collages already work this way |
 | Sounds | EfficientAT mn10_as (MIT; 527 AudioSet classes) on 2 s windows every second, each followed by 4 s of silence, grouped into about 180 names for the script | Small (20 MB) and fast on the CPU; trained on 10 s clips, it answers nonsense for 2 s alone, and 6 s gets nine in ten of its 10 s answers at half the cost |
@@ -199,11 +199,11 @@ All nine streams are merged. What runs today:
   8-bit weights, picked in Settings → Models. whisper.cpp is built for
   the GPU (Metal on macOS, Vulkan on Windows and Linux, with flash
   attention), so building needs Xcode or the Vulkan SDK (`glslc` and the
-  Vulkan headers on Linux); `--features koo-models/cuda` adds CUDA. On a
-  machine without a GPU it runs on the CPU. On Windows the editor loads
-  `vulkan-1.dll` only when Whisper first runs (`/DELAYLOAD`), and where
-  the DLL is missing `koo-editor/src/vulkan_fallback.rs` makes Vulkan
-  fail to start, so Whisper runs on the CPU there too. The picked size is in
+  Vulkan headers on Linux). On a machine without a GPU it runs on the
+  CPU. On Windows the editor loads `vulkan-1.dll` only when Whisper first
+  runs (`/DELAYLOAD`), and where the DLL is missing
+  `koo-editor/src/vulkan_fallback.rs` makes Vulkan fail to start, so
+  Whisper runs on the CPU there too. The picked size is in
   `paths::models()` once the user downloads it (Models, below), or set
   `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
   stands in for whichever size is picked. Speech, and so silences, comes
