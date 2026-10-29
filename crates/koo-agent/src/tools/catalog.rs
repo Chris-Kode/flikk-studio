@@ -2,7 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
-use super::{layout, masks};
+use super::{groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
 use koo_core::model::{BlendMode, ClipColor, Property};
@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 pub struct ToolSpec {
     pub name: &'static str,
-    /// `None` for `ask_user`, which is always available.
+    /// `None` for `ask_user`, `load_tools` and `run_tool`, which are always
+    /// available.
     pub category: Option<ToolCategory>,
     pub description: &'static str,
     pub schema: Value,
@@ -138,6 +139,13 @@ fn reason() -> Value {
     string("One line shown to the user with the change; cite the style rule that drove it, if any")
 }
 
+/// A few typical calls, as JSON Schema `examples`, for tools whose
+/// arguments are easy to get wrong.
+fn examples(mut schema: Value, examples: Value) -> Value {
+    schema["examples"] = examples;
+    schema
+}
+
 fn object(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
 }
@@ -175,7 +183,7 @@ pub fn catalog() -> Vec<ToolSpec> {
     let audio_kinds: Vec<&str> = AudioFxKind::ALL.iter().map(|k| k.name()).collect();
     let fx_kinds = &["effect", "transition", "generator"];
     let aligns = &["center", "start_on_cut", "end_on_cut"];
-    vec![
+    let mut tools = vec![
         // ---- read project
         spec(
             "get_timeline",
@@ -304,28 +312,33 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "view_range",
             Some(View),
-            "See a range: its sound script plus a collage of up to 30 frames spread evenly over it, each stamped with its timeline time.",
-            object(json!({ "range": range("Timeline range") }), &["range"]),
-        ),
-        spec(
-            "view_detail",
-            Some(View),
-            "A denser collage of a short span (at most 20 s), for checking a cut or a moment.",
+            "See a range: its sound script plus a collage of up to 30 frames spread evenly over it, each stamped with its timeline time. With `detail`, a denser collage of a short span (at most 20 s), for checking a cut or a moment.",
             object(
-                json!({ "range": range("Timeline range, at most 20 s") }),
+                json!({
+                    "range": range("Timeline range"),
+                    "detail": boolean("Denser frames over at most 20 s")
+                }),
                 &["range"],
             ),
         ),
         spec(
             "view_frame",
             Some(View),
-            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip.",
-            object(
-                json!({
-                    "t": time("Timeline seconds"),
-                    "annotate": boolean("Box and number each visible item")
-                }),
-                &["t"],
+            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip. With `zoom`, only that region, magnified at full resolution under a grid labelled in frame pixels: look closely before you set a mask, pin a picture or check an edge.",
+            examples(
+                object(
+                    json!({
+                        "t": time("Timeline seconds"),
+                        "annotate": boolean("Box and number each visible item"),
+                        "zoom": numbers(4, "[left, top, width, height] in frame pixels")
+                    }),
+                    &["t"],
+                ),
+                json!([
+                    { "t": 12.0, "annotate": true },
+                    { "t": 12.0, "zoom": [760, 180, 420, 420] },
+                    { "t": "0:08.000", "zoom": [780, 260, 520, 340] }
+                ]),
             ),
         ),
         spec(
@@ -559,126 +572,133 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_keyframe",
             Some(Transform),
-            "Propose a keyframe on a clip property at a timeline time.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "property": one_of(&properties, "Property; crop_* are fractions 0..1, volume is clip gain in dB"),
-                    "at": time("Timeline seconds, inside the clip"),
-                    "value": number("Value"),
-                    "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
-                    "reason": reason()
-                }),
-                &["clip", "property", "at", "value"],
-            ),
-        ),
-        spec(
-            "remove_keyframe",
-            Some(Transform),
-            "Propose removing a clip property keyframe at a timeline time.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "property": one_of(&properties, "Property"),
-                    "at": time("Timeline time of the keyframe"),
-                    "reason": reason()
-                }),
-                &["clip", "property", "at"],
+            "Propose a keyframe on a clip property at a timeline time, or with `remove` take the one there away.",
+            examples(
+                object(
+                    json!({
+                        "clip": string("Clip id"),
+                        "property": one_of(&properties, "Property; crop_* are fractions 0..1, volume is clip gain in dB"),
+                        "at": time("Timeline seconds, inside the clip"),
+                        "value": number("Value (not with `remove`)"),
+                        "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
+                        "remove": boolean("Remove the keyframe at `at` instead"),
+                        "reason": reason()
+                    }),
+                    &["clip", "property", "at"],
+                ),
+                json!([
+                    { "clip": "3f9a1c2e", "property": "scale", "at": 12.0, "value": 1.0, "reason": "Start of the punch-in" },
+                    { "clip": "3f9a1c2e", "property": "scale", "at": "0:13.500", "value": 1.25, "ease": "ease_out", "reason": "Punch in on the answer" },
+                    { "clip": "3f9a1c2e", "property": "opacity", "at": 20.0, "remove": true, "reason": "Drop the extra fade key" }
+                ]),
             ),
         ),
         spec(
             "set_transform",
             Some(Transform),
             "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip, blend and corner pin (the render burns them in without them). With `group`, several clips move, scale and turn as one about the centre of what they draw together.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "clips": strings("More clip ids, changed alike"),
-                    "position": numbers(2, "[x, y] offset from where it rests (centred; captions where their style puts them), as a fraction of the frame: [0.25, 0] moves it a quarter of the frame width right"),
-                    "scale": number("1 = fitted (captions: their style's size)"),
-                    "stretch": numbers(2, "[x, y] per-axis scale on top of `scale`, 1 = none"),
-                    "rotation": number("Degrees clockwise, about the anchor"),
-                    "skew": numbers(2, "[x, y] slant in degrees, ±80: x leans vertical edges right going down, y leans horizontal edges down going right"),
-                    "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. It stays where it rests, so changing it shifts a scaled, rotated or skewed picture: set it first, then place it"),
-                    "opacity": number("0..1"),
-                    "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
-                    "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
-                    "blend": one_of(&blends, "Composite mode over the tracks below"),
-                    "corner_pin": { "type": "array", "items": numbers(2, "[x, y]"), "minItems": 4, "maxItems": 4, "description": "How far each corner moves, [top-left, top-right, bottom-right, bottom-left], as [x, y] fractions of the picture's size before the rest of the transform; the picture is drawn in perspective onto the quad they make. All [0, 0] = none. To pin onto points of the frame, use place with `pin_to`" },
-                    "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
-                    "group": boolean("Move `clips` as one group at `at` (default: the middle of the time they share): position moves the group by a fraction of the frame, scale multiplies its size, rotation turns it, about the centre of their bounds together; each clip's own transform changes to match. Only position, scale and rotation apply"),
-                    "at": time("Timeline time to set it at, keyframe-aware (see above)"),
-                    "reason": reason()
-                }),
-                &[],
+            examples(
+                object(
+                    json!({
+                        "clip": string("Clip id"),
+                        "clips": strings("More clip ids, changed alike"),
+                        "position": numbers(2, "[x, y] offset from where it rests (centred; captions where their style puts them), as a fraction of the frame: [0.25, 0] moves it a quarter of the frame width right"),
+                        "scale": number("1 = fitted (captions: their style's size)"),
+                        "stretch": numbers(2, "[x, y] per-axis scale on top of `scale`, 1 = none"),
+                        "rotation": number("Degrees clockwise, about the anchor"),
+                        "skew": numbers(2, "[x, y] slant in degrees, ±80: x leans vertical edges right going down, y leans horizontal edges down going right"),
+                        "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. It stays where it rests, so changing it shifts a scaled, rotated or skewed picture: set it first, then place it"),
+                        "opacity": number("0..1"),
+                        "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
+                        "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
+                        "blend": one_of(&blends, "Composite mode over the tracks below"),
+                        "corner_pin": { "type": "array", "items": numbers(2, "[x, y]"), "minItems": 4, "maxItems": 4, "description": "How far each corner moves, [top-left, top-right, bottom-right, bottom-left], as [x, y] fractions of the picture's size before the rest of the transform; the picture is drawn in perspective onto the quad they make. All [0, 0] = none. To pin onto points of the frame, use place with `pin_to`" },
+                        "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
+                        "group": boolean("Move `clips` as one group at `at` (default: the middle of the time they share): position moves the group by a fraction of the frame, scale multiplies its size, rotation turns it, about the centre of their bounds together; each clip's own transform changes to match. Only position, scale and rotation apply"),
+                        "at": time("Timeline time to set it at, keyframe-aware (see above)"),
+                        "reason": reason()
+                    }),
+                    &[],
+                ),
+                json!([
+                    { "clip": "9d4e6b10", "scale": 0.4, "position": [0.28, -0.26], "reason": "Picture-in-picture, top right" },
+                    { "clip": "9d4e6b10", "position": [-0.02, 0], "relative": true, "reason": "Nudge left" },
+                    { "clip": "9d4e6b10", "anchor": [0.5, 0.5], "rotation": 8, "reason": "Tilt about its bottom-right corner" },
+                    { "clips": ["5be20f71", "c03d8a9e"], "group": true, "scale": 0.8, "reason": "Shrink the logo and its label together" }
+                ]),
             ),
         ),
         spec(
             "place",
             Some(Transform),
             "Propose putting a clip somewhere by meaning: align what it draws (its opaque part: a logo's pixels, a lower third inside its frame, a caption's box) to a corner, edge or the centre, a margin in from the frame edges, and size it. Several `clips` are placed as one group: their bounds together are aligned and sized, keeping their arrangement. Keyframe-aware at `at`. Check the result with get_layout or view_frame.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "clips": strings("Clip ids placed together as one group (with or instead of `clip`)"),
-                    "pin_to": { "type": "array", "items": numbers(2, "[x, y] frame pixels"), "minItems": 4, "maxItems": 4, "description": "Corner pin instead of aligning: put the whole picture's corners (top-left, top-right, bottom-right, bottom-left) on these frame points, in perspective, e.g. onto a screen or sign seen in the shot. One picture clip; not captions or titles" },
-                    "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
-                    "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
-                    "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),
-                    "fit": one_of(&layout::FITS, "keep its size (default); contain: fit inside the margins; cover: fill the frame, cropping; fill: stretch to the frame; width / height: `size` of the frame's width / height"),
-                    "size": number("For fit width / height: the fraction of the frame, e.g. 0.15"),
-                    "at": time("Timeline time inside the clip to place it at (default: its middle; a group: the middle of the time its clips share)"),
-                    "reason": reason()
-                }),
-                &[],
+            examples(
+                object(
+                    json!({
+                        "clip": string("Clip id"),
+                        "clips": strings("Clip ids placed together as one group (with or instead of `clip`)"),
+                        "pin_to": { "type": "array", "items": numbers(2, "[x, y] frame pixels"), "minItems": 4, "maxItems": 4, "description": "Corner pin instead of aligning: put the whole picture's corners (top-left, top-right, bottom-right, bottom-left) on these frame points, in perspective, e.g. onto a screen or sign seen in the shot. One picture clip; not captions or titles" },
+                        "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
+                        "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
+                        "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),
+                        "fit": one_of(&layout::FITS, "keep its size (default); contain: fit inside the margins; cover: fill the frame, cropping; fill: stretch to the frame; width / height: `size` of the frame's width / height"),
+                        "size": number("For fit width / height: the fraction of the frame, e.g. 0.15"),
+                        "at": time("Timeline time inside the clip to place it at (default: its middle; a group: the middle of the time its clips share)"),
+                        "reason": reason()
+                    }),
+                    &[],
+                ),
+                json!([
+                    { "clip": "5be20f71", "align": "top_right", "fit": "width", "size": 0.12, "reason": "Logo in the corner, small" },
+                    { "clips": ["5be20f71", "c03d8a9e"], "align": "bottom_left", "safe_area": true, "reason": "Name and title together, inside title-safe" },
+                    { "clip": "9d4e6b10", "fit": "cover", "reason": "Fill the vertical frame" },
+                    { "clip": "9d4e6b10", "pin_to": [[812, 301], [1240, 288], [1252, 560], [806, 571]], "reason": "Put the slide on the laptop screen" }
+                ]),
             ),
         ),
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), or a change to one given by `mask`: it keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
-                    "shape": {
-                        "type": "object",
-                        "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), `smooth` draws a curve through them. Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
-                        "properties": {
-                            "type": { "type": "string", "enum": masks::SHAPES },
-                            "center": numbers(2, "[x, y]"),
-                            "size": numbers(2, "[width, height]"),
-                            "rotation": number("Degrees clockwise"),
-                            "roundness": number("Rectangle corners, 0..1"),
-                            "points": { "type": "array", "items": numbers(2, "[x, y]") },
-                            "smooth": boolean("A curve through the points")
-                        }
-                    },
-                    "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
-                    "mode": one_of(&masks::MODES, "How it combines with the masks before it (default add)"),
-                    "invert": boolean("Cut the shape away instead of keeping it"),
-                    "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.03)"),
-                    "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height"),
-                    "opacity": number("0..1"),
-                    "enabled": boolean("Off keeps the mask but ignores it"),
-                    "at": time("Timeline time to keyframe the shape at"),
-                    "reason": reason()
-                }),
-                &["clip"],
-            ),
-        ),
-        spec(
-            "remove_mask",
-            Some(Transform),
-            "Propose removing a mask from a clip, or all of them.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "mask": string("Mask id (from get_clip)"),
-                    "all": boolean("Remove every mask on the clip"),
-                    "reason": reason()
-                }),
-                &["clip"],
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.",
+            examples(
+                object(
+                    json!({
+                        "clip": string("Clip id"),
+                        "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
+                        "shape": {
+                            "type": "object",
+                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                            "properties": {
+                                "type": { "type": "string", "enum": masks::SHAPES },
+                                "center": numbers(2, "[x, y]"),
+                                "size": numbers(2, "[width, height]"),
+                                "rotation": number("Degrees clockwise"),
+                                "roundness": number("Rectangle corners, 0..1"),
+                                "points": { "type": "array", "items": numbers(2, "[x, y]") },
+                                "smooth": boolean("A curve through the points instead of straight lines (default false)")
+                            }
+                        },
+                        "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
+                        "mode": one_of(&masks::MODES, "How it combines with the masks before it (default add)"),
+                        "invert": boolean("Cut the shape away instead of keeping it"),
+                        "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.03)"),
+                        "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height"),
+                        "opacity": number("0..1"),
+                        "enabled": boolean("Off keeps the mask but ignores it"),
+                        "at": time("Timeline time to keyframe the shape at"),
+                        "remove": boolean("Remove `mask` instead"),
+                        "all": boolean("With `remove`: every mask on the clip"),
+                        "reason": reason()
+                    }),
+                    &["clip"],
+                ),
+                json!([
+                    { "clip": "3f9a1c2e", "shape": { "type": "ellipse", "center": [0.5, 0.42], "size": [0.35, 0.5] }, "feather": 0.04, "reason": "Spotlight the speaker's face" },
+                    { "clip": "3f9a1c2e", "mask": "a71c09d4", "shape": { "center": [0.62, 0.42] }, "at": "0:08.000", "reason": "Follow the face as she moves" },
+                    { "clip": "3f9a1c2e", "shape": { "type": "rectangle", "center": [960, 540], "size": [1920, 140] }, "space": "frame", "invert": true, "reason": "Hide the ticker" },
+                    { "clip": "3f9a1c2e", "shape": { "type": "path", "points": [[1210, 180], [1330, 205], [1350, 420], [1240, 470], [1150, 330]], "smooth": true }, "space": "frame", "reason": "Cut out her head" },
+                    { "clip": "3f9a1c2e", "remove": true, "all": true, "reason": "Back to the full picture" }
+                ]),
             ),
         ),
         spec(
@@ -741,17 +761,11 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_primary",
             Some(Color),
-            "Propose primary correction on clips. Only the values given change; curves given replace that channel's curve.",
+            "Propose primary correction on clips, or without `clips` on the timeline grade (applied over every media clip's own grade). Only the values given change; curves given replace that channel's curve.",
             object(
-                grade_props(json!({ "clips": strings("Clip ids") })),
-                &["clips"],
+                grade_props(json!({ "clips": strings("Clip ids (default: the timeline grade)") })),
+                &[],
             ),
-        ),
-        spec(
-            "set_timeline_grade",
-            Some(Color),
-            "Propose a grade for the whole timeline, applied over every media clip's own grade. Only the values given change.",
-            object(grade_props(json!({})), &[]),
         ),
         spec(
             "set_curves",
@@ -926,7 +940,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_effect",
             Some(Effects),
-            "Propose new parameter values (merged over the current ones) or enabled state for an effect on a clip.",
+            "Propose new parameter values (merged over the current ones) or enabled state for an effect on a clip; or, on their own, move it in the stack with `index` or take it off with `remove`.",
             object(
                 json!({
                     "clip": string("Clip id"),
@@ -934,65 +948,42 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "params": params("Parameter name → value"),
                     "reset_params": boolean("Start from the defaults instead of merging"),
                     "enabled": boolean("Bypass with false"),
+                    "index": number("Move it to this position (0 = applied first)"),
+                    "remove": boolean("Remove the effect"),
                     "reason": reason()
                 }),
                 &["clip", "effect"],
-            ),
-        ),
-        spec(
-            "remove_effect",
-            Some(Effects),
-            "Propose removing an effect from a clip.",
-            object(
-                json!({ "clip": string("Clip id"), "effect": string("Effect id"), "reason": reason() }),
-                &["clip", "effect"],
-            ),
-        ),
-        spec(
-            "move_effect",
-            Some(Effects),
-            "Propose moving an effect within a clip's stack (0 = applied first).",
-            object(
-                json!({ "clip": string("Clip id"), "effect": string("Effect id"), "index": number("New position"), "reason": reason() }),
-                &["clip", "effect", "index"],
             ),
         ),
         spec(
             "set_effect_keyframe",
             Some(Effects),
-            "Propose a keyframe on a parameter of a clip effect, of a generator clip (`effect`: generator) or of a transition (`effect`: in or out). Values ease into the next keyframe.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "effect": string("Effect id, `generator`, `in`, `out`, or an `@effect`/`@transition` token"),
-                    "param": string("Parameter name"),
-                    "at": time("Timeline time"),
-                    "value": { "description": "Number, bool, [r, g, b, a], [x, y] or text, as the parameter takes" },
-                    "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
-                    "reason": reason()
-                }),
-                &["clip", "effect", "param", "at", "value"],
-            ),
-        ),
-        spec(
-            "remove_effect_keyframe",
-            Some(Effects),
-            "Propose removing an effect parameter keyframe at a timeline time.",
-            object(
-                json!({
-                    "clip": string("Clip id"),
-                    "effect": string("Effect id, `generator`, `in` or `out`"),
-                    "param": string("Parameter name"),
-                    "at": time("Timeline time of the keyframe"),
-                    "reason": reason()
-                }),
-                &["clip", "effect", "param", "at"],
+            "Propose a keyframe on a parameter of a clip effect, of a generator clip (`effect`: generator) or of a transition (`effect`: in or out), or with `remove` take the one there away. Values ease into the next keyframe.",
+            examples(
+                object(
+                    json!({
+                        "clip": string("Clip id"),
+                        "effect": string("Effect id, `generator`, `in`, `out`, or an `@effect`/`@transition` token"),
+                        "param": string("Parameter name"),
+                        "at": time("Timeline time"),
+                        "value": { "description": "Number, bool, [r, g, b, a], [x, y] or text, as the parameter takes (not with `remove`)" },
+                        "ease": one_of(eases, "Easing into the next keyframe (default ease_in_out)"),
+                        "remove": boolean("Remove the keyframe at `at` instead"),
+                        "reason": reason()
+                    }),
+                    &["clip", "effect", "param", "at"],
+                ),
+                json!([
+                    { "clip": "3f9a1c2e", "effect": "@effect 3f9a1c2e/e2b7c419", "param": "amount", "at": 4.0, "value": 0.0, "reason": "Blur starts clear" },
+                    { "clip": "7a01c5d3", "effect": "generator", "param": "accent", "at": "0:02.000", "value": [1.0, 0.6, 0.1, 1.0], "reason": "Accent warms up" },
+                    { "clip": "3f9a1c2e", "effect": "in", "param": "softness", "at": 10.2, "remove": true, "reason": "Drop the extra key" }
+                ]),
             ),
         ),
         spec(
             "set_transition",
             Some(Effects),
-            "Propose a transition at a clip's start (from the clip before it, or from nothing) or end. Without `fx`, changes the transition already there.",
+            "Propose a transition at a clip's start (from the clip before it, or from nothing) or end. Without `fx`, changes the transition already there; with `remove`, takes it away.",
             object(
                 json!({
                     "clip": string("Clip id or `@transition clip/in|out`"),
@@ -1001,17 +992,9 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "duration": time("Length (default 0.5 s, or the current one)"),
                     "align": one_of(aligns, "Where it sits at a cut (default center)"),
                     "params": params("Parameter name → value"),
+                    "remove": boolean("Remove the transition at `edge`"),
                     "reason": reason()
                 }),
-                &["clip"],
-            ),
-        ),
-        spec(
-            "remove_transition",
-            Some(Effects),
-            "Propose removing a clip's transition in or out.",
-            object(
-                json!({ "clip": string("Clip id or `@transition` token"), "edge": one_of(edges, "start or end"), "reason": reason() }),
                 &["clip"],
             ),
         ),
@@ -1175,5 +1158,34 @@ pub fn catalog() -> Vec<ToolSpec> {
                 &["question", "choices"],
             ),
         ),
-    ]
+    ];
+    // ---- tool groups (see `groups`)
+    let index = groups::index(&tools);
+    let keys: Vec<&str> = groups::GROUPS.iter().map(|g| groups::key(*g)).collect();
+    tools.push(spec(
+        groups::LOAD_TOOLS,
+        None,
+        "Only the tools most messages need are listed. Load one or more groups to get the schemas of their other tools, then call those through run_tool.",
+        object(
+            json!({ "groups": {
+                "type": "array",
+                "items": { "type": "string", "enum": keys },
+                "description": format!("Groups to load. {index}"),
+            } }),
+            &["groups"],
+        ),
+    ));
+    tools.push(spec(
+        groups::RUN_TOOL,
+        None,
+        "Call a tool that load_tools handed you but that is not in your tool list yet.",
+        object(
+            json!({
+                "name": string("The tool's name"),
+                "arguments": { "type": "object", "description": "The tool's arguments, as its schema describes" },
+            }),
+            &["name"],
+        ),
+    ));
+    tools
 }

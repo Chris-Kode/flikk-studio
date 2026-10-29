@@ -24,7 +24,8 @@ fn file() -> PathBuf {
 /// projects had several chats, so existing conversations still resume.
 pub const MAIN_CHAT: &str = "main";
 
-fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
+/// The key a backend session is stored under.
+pub fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
     let base = format!(
         "{}/{}/{}",
         project.0,

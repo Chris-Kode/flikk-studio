@@ -20,15 +20,17 @@
 
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
+use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
 use crate::{prompt, recipes, session};
 use koo_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
 use koo_core::bus::{AgentRole, Author, CommandBus};
 use koo_core::changeset::ChangeSetState;
+use koo_core::command::ToolCategory;
 use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -88,6 +90,10 @@ struct Turn {
     finished: Option<Option<String>>,
     cancelled: bool,
     saw_text: bool,
+    /// Tool groups listed this turn (see `tools::groups`); `load_tools`
+    /// adds to it, and the chat keeps it for its next turns.
+    groups: BTreeSet<ToolCategory>,
+    usage: Usage,
 }
 
 type JobResult = (Origin, Reply, String, Value, JobDone);
@@ -108,6 +114,10 @@ pub struct AgentHost {
     /// What became of approval requests, told to the agent on its next turn.
     outcomes: Vec<String>,
     external: External,
+    /// Tool groups each backend session has used, by session key. They only
+    /// grow, so a chat's tool list (which the backends cache the prompt
+    /// behind) changes only when it needs a new group.
+    groups: HashMap<String, BTreeSet<ToolCategory>>,
 }
 
 impl Default for AgentHost {
@@ -133,6 +143,7 @@ impl AgentHost {
             next_approval: 1,
             outcomes: Vec::new(),
             external: External::default(),
+            groups: HashMap::new(),
         }
     }
 
@@ -274,6 +285,14 @@ impl AgentHost {
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let system_prompt = prompt::system_prompt(self.role, &q.settings);
+        let backend = q.settings.backend;
+        let picked = groups::pick(&text, project, &q.context, self.role);
+        let mut groups = self
+            .groups
+            .get(&session::key(project.id, &self.chat, backend, self.role))
+            .cloned()
+            .unwrap_or_default();
+        groups.extend(picked.iter().copied());
 
         let launch = (|| -> std::io::Result<(McpLaunch, PathBuf, PathBuf)> {
             if self.bridge.is_none() {
@@ -306,7 +325,6 @@ impl AgentHost {
             }
         };
 
-        let backend = q.settings.backend;
         let spec = TurnSpec {
             system_prompt,
             message,
@@ -341,6 +359,8 @@ impl AgentHost {
             finished: None,
             cancelled: false,
             saw_text: false,
+            usage: Usage::new(picked, groups.clone()),
+            groups,
         });
     }
 
@@ -420,6 +440,12 @@ impl AgentHost {
             });
         }
         close_open_sets(bus, &turn.author, &mut self.events);
+        let role = role_of(&turn.author);
+        self.groups.insert(
+            session::key(turn.project, &turn.chat, turn.backend, role),
+            turn.usage.next_groups(&turn.groups),
+        );
+        turn.usage.log(&turn.settings, role, &turn.context, now());
         let _ = std::fs::remove_dir_all(&turn.spec.run_dir);
         self.events.push(AgentEvent::TurnDone);
     }
@@ -442,19 +468,37 @@ impl AgentHost {
                         self.external.connections.remove(&id);
                     }
                 }
-                (Origin::Turn, IncomingKind::List) => {
-                    let role = self.turn.as_ref().map_or(self.role, |t| role_of(&t.author));
-                    reply.tools(tools::list(bus, role));
-                }
+                (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
+                    Some(turn) => {
+                        let list = tools::list(bus, role_of(&turn.author), Some(&turn.groups));
+                        turn.usage.listed = list.len();
+                        turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
+                        reply.tools(list);
+                    }
+                    None => reply.tools(tools::list(bus, self.role, None)),
+                },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, self.role));
+                    reply.tools(tools::list(bus, self.role, None));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;
                     };
+                    let via_run = tool == groups::RUN_TOOL;
+                    let (tool, args) = groups::unwrap_run(tool, args);
+                    turn.usage.calls.push((tool.clone(), via_run));
+                    if tool == groups::LOAD_TOOLS {
+                        let before = turn.groups.clone();
+                        let done =
+                            groups::load(bus, role_of(&turn.author), &mut turn.groups, &args);
+                        turn.usage
+                            .loaded
+                            .extend(turn.groups.difference(&before).copied());
+                        self.finish_call(reply, tool, args, done);
+                        continue;
+                    }
                     let mut ctx = ToolCtx {
                         bus,
                         services,
@@ -474,6 +518,7 @@ impl AgentHost {
                     }
                 }
                 (Origin::External(id), IncomingKind::Call { tool, args }) => {
+                    let (tool, args) = groups::unwrap_run(tool, args);
                     self.external.connections.insert(id);
                     self.external.last_call = Some(Instant::now());
                     let mut ctx = ToolCtx {

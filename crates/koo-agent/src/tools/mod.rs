@@ -11,6 +11,7 @@ mod audio;
 pub mod catalog;
 mod edit;
 mod fx;
+pub mod groups;
 mod layout;
 mod masks;
 mod preview;
@@ -28,6 +29,7 @@ use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::model::Project;
 use koo_core::services::Services;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// Long-term memory the host was given (the store owns it).
@@ -137,11 +139,21 @@ impl From<Done> for Step {
 }
 
 /// Tools the author may see: categories that are not `Off`, and only the
-/// role's own kinds of tools.
-pub fn list(bus: &CommandBus, role: AgentRole) -> Vec<Value> {
+/// role's own kinds of tools. With `groups` (the editor's own turns), only
+/// the core tools and those groups, plus `load_tools` and `run_tool` for the
+/// rest; without (external clients), every tool.
+pub fn list(
+    bus: &CommandBus,
+    role: AgentRole,
+    groups: Option<&BTreeSet<ToolCategory>>,
+) -> Vec<Value> {
     catalog()
         .iter()
         .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
+        .filter(|t| match groups {
+            Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
+            None => t.name != groups::LOAD_TOOLS && t.name != groups::RUN_TOOL,
+        })
         .map(ToolSpec::to_mcp)
         .collect()
 }
@@ -160,7 +172,12 @@ fn role_allows(role: AgentRole, category: ToolCategory, tool: &str) -> bool {
     }
 }
 
-fn visible(bus: &CommandBus, role: AgentRole, category: ToolCategory, tool: &str) -> bool {
+pub(crate) fn visible(
+    bus: &CommandBus,
+    role: AgentRole,
+    category: ToolCategory,
+    tool: &str,
+) -> bool {
     role_allows(role, category, tool)
         && bus.check(&Author::Agent { role }, category).is_ok()
         && category != ToolCategory::Media
@@ -186,6 +203,14 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         Args::of(args, rate)?
     };
     let Some(category) = spec.category else {
+        if tool != "ask_user" {
+            // The host serves these for its own turns.
+            return Err(ToolError(if ctx.external {
+                "Every tool is already in your list; call it directly.".into()
+            } else {
+                format!("`{tool}` needs a tool name")
+            }));
+        }
         if ctx.external {
             return Err(ToolError(
                 "ask_user is for the editor's own chat; ask in your own conversation instead."
@@ -212,7 +237,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
     if permission == Permission::NeedsApproval {
         return approval::request(ctx, tool, category, &args).map(Into::into);
     }
-    match tool {
+    match internal(tool, &args)? {
         "get_timeline" => read::get_timeline(ctx, &args),
         "get_selection" => read::get_selection(ctx),
         "list_media" => read::list_media(ctx, &args),
@@ -241,9 +266,37 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
 
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),
-        _ if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
-        _ => edit::serve(ctx, tool, &args),
+        tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
+        tool => edit::serve(ctx, tool, &args),
     }
+}
+
+/// The handler behind a call: listed tools fold their siblings in behind
+/// flags (`set_mask` with `remove` is `remove_mask`), so fewer schemas are
+/// sent while the handlers stay one per operation.
+fn internal<'a>(tool: &'a str, args: &Args) -> Result<&'a str, ToolError> {
+    let flag = |key| args.opt_bool(key).map(|b| b == Some(true));
+    Ok(match tool {
+        "view_range" if flag("detail")? => "view_detail",
+        "set_keyframe" if flag("remove")? => "remove_keyframe",
+        "set_mask" if flag("remove")? => "remove_mask",
+        "set_effect_keyframe" if flag("remove")? => "remove_effect_keyframe",
+        "set_transition" if flag("remove")? => "remove_transition",
+        "set_primary" if !args.has("clips") => "set_timeline_grade",
+        "set_effect" if flag("remove")? => "remove_effect",
+        "set_effect" if args.has("index") => {
+            if ["params", "reset_params", "enabled"]
+                .iter()
+                .any(|k| args.has(k))
+            {
+                return Err(ToolError(
+                    "Move an effect (`index`) in a call of its own, without other changes.".into(),
+                ));
+            }
+            "move_effect"
+        }
+        _ => tool,
+    })
 }
 
 /// Change sets of external clients are titled so the user knows where they
