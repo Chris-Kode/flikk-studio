@@ -92,12 +92,17 @@ name (float; int and choice → int; bool; color → vec4; point → vec2; image
 → `vec4 image_<name>(vec2 uv)`).
 
 HTML: a document or fragment on a transparent page at the sequence size in \
-CSS px. The engine owns the clock: CSS animations, Web Animations, rAF and \
-timers follow clip time. Parameters arrive as `{{name}}` (text escaped), \
-CSS variables `--name` on :root (also `--duration`, `--width`, \
-`--height`) and `window.koo.params`; `window.kooRender(time)` is called \
-per frame if defined. Time an exit with \
-`animation-delay: calc(var(--duration) * 1s - 0.4s)`.";
+CSS px. Animate with GSAP 3.15, preloaded as `gsap` with SplitText, \
+CustomEase, DrawSVG, MorphSVG, MotionPath, Text and ScrambleText \
+registered; never load it from a CDN. Build the animation in \
+`window.kooTimeline = (koo) => { gsap.timeline()... }`: it reruns when \
+parameters or the clip length change, so read `koo.params` there and \
+place the exit at `koo.duration - 0.5`; what it creates starts at clip \
+time 0. Write unit strings with a leading digit (`'0.6em'`). Parameters \
+also arrive as `{{name}}` (text escaped) and CSS variables `--name` on \
+:root (also `--duration`, `--width`, `--height`). The engine owns the \
+clock: CSS animations, rAF and timers follow clip time too, and \
+`window.kooRender(time)` is called per frame if defined.";
 
 const BUILDER: &str = "\
 Role: builder. You help the user shape how the editor works for them: style \

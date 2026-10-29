@@ -46,8 +46,8 @@
 //! The code is an HTML document or fragment rendered with a transparent
 //! background at the sequence size (e.g. 1920 × 1080 CSS px), then scaled to
 //! the output. The engine owns the clock, so frames are deterministic:
-//! - CSS animations and transitions and the Web Animations API are paused
-//!   and seeked to the clip time;
+//! - GSAP timelines, CSS animations and transitions and the Web Animations
+//!   API are paused and seeked to the clip time;
 //! - `requestAnimationFrame`, `performance.now()`, `Date.now()` and timers
 //!   follow the clip clock;
 //! - `window.koo = { time, duration, progress, width, height, params }` is
@@ -64,6 +64,18 @@
 //! `<img src>`). `:root` also gets `--duration`, `--width` and `--height`
 //! (unitless), so CSS can schedule an exit animation with
 //! `animation-delay: calc(var(--duration) * 1s - 0.4s)`.
+//!
+//! GSAP 3.15 is preloaded as `gsap`, with SplitText, CustomEase,
+//! CustomBounce, CustomWiggle, EasePack, TextPlugin, ScrambleTextPlugin,
+//! DrawSVGPlugin, MorphSVGPlugin, MotionPathPlugin, Physics2DPlugin and
+//! PhysicsPropsPlugin registered. Build the animation in
+//! `window.kooTimeline = (koo) => { ... }`: the engine runs it before the
+//! first frame, and reverts and reruns it when parameters, duration or
+//! canvas change and when seeking back, so it may read `koo.params` and
+//! `koo.duration` (an exit placed at `koo.duration - 0.5`). What it creates
+//! starts at clip time 0; a function it returns runs before each rerun.
+//! GSAP code outside it runs once, at load. Unit strings need a leading
+//! digit (`'0.6em'`): GSAP reads `'.6em'` as pixels.
 
 mod shaders;
 mod templates;
