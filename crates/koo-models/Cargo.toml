@@ -8,6 +8,11 @@ edition.workspace = true
 [features]
 # Voice activity and transcription, run by whisper.cpp.
 whisper = ["dep:whisper-rs"]
+# whisper.cpp on the GPU, with the CPU when the machine has none. Each one
+# needs its SDK at build time: Metal (Xcode), Vulkan (the Vulkan SDK, or
+# `glslc` and the Vulkan headers).
+metal = ["whisper-rs?/metal"]
+vulkan = ["whisper-rs?/vulkan"]
 # Word timing, run by ONNX Runtime, which is downloaded and linked
 # statically at build time.
 aligner = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]

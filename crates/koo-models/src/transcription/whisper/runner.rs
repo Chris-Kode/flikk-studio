@@ -1,7 +1,7 @@
 //! Whisper hearing each stretch of speech on its own, the longest first,
 //! and its tokens put together into words.
 
-use super::config::MAX_THREADS;
+use super::config::{GPU, MAX_THREADS};
 use crate::transcription::{Progress, Transcribed, Transcriber};
 use crate::{ModelFile, SPEECH_RATE};
 use anyhow::{Context, Result};
@@ -38,7 +38,13 @@ impl Whisper {
         }
         let model = self.file.locate()?;
         let path = model.to_str().context("model path is not valid UTF-8")?;
-        let loaded = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+        // Flash attention is faster on the GPU; it rules out DTW
+        // timestamps, which are off anyway.
+        let params = WhisperContextParameters {
+            flash_attn: GPU,
+            ..WhisperContextParameters::default()
+        };
+        let loaded = WhisperContext::new_with_params(path, params)
             .with_context(|| format!("could not load Whisper model {}", model.display()))?;
         let loaded = Arc::new(loaded);
         *ctx = Some(loaded.clone());
