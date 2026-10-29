@@ -59,9 +59,9 @@ impl InspectorPanel {
         }
     }
 
-    /// Transform with keyframe toggles, then the clip's keyframes. Lettering
-    /// (captions, titles) has no crop, flip, blend mode or corner pin: the
-    /// render cannot burn them in.
+    /// Transform with keyframe toggles, masks, then the clip's keyframes.
+    /// Lettering (captions, titles) has no crop, flip, blend mode, corner
+    /// pin or masks: the render cannot burn them in.
     pub(super) fn transform_view(
         &mut self,
         clip: &Clip,
@@ -103,6 +103,7 @@ impl InspectorPanel {
             .when(!lettering, |s| s.child(self.blend_row(&clip, cx)));
         let crop = (!lettering).then(|| section("Crop", cx).children(crop_rows));
         let pin = (!lettering).then(|| section("Corner pin", cx).children(pin_rows));
+        let masks = (!lettering).then(|| self.masks_view(&clip, window, cx));
         let list = (!frames.is_empty()).then(|| self.keyframe_list(&clip, frames, at, frame, cx));
         v_flex()
             .gap_4()
@@ -110,6 +111,7 @@ impl InspectorPanel {
             .child(composite)
             .children(crop)
             .children(pin)
+            .children(masks)
             .children(list)
             .into_any_element()
     }

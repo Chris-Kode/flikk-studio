@@ -14,11 +14,13 @@
 //! removes items, and several move, scale and turn as one. The view zooms (Fit or a
 //! fixed size, scroll with Ctrl/Cmd) and pans (scroll or middle-drag), so
 //! handles outside the frame stay in reach. The corner-pin toggle makes a
-//! picture's corners move one by one.
+//! picture's corners move one by one; mask mode shows and edits the
+//! selected picture's masks ([`masks`]).
 
 mod audio;
 mod cache;
 mod gizmo;
+mod masks;
 mod player;
 
 use super::timeline::glyph::{Glyph, glyph};
@@ -68,6 +70,7 @@ actions!(
         NudgeItemUpMore,
         NudgeItemDownMore,
         Deselect,
+        RemoveMask,
     ]
 );
 
@@ -89,6 +92,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", NudgeItemUpMore, g),
         KeyBinding::new("shift-down", NudgeItemDownMore, g),
         KeyBinding::new("escape", Deselect, g),
+        KeyBinding::new("delete", RemoveMask, g),
+        KeyBinding::new("backspace", RemoveMask, g),
     ]);
 }
 const CONTROLS_HEIGHT: f32 = 30.;
@@ -174,6 +179,8 @@ pub struct ViewerPanel {
     ahead: Option<(Request, Player)>,
     /// Picking and transforming items on the frame.
     gizmo: Gizmo,
+    /// Drawing and editing the selected picture's masks.
+    masks: masks::MaskEditor,
     /// A layout is being made for this frame.
     laying_out: Option<Request>,
     /// Device pixels per sequence pixel; `None` fits the frame to the panel.
@@ -212,6 +219,7 @@ impl ViewerPanel {
             shift: Arc::new(AtomicU8::new(0)),
             ahead: None,
             gizmo: Gizmo::default(),
+            masks: masks::MaskEditor::default(),
             laying_out: None,
             zoom: None,
             pan: Point::default(),
@@ -480,6 +488,10 @@ impl ViewerPanel {
             return;
         }
         self.pending_pick = None;
+        if self.masks.on {
+            self.mask_press(ev, &screen, under, cx);
+            return;
+        }
         let alt = ev.modifiers.alt;
         let mut press = Press {
             under: under.clone(),
@@ -589,6 +601,64 @@ impl ViewerPanel {
         cx.notify();
     }
 
+    /// A press in mask mode: on the selected picture's masks, else picking
+    /// another item (no transform).
+    fn mask_press(
+        &mut self,
+        ev: &MouseDownEvent,
+        screen: &Screen,
+        under: Vec<koo_core::ClipId>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.read(cx);
+        let (playhead, request) = (state.playhead, self.requested);
+        let editable = state.preview.is_none();
+        let selected = state.selection.clips.clone();
+        let shape = self
+            .gizmo
+            .active(&selected, request)
+            .filter(|s| !s.lettering && editable);
+        let commands = shape.and_then(|shape| {
+            let project = self.state.read(cx).bus.project();
+            self.masks
+                .press(ev.position, ev.modifiers, screen, project, &shape, playhead)
+        });
+        match commands {
+            Some(commands) if !commands.is_empty() => {
+                self.state
+                    .update(cx, |s, cx| s.edit_batch(commands, "set_masks", cx));
+            }
+            Some(_) => {}
+            None => {
+                let pick: Vec<_> = under.first().copied().into_iter().collect();
+                if pick.first() != selected.first() {
+                    self.masks.cancel();
+                    self.masks.selected = None;
+                    self.state.update(cx, |s, cx| s.select_clips(pick, cx));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove the picked mask; whether there was one.
+    fn remove_mask(&mut self, cx: &mut Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        if !self.masks.on || state.preview.is_some() {
+            return false;
+        }
+        let Some(shape) = self.gizmo.active(&state.selection.clips, self.requested) else {
+            return false;
+        };
+        let commands = self.masks.remove_selected(state.bus.project(), shape.clip);
+        if commands.is_empty() {
+            return false;
+        }
+        self.state
+            .update(cx, |s, cx| s.edit_batch(commands, "set_masks", cx));
+        true
+    }
+
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         if let Some((from, pan)) = self.panning {
             self.pan = pan + (ev.position - from);
@@ -596,6 +666,21 @@ impl ViewerPanel {
             return;
         }
         let screen = self.screen(cx);
+        if self.masks.dragging() {
+            if ev.dragging()
+                && let Some(commands) = self.masks.drag_to(ev.position, ev.modifiers, &screen)
+            {
+                self.state.update(cx, |s, cx| s.show_live(&commands, cx));
+                cx.notify();
+            }
+            return;
+        }
+        if self.masks.on {
+            if self.gizmo.hover.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
         let state = self.state.read(cx);
         let (playhead, request) = (state.playhead, self.requested);
         if self.gizmo.dragging() {
@@ -643,6 +728,18 @@ impl ViewerPanel {
             return;
         }
         let pressed = self.pressed.take();
+        if self.masks.dragging() {
+            let commands = self.masks.end();
+            self.state.update(cx, |s, cx| {
+                if commands.is_empty() {
+                    s.show_live(&[], cx);
+                } else {
+                    s.edit_batch(commands, "set_masks", cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         if !self.gizmo.dragging() {
             return;
         }
@@ -872,6 +969,58 @@ impl ViewerPanel {
                 })
             });
         let viewer = cx.entity();
+        let masking = self.masks.on;
+        let mask_toggle = Button::new("viewer-masks")
+            .ghost()
+            .xsmall()
+            .toggled(masking)
+            .tooltip("Masks")
+            .child(glyph(
+                Glyph::Mask,
+                px(13.),
+                if masking { fg } else { muted },
+            ))
+            .on_click(move |_, _, cx| {
+                viewer.update(cx, |this, cx| {
+                    this.masks.on = !this.masks.on;
+                    this.masks.cancel();
+                    this.masks.tool = None;
+                    if this.masks.on {
+                        this.gizmo.corner_pin = false;
+                    }
+                    cx.notify();
+                })
+            });
+        let tools = masking.then(|| {
+            let tool = self.masks.tool;
+            let viewer = cx.entity();
+            h_flex().gap_1().children(
+                [
+                    (masks::Tool::Rectangle, Glyph::MaskRect, "Rectangle"),
+                    (masks::Tool::Ellipse, Glyph::MaskEllipse, "Ellipse"),
+                    (masks::Tool::Pen, Glyph::Pen, "Pen"),
+                ]
+                .into_iter()
+                .map(|(t, g, tip)| {
+                    let on = tool == Some(t);
+                    let viewer = viewer.clone();
+                    Button::new(SharedString::from(format!("viewer-mask-{tip}")))
+                        .ghost()
+                        .xsmall()
+                        .toggled(on)
+                        .tooltip(tip)
+                        .child(glyph(g, px(13.), if on { fg } else { muted }))
+                        .on_click(move |_, _, cx| {
+                            viewer.update(cx, |this, cx| {
+                                this.masks.cancel();
+                                this.masks.tool = (this.masks.tool != Some(t)).then_some(t);
+                                cx.notify();
+                            })
+                        })
+                }),
+            )
+        });
+        let viewer = cx.entity();
         let pin = self.gizmo.corner_pin;
         let pin_toggle = Button::new("viewer-corner-pin")
             .ghost()
@@ -886,6 +1035,10 @@ impl ViewerPanel {
             .on_click(move |_, _, cx| {
                 viewer.update(cx, |this, cx| {
                     this.gizmo.corner_pin = !this.gizmo.corner_pin;
+                    if this.gizmo.corner_pin {
+                        this.masks.on = false;
+                        this.masks.cancel();
+                    }
                     cx.notify();
                 })
             });
@@ -929,6 +1082,8 @@ impl ViewerPanel {
                     )
                     .child(div().flex_none().child(tc))
             }))
+            .children(tools)
+            .child(mask_toggle)
             .child(pin_toggle)
             .child(safe_toggle)
             .child(zoom_menu)
@@ -964,9 +1119,25 @@ impl Render for ViewerPanel {
                 &state.selection.clips,
                 state.playhead,
                 self.requested,
-                state.preview.is_none(),
+                state.preview.is_none() && !self.masks.on,
             )
         });
+        let mask_overlay = (!state.playing && self.masks.on)
+            .then(|| {
+                let shape = self
+                    .gizmo
+                    .active(&state.selection.clips, self.requested)
+                    .filter(|s| !s.lettering)?;
+                let screen = Screen {
+                    frame: self.frame_rect.get(),
+                    sequence,
+                };
+                Some(
+                    self.masks
+                        .overlay(state.bus.project(), &shape, state.playhead, &screen),
+                )
+            })
+            .flatten();
         let theme = cx.theme();
         let bg = theme.background;
         let colors = [
@@ -1019,6 +1190,10 @@ impl Render for ViewerPanel {
                         let screen = Screen { frame, sequence };
                         gizmo::paint(overlay, &screen, colors, window);
                     }
+                    if let Some(overlay) = &mask_overlay {
+                        let screen = Screen { frame, sequence };
+                        masks::paint(overlay, &screen, colors[1], window);
+                    }
                 });
                 let e = entity.clone();
                 window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
@@ -1038,6 +1213,8 @@ impl Render for ViewerPanel {
 
         let cursor = if self.panning.is_some() {
             CursorStyle::ClosedHand
+        } else if self.masks.on && self.masks.tool.is_some() {
+            CursorStyle::Crosshair
         } else {
             gizmo::cursor(self.gizmo.hover, self.gizmo.dragging())
         };
@@ -1104,7 +1281,17 @@ impl Render for ViewerPanel {
             .on_action(cx.listener(|this, _: &NudgeItemRightMore, _, cx| this.nudge([10., 0.], cx)))
             .on_action(cx.listener(|this, _: &NudgeItemUpMore, _, cx| this.nudge([0., -10.], cx)))
             .on_action(cx.listener(|this, _: &NudgeItemDownMore, _, cx| this.nudge([0., 10.], cx)))
+            .on_action(cx.listener(|this, _: &RemoveMask, _, cx| {
+                if !this.remove_mask(cx) {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| {
+                if this.masks.drawing() {
+                    this.masks.cancel();
+                    cx.notify();
+                    return;
+                }
                 this.gizmo.cancel();
                 this.state.update(cx, |s, cx| {
                     s.show_live(&[], cx);

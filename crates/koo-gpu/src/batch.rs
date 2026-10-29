@@ -20,8 +20,8 @@ use std::sync::mpsc;
 /// Readback buffers kept for frames in flight.
 const MAX_READBACKS: usize = 4;
 
-/// Premultiplying, unpremultiplying, cross-fading and swapping red and blue,
-/// one pixel at a time.
+/// Premultiplying, unpremultiplying, cross-fading, swapping red and blue
+/// and masking, one pixel at a time.
 const CONVERT: &str = r#"
 struct Op {
     mode: u32,
@@ -51,8 +51,28 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             return vec4<f32>(min(x.rgb / x.a, vec3<f32>(1.0)), x.a);
         }
         case 2u: { return mix(x, textureLoad(b, p, 0), op.t); }
+        case 4u: { return mask(pos.xy); }
         default: { return x.bgra; }
     }
+}
+
+// The picture `b` with its alpha times the mask `a`'s, sampled bilinearly
+// at the same uv (koo_core::mask::apply).
+fn mask(pos: vec2<f32>) -> vec4<f32> {
+    let src = textureLoad(b, vec2<i32>(pos), 0);
+    let size = vec2<f32>(textureDimensions(b));
+    let msize = vec2<i32>(textureDimensions(a));
+    let t = pos / size * vec2<f32>(msize) - 0.5;
+    let base = floor(t);
+    let k = t - base;
+    let c = vec2<i32>(base);
+    let last = msize - vec2<i32>(1, 1);
+    let m00 = textureLoad(a, clamp(c, vec2<i32>(0), last), 0).a;
+    let m10 = textureLoad(a, clamp(c + vec2<i32>(1, 0), vec2<i32>(0), last), 0).a;
+    let m01 = textureLoad(a, clamp(c + vec2<i32>(0, 1), vec2<i32>(0), last), 0).a;
+    let m11 = textureLoad(a, clamp(c + vec2<i32>(1, 1), vec2<i32>(0), last), 0).a;
+    let m = mix(mix(m00, m10, k.x), mix(m01, m11, k.x), k.y);
+    return vec4<f32>(src.rgb, src.a * m);
 }
 "#;
 
@@ -60,6 +80,7 @@ const PREMULTIPLY: u32 = 0;
 const UNPREMULTIPLY: u32 = 1;
 const MIX: u32 = 2;
 const SWAP: u32 = 3;
+const MASK: u32 = 4;
 
 /// The convert program, built with the engine.
 pub(crate) struct Converter {
@@ -404,6 +425,10 @@ impl FxBatch for Batch<'_> {
         }
         self.spare.extend(canvases);
         Ok(self.push(output))
+    }
+
+    fn mask(&mut self, picture: Surface, mask: Surface) -> ServiceResult<Surface> {
+        self.convert(MASK, mask, picture, 0.0)
     }
 
     fn premultiply(&mut self, surface: Surface) -> ServiceResult<Surface> {

@@ -2,7 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
-use super::layout;
+use super::{layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
 use koo_core::model::{BlendMode, ClipColor, Property};
@@ -631,6 +631,54 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "reason": reason()
                 }),
                 &[],
+            ),
+        ),
+        spec(
+            "set_mask",
+            Some(Transform),
+            "Propose a mask on a picture clip (video, image, overlay, generator), or a change to one given by `mask`: it keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
+                    "shape": {
+                        "type": "object",
+                        "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), `smooth` draws a curve through them. Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                        "properties": {
+                            "type": { "type": "string", "enum": masks::SHAPES },
+                            "center": numbers(2, "[x, y]"),
+                            "size": numbers(2, "[width, height]"),
+                            "rotation": number("Degrees clockwise"),
+                            "roundness": number("Rectangle corners, 0..1"),
+                            "points": { "type": "array", "items": numbers(2, "[x, y]") },
+                            "smooth": boolean("A curve through the points")
+                        }
+                    },
+                    "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
+                    "mode": one_of(&masks::MODES, "How it combines with the masks before it (default add)"),
+                    "invert": boolean("Cut the shape away instead of keeping it"),
+                    "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.03)"),
+                    "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height"),
+                    "opacity": number("0..1"),
+                    "enabled": boolean("Off keeps the mask but ignores it"),
+                    "at": time("Timeline time to keyframe the shape at"),
+                    "reason": reason()
+                }),
+                &["clip"],
+            ),
+        ),
+        spec(
+            "remove_mask",
+            Some(Transform),
+            "Propose removing a mask from a clip, or all of them.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "mask": string("Mask id (from get_clip)"),
+                    "all": boolean("Remove every mask on the clip"),
+                    "reason": reason()
+                }),
+                &["clip"],
             ),
         ),
         spec(

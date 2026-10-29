@@ -12,6 +12,7 @@ pub mod catalog;
 mod edit;
 mod fx;
 mod layout;
+mod masks;
 mod preview;
 mod read;
 mod view;

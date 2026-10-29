@@ -28,6 +28,8 @@ pub enum Key {
     /// Corner pin, corner by corner (top-left, top-right, bottom-right,
     /// bottom-left), x then y: `corner × 2 + axis`.
     Pin(usize),
+    /// A value of the clip's n-th mask.
+    Mask(usize, MaskField),
     /// The selected transition's length in seconds.
     TransitionDuration,
     Exposure,
@@ -46,6 +48,52 @@ pub enum Key {
     DuckReduction,
     DuckAttack,
     DuckRelease,
+}
+
+/// A slider of a mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MaskField {
+    Feather,
+    Expansion,
+    Opacity,
+    /// Rectangles and ellipses.
+    Rotation,
+    /// Rectangles.
+    Roundness,
+}
+
+impl MaskField {
+    pub fn get(self, state: &koo_core::mask::MaskState) -> f32 {
+        use koo_core::mask::MaskShape;
+        match (self, &state.shape) {
+            (Self::Feather, _) => state.feather,
+            (Self::Expansion, _) => state.expansion,
+            (Self::Opacity, _) => state.opacity,
+            (
+                Self::Rotation,
+                MaskShape::Rectangle { rotation_deg, .. } | MaskShape::Ellipse { rotation_deg, .. },
+            ) => *rotation_deg,
+            (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => *roundness,
+            _ => 0.0,
+        }
+    }
+
+    pub fn set(self, state: &mut koo_core::mask::MaskState, v: f32) {
+        use koo_core::mask::MaskShape;
+        match (self, &mut state.shape) {
+            (Self::Feather, _) => state.feather = v.max(0.0),
+            (Self::Expansion, _) => state.expansion = v,
+            (Self::Opacity, _) => state.opacity = v.clamp(0.0, 1.0),
+            (
+                Self::Rotation,
+                MaskShape::Rectangle { rotation_deg, .. } | MaskShape::Ellipse { rotation_deg, .. },
+            ) => *rotation_deg = v,
+            (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => {
+                *roundness = v.clamp(0.0, 1.0)
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Range and display of a key. Sliders and fields work in display units
@@ -104,6 +152,13 @@ impl Key {
                 100.,
                 0.,
             ),
+            Key::Mask(_, field) => match field {
+                MaskField::Feather => s("Feather", 0., 50., 0.1, 1, 100., 0.),
+                MaskField::Expansion => s("Expand", -50., 50., 0.1, 1, 100., 0.),
+                MaskField::Opacity => s("Opacity", 0., 100., 1., 0, 100., 1.),
+                MaskField::Rotation => s("Rotation", -180., 180., 0.5, 1, 1., 0.),
+                MaskField::Roundness => s("Round", 0., 100., 1., 0, 100., 0.),
+            },
             Key::TransitionDuration => s("Duration", 0.1, 5., 0.05, 2, 1., 1.),
             Key::Exposure => s("Exposure", -4., 4., 0.01, 2, 1., 0.),
             Key::Contrast => s("Contrast", 0., 200., 1., 0, 100., 1.),

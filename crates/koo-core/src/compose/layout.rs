@@ -2,7 +2,7 @@
 //! in the viewer and for the agent's `get_layout`: each layer's placement,
 //! where it rests before its transform, and the part of it with anything
 //! drawn (the opaque part of a logo, the lower third inside a full-frame
-//! generator).
+//! generator, what its masks keep).
 //!
 //! Several layers move as one through a [`GroupMove`]: a shift, uniform
 //! scale and turn about a pivot, which [`GroupMove::transform`] turns back
@@ -265,7 +265,12 @@ fn picture_shape(
     let fit = (canvas.0 as f32 / size.0.max(1) as f32).min(canvas.1 as f32 / size.1.max(1) as f32);
     // Drawn part, in the picture's own uv, cut by the crop, then flipped
     // into the placement's uv.
-    let [x0, y0, x1, y1] = drawn.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    let [mut x0, mut y0, mut x1, mut y1] = drawn.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    // Masks that only add shapes leave their bounds at most.
+    let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
+    if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect) {
+        (x0, y0, x1, y1) = (x0.max(k0), y0.max(l0), x1.min(k1), y1.min(l1));
+    }
     let [cl, ct, cr, cb] = place.crop;
     let (mut u0, mut v0, mut u1, mut v1) =
         (x0.max(cl), y0.max(ct), x1.min(1.0 - cr), y1.min(1.0 - cb));

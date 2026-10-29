@@ -18,7 +18,9 @@
 //!    first resampled to its fitted size in the output frame. Programs
 //!    measure `iResolution` in sequence pixels whatever size they run at,
 //!    so a blur radius means the same in a small viewer and in any render.
-//! 4. **Transform** and **blend**: fitted inside the canvas (as the export
+//! 4. **Masks**: the clip's masks, drawn in the picture's own uv
+//!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
+//! 5. **Transform** and **blend**: fitted inside the canvas (as the export
 //!    graph does), stretched and scaled, skewed and rotated clockwise about
 //!    its anchor, which lands at the centre plus `position` × canvas size
 //!    ([`placement`]), cropped, flipped, faded by opacity and
@@ -216,7 +218,8 @@ fn black((w, h): (u32, u32)) -> Frame {
 
 /// Whether `range` uses anything the FFmpeg graph cannot draw exactly:
 /// effects, generators, transitions, non-normal blend modes, crop, flip,
-/// stretch, skew, an anchor off the centre, a corner pin or retimed media.
+/// stretch, skew, an anchor off the centre, a corner pin, masks or retimed
+/// media.
 pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
     picture_tracks(project).any(|track| {
         fx::transitions(track)
@@ -235,6 +238,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                         || tf.crop.iter().any(|v| *v > 0.0)
                         || is_free_form(tf)
                         || tf.is_pinned()
+                        || crate::mask::any_enabled(&c.masks)
                         || c.keyframes.iter().any(|k| {
                             Property::PIN.contains(&k.property)
                                 || matches!(
@@ -463,8 +467,24 @@ impl Ctx<'_, '_> {
             return None;
         }
         let picture = self.picture(clip, t, None)?;
-        let place = placement(&tf, self.batch.size(picture), self.size);
+        let size = self.batch.size(picture);
+        let picture = self.masked(clip, picture, t).unwrap_or(picture);
+        let place = placement(&tf, size, self.size);
         Some((picture, place))
+    }
+
+    /// `picture` (of `clip` at `t`) through the clip's masks; `None` when
+    /// it has none.
+    fn masked(&mut self, clip: &Clip, picture: Surface, t: Time) -> Option<Surface> {
+        if !crate::mask::any_enabled(&clip.masks) {
+            return None;
+        }
+        let (w, h) = self.batch.size(picture);
+        let (mw, mh) = crate::mask::raster_size((w, h));
+        let aspect = w.max(1) as f32 / h.max(1) as f32;
+        let raster = crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh)?;
+        let mask = self.batch.upload(&raster).ok()?;
+        self.batch.mask(picture, mask).ok()
     }
 
     fn picture(&mut self, clip: &Clip, t: Time, limit: Option<usize>) -> Option<Surface> {

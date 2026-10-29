@@ -298,6 +298,9 @@ pub trait FxBatch {
         background: [u8; 4],
         layers: &[(Surface, Placement)],
     ) -> ServiceResult<Surface>;
+    /// `picture` with its alpha multiplied by `mask`'s, sampled bilinearly
+    /// at the same uv (any size), as [`crate::mask::apply`].
+    fn mask(&mut self, picture: Surface, mask: Surface) -> ServiceResult<Surface>;
     /// Color multiplied by alpha.
     fn premultiply(&mut self, surface: Surface) -> ServiceResult<Surface>;
     /// Premultiplied color made straight again.

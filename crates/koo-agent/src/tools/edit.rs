@@ -136,6 +136,8 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             }]
         }
         "set_transform" => return set_transform(ctx, args, &reason),
+        "set_mask" => return super::masks::set_mask(ctx, args, &reason),
+        "remove_mask" => super::masks::remove_mask(ctx, args)?,
         "place" => return super::layout::place(ctx, args, &reason),
         "animate" => super::layout::animate(ctx, args)?,
 
@@ -426,7 +428,7 @@ fn off_words(ctx: &ToolCtx, args: &Args, t: Time) -> ToolResultOf<(Time, Option<
 }
 
 /// Append `notes` to a proposal's result.
-fn with_notes(mut done: Done, notes: impl IntoIterator<Item = String>) -> Done {
+pub(super) fn with_notes(mut done: Done, notes: impl IntoIterator<Item = String>) -> Done {
     for note in notes {
         if let Some(Content::Text { text }) = done.result.content.first_mut() {
             text.push('\n');

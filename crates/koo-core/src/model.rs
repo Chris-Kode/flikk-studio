@@ -7,6 +7,7 @@
 use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
+use crate::mask::Mask;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -295,6 +296,10 @@ pub struct Clip {
     /// clip has no `transition_in`.
     #[serde(default)]
     pub transition_out: Option<Transition>,
+    /// Shapes that keep or cut away parts of the picture, in order (see
+    /// [`crate::mask`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<Mask>,
 }
 
 impl Clip {
@@ -315,6 +320,7 @@ impl Clip {
             effects: Vec::new(),
             transition_in: None,
             transition_out: None,
+            masks: Vec::new(),
         }
     }
 

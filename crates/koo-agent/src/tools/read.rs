@@ -344,6 +344,9 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         v["audio_stream"] = json!(s);
     }
     v["transform"] = super::layout::transform_json(&clip.transform);
+    if !clip.masks.is_empty() {
+        v["masks"] = super::masks::masks_json(clip);
+    }
     v["speed"] = json!(clip.speed);
     v["enabled"] = json!(clip.enabled);
     v["effects"] = clip

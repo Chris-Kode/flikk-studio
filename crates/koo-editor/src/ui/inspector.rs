@@ -10,6 +10,7 @@ mod controls;
 mod edit;
 mod effects;
 mod generator;
+mod masks;
 mod param;
 mod transition;
 
@@ -255,6 +256,24 @@ impl InspectorPanel {
                         transform,
                     });
                 }
+            }
+            Key::Mask(i, field) => {
+                let Some(clip) = clips.first() else {
+                    return none;
+                };
+                let Some(mask) = clip.masks.get(i) else {
+                    return none;
+                };
+                let at = clip_time(clip, playhead);
+                let mut now = mask.state_at(at);
+                field.set(&mut now, v);
+                let mut masks = clip.masks.clone();
+                masks[i] = mask.with_state_at(at, now);
+                commands.push(Command::SetMasks {
+                    clip: clip.id,
+                    masks,
+                });
+                label = "set_masks";
             }
             Key::TransitionDuration => {
                 let Some((clip, edge)) = state.selected_transition else {

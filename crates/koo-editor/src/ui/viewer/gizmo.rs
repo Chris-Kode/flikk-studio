@@ -27,9 +27,9 @@ use koo_core::services::Placement;
 use koo_core::{ClipId, Time};
 
 /// Side of a square handle, in screen pixels.
-const HANDLE: f32 = 8.0;
+pub(super) const HANDLE: f32 = 8.0;
 /// How far a handle reaches for the mouse, in screen pixels.
-const REACH: f32 = 7.0;
+pub(super) const REACH: f32 = 7.0;
 /// Distance of the rotate handle above the box, in screen pixels.
 const ROTATE_OFFSET: f32 = 24.0;
 /// How close an edge must come to snap, in screen pixels.
@@ -37,7 +37,7 @@ const SNAP: f32 = 6.0;
 /// Margins of the action- and title-safe areas, as a fraction of the frame.
 pub(super) const SAFE: [f32; 2] = [0.05, 0.1];
 /// Mouse travel that turns a click into a drag, in screen pixels.
-const CLICK_SLOP: f32 = 3.0;
+pub(super) const CLICK_SLOP: f32 = 3.0;
 
 /// Part of the box under the mouse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,7 +301,7 @@ fn inside(q: &[Point<Pixels>; 4], p: Point<Pixels>) -> bool {
     sign != 0.0
 }
 
-fn near(a: Point<Pixels>, b: Point<Pixels>, reach: f32) -> bool {
+pub(super) fn near(a: Point<Pixels>, b: Point<Pixels>, reach: f32) -> bool {
     f32::from(a.x - b.x).hypot(f32::from(a.y - b.y)) <= reach
 }
 
@@ -358,7 +358,7 @@ impl Gizmo {
 
     /// The selected clip's layer, with its placement as last dragged: the
     /// first selected clip laid out on this frame.
-    fn active(&self, selected: &[ClipId], request: Option<Request>) -> Option<Shape> {
+    pub fn active(&self, selected: &[ClipId], request: Option<Request>) -> Option<Shape> {
         self.selected_shapes(selected, request).into_iter().next()
     }
 

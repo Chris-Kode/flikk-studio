@@ -241,6 +241,11 @@ pub enum Command {
         property: Property,
         at: Time,
     },
+    /// Replace a picture clip's masks (shapes, edges, keyframes).
+    SetMasks {
+        clip: ClipId,
+        masks: Vec<crate::mask::Mask>,
+    },
 
     // ---- captions and titles (C1–C4)
     /// Caption style preset for a caption track (PRD C2); `None` = default.
@@ -479,9 +484,11 @@ impl Command {
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. } => ToolCategory::EditTimeline,
-            SetTransform { .. } | AddZoom { .. } | SetKeyframe { .. } | RemoveKeyframe { .. } => {
-                ToolCategory::Transform
-            }
+            SetTransform { .. }
+            | AddZoom { .. }
+            | SetKeyframe { .. }
+            | RemoveKeyframe { .. }
+            | SetMasks { .. } => ToolCategory::Transform,
             SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
                 ToolCategory::Captions
             }
