@@ -725,7 +725,7 @@ fn rgb(args: &Args, key: &str, current: [f32; 3]) -> ToolResultOf<[f32; 3]> {
 }
 
 /// `clip` and `clips` together: the clips a transform tool changes.
-fn target_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<koo_core::ClipId>> {
+pub(super) fn target_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<koo_core::ClipId>> {
     let p = ctx.project();
     let mut ids = Vec::new();
     if let Some(c) = args.opt_str("clip")? {
@@ -743,6 +743,9 @@ fn target_clips(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<koo_core::ClipId
 /// The static transform of each clip, or with `at`, the transform there:
 /// keyframed properties get a keyframe at `at`, the rest change statically.
 fn set_transform(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    if args.opt_bool("group")? == Some(true) {
+        return super::layout::transform_group(ctx, args, reason);
+    }
     let p = ctx.project();
     let at = args.opt_time("at")?;
     let relative = args.opt_bool("relative")?.unwrap_or(false);

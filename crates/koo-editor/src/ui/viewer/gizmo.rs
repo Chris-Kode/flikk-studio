@@ -7,11 +7,17 @@
 //! property with keyframes gets one at the playhead, others change the
 //! static transform. Dragging a caption moves every caption on its track
 //! the same way; with Alt, only that one.
+//!
+//! With several items selected, one box goes around what they draw: its
+//! body moves them, its corners scale and its knob turns them together
+//! about the box's centre ([`GroupMove`]), each clip's own transform
+//! changed to match, as one undo step. Group members move alone, captions
+//! included.
 
 use super::Request;
 use gpui_kit::*;
 use koo_core::command::Command;
-use koo_core::compose::{self, Shape};
+use koo_core::compose::{self, GroupMove, Shape};
 use koo_core::model::{Clip, ClipContent, Project, Property, Track, Transform};
 use koo_core::services::Placement;
 use koo_core::{ClipId, Time};
@@ -78,6 +84,28 @@ struct Drag {
     now: Transform,
 }
 
+/// A selected item moving with the group.
+struct Member {
+    clip: ClipId,
+    /// Its layer when the drag began.
+    shape: Shape,
+    /// Its transform at the playhead when the drag began.
+    start: Transform,
+}
+
+/// A drag of the group box.
+struct GroupDrag {
+    mode: Mode,
+    members: Vec<Member>,
+    /// The box when the drag began.
+    corners: [[f32; 2]; 4],
+    from: [f32; 2],
+    from_screen: Point<Pixels>,
+    moved: bool,
+    /// The move at the last mouse move.
+    now: GroupMove,
+}
+
 /// The box drawn for a layer, in sequence pixels.
 #[derive(Clone, Debug)]
 pub(super) struct Outline {
@@ -85,6 +113,8 @@ pub(super) struct Outline {
     pub anchor: [f32; 2],
     /// The selected clip's box, with handles.
     pub active: bool,
+    /// The box around several items: corners and the rotate knob only.
+    pub group: bool,
 }
 
 /// Everything painted over the program, in sequence pixels.
@@ -102,11 +132,12 @@ pub(super) struct Gizmo {
     /// Layout of a paused frame and what it was made for.
     pub shapes: Option<(Request, Vec<Shape>)>,
     drag: Option<Drag>,
+    group_drag: Option<GroupDrag>,
     pub hover: Option<Handle>,
     guides: Vec<Guide>,
     pub safe_areas: bool,
-    /// A just-dragged clip's placement, shown until a newer layout arrives.
-    held: Option<(ClipId, Placement)>,
+    /// Just-dragged clips' placements, shown until a newer layout arrives.
+    held: Vec<(ClipId, Placement)>,
 }
 
 /// Maps sequence pixels onto the screen.
@@ -197,6 +228,25 @@ fn handles(
     out
 }
 
+/// Screen positions of the group box's handles: corners and the knob.
+fn group_handles(corners: &[[f32; 2]; 4], screen: &Screen) -> Vec<(Handle, Point<Pixels>)> {
+    let mut out = vec![(Handle::Rotate, rotate_handle(corners, screen))];
+    for (i, c) in corners.iter().enumerate() {
+        out.push((Handle::Corner(i), screen.to_screen(*c)));
+    }
+    out
+}
+
+/// The corners of the box `[x0, y0, x1, y1]`.
+fn box_corners([x0, y0, x1, y1]: [f32; 4]) -> [[f32; 2]; 4] {
+    [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+}
+
+/// The centre of a box with `corners`.
+fn box_center(corners: &[[f32; 2]; 4]) -> [f32; 2] {
+    mid(corners[0], corners[2])
+}
+
 /// Whether `p` is inside the quadrilateral `q` (screen pixels); never
 /// inside a flat one.
 fn inside(q: &[Point<Pixels>; 4], p: Point<Pixels>) -> bool {
@@ -223,7 +273,7 @@ fn near(a: Point<Pixels>, b: Point<Pixels>, reach: f32) -> bool {
 
 impl Gizmo {
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.group_drag.is_some()
     }
 
     /// Shapes of the frame `request` shows, if laid out.
@@ -237,27 +287,67 @@ impl Gizmo {
     /// A newer layout arrived.
     pub fn set_shapes(&mut self, request: Request, shapes: Vec<Shape>) {
         self.shapes = Some((request, shapes));
-        if self.drag.is_none() {
-            self.held = None;
+        if !self.dragging() {
+            self.held.clear();
         }
     }
 
-    /// The selected clip's layer, with its placement as last dragged.
-    fn active(&self, selected: &[ClipId], request: Option<Request>) -> Option<Shape> {
-        let shapes = self.shapes.as_ref().map(|(_, s)| s.as_slice())?;
+    /// The selected clips' layers, in selection order, with their
+    /// placements as last dragged.
+    fn selected_shapes(&self, selected: &[ClipId], request: Option<Request>) -> Vec<Shape> {
+        let Some((_, shapes)) = self.shapes.as_ref() else {
+            return Vec::new();
+        };
         // While a drag runs or until its layout arrives, older shapes do.
         let fresh = self.shapes_for(request).is_some();
-        if !fresh && self.drag.is_none() && self.held.is_none() {
+        if !fresh && !self.dragging() && self.held.is_empty() {
+            return Vec::new();
+        }
+        selected
+            .iter()
+            .filter_map(|id| shapes.iter().find(|s| s.clip == *id))
+            .map(|shape| {
+                let mut shape = shape.clone();
+                if let Some(d) = self.drag.as_ref().filter(|d| d.clip == shape.clip) {
+                    shape.placement = shape.placed(&d.now);
+                } else if let Some(g) = &self.group_drag
+                    && let Some(m) = g.members.iter().find(|m| m.clip == shape.clip)
+                {
+                    shape.placement = m.shape.placed(&g.now.transform(&m.shape, &m.start));
+                } else if let Some((_, place)) = self.held.iter().find(|(c, _)| *c == shape.clip) {
+                    shape.placement = *place;
+                }
+                shape
+            })
+            .collect()
+    }
+
+    /// The selected clip's layer, with its placement as last dragged: the
+    /// first selected clip laid out on this frame.
+    fn active(&self, selected: &[ClipId], request: Option<Request>) -> Option<Shape> {
+        self.selected_shapes(selected, request).into_iter().next()
+    }
+
+    /// The selected layers when there are several, and the box around them.
+    fn group(
+        &self,
+        selected: &[ClipId],
+        request: Option<Request>,
+    ) -> Option<(Vec<Shape>, [[f32; 2]; 4])> {
+        let shapes = self.selected_shapes(selected, request);
+        if shapes.len() < 2 {
             return None;
         }
-        let first = selected.first()?;
-        let mut shape = shapes.iter().find(|s| s.clip == *first)?.clone();
-        if let Some(d) = self.drag.as_ref().filter(|d| d.clip == shape.clip) {
-            shape.placement = placed(&shape, &d.now);
-        } else if let Some((_, place)) = self.held.filter(|(c, _)| *c == shape.clip) {
-            shape.placement = place;
-        }
-        Some(shape)
+        let corners = match &self.group_drag {
+            Some(g) => g.corners.map(|c| g.now.apply(c)),
+            None => box_corners(compose::group_bounds(&shapes)?),
+        };
+        Some((shapes, corners))
+    }
+
+    /// Whether several selected items share one box.
+    pub fn grouped(&self, selected: &[ClipId], request: Option<Request>) -> bool {
+        self.selected_shapes(selected, request).len() >= 2
     }
 
     /// The selected clip's current transform at the playhead.
@@ -284,6 +374,26 @@ impl Gizmo {
         editable: bool,
     ) -> Overlay {
         let mut outlines = Vec::new();
+        if let Some((shapes, corners)) = self.group(selected, request) {
+            outlines.extend(shapes.iter().map(|s| Outline {
+                corners: s.corners(),
+                anchor: s.placement.center,
+                active: false,
+                group: false,
+            }));
+            outlines.push(Outline {
+                corners,
+                anchor: box_center(&corners),
+                active: true,
+                group: true,
+            });
+            return Overlay {
+                outlines,
+                guides: self.guides.clone(),
+                safe: self.safe_areas,
+                editable,
+            };
+        }
         if let Some(shape) = self.active(selected, request)
             && let Some(tf) = self.active_transform(project, shape.clip, playhead)
         {
@@ -291,6 +401,7 @@ impl Gizmo {
                 corners: shape.corners(),
                 anchor: anchor_point(&shape, &tf),
                 active: true,
+                group: false,
             });
         }
         if let Some(shapes) = self.shapes_for(request) {
@@ -302,6 +413,7 @@ impl Gizmo {
                     corners: s.corners(),
                     anchor: s.placement.center,
                     active: false,
+                    group: false,
                 });
             }
         }
@@ -323,6 +435,15 @@ impl Gizmo {
         playhead: Time,
         request: Option<Request>,
     ) -> Option<Handle> {
+        if let Some((_, corners)) = self.group(selected, request) {
+            for (handle, at) in group_handles(&corners, screen) {
+                if near(at, p, REACH) {
+                    return Some(handle);
+                }
+            }
+            let quad = corners.map(|c| screen.to_screen(c));
+            return inside(&quad, p).then_some(Handle::Body);
+        }
         let shape = self.active(selected, request)?;
         let tf = self.active_transform(project, shape.clip, playhead)?;
         let corners = shape.corners();
@@ -388,7 +509,7 @@ impl Gizmo {
             Handle::Anchor => Mode::Move,
         };
         let start = c.transform_at(clip_time(c, playhead));
-        self.held = None;
+        self.held.clear();
         self.drag = Some(Drag {
             mode,
             clip,
@@ -403,6 +524,54 @@ impl Gizmo {
         true
     }
 
+    /// Start dragging `handle` of the box around the `selected` items from
+    /// `p`. Items on locked tracks stay put.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_group(
+        &mut self,
+        handle: Handle,
+        p: Point<Pixels>,
+        screen: &Screen,
+        project: &Project,
+        selected: &[ClipId],
+        playhead: Time,
+        request: Option<Request>,
+    ) -> bool {
+        let Some((shapes, corners)) = self.group(selected, request) else {
+            return false;
+        };
+        let mode = match handle {
+            Handle::Corner(i) => Mode::Scale(i),
+            Handle::Rotate => Mode::Rotate,
+            _ => Mode::Move,
+        };
+        let members: Vec<Member> = shapes
+            .into_iter()
+            .filter_map(|shape| {
+                let (track, c) = project.timeline.clip(shape.clip)?;
+                (!track.locked).then(|| Member {
+                    clip: shape.clip,
+                    start: c.transform_at(clip_time(c, playhead)),
+                    shape,
+                })
+            })
+            .collect();
+        if members.is_empty() {
+            return false;
+        }
+        self.held.clear();
+        self.group_drag = Some(GroupDrag {
+            mode,
+            members,
+            now: GroupMove::about(box_center(&corners)),
+            corners,
+            from: screen.to_sequence(p),
+            from_screen: p,
+            moved: false,
+        });
+        true
+    }
+
     /// Follow the mouse; the commands that show the drag live, if it moved.
     pub fn drag_to(
         &mut self,
@@ -412,6 +581,9 @@ impl Gizmo {
         project: &Project,
         playhead: Time,
     ) -> Option<Vec<Command>> {
+        if self.group_drag.is_some() {
+            return self.group_drag_to(p, modifiers, screen, project, playhead);
+        }
         let others: Vec<[f32; 4]> = self
             .shapes
             .as_ref()
@@ -436,17 +608,94 @@ impl Gizmo {
         Some(transform_commands(clip, playhead, &d.now))
     }
 
+    /// [`Self::drag_to`] for the group box.
+    fn group_drag_to(
+        &mut self,
+        p: Point<Pixels>,
+        modifiers: Modifiers,
+        screen: &Screen,
+        project: &Project,
+        playhead: Time,
+    ) -> Option<Vec<Command>> {
+        let safe = self.safe_areas;
+        let g = self.group_drag.as_mut()?;
+        let others: Vec<[f32; 4]> = self
+            .shapes
+            .as_ref()
+            .map(|(_, s)| s.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(|s| g.members.iter().all(|m| m.clip != s.clip))
+            .map(Shape::bounds)
+            .collect();
+        if !g.moved && !near(p, g.from_screen, CLICK_SLOP) {
+            g.moved = true;
+        }
+        if !g.moved {
+            return None;
+        }
+        let m = screen.to_sequence(p);
+        let pivot = box_center(&g.corners);
+        let mut now = GroupMove::about(pivot);
+        let mut guides = Vec::new();
+        match g.mode {
+            Mode::Scale(i) => {
+                let c0 = sub(g.corners[i], pivot);
+                let len = dot(c0, c0);
+                if len > 1e-6 {
+                    now.scale = (dot(sub(m, pivot), c0) / len).max(0.01);
+                }
+            }
+            Mode::Rotate => {
+                let angle = |p: [f32; 2]| (p[1] - pivot[1]).atan2(p[0] - pivot[0]).to_degrees();
+                let mut turn = angle(m) - angle(g.from);
+                if modifiers.shift {
+                    turn = (turn / 15.0).round() * 15.0;
+                }
+                now.rotation_deg = turn;
+            }
+            _ => {
+                let [x0, y0] = g.corners[0];
+                let [x1, y1] = g.corners[2];
+                let delta = sub(m, g.from);
+                now.offset = snap_move(
+                    [x0, y0, x1, y1],
+                    delta,
+                    modifiers,
+                    screen,
+                    &others,
+                    safe,
+                    &mut guides,
+                );
+            }
+        }
+        g.now = now;
+        self.guides = guides;
+        Some(group_commands(g, project, playhead))
+    }
+
     /// End the drag: the commands to commit (none for a click), and whether
     /// it was a click.
     pub fn end(&mut self, project: &Project, playhead: Time) -> (Vec<Command>, bool) {
         self.guides.clear();
+        if let Some(g) = self.group_drag.take() {
+            if !g.moved {
+                return (Vec::new(), true);
+            }
+            self.held = g
+                .members
+                .iter()
+                .map(|m| (m.clip, m.shape.placed(&g.now.transform(&m.shape, &m.start))))
+                .collect();
+            return (group_commands(&g, project, playhead), false);
+        }
         let Some(d) = self.drag.take() else {
             return (Vec::new(), false);
         };
         if !d.moved {
             return (Vec::new(), true);
         }
-        self.held = Some((d.clip, placed(&d.shape, &d.now)));
+        self.held = vec![(d.clip, d.shape.placed(&d.now))];
         let caption = d.shape.lettering && !d.alone;
         (commit(project, d.clip, playhead, &d.now, caption), false)
     }
@@ -458,32 +707,102 @@ impl Gizmo {
             .as_ref()
             .and_then(|(_, shapes)| shapes.iter().find(|s| s.clip == clip));
         if let Some(shape) = shape {
-            self.held = Some((clip, placed(shape, tf)));
+            self.held.retain(|(c, _)| *c != clip);
+            self.held.push((clip, shape.placed(tf)));
         }
     }
 
     /// Drop the drag without committing it, and any held placement.
     pub fn cancel(&mut self) {
         self.drag = None;
-        self.held = None;
+        self.group_drag = None;
+        self.held.clear();
         self.guides.clear();
     }
 }
 
-/// Where `shape` lands with transform `tf` instead of its own.
-fn placed(shape: &Shape, tf: &Transform) -> Placement {
-    let s = &shape.placement;
-    let tf = if shape.lettering {
-        compose::lettering_transform(tf.clone())
-    } else {
-        Transform {
-            crop: s.crop,
-            flip: s.flip,
-            blend: s.blend,
-            ..tf.clone()
+/// The commands that give every member of `g` its place in the group's
+/// current move.
+fn group_commands(g: &GroupDrag, project: &Project, playhead: Time) -> Vec<Command> {
+    g.members
+        .iter()
+        .filter_map(|m| {
+            let (_, clip) = project.timeline.clip(m.clip)?;
+            let tf = g.now.transform(&m.shape, &m.start);
+            Some(transform_commands(clip, playhead, &tf))
+        })
+        .flatten()
+        .collect()
+}
+
+/// `delta` (sequence pixels) for a box `bounds` being moved, snapped to
+/// the frame, the safe areas (with `safe`) and the `others` boxes, with
+/// the guides it snapped to added to `guides`. Shift keeps to one axis;
+/// Ctrl/Cmd turns snapping off.
+fn snap_move(
+    bounds: [f32; 4],
+    mut delta: [f32; 2],
+    modifiers: Modifiers,
+    screen: &Screen,
+    others: &[[f32; 4]],
+    safe: bool,
+    guides: &mut Vec<Guide>,
+) -> [f32; 2] {
+    let (cw, ch) = (
+        screen.sequence.0.max(1) as f32,
+        screen.sequence.1.max(1) as f32,
+    );
+    if modifiers.shift {
+        if delta[0].abs() > delta[1].abs() {
+            delta[1] = 0.0;
+        } else {
+            delta[0] = 0.0;
         }
+    }
+    if modifiers.secondary() {
+        return delta;
+    }
+    let reach = SNAP / screen.scale().max(1e-6);
+    let [x0, y0, x1, y1] = bounds;
+    let mut xs = vec![0.0, cw / 2.0, cw];
+    let mut ys = vec![0.0, ch / 2.0, ch];
+    if safe {
+        for f in SAFE {
+            xs.extend([cw * f, cw * (1.0 - f)]);
+            ys.extend([ch * f, ch * (1.0 - f)]);
+        }
+    }
+    for b in others {
+        xs.extend([b[0], (b[0] + b[2]) / 2.0, b[2]]);
+        ys.extend([b[1], (b[1] + b[3]) / 2.0, b[3]]);
+    }
+    let snap = |edges: [f32; 3], targets: &[f32]| -> Option<(f32, f32)> {
+        let mut best: Option<(f32, f32)> = None;
+        for e in edges {
+            for t in targets {
+                let gap = t - e;
+                if gap.abs() <= reach && best.is_none_or(|(g, _)| gap.abs() < g.abs()) {
+                    best = Some((gap, *t));
+                }
+            }
+        }
+        best
     };
-    compose::placement_from(&tf, shape.rest_center, shape.rest_size, shape.canvas)
+    let moved_x = [x0 + delta[0], (x0 + x1) / 2.0 + delta[0], x1 + delta[0]];
+    let moved_y = [y0 + delta[1], (y0 + y1) / 2.0 + delta[1], y1 + delta[1]];
+    if !(modifiers.shift && delta[0] == 0.0)
+        && let Some((gap, at)) = snap(moved_x, &xs)
+    {
+        delta[0] += gap;
+        guides.push(Guide::Vertical(at));
+    }
+    if !(modifiers.shift && delta[1] == 0.0)
+        && let Some((gap, at)) = snap(moved_y, &ys)
+    {
+        delta[1] += gap;
+        guides.push(Guide::Horizontal(at));
+    }
+    delta
 }
 
 /// The transform `d` makes with the mouse at `m` (sequence pixels), and
@@ -509,56 +828,15 @@ fn apply(
     let corners = shape.corners();
     match d.mode {
         Mode::Move => {
-            let mut delta = sub(m, d.from);
-            if modifiers.shift {
-                if delta[0].abs() > delta[1].abs() {
-                    delta[1] = 0.0;
-                } else {
-                    delta[0] = 0.0;
-                }
-            }
-            if !modifiers.secondary() {
-                let reach = SNAP / screen.scale().max(1e-6);
-                let [x0, y0, x1, y1] = shape.bounds();
-                let mut xs = vec![0.0, cw / 2.0, cw];
-                let mut ys = vec![0.0, ch / 2.0, ch];
-                if safe {
-                    for f in SAFE {
-                        xs.extend([cw * f, cw * (1.0 - f)]);
-                        ys.extend([ch * f, ch * (1.0 - f)]);
-                    }
-                }
-                for b in others {
-                    xs.extend([b[0], (b[0] + b[2]) / 2.0, b[2]]);
-                    ys.extend([b[1], (b[1] + b[3]) / 2.0, b[3]]);
-                }
-                let snap = |edges: [f32; 3], targets: &[f32]| -> Option<(f32, f32)> {
-                    let mut best: Option<(f32, f32)> = None;
-                    for e in edges {
-                        for t in targets {
-                            let gap = t - e;
-                            if gap.abs() <= reach && best.is_none_or(|(g, _)| gap.abs() < g.abs()) {
-                                best = Some((gap, *t));
-                            }
-                        }
-                    }
-                    best
-                };
-                let moved_x = [x0 + delta[0], (x0 + x1) / 2.0 + delta[0], x1 + delta[0]];
-                let moved_y = [y0 + delta[1], (y0 + y1) / 2.0 + delta[1], y1 + delta[1]];
-                if !(modifiers.shift && delta[0] == 0.0)
-                    && let Some((gap, at)) = snap(moved_x, &xs)
-                {
-                    delta[0] += gap;
-                    guides.push(Guide::Vertical(at));
-                }
-                if !(modifiers.shift && delta[1] == 0.0)
-                    && let Some((gap, at)) = snap(moved_y, &ys)
-                {
-                    delta[1] += gap;
-                    guides.push(Guide::Horizontal(at));
-                }
-            }
+            let delta = snap_move(
+                shape.bounds(),
+                sub(m, d.from),
+                modifiers,
+                screen,
+                others,
+                safe,
+                &mut guides,
+            );
             tf.position = [
                 start.position[0] + delta[0] / cw,
                 start.position[1] + delta[1] / ch,
@@ -818,7 +1096,12 @@ pub(super) fn paint(overlay: &Overlay, screen: &Screen, colors: [Hsla; 3], windo
         let top = screen.to_screen(mid(o.corners[0], o.corners[1]));
         let knob = rotate_handle(&o.corners, screen);
         stroke(&[top, knob], false, 1.0, line, window);
-        for (handle, at) in handles(&o.corners, o.anchor, screen) {
+        let shown = if o.group {
+            group_handles(&o.corners, screen)
+        } else {
+            handles(&o.corners, o.anchor, screen)
+        };
+        for (handle, at) in shown {
             let half = px(HANDLE / 2.0);
             match handle {
                 Handle::Anchor => {

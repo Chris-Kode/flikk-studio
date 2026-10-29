@@ -55,7 +55,7 @@ mod layout;
 mod pictures;
 
 pub use cpu::{blend_channel, composite_cpu};
-pub use layout::{Shape, layout};
+pub use layout::{GroupMove, Shape, group_bounds, layout};
 pub use pictures::{Pictures, Stills, Streams, overlay_item};
 
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};

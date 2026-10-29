@@ -10,7 +10,8 @@
 //! render burns them in (`koo_deliver::Letterer`).
 //!
 //! Paused, the frame's layout ([`compose::layout`]) lets the user pick an
-//! item and transform it on screen ([`gizmo`]). The view zooms (Fit or a
+//! item and transform it on screen ([`gizmo`]); Shift-click adds or
+//! removes items, and several move, scale and turn as one. The view zooms (Fit or a
 //! fixed size, scroll with Ctrl/Cmd) and pans (scroll or middle-drag), so
 //! handles outside the frame stay in reach.
 
@@ -118,6 +119,16 @@ struct Request {
     frame: i64,
 }
 
+/// Mouse down on the frame.
+struct Press {
+    /// The items under it, topmost first.
+    under: Vec<koo_core::ClipId>,
+    /// Alt: a click picks the next item under the mouse.
+    alt: bool,
+    /// Shift on a selected item: a click takes it out of the selection.
+    deselect: Option<koo_core::ClipId>,
+}
+
 /// A paused frame to compose off the UI thread.
 struct Job {
     project: Arc<Project>,
@@ -170,8 +181,8 @@ pub struct ViewerPanel {
     pan: Point<Pixels>,
     /// A middle-drag pan: where it started and the pan then.
     panning: Option<(Point<Pixels>, Point<Pixels>)>,
-    /// Mouse down on the frame: where, the items under it, and Alt.
-    pressed: Option<(Point<Pixels>, Vec<koo_core::ClipId>, bool)>,
+    /// Mouse down on the frame.
+    pressed: Option<Press>,
     /// A click that came before the frame was laid out, picked once it is.
     pending_pick: Option<Point<Pixels>>,
     /// The frame on screen from the last layout.
@@ -468,8 +479,75 @@ impl ViewerPanel {
             return;
         }
         self.pending_pick = None;
-        self.pressed = Some((ev.position, under.clone(), ev.modifiers.alt));
         let alt = ev.modifiers.alt;
+        let mut press = Press {
+            under: under.clone(),
+            alt,
+            deselect: None,
+        };
+        // Shift-click adds the item under the mouse, or takes a selected
+        // one out on release (a drag moves them all instead).
+        if ev.modifiers.shift
+            && let Some(&clip) = under.first()
+        {
+            if selected.contains(&clip) {
+                press.deselect = Some(clip);
+            } else {
+                selected.push(clip);
+                let clips = selected.clone();
+                self.state.update(cx, |s, cx| s.select_clips(clips, cx));
+            }
+            self.pressed = Some(press);
+            if editable {
+                let state = self.state.read(cx);
+                let (project, request) = (state.bus.project(), self.requested);
+                if !self.gizmo.begin_group(
+                    gizmo::Handle::Body,
+                    ev.position,
+                    &screen,
+                    project,
+                    &selected,
+                    playhead,
+                    request,
+                ) && let Some(&first) = selected.first()
+                {
+                    self.gizmo.begin(
+                        gizmo::Handle::Body,
+                        first,
+                        ev.position,
+                        ev.modifiers,
+                        &screen,
+                        project,
+                        playhead,
+                        request,
+                    );
+                }
+            }
+            cx.notify();
+            return;
+        }
+        self.pressed = Some(press);
+        // The group's box takes its handles, and its body over its items
+        // or nothing.
+        if self.gizmo.grouped(&selected, request)
+            && let Some(handle) = handle
+            && (handle != gizmo::Handle::Body || under.first().is_none_or(|c| selected.contains(c)))
+        {
+            if editable {
+                let state = self.state.read(cx);
+                self.gizmo.begin_group(
+                    handle,
+                    ev.position,
+                    &screen,
+                    state.bus.project(),
+                    &selected,
+                    playhead,
+                    request,
+                );
+            }
+            cx.notify();
+            return;
+        }
         // The selected box's handles come first; its body only when it is
         // the topmost item there, or with Alt (which cycles on release).
         let body =
@@ -569,7 +647,8 @@ impl ViewerPanel {
         }
         let state = self.state.read(cx);
         let (commands, click) = self.gizmo.end(state.bus.project(), state.playhead);
-        let selected = state.selection.clips.first().copied();
+        let selection = state.selection.clips.clone();
+        let selected = selection.first().copied();
         let applied = self.state.update(cx, |s, cx| {
             if commands.is_empty() {
                 s.show_live(&[], cx);
@@ -581,9 +660,18 @@ impl ViewerPanel {
         if !applied {
             self.gizmo.cancel();
         }
+        // Shift-click on a selected item: out of the selection.
+        if click && let Some(clip) = pressed.as_ref().and_then(|p| p.deselect) {
+            let rest: Vec<_> = selection.into_iter().filter(|c| *c != clip).collect();
+            self.state.update(cx, |s, cx| s.select_clips(rest, cx));
+            cx.notify();
+            return;
+        }
         // Alt-click: the next item under the mouse.
         if click
-            && let Some((_, under, true)) = pressed
+            && let Some(Press {
+                under, alt: true, ..
+            }) = pressed
             && under.len() > 1
         {
             let next = selected
@@ -629,23 +717,34 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    /// Move the picked item by `delta` sequence pixels.
+    /// Move the picked items by `delta` sequence pixels. One picked caption
+    /// takes its track along, as when dragged.
     fn nudge(&mut self, delta: [f32; 2], cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         if state.preview.is_some() {
             return;
         }
         let project = state.bus.project();
-        let Some(&id) = state.selection.clips.first() else {
-            return;
-        };
-        let Some((track, clip)) = project.timeline.clip(id) else {
-            return;
-        };
         let s = &project.timeline.settings;
-        let tf = gizmo::nudged(clip, state.playhead, delta, (s.width, s.height));
-        let lettering = compose::is_lettering(track, clip);
-        let commands = gizmo::commit(project, id, state.playhead, &tf, lettering);
+        let picked = picked_clips(&state.selection.clips, project, state.playhead);
+        let alone = picked.len() > 1;
+        let mut moved = Vec::new();
+        let mut commands = Vec::new();
+        for (track, clip) in picked {
+            if track.locked {
+                continue;
+            }
+            let tf = gizmo::nudged(clip, state.playhead, delta, (s.width, s.height));
+            let lettering = !alone && compose::is_lettering(track, clip);
+            commands.extend(gizmo::commit(
+                project,
+                clip.id,
+                state.playhead,
+                &tf,
+                lettering,
+            ));
+            moved.push((clip.id, tf));
+        }
         if commands.is_empty() {
             return;
         }
@@ -654,26 +753,18 @@ impl ViewerPanel {
             .update(cx, |s, cx| s.edit_batch(commands, "set_transform", cx))
             .is_some();
         if applied {
-            self.gizmo.hold(id, &tf);
+            for (id, tf) in &moved {
+                self.gizmo.hold(*id, tf);
+            }
         }
     }
 
-    /// Whether an item is picked on the paused frame: the first selected
-    /// clip shows a picture or lettering under the playhead.
+    /// Whether an item is picked on the paused frame: a selected clip shows
+    /// a picture or lettering under the playhead.
     fn picked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        let Some(first) = state.selection.clips.first() else {
-            return false;
-        };
         !state.playing
-            && state
-                .bus
-                .project()
-                .timeline
-                .clip(*first)
-                .is_some_and(|(track, clip)| {
-                    track.kind != TrackKind::Audio && clip.range().contains(state.playhead)
-                })
+            && !picked_clips(&state.selection.clips, state.bus.project(), state.playhead).is_empty()
     }
 
     /// Once the playhead has rested on `request` for [`AHEAD_DELAY`], render
@@ -1013,6 +1104,19 @@ impl Render for ViewerPanel {
                     .child(self.controls(cx)),
             )
     }
+}
+
+/// The `selected` clips that show a picture or lettering at `playhead`.
+fn picked_clips<'a>(
+    selected: &[koo_core::ClipId],
+    project: &'a Project,
+    playhead: Time,
+) -> Vec<(&'a koo_core::model::Track, &'a koo_core::model::Clip)> {
+    selected
+        .iter()
+        .filter_map(|id| project.timeline.clip(*id))
+        .filter(|(track, clip)| track.kind != TrackKind::Audio && clip.range().contains(playhead))
+        .collect()
 }
 
 /// A decoded frame as a GPUI image, for other panels' thumbnails.

@@ -589,7 +589,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_transform",
             Some(Transform),
-            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip and blend.",
+            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip and blend. With `group`, several clips move, scale and turn as one about the centre of what they draw together.",
             object(
                 json!({
                     "clip": string("Clip id"),
@@ -605,6 +605,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
                     "blend": one_of(&blends, "Composite mode over the tracks below"),
                     "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
+                    "group": boolean("Move `clips` as one group at `at` (default: the middle of the time they share): position moves the group by a fraction of the frame, scale multiplies its size, rotation turns it, about the centre of their bounds together; each clip's own transform changes to match. Only position, scale and rotation apply"),
                     "at": time("Timeline time to set it at, keyframe-aware (see above)"),
                     "reason": reason()
                 }),
@@ -614,19 +615,20 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "place",
             Some(Transform),
-            "Propose putting a clip somewhere by meaning: align what it draws (its opaque part: a logo's pixels, a lower third inside its frame, a caption's box) to a corner, edge or the centre, a margin in from the frame edges, and size it. Keyframe-aware at `at`. Check the result with get_layout or view_frame.",
+            "Propose putting a clip somewhere by meaning: align what it draws (its opaque part: a logo's pixels, a lower third inside its frame, a caption's box) to a corner, edge or the centre, a margin in from the frame edges, and size it. Several `clips` are placed as one group: their bounds together are aligned and sized, keeping their arrangement. Keyframe-aware at `at`. Check the result with get_layout or view_frame.",
             object(
                 json!({
                     "clip": string("Clip id"),
+                    "clips": strings("Clip ids placed together as one group (with or instead of `clip`)"),
                     "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
                     "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
                     "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),
                     "fit": one_of(&layout::FITS, "keep its size (default); contain: fit inside the margins; cover: fill the frame, cropping; fill: stretch to the frame; width / height: `size` of the frame's width / height"),
                     "size": number("For fit width / height: the fraction of the frame, e.g. 0.15"),
-                    "at": time("Timeline time inside the clip to place it at (default: its middle)"),
+                    "at": time("Timeline time inside the clip to place it at (default: its middle; a group: the middle of the time its clips share)"),
                     "reason": reason()
                 }),
-                &["clip"],
+                &[],
             ),
         ),
         spec(

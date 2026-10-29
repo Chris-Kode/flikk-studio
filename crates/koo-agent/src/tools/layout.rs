@@ -1,16 +1,18 @@
 //! Where things are on screen, and putting them somewhere: `get_layout`
 //! reads every visible item's box at a time (`koo_core::compose::layout`,
-//! as the viewer picks them), `place` aligns and sizes a clip by meaning
-//! (corner, margin, fit) instead of numbers, and `animate` writes preset
-//! moves as ordinary keyframes the user can edit.
+//! as the viewer picks them), `place` aligns and sizes a clip, or several
+//! as one group, by meaning (corner, margin, fit) instead of numbers,
+//! `set_transform` with `group` moves, scales and turns several as one,
+//! and `animate` writes preset moves as ordinary keyframes the user can
+//! edit.
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::*;
-use koo_core::Time;
 use koo_core::command::Command;
-use koo_core::compose::{self, Shape, Stills};
+use koo_core::compose::{self, GroupMove, Shape, Stills};
 use koo_core::model::{Clip, ClipContent, Ease, Project, Property, Transform};
 use koo_core::services::Services;
+use koo_core::{ClipId, Time};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -208,14 +210,76 @@ fn time_in(clip: &Clip, at: Option<Time>, project: &Project) -> ToolResultOf<Tim
     }
 }
 
+/// A time inside every clip of `ids`: `at` if given, else the middle of
+/// the range they share.
+fn time_in_all(ids: &[ClipId], at: Option<Time>, project: &Project) -> ToolResultOf<Time> {
+    let mut clips = Vec::new();
+    for id in ids {
+        let (_, clip) = project
+            .timeline
+            .clip(*id)
+            .ok_or_else(|| ToolError("clip not found".into()))?;
+        clips.push(clip);
+    }
+    if let [clip] = clips.as_slice() {
+        return time_in(clip, at, project);
+    }
+    let rate = project.timeline.settings.rate;
+    let start = clips.iter().map(|c| c.start).max().unwrap_or_default();
+    let end = clips.iter().map(|c| c.end()).min().unwrap_or_default();
+    match at {
+        Some(t) => match clips.iter().find(|c| !c.range().contains(t)) {
+            Some(c) => fail(format!(
+                "{t} is outside clip {} ({} – {})",
+                short(c.id),
+                c.start,
+                c.end()
+            )),
+            None => Ok(t.floor_to_frame(rate).max(start)),
+        },
+        None if start < end => Ok((start + Time((end.0 - start.0) / 2)).floor_to_frame(rate)),
+        None => fail("The clips are never on screen together; place them one at a time."),
+    }
+}
+
+/// The shapes of `ids` in `shapes`, or an error naming those that draw
+/// nothing at `t`.
+fn group_shapes(shapes: &[Shape], ids: &[ClipId], t: Time) -> Result<Vec<Shape>, String> {
+    let missing: Vec<String> = ids
+        .iter()
+        .filter(|id| shapes.iter().all(|s| s.clip != **id))
+        .map(|id| short(*id))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} draw nothing at {t} (hidden, transparent or covered by a transition); pass `at`.",
+            missing.join(", ")
+        ));
+    }
+    Ok(ids
+        .iter()
+        .filter_map(|id| shapes.iter().find(|s| s.clip == *id).cloned())
+        .collect())
+}
+
+/// The commands that move each of `shapes` with `group` at `t`.
+fn group_commands(project: &Project, shapes: &[Shape], group: &GroupMove, t: Time) -> Vec<Command> {
+    shapes
+        .iter()
+        .filter_map(|shape| {
+            let (_, clip) = project.timeline.clip(shape.clip)?;
+            let local = t - clip.start;
+            let tf = group.transform(shape, &clip.transform_at(local));
+            Some(Command::transform_at(clip, local, &tf))
+        })
+        .flatten()
+        .collect()
+}
+
 pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    let ids = super::edit::target_clips(ctx, args)?;
     let project = ctx.project();
-    let id = clip_id(project, args.str("clip")?)?;
-    let (_, clip) = project
-        .timeline
-        .clip(id)
-        .ok_or_else(|| ToolError("clip not found".into()))?;
-    let t = time_in(clip, args.opt_time("at")?, project)?;
+    let t = time_in_all(&ids, args.opt_time("at")?, project)?;
     let align = args.opt_str("align")?.unwrap_or("center");
     if !ALIGNS.contains(&align) {
         return fail(format!("`align` is one of {}", ALIGNS.join(", ")));
@@ -230,6 +294,9 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
             "`fit: width` and `fit: height` need `size` (a fraction of the frame, e.g. 0.2)",
         );
     }
+    if ids.len() > 1 && fit == "fill" {
+        return fail("A group keeps its shape: use `contain` or `cover` instead of `fill`.");
+    }
     let margin = match args.opt_bool("safe_area")? {
         Some(true) => TITLE_SAFE,
         _ => args
@@ -242,6 +309,26 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
     let (align, fit, reason) = (align.to_owned(), fit.to_owned(), reason.to_owned());
     let job: Job = Box::new(move || {
         let shapes = shapes_at(&project, &services, t);
+        if ids.len() > 1 {
+            let members = match group_shapes(&shapes, &ids, t) {
+                Ok(members) => members,
+                Err(e) => return JobDone::Done(Done::error(e)),
+            };
+            let group = placed_group(&project, &members, &align, &fit, size, margin);
+            let commands = group_commands(&project, &members, &group, t);
+            if commands.is_empty() {
+                return JobDone::Done(Done::text(
+                    "already placed",
+                    "The clips are already there; nothing to change.",
+                ));
+            }
+            return JobDone::Propose {
+                commands,
+                reason,
+                excerpts: Vec::new(),
+            };
+        }
+        let id = ids[0];
         let Some(shape) = shapes.iter().find(|s| s.clip == id) else {
             return JobDone::Done(Done::error(format!(
                 "The clip draws nothing at {t} (hidden, transparent or covered by a transition); pass `at`."
@@ -314,7 +401,14 @@ fn placed(
         placement: compose::placement_from(&geometry, shape.rest_center, shape.rest_size, canvas),
         ..shape.clone()
     };
-    let [x0, y0, x1, y1] = at_rest.bounds();
+    let [dx, dy] = align_by(at_rest.bounds(), align, (w, h), m);
+    tf.position = [dx / w, dy / h];
+    tf
+}
+
+/// How far a box `[x0, y0, x1, y1]` moves to sit at `align`, `m` pixels in
+/// from the edges of a `w` × `h` frame.
+fn align_by([x0, y0, x1, y1]: [f32; 4], align: &str, (w, h): (f32, f32), m: f32) -> [f32; 2] {
     let dx = if align.ends_with("left") || align == "left" {
         m - x0
     } else if align.ends_with("right") {
@@ -329,8 +423,111 @@ fn placed(
     } else {
         h / 2.0 - (y0 + y1) / 2.0
     };
-    tf.position = [dx / w, dy / h];
-    tf
+    [dx, dy]
+}
+
+/// The move that puts what `shapes` draw together at `align`, sized by
+/// `fit` (uniformly, about their centre).
+fn placed_group(
+    project: &Project,
+    shapes: &[Shape],
+    align: &str,
+    fit: &str,
+    size: Option<f32>,
+    margin: f32,
+) -> GroupMove {
+    let s = &project.timeline.settings;
+    let (w, h) = (s.width.max(1) as f32, s.height.max(1) as f32);
+    let m = margin * h;
+    let [x0, y0, x1, y1] = compose::group_bounds(shapes).unwrap_or_default();
+    let (bw, bh) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
+    let k = match fit {
+        "contain" => ((w - 2.0 * m) / bw).min((h - 2.0 * m) / bh),
+        "cover" => (w / bw).max(h / bh),
+        "width" => size.unwrap_or(1.0) * w / bw,
+        "height" => size.unwrap_or(1.0) * h / bh,
+        _ => 1.0,
+    }
+    .max(0.001);
+    let c = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    let scaled = [
+        c[0] - bw * k / 2.0,
+        c[1] - bh * k / 2.0,
+        c[0] + bw * k / 2.0,
+        c[1] + bh * k / 2.0,
+    ];
+    GroupMove {
+        offset: align_by(scaled, align, (w, h), m),
+        scale: k,
+        ..GroupMove::about(c)
+    }
+}
+
+/// `set_transform` with `group`: the clips moved by `position` (a fraction
+/// of the frame), scaled by `scale` and turned by `rotation` together,
+/// about the centre of what they draw at `at`.
+pub fn transform_group(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    let ids = super::edit::target_clips(ctx, args)?;
+    if ids.len() < 2 {
+        return fail("`group` moves several clips as one: give two or more in `clips`.");
+    }
+    let others = [
+        "stretch", "skew", "anchor", "opacity", "crop", "flip", "blend",
+    ];
+    if let Some(key) = others.iter().find(|k| args.has(k)) {
+        return fail(format!(
+            "With `group`, only position, scale and rotation apply; set `{key}` without it."
+        ));
+    }
+    let project = ctx.project();
+    let t = time_in_all(&ids, args.opt_time("at")?, project)?;
+    let s = &project.timeline.settings;
+    let (w, h) = (s.width.max(1) as f32, s.height.max(1) as f32);
+    let [px, py] = match args.value("position") {
+        None => [0.0; 2],
+        Some(v) => match v
+            .as_array()
+            .map(|a| a.iter().map(Value::as_f64).collect::<Vec<_>>())
+        {
+            Some(a) if a.len() == 2 && a.iter().all(Option::is_some) => [
+                a[0].unwrap_or_default() as f32,
+                a[1].unwrap_or_default() as f32,
+            ],
+            _ => return fail("`position` is [x, y]"),
+        },
+    };
+    let scale = args.opt_f64("scale")?.map_or(1.0, |v| v as f32);
+    if scale <= 0.0 {
+        return fail("`scale` multiplies the group's size and is above 0");
+    }
+    let rotation = args.opt_f64("rotation")?.map_or(0.0, |v| v as f32);
+    let project = Arc::new(project.clone());
+    let services = ctx.services.clone();
+    let reason = reason.to_owned();
+    let job: Job = Box::new(move || {
+        let shapes = shapes_at(&project, &services, t);
+        let members = match group_shapes(&shapes, &ids, t) {
+            Ok(members) => members,
+            Err(e) => return JobDone::Done(Done::error(e)),
+        };
+        let [x0, y0, x1, y1] = compose::group_bounds(&members).unwrap_or_default();
+        let group = GroupMove {
+            offset: [px * w, py * h],
+            scale,
+            rotation_deg: rotation,
+            ..GroupMove::about([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+        };
+        let commands = group_commands(&project, &members, &group, t);
+        if commands.is_empty() {
+            return JobDone::Done(Done::text("no change", "Nothing changes."));
+        }
+        JobDone::Propose {
+            commands,
+            reason,
+            excerpts: Vec::new(),
+        }
+    });
+    Ok(Step::Job(job))
 }
 
 /// One keyframe to write: property, clip-relative time, value, easing.

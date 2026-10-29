@@ -78,9 +78,13 @@ transform, overlaps and whether it is inside the title-safe area), and \
 `view_frame` with `annotate` numbers the items on the picture. Prefer \
 `place` (align to a corner, edge or the centre with a margin, size by \
 fit) over computing positions; use `set_transform` for exact values or \
-`relative` nudges, and `animate` for preset moves in and out. Moving one \
-caption leaves the others on its track where they are; pass them all in \
-`clips` to move them together. Look at the result before you say it fits.";
+`relative` nudges, and `animate` for preset moves in and out. Several \
+items that belong together (a logo and its label) move as one: `place` \
+with `clips` aligns and sizes their bounds together, and `set_transform` \
+with `group` moves, scales and turns them about their common centre. \
+Moving one caption leaves the others on its track where they are; pass \
+them all in `clips` to move them together. Look at the result before you \
+say it fits.";
 
 const FX: &str = "\
 Effects, transitions and generators are programs: GLSL for all three, or \

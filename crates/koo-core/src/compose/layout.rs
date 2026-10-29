@@ -3,14 +3,18 @@
 //! where it rests before its transform, and the part of it with anything
 //! drawn (the opaque part of a logo, the lower third inside a full-frame
 //! generator).
+//!
+//! Several layers move as one through a [`GroupMove`]: a shift, uniform
+//! scale and turn about a pivot, which [`GroupMove::transform`] turns back
+//! into each clip's own transform.
 
 use super::{
-    Pictures, is_lettering, lettering_layer, lettering_tracks, overlay_item, picture_tracks,
-    placement,
+    Pictures, is_lettering, lettering_layer, lettering_tracks, lettering_transform, overlay_item,
+    picture_tracks, placement, placement_from,
 };
 use crate::fx::{self, FxKind, FxLanguage};
 use crate::ids::{ClipId, TrackId};
-use crate::model::{Clip, ClipContent, MediaKind, Project};
+use crate::model::{Clip, ClipContent, MediaKind, Project, Transform};
 use crate::services::{Frame, FxCall, Placement, Services};
 use crate::time::Time;
 
@@ -61,6 +65,84 @@ impl Shape {
         self.placement
             .to_picture(p)
             .is_some_and(|[u, v]| u >= u0 && u <= u1 && v >= v0 && v <= v1)
+    }
+
+    /// Where the layer lands with transform `tf` instead of its own (crop,
+    /// flip and blend stay as laid out).
+    pub fn placed(&self, tf: &Transform) -> Placement {
+        let s = &self.placement;
+        let tf = if self.lettering {
+            lettering_transform(tf.clone())
+        } else {
+            Transform {
+                crop: s.crop,
+                flip: s.flip,
+                blend: s.blend,
+                ..tf.clone()
+            }
+        };
+        placement_from(&tf, self.rest_center, self.rest_size, self.canvas)
+    }
+}
+
+/// Axis-aligned bounds of the drawn parts of `shapes` together: `[x0, y0,
+/// x1, y1]`; `None` without shapes.
+pub fn group_bounds<'a>(shapes: impl IntoIterator<Item = &'a Shape>) -> Option<[f32; 4]> {
+    shapes.into_iter().map(Shape::bounds).reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    })
+}
+
+/// Several layers moved as one: a canvas point `p` goes to `pivot +
+/// scale · turn(p − pivot) + offset`, turned clockwise by `rotation_deg`.
+/// Uniform, so every layer keeps its shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupMove {
+    pub pivot: [f32; 2],
+    pub offset: [f32; 2],
+    pub scale: f32,
+    pub rotation_deg: f32,
+}
+
+impl GroupMove {
+    /// No change, about `pivot`.
+    pub fn about(pivot: [f32; 2]) -> Self {
+        Self {
+            pivot,
+            offset: [0.0; 2],
+            scale: 1.0,
+            rotation_deg: 0.0,
+        }
+    }
+
+    /// Where canvas point `p` goes.
+    pub fn apply(&self, p: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.rotation_deg.to_radians().sin_cos();
+        let (dx, dy) = (p[0] - self.pivot[0], p[1] - self.pivot[1]);
+        [
+            self.pivot[0] + self.scale * (c * dx - s * dy) + self.offset[0],
+            self.pivot[1] + self.scale * (s * dx + c * dy) + self.offset[1],
+        ]
+    }
+
+    /// `tf`, the transform `shape` was laid out with, changed so the layer
+    /// lands where this move puts it: scaled and turned with the group, and
+    /// moved so its centre follows.
+    pub fn transform(&self, shape: &Shape, tf: &Transform) -> Transform {
+        let mut out = tf.clone();
+        out.scale = (tf.scale * self.scale).max(0.001);
+        out.rotation_deg = tf.rotation_deg + self.rotation_deg;
+        let target = self.apply(shape.placed(tf).center);
+        out.position = [0.0; 2];
+        let rest = shape.placed(&out).center;
+        let (cw, ch) = (shape.canvas.0.max(1) as f32, shape.canvas.1.max(1) as f32);
+        out.position = [(target[0] - rest[0]) / cw, (target[1] - rest[1]) / ch];
+        out
     }
 }
 
