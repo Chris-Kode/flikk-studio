@@ -5,6 +5,8 @@ mod notices;
 mod persistence;
 mod state;
 mod ui;
+#[cfg(all(windows, target_env = "msvc"))]
+mod vulkan_fallback;
 
 use gpui_kit::*;
 

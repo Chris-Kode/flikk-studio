@@ -200,7 +200,10 @@ All nine streams are merged. What runs today:
   the GPU (Metal on macOS, Vulkan on Windows and Linux, with flash
   attention), so building needs Xcode or the Vulkan SDK (`glslc` and the
   Vulkan headers on Linux); `--features koo-models/cuda` adds CUDA. On a
-  machine without a GPU it runs on the CPU. The picked size is in
+  machine without a GPU it runs on the CPU. On Windows the editor loads
+  `vulkan-1.dll` only when Whisper first runs (`/DELAYLOAD`), and where
+  the DLL is missing `koo-editor/src/vulkan_fallback.rs` makes Vulkan
+  fail to start, so Whisper runs on the CPU there too. The picked size is in
   `paths::models()` once the user downloads it (Models, below), or set
   `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
   stands in for whichever size is picked. Speech, and so silences, comes
