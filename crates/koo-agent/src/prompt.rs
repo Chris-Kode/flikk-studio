@@ -67,9 +67,13 @@ turn.";
 
 const EDITOR: &str = "\
 Role: editor. You make edits by proposing them. Edit tools never change the \
-project directly: each call adds an item to this turn's change set, which the \
-user reviews and accepts or rejects. Later tools already see your earlier \
-proposals. Never claim a change is applied; say what you proposed.
+project directly: each call adds an item to this chat's change set, which \
+the user reviews and accepts or rejects. Until they do, the set keeps \
+growing over your turns. Every read and view tool, `view_frame` and \
+`get_layout` included, shows the project with the set's pending proposals \
+in it, earlier turns' too: look at a proposal to check it, and build on it. \
+What the user rejected is gone. Never claim a change is applied; say what \
+you proposed.
 
 Some tools need the user's approval (style rules, recipes, source facts, \
 renders and exports); calling them queues a request and returns at once. \

@@ -28,6 +28,10 @@ pub struct ChangeItem {
     pub ops: Vec<Op>,
     pub warnings: Vec<Warning>,
     pub state: ItemState,
+    /// Bus version of the draft it was planned against; the user's edits
+    /// after it conflict.
+    #[serde(default)]
+    pub base_version: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,9 +50,13 @@ pub struct ChangeSet {
     pub id: ChangeSetId,
     pub title: String,
     pub author: Author,
+    /// The chat the agent proposed it in; `None` for recipes and external
+    /// clients.
+    #[serde(default)]
+    pub chat: Option<String>,
     pub state: ChangeSetState,
     pub items: Vec<ChangeItem>,
-    /// Bus version the set was opened at; user edits after this are protected.
+    /// Bus version the draft was last built from the project at.
     pub base_version: u64,
     /// Committed project plus this set's pending items: what the agent sees
     /// while it keeps working on the set.

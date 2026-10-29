@@ -42,7 +42,10 @@ pub struct OverlayItem {
     pub warnings: Vec<String>,
 }
 
-pub fn collect(timeline: &Timeline, sets: &[ChangeSet]) -> Vec<OverlayItem> {
+pub fn collect<'a>(
+    timeline: &Timeline,
+    sets: impl IntoIterator<Item = &'a ChangeSet>,
+) -> Vec<OverlayItem> {
     let mut out = Vec::new();
     for set in sets {
         // Ripple-delete ranges of the set's earlier items, in draft time.

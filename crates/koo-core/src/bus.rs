@@ -9,7 +9,7 @@ use crate::ids::*;
 use crate::model::Project;
 use crate::ops::{Op, apply_all, invert_all};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +30,10 @@ pub enum Author {
 impl Author {
     pub fn is_user(&self) -> bool {
         matches!(self, Author::User)
+    }
+
+    pub fn is_agent(&self) -> bool {
+        matches!(self, Author::Agent { .. })
     }
 }
 
@@ -119,6 +123,9 @@ pub struct CommandBus {
     version: u64,
     /// Clips the user touched, with the version they touched them at.
     user_touched: Vec<(u64, ClipId)>,
+    /// The chat open in the editor. The agent's change sets are stamped with
+    /// it, and only its sets are shown.
+    chat: Option<String>,
 }
 
 impl CommandBus {
@@ -130,6 +137,7 @@ impl CommandBus {
             change_sets: Vec::new(),
             version: 0,
             user_touched: Vec::new(),
+            chat: None,
         }
     }
 
@@ -178,12 +186,56 @@ impl CommandBus {
         self.change_sets.iter().find(|c| c.id == id)
     }
 
+    /// The change sets of the open chat, plus those of no chat (recipes,
+    /// external clients).
+    pub fn chat_change_sets(&self) -> impl Iterator<Item = &ChangeSet> {
+        self.change_sets
+            .iter()
+            .filter(|s| s.chat.is_none() || s.chat == self.chat)
+    }
+
+    /// Switch to chat `chat`: the editor shows its pending proposals, and
+    /// the agent's next turn adds to them, rather than another chat's.
+    pub fn set_chat(&mut self, chat: &str) {
+        self.chat = Some(chat.to_owned());
+    }
+
     /// What `author` sees: the open change set's draft for agents, the
     /// committed project otherwise.
     pub fn view_for(&self, author: &Author) -> &Project {
         self.open_set(author)
             .and_then(|s| s.draft.as_ref())
             .unwrap_or(&self.project)
+    }
+
+    /// Start `author`'s turn in the open chat: the chat's set still waiting
+    /// for review opens again, so the turn sees those proposals and adds to
+    /// them, and one review takes them all. Returns the set and how many
+    /// items it had.
+    pub fn reopen_change_set(&mut self, author: &Author) -> Option<(ChangeSetId, usize)> {
+        let set = self.change_sets.iter_mut().find(|s| {
+            &s.author == author
+                && s.state == ChangeSetState::Pending
+                && s.chat.is_some()
+                && s.chat == self.chat
+        })?;
+        set.state = ChangeSetState::Open;
+        if set.draft.is_none() || set.base_version != self.version {
+            // The project changed since: replay the pending items on it,
+            // re-planning those whose ops no longer fit and leaving out
+            // those that can't be.
+            let mut draft = self.project.clone();
+            for item in set.pending_items() {
+                if apply_all(&mut draft, &item.ops).is_err()
+                    && let Ok(plan) = item.command.plan(&draft)
+                {
+                    let _ = apply_all(&mut draft, &plan.ops);
+                }
+            }
+            set.draft = Some(draft);
+            set.base_version = self.version;
+        }
+        Some((set.id, set.items.len()))
     }
 
     /// Permission check for anything the bus does not execute itself
@@ -244,6 +296,11 @@ impl CommandBus {
     fn propose(&mut self, command: Command, author: Author, reason: String) -> Result<Outcome> {
         let version = self.version;
         let project = &self.project;
+        let chat = if author.is_agent() {
+            self.chat.clone()
+        } else {
+            None
+        };
         let set = match self
             .change_sets
             .iter_mut()
@@ -255,6 +312,7 @@ impl CommandBus {
                     id: ChangeSetId::new(),
                     title: reason.clone(),
                     author,
+                    chat,
                     state: ChangeSetState::Open,
                     items: Vec::new(),
                     base_version: version,
@@ -280,6 +338,7 @@ impl CommandBus {
             ops,
             warnings: warnings.clone(),
             state: ItemState::Pending,
+            base_version: set.base_version,
         };
         let item_id = item.id;
         set.items.push(item);
@@ -312,7 +371,7 @@ impl CommandBus {
     }
 
     /// Accept the given items (all pending ones if `None`) as one undo step.
-    /// Items touching clips the user edited since the proposal are marked
+    /// Items touching clips the user edited since they were planned are marked
     /// conflicted and not applied; others are re-planned if their ops no
     /// longer fit (e.g. an earlier item in the set was rejected).
     pub fn accept(
@@ -325,14 +384,7 @@ impl CommandBus {
             .iter()
             .position(|s| s.id == id)
             .ok_or(CoreError::Invalid("unknown change set".into()))?;
-        let base_version = self.change_sets[ix].base_version;
-        let touched: HashSet<ClipId> = self
-            .user_touched
-            .iter()
-            .filter(|(v, _)| *v > base_version)
-            .map(|(_, c)| *c)
-            .collect();
-
+        let user_touched = &self.user_touched;
         let mut scratch = self.project.clone();
         let mut all_ops = Vec::new();
         let mut report = AcceptReport::default();
@@ -345,12 +397,11 @@ impl CommandBus {
             if items.is_some_and(|ids| !ids.contains(&item.id)) {
                 continue;
             }
-            if item
-                .ops
-                .iter()
-                .filter_map(Op::clip)
-                .any(|c| touched.contains(&c))
-            {
+            if item.ops.iter().filter_map(Op::clip).any(|c| {
+                user_touched
+                    .iter()
+                    .any(|(v, t)| *v > item.base_version && *t == c)
+            }) {
                 item.state = ItemState::Conflicted;
                 report.conflicted.push(item.id);
                 continue;

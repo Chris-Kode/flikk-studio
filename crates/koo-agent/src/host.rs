@@ -23,6 +23,7 @@ use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
 use crate::{prompt, recipes, session};
+use koo_core::ChangeSetId;
 use koo_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
 use koo_core::bus::{AgentRole, Author, CommandBus};
 use koo_core::changeset::ChangeSetState;
@@ -79,6 +80,8 @@ struct Turn {
     project: koo_core::ProjectId,
     /// Chat session the turn belongs to; its backend session is resumed.
     chat: String,
+    /// The chat's set the turn reopened, with how many items it had then.
+    carried: Option<(ChangeSetId, usize)>,
     context: EditorContext,
     settings: AgentSettings,
     /// Kept to re-run once without `--resume` if the session is gone.
@@ -253,8 +256,13 @@ impl AgentHost {
     fn start(&mut self, q: Queued, bus: &mut CommandBus) {
         let author = Author::Agent { role: self.role };
         // A set left open by an earlier turn that never finished.
-        close_open_sets(bus, &author, &mut self.events);
-        let project = bus.project();
+        close_open_sets(bus, &author, None, &mut self.events);
+        bus.set_chat(&self.chat);
+        // The chat's proposals still waiting for review: this turn sees them
+        // and adds to them.
+        let carried = bus.reopen_change_set(&author);
+        let project = bus.view_for(&author);
+        let project_id = project.id;
         let enabled: Vec<Recipe> = self
             .memory
             .recipes
@@ -318,7 +326,12 @@ impl AgentHost {
         let (mcp, workdir, run_dir) = match launch {
             Ok(l) => l,
             Err(e) => {
-                self.fail_now(format!("Could not start the agent: {e}"));
+                self.fail_now(
+                    bus,
+                    &author,
+                    carried,
+                    format!("Could not start the agent: {e}"),
+                );
                 return;
             }
         };
@@ -337,7 +350,8 @@ impl AgentHost {
             Ok(r) => r,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&spec.run_dir);
-                self.fail_now(format!("Could not start {}: {e}", backend.label()));
+                let message = format!("Could not start {}: {e}", backend.label());
+                self.fail_now(bus, &author, carried, message);
                 return;
             }
         };
@@ -348,8 +362,9 @@ impl AgentHost {
         self.turn = Some(Turn {
             author,
             backend,
-            project: project.id,
+            project: project_id,
             chat: self.chat.clone(),
+            carried,
             context: q.context,
             settings: q.settings,
             spec,
@@ -363,7 +378,14 @@ impl AgentHost {
         });
     }
 
-    fn fail_now(&mut self, message: String) {
+    fn fail_now(
+        &mut self,
+        bus: &mut CommandBus,
+        author: &Author,
+        carried: Option<(ChangeSetId, usize)>,
+        message: String,
+    ) {
+        close_open_sets(bus, author, carried, &mut self.events);
         self.events.push(AgentEvent::Error { message });
         self.events.push(AgentEvent::TurnDone);
     }
@@ -438,7 +460,7 @@ impl AgentHost {
                 message: error.clone(),
             });
         }
-        close_open_sets(bus, &turn.author, &mut self.events);
+        close_open_sets(bus, &turn.author, turn.carried, &mut self.events);
         turn.usage
             .log(&turn.settings, role_of(&turn.author), &turn.context, now());
         let _ = std::fs::remove_dir_all(&turn.spec.run_dir);
@@ -626,7 +648,7 @@ impl AgentHost {
             return;
         }
         ext.last_call = None;
-        close_open_sets(bus, &external_author(), &mut self.events);
+        close_open_sets(bus, &external_author(), None, &mut self.events);
     }
 
     fn finish_call(&mut self, reply: Reply, tool: String, args: Value, done: Done) {
@@ -655,18 +677,24 @@ impl AgentHost {
     }
 }
 
-/// Offer `author`'s open change set for review, or drop it if empty.
-fn close_open_sets(bus: &mut CommandBus, author: &Author, events: &mut Vec<AgentEvent>) {
+/// Offer `author`'s open change set for review, or drop it if empty. A
+/// `carried` set that got nothing new was offered already.
+fn close_open_sets(
+    bus: &mut CommandBus,
+    author: &Author,
+    carried: Option<(ChangeSetId, usize)>,
+    events: &mut Vec<AgentEvent>,
+) {
     let open: Vec<_> = bus
         .change_sets()
         .iter()
         .filter(|s| &s.author == author && s.state == ChangeSetState::Open)
-        .map(|s| (s.id, s.items.is_empty()))
+        .map(|s| (s.id, s.items.len()))
         .collect();
-    for (id, empty) in open {
+    for (id, len) in open {
         // Closing twice is harmless: `EditorState` closes it again on the event.
         bus.close_change_set(id);
-        if !empty {
+        if len > 0 && carried != Some((id, len)) {
             events.push(AgentEvent::ChangeSetReady { change_set: id });
         }
     }
