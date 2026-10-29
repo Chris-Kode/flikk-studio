@@ -341,6 +341,88 @@ pub struct Placement {
     pub flip: [bool; 2],
     pub opacity: f32,
     pub blend: BlendMode,
+    /// How far each corner of the picture moves before the rest of the
+    /// placement, [top-left, top-right, bottom-right, bottom-left], in its
+    /// uv, as [`Transform::corner_pin`]; all zero = none. Pinned, the
+    /// picture maps onto the canvas through a homography instead of an
+    /// affine map.
+    ///
+    /// [`Transform::corner_pin`]: crate::model::Transform::corner_pin
+    pub pin: [[f32; 2]; 4],
+}
+
+/// A 3×3 matrix, row-major, acting on `(x, y, 1)`.
+pub type Matrix3 = [f32; 9];
+
+fn mul3(a: &Matrix3, b: &Matrix3) -> Matrix3 {
+    let mut out = [0.0; 9];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r * 3 + c] = (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum();
+        }
+    }
+    out
+}
+
+/// `m⁻¹`, if `m` is not singular.
+fn invert3(m: &Matrix3) -> Option<Matrix3> {
+    let [a, b, c, d, e, f, g, h, i] = *m;
+    let co = [
+        e * i - f * h,
+        c * h - b * i,
+        b * f - c * e,
+        f * g - d * i,
+        a * i - c * g,
+        c * d - a * f,
+        d * h - e * g,
+        b * g - a * h,
+        a * e - b * d,
+    ];
+    let det = a * co[0] + b * co[3] + c * co[6];
+    if det.abs() < 1e-12 || !det.is_finite() {
+        return None;
+    }
+    Some(co.map(|v| v / det))
+}
+
+/// `m` applied to `p`, divided through; `None` behind the projection.
+fn project(m: &Matrix3, p: [f32; 2]) -> Option<[f32; 2]> {
+    let w = m[6] * p[0] + m[7] * p[1] + m[8];
+    if w <= 1e-9 {
+        return None;
+    }
+    Some([
+        (m[0] * p[0] + m[1] * p[1] + m[2]) / w,
+        (m[3] * p[0] + m[4] * p[1] + m[5]) / w,
+    ])
+}
+
+/// The homography taking the unit square's corners (top-left, top-right,
+/// bottom-right, bottom-left) to `quad`'s (Heckbert's square-to-quad).
+fn square_to_quad(quad: [[f32; 2]; 4]) -> Option<Matrix3> {
+    let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = quad;
+    let (sx, sy) = (x0 - x1 + x2 - x3, y0 - y1 + y2 - y3);
+    let (g, h) = if sx.abs() < 1e-9 && sy.abs() < 1e-9 {
+        (0.0, 0.0)
+    } else {
+        let (dx1, dx2, dy1, dy2) = (x1 - x2, x3 - x2, y1 - y2, y3 - y2);
+        let den = dx1 * dy2 - dx2 * dy1;
+        if den.abs() < 1e-12 {
+            return None;
+        }
+        ((sx * dy2 - dx2 * sy) / den, (dx1 * sy - sx * dy1) / den)
+    };
+    Some([
+        x1 - x0 + g * x1,
+        x3 - x0 + h * x3,
+        x0,
+        y1 - y0 + g * y1,
+        y3 - y0 + h * y3,
+        y0,
+        g,
+        h,
+        1.0,
+    ])
 }
 
 impl Placement {
@@ -355,7 +437,13 @@ impl Placement {
             flip: [false; 2],
             opacity: 1.0,
             blend: BlendMode::Normal,
+            pin: [[0.0; 2]; 4],
         }
+    }
+
+    /// Whether any corner is pinned.
+    pub fn is_pinned(&self) -> bool {
+        self.pin.iter().flatten().any(|v| v.abs() > 1e-6)
     }
 
     /// Rotation after skew, `[a, b, c, d]`: a picture point `(x, y)` pixels
@@ -368,6 +456,18 @@ impl Placement {
 
     /// Canvas point of `uv`, 0..1 across the whole picture.
     pub fn to_canvas(&self, uv: [f32; 2]) -> [f32; 2] {
+        if self.is_pinned()
+            && let Some(m) = self.homography()
+            && let Some(p) = project(&m, uv)
+        {
+            return p;
+        }
+        self.unpinned_to_canvas(uv)
+    }
+
+    /// Where `uv` lands without the corner pin: the affine part of the
+    /// placement, in which the pin's corners are measured.
+    pub fn unpinned_to_canvas(&self, uv: [f32; 2]) -> [f32; 2] {
         let [a, b, c, d] = self.linear();
         let x = (uv[0] - 0.5) * self.size[0];
         let y = (uv[1] - 0.5) * self.size[1];
@@ -375,6 +475,65 @@ impl Placement {
             self.center[0] + a * x + b * y,
             self.center[1] + c * x + d * y,
         ]
+    }
+
+    /// Picture `uv` → canvas, the affine part only.
+    fn affine(&self) -> Matrix3 {
+        let [a, b, c, d] = self.linear();
+        let [w, h] = self.size;
+        let [cx, cy] = self.center;
+        [
+            a * w,
+            b * h,
+            cx - 0.5 * (a * w + b * h),
+            c * w,
+            d * h,
+            cy - 0.5 * (c * w + d * h),
+            0.0,
+            0.0,
+            1.0,
+        ]
+    }
+
+    /// Picture `uv` → canvas, corner pin included. `None` when the pinned
+    /// corners make no quad.
+    pub fn homography(&self) -> Option<Matrix3> {
+        let affine = self.affine();
+        if !self.is_pinned() {
+            return Some(affine);
+        }
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let quad = std::array::from_fn(|i| {
+            [
+                corners[i][0] + self.pin[i][0],
+                corners[i][1] + self.pin[i][1],
+            ]
+        });
+        Some(mul3(&affine, &square_to_quad(quad)?))
+    }
+
+    /// Canvas → picture `uv`, corner pin included, as a 3×3 matrix: `uv =
+    /// (r₀·q, r₁·q) / (r₂·q)` for `q = (x, y, 1)`, outside the picture
+    /// where `r₂·q ≤ 0`. Unpinned, the last row is `(0, 0, 1)` and this is
+    /// [`Self::inverse`]. `None` when the picture is flat.
+    pub fn uv_map(&self) -> Option<Matrix3> {
+        if !self.is_pinned() {
+            let [a, b, c, d] = self.inverse()?;
+            let [cx, cy] = self.center;
+            return Some([
+                a,
+                b,
+                0.5 - a * cx - b * cy,
+                c,
+                d,
+                0.5 - c * cx - d * cy,
+                0.0,
+                0.0,
+                1.0,
+            ]);
+        }
+        self.inverse()?;
+        invert3(&self.homography()?)
     }
 
     /// Canvas → picture `uv` (0..1 across the whole picture), as `[a, b, c,
@@ -392,6 +551,14 @@ impl Placement {
 
     /// Picture `uv` under canvas point `p`, if the picture is not flat.
     pub fn to_picture(&self, p: [f32; 2]) -> Option<[f32; 2]> {
+        if self.is_pinned() {
+            return project(&self.uv_map()?, p);
+        }
+        self.unpinned_to_picture(p)
+    }
+
+    /// [`Self::to_picture`] without the corner pin.
+    pub fn unpinned_to_picture(&self, p: [f32; 2]) -> Option<[f32; 2]> {
         let [a, b, c, d] = self.inverse()?;
         let (dx, dy) = (p[0] - self.center[0], p[1] - self.center[1]);
         Some([a * dx + b * dy + 0.5, c * dx + d * dy + 0.5])

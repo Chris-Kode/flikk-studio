@@ -28,6 +28,7 @@ pub enum Glyph {
     NextCut,
     Trash,
     SafeArea,
+    CornerPin,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -231,6 +232,21 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
                 true,
                 window,
             );
+        }
+        Glyph::CornerPin => {
+            let quad = [(2.5, 4.5), (13., 2.5), (12., 13.5), (4., 11.5)];
+            lines(&quad, true, window);
+            for (x, y) in quad {
+                fill(
+                    &[
+                        (x - 1.5, y - 1.5),
+                        (x + 1.5, y - 1.5),
+                        (x + 1.5, y + 1.5),
+                        (x - 1.5, y + 1.5),
+                    ],
+                    window,
+                );
+            }
         }
         Glyph::PrevCut => {
             lines(&[(3.5, 3.5), (3.5, 12.5)], false, window);

@@ -233,7 +233,8 @@ impl InspectorPanel {
             | Key::AnchorX
             | Key::AnchorY
             | Key::Opacity
-            | Key::Crop(_) => {
+            | Key::Crop(_)
+            | Key::Pin(_) => {
                 let Some(clip) = clips.first() else {
                     return none;
                 };
@@ -438,6 +439,7 @@ fn property_of(key: Key) -> Option<Property> {
         Key::Crop(1) => Property::CropTop,
         Key::Crop(2) => Property::CropRight,
         Key::Crop(_) => Property::CropBottom,
+        Key::Pin(i) => Property::PIN[i.min(7)],
         _ => return None,
     })
 }

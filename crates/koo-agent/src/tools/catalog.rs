@@ -589,7 +589,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_transform",
             Some(Transform),
-            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip and blend. With `group`, several clips move, scale and turn as one about the centre of what they draw together.",
+            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip, blend and corner pin (the render burns them in without them). With `group`, several clips move, scale and turn as one about the centre of what they draw together.",
             object(
                 json!({
                     "clip": string("Clip id"),
@@ -604,6 +604,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
                     "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
                     "blend": one_of(&blends, "Composite mode over the tracks below"),
+                    "corner_pin": { "type": "array", "items": numbers(2, "[x, y]"), "minItems": 4, "maxItems": 4, "description": "How far each corner moves, [top-left, top-right, bottom-right, bottom-left], as [x, y] fractions of the picture's size before the rest of the transform; the picture is drawn in perspective onto the quad they make. All [0, 0] = none. To pin onto points of the frame, use place with `pin_to`" },
                     "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
                     "group": boolean("Move `clips` as one group at `at` (default: the middle of the time they share): position moves the group by a fraction of the frame, scale multiplies its size, rotation turns it, about the centre of their bounds together; each clip's own transform changes to match. Only position, scale and rotation apply"),
                     "at": time("Timeline time to set it at, keyframe-aware (see above)"),
@@ -620,6 +621,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                 json!({
                     "clip": string("Clip id"),
                     "clips": strings("Clip ids placed together as one group (with or instead of `clip`)"),
+                    "pin_to": { "type": "array", "items": numbers(2, "[x, y] frame pixels"), "minItems": 4, "maxItems": 4, "description": "Corner pin instead of aligning: put the whole picture's corners (top-left, top-right, bottom-right, bottom-left) on these frame points, in perspective, e.g. onto a screen or sign seen in the shot. One picture clip; not captions or titles" },
                     "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
                     "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
                     "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),

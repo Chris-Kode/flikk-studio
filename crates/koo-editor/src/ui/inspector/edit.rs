@@ -27,6 +27,16 @@ const TRANSFORM: [Key; 6] = [
 ];
 const SHAPE: [Key; 4] = [Key::SkewX, Key::SkewY, Key::AnchorX, Key::AnchorY];
 const CROP: [Key; 4] = [Key::Crop(0), Key::Crop(1), Key::Crop(2), Key::Crop(3)];
+const PIN: [Key; 8] = [
+    Key::Pin(0),
+    Key::Pin(1),
+    Key::Pin(2),
+    Key::Pin(3),
+    Key::Pin(4),
+    Key::Pin(5),
+    Key::Pin(6),
+    Key::Pin(7),
+];
 
 impl InspectorPanel {
     /// The selected clip's properties for its kind, or the sequence format
@@ -50,8 +60,8 @@ impl InspectorPanel {
     }
 
     /// Transform with keyframe toggles, then the clip's keyframes. Lettering
-    /// (captions, titles) has no crop, flip or blend mode: the render cannot
-    /// burn them in.
+    /// (captions, titles) has no crop, flip, blend mode or corner pin: the
+    /// render cannot burn them in.
     pub(super) fn transform_view(
         &mut self,
         clip: &Clip,
@@ -81,6 +91,7 @@ impl InspectorPanel {
         let shape_rows = keyed_rows(&SHAPE, self, cx);
         let opacity = keyed_rows(&[Key::Opacity], self, cx);
         let crop_rows = keyed_rows(&CROP, self, cx);
+        let pin_rows = keyed_rows(&PIN, self, cx);
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
         let transform = section("Transform", cx)
@@ -91,12 +102,14 @@ impl InspectorPanel {
             .children(opacity)
             .when(!lettering, |s| s.child(self.blend_row(&clip, cx)));
         let crop = (!lettering).then(|| section("Crop", cx).children(crop_rows));
+        let pin = (!lettering).then(|| section("Corner pin", cx).children(pin_rows));
         let list = (!frames.is_empty()).then(|| self.keyframe_list(&clip, frames, at, frame, cx));
         v_flex()
             .gap_4()
             .child(transform)
             .child(composite)
             .children(crop)
+            .children(pin)
             .children(list)
             .into_any_element()
     }
@@ -339,6 +352,6 @@ fn transform_key(p: Property) -> Option<Key> {
         Property::CropTop => Key::Crop(1),
         Property::CropRight => Key::Crop(2),
         Property::CropBottom => Key::Crop(3),
-        _ => return None,
+        p => Key::Pin(Property::PIN.iter().position(|q| *q == p)?),
     })
 }

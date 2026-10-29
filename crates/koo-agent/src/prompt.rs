@@ -82,6 +82,8 @@ fit) over computing positions; use `set_transform` for exact values or \
 items that belong together (a logo and its label) move as one: `place` \
 with `clips` aligns and sizes their bounds together, and `set_transform` \
 with `group` moves, scales and turns them about their common centre. \
+To put a picture onto a screen or sign in the shot, `place` it with \
+`pin_to` (the four corners' frame pixels): it is drawn in perspective. \
 Moving one caption leaves the others on its track where they are; pass \
 them all in `clips` to move them together. Look at the result before you \
 say it fits.";

@@ -13,7 +13,8 @@
 //! item and transform it on screen ([`gizmo`]); Shift-click adds or
 //! removes items, and several move, scale and turn as one. The view zooms (Fit or a
 //! fixed size, scroll with Ctrl/Cmd) and pans (scroll or middle-drag), so
-//! handles outside the frame stay in reach.
+//! handles outside the frame stay in reach. The corner-pin toggle makes a
+//! picture's corners move one by one.
 
 mod audio;
 mod cache;
@@ -870,6 +871,24 @@ impl ViewerPanel {
                     cx.notify();
                 })
             });
+        let viewer = cx.entity();
+        let pin = self.gizmo.corner_pin;
+        let pin_toggle = Button::new("viewer-corner-pin")
+            .ghost()
+            .xsmall()
+            .toggled(pin)
+            .tooltip("Corner pin")
+            .child(glyph(
+                Glyph::CornerPin,
+                px(13.),
+                if pin { fg } else { muted },
+            ))
+            .on_click(move |_, _, cx| {
+                viewer.update(cx, |this, cx| {
+                    this.gizmo.corner_pin = !this.gizmo.corner_pin;
+                    cx.notify();
+                })
+            });
         h_flex()
             .flex_none()
             .h(px(CONTROLS_HEIGHT))
@@ -910,6 +929,7 @@ impl ViewerPanel {
                     )
                     .child(div().flex_none().child(tc))
             }))
+            .child(pin_toggle)
             .child(safe_toggle)
             .child(zoom_menu)
     }

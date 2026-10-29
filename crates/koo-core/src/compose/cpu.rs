@@ -2,8 +2,9 @@
 //! when there is no GPU engine; `koo-gpu` implements the same arithmetic.
 //!
 //! For every canvas pixel centre, the layer's picture is found through the
-//! inverse of its placement (scale, skew, clockwise rotation, flip), cut by its
-//! crop, and sampled bilinearly from premultiplied texels (clamped at the
+//! inverse of its placement (scale, skew, clockwise rotation, corner pin:
+//! [`Placement::uv_map`], divided through, so a pinned picture is sampled
+//! in perspective), flipped, cut by its crop, and sampled bilinearly from premultiplied texels (clamped at the
 //! edges, transparent outside the picture). The sample, straight again and
 //! with alpha × opacity, is blended onto the canvas with the W3C
 //! compositing formula: `Co = αs(1−αb)Cs + αsαb·B(Cb, Cs) + (1−αs)αb·Cb`,
@@ -52,9 +53,8 @@ fn hard_light(b: f32, s: f32) -> f32 {
 /// A placement prepared for sampling.
 struct Map<'a> {
     frame: &'a Frame,
-    center: [f32; 2],
-    /// Canvas offset from `center` → picture uv ([`Placement::inverse`]).
-    inv: [f32; 4],
+    /// Canvas point → picture uv ([`Placement::uv_map`]).
+    map: [f32; 9],
     crop: [f32; 4],
     flip: [bool; 2],
     opacity: f32,
@@ -74,7 +74,7 @@ impl<'a> Map<'a> {
         if frame.width == 0 || frame.height == 0 {
             return None;
         }
-        let inv = p.inverse()?;
+        let map = p.uv_map()?;
         let corners = p.corners();
         let span = |axis: usize, max: u32| {
             let (lo, hi) = corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
@@ -91,8 +91,7 @@ impl<'a> Map<'a> {
         }
         Some(Self {
             frame,
-            center: p.center,
-            inv,
+            map,
             crop: p.crop.map(|c| c.clamp(0.0, 1.0)),
             flip: p.flip,
             opacity,
@@ -103,10 +102,13 @@ impl<'a> Map<'a> {
 
     /// Premultiplied sample at canvas point (`x`, `y`), alpha × opacity.
     fn sample(&self, x: f32, y: f32) -> Option<[f32; 4]> {
-        let (dx, dy) = (x - self.center[0], y - self.center[1]);
-        let [a, b, c, d] = self.inv;
-        let mut u = a * dx + b * dy + 0.5;
-        let mut v = c * dx + d * dy + 0.5;
+        let m = &self.map;
+        let w = m[6] * x + m[7] * y + m[8];
+        if w <= 1e-9 {
+            return None;
+        }
+        let mut u = (m[0] * x + m[1] * y + m[2]) / w;
+        let mut v = (m[3] * x + m[4] * y + m[5]) / w;
         if self.flip[0] {
             u = 1.0 - u;
         }

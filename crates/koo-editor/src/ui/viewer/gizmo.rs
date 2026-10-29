@@ -13,6 +13,10 @@
 //! about the box's centre ([`GroupMove`]), each clip's own transform
 //! changed to match, as one undo step. Group members move alone, captions
 //! included.
+//!
+//! In corner-pin mode the selected picture's corners move one by one,
+//! drawing it in perspective; captions and titles have no corner pin (see
+//! `compose::lettering_transform`).
 
 use super::Request;
 use gpui_kit::*;
@@ -58,6 +62,8 @@ enum Mode {
     Skew(usize),
     Rotate,
     Anchor,
+    /// One corner, in corner-pin mode.
+    Pin(usize),
 }
 
 /// A snapping line, in sequence pixels.
@@ -113,8 +119,17 @@ pub(super) struct Outline {
     pub anchor: [f32; 2],
     /// The selected clip's box, with handles.
     pub active: bool,
-    /// The box around several items: corners and the rotate knob only.
-    pub group: bool,
+    pub kind: OutlineKind,
+}
+
+/// Which handles an active box has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OutlineKind {
+    Item,
+    /// Around several items: corners and the rotate knob.
+    Group,
+    /// A picture's pinned corners.
+    Pin,
 }
 
 /// Everything painted over the program, in sequence pixels.
@@ -136,6 +151,8 @@ pub(super) struct Gizmo {
     pub hover: Option<Handle>,
     guides: Vec<Guide>,
     pub safe_areas: bool,
+    /// Corners move one by one (corner-pin mode).
+    pub corner_pin: bool,
     /// Just-dragged clips' placements, shown until a newer layout arrives.
     held: Vec<(ClipId, Placement)>,
 }
@@ -189,11 +206,21 @@ fn solve(m: [f32; 4], v: [f32; 2]) -> Option<[f32; 2]> {
     (det.abs() > 1e-9).then(|| [(d * v[0] - b * v[1]) / det, (a * v[1] - c * v[0]) / det])
 }
 
-/// Where `shape`'s anchor sits, in sequence pixels.
+/// Where `shape`'s anchor sits, in sequence pixels (measured without the
+/// corner pin, as the transform places it).
 fn anchor_point(shape: &Shape, tf: &Transform) -> [f32; 2] {
     shape
         .placement
-        .to_canvas([0.5 + tf.anchor[0], 0.5 + tf.anchor[1]])
+        .unpinned_to_canvas([0.5 + tf.anchor[0], 0.5 + tf.anchor[1]])
+}
+
+/// The whole picture's corners in uv: top-left, top-right, bottom-right,
+/// bottom-left.
+const UV_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// Where the whole picture's corners land, pin included.
+fn pin_corners(shape: &Shape) -> [[f32; 2]; 4] {
+    UV_CORNERS.map(|uv| shape.placement.to_canvas(uv))
 }
 
 /// The rotate handle's screen position for a box with `corners`.
@@ -235,6 +262,13 @@ fn group_handles(corners: &[[f32; 2]; 4], screen: &Screen) -> Vec<(Handle, Point
         out.push((Handle::Corner(i), screen.to_screen(*c)));
     }
     out
+}
+
+/// Screen positions of a pinned picture's corner handles.
+fn pin_handles(corners: &[[f32; 2]; 4], screen: &Screen) -> Vec<(Handle, Point<Pixels>)> {
+    (0..4)
+        .map(|i| (Handle::Corner(i), screen.to_screen(corners[i])))
+        .collect()
 }
 
 /// The corners of the box `[x0, y0, x1, y1]`.
@@ -345,6 +379,12 @@ impl Gizmo {
         Some((shapes, corners))
     }
 
+    /// Whether `shape`'s corners move one by one: corner-pin mode, on a
+    /// picture.
+    fn pinning(&self, shape: &Shape) -> bool {
+        self.corner_pin && !shape.lettering
+    }
+
     /// Whether several selected items share one box.
     pub fn grouped(&self, selected: &[ClipId], request: Option<Request>) -> bool {
         self.selected_shapes(selected, request).len() >= 2
@@ -379,13 +419,13 @@ impl Gizmo {
                 corners: s.corners(),
                 anchor: s.placement.center,
                 active: false,
-                group: false,
+                kind: OutlineKind::Item,
             }));
             outlines.push(Outline {
                 corners,
                 anchor: box_center(&corners),
                 active: true,
-                group: true,
+                kind: OutlineKind::Group,
             });
             return Overlay {
                 outlines,
@@ -397,11 +437,20 @@ impl Gizmo {
         if let Some(shape) = self.active(selected, request)
             && let Some(tf) = self.active_transform(project, shape.clip, playhead)
         {
+            let pin = self.pinning(&shape);
             outlines.push(Outline {
-                corners: shape.corners(),
+                corners: if pin {
+                    pin_corners(&shape)
+                } else {
+                    shape.corners()
+                },
                 anchor: anchor_point(&shape, &tf),
                 active: true,
-                group: false,
+                kind: if pin {
+                    OutlineKind::Pin
+                } else {
+                    OutlineKind::Item
+                },
             });
         }
         if let Some(shapes) = self.shapes_for(request) {
@@ -413,7 +462,7 @@ impl Gizmo {
                     corners: s.corners(),
                     anchor: s.placement.center,
                     active: false,
-                    group: false,
+                    kind: OutlineKind::Item,
                 });
             }
         }
@@ -445,6 +494,16 @@ impl Gizmo {
             return inside(&quad, p).then_some(Handle::Body);
         }
         let shape = self.active(selected, request)?;
+        if self.pinning(&shape) {
+            let corners = pin_corners(&shape);
+            for (handle, at) in pin_handles(&corners, screen) {
+                if near(at, p, REACH) {
+                    return Some(handle);
+                }
+            }
+            let quad = corners.map(|c| screen.to_screen(c));
+            return inside(&quad, p).then_some(Handle::Body);
+        }
         let tf = self.active_transform(project, shape.clip, playhead)?;
         let corners = shape.corners();
         for (handle, at) in handles(&corners, anchor_point(&shape, &tf), screen) {
@@ -499,6 +558,7 @@ impl Gizmo {
         }
         let mode = match handle {
             Handle::Body => Mode::Move,
+            Handle::Corner(i) if self.pinning(&shape) => Mode::Pin(i),
             Handle::Corner(i) if modifiers.shift => Mode::Free(i),
             Handle::Corner(i) => Mode::Scale(i),
             Handle::Edge(i) if modifiers.secondary() => Mode::Skew(i),
@@ -904,8 +964,30 @@ fn apply(
             }
             tf.rotation_deg = turn;
         }
+        Mode::Pin(i) => {
+            // The corner snaps like a point; the pin is measured in the
+            // picture's own uv, before the rest of the transform.
+            let plain = Modifiers {
+                shift: false,
+                ..modifiers
+            };
+            let snapped = snap_move(
+                [m[0], m[1], m[0], m[1]],
+                [0.0; 2],
+                plain,
+                screen,
+                others,
+                safe,
+                &mut guides,
+            );
+            let target = [m[0] + snapped[0], m[1] + snapped[1]];
+            if let Some(uv) = place.unpinned_to_picture(target) {
+                let rest = UV_CORNERS[i];
+                tf.corner_pin[i] = [uv[0] - rest[0], uv[1] - rest[1]];
+            }
+        }
         Mode::Anchor => {
-            if let Some(uv) = place.to_picture(m) {
+            if let Some(uv) = place.unpinned_to_picture(m) {
                 let mut anchor = [uv[0] - 0.5, uv[1] - 0.5];
                 // Snap to the corners, edge midpoints and centre of the box.
                 let [u0, v0, u1, v1] = shape.content;
@@ -914,7 +996,7 @@ fn apply(
                     .into_iter()
                     .flat_map(|u| [v0, (v0 + v1) / 2.0, v1].map(|v| (u, v)))
                 {
-                    let p = place.to_canvas([u, v]);
+                    let p = place.unpinned_to_canvas([u, v]);
                     if sub(p, m)[0].hypot(sub(p, m)[1]) <= reach {
                         anchor = [u - 0.5, v - 0.5];
                     }
@@ -1093,10 +1175,23 @@ pub(super) fn paint(overlay: &Overlay, screen: &Screen, colors: [Hsla; 3], windo
         if !o.active || !overlay.editable {
             continue;
         }
+        if o.kind == OutlineKind::Pin {
+            for (_, at) in pin_handles(&o.corners, screen) {
+                let half = px(HANDLE / 2.0);
+                let square =
+                    Bounds::new(point(at.x - half, at.y - half), size(half * 2., half * 2.));
+                window.paint_quad(
+                    fill(square, line)
+                        .border_widths(px(1.))
+                        .border_color(white()),
+                );
+            }
+            continue;
+        }
         let top = screen.to_screen(mid(o.corners[0], o.corners[1]));
         let knob = rotate_handle(&o.corners, screen);
         stroke(&[top, knob], false, 1.0, line, window);
-        let shown = if o.group {
+        let shown = if o.kind == OutlineKind::Group {
             group_handles(&o.corners, screen)
         } else {
             handles(&o.corners, o.anchor, screen)

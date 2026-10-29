@@ -216,7 +216,7 @@ fn black((w, h): (u32, u32)) -> Frame {
 
 /// Whether `range` uses anything the FFmpeg graph cannot draw exactly:
 /// effects, generators, transitions, non-normal blend modes, crop, flip,
-/// stretch, skew, an anchor off the centre or retimed media.
+/// stretch, skew, an anchor off the centre, a corner pin or retimed media.
 pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
     picture_tracks(project).any(|track| {
         fx::transitions(track)
@@ -234,20 +234,22 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                         || tf.flip.iter().any(|f| *f)
                         || tf.crop.iter().any(|v| *v > 0.0)
                         || is_free_form(tf)
+                        || tf.is_pinned()
                         || c.keyframes.iter().any(|k| {
-                            matches!(
-                                k.property,
-                                Property::CropLeft
-                                    | Property::CropTop
-                                    | Property::CropRight
-                                    | Property::CropBottom
-                                    | Property::ScaleX
-                                    | Property::ScaleY
-                                    | Property::SkewX
-                                    | Property::SkewY
-                                    | Property::AnchorX
-                                    | Property::AnchorY
-                            )
+                            Property::PIN.contains(&k.property)
+                                || matches!(
+                                    k.property,
+                                    Property::CropLeft
+                                        | Property::CropTop
+                                        | Property::CropRight
+                                        | Property::CropBottom
+                                        | Property::ScaleX
+                                        | Property::ScaleY
+                                        | Property::SkewX
+                                        | Property::SkewY
+                                        | Property::AnchorX
+                                        | Property::AnchorY
+                                )
                         })
                         || (c.media().is_some() && (c.speed - 1.0).abs() > 1e-9)
                 })
@@ -299,6 +301,7 @@ pub fn placement_from(
         flip: tf.flip,
         opacity: tf.opacity.clamp(0.0, 1.0),
         blend: tf.blend,
+        pin: tf.corner_pin,
     };
     // The anchor stays where it rests (plus `position`); the centre is the
     // anchor's offset from it, scaled and turned with the picture.
@@ -365,11 +368,14 @@ pub fn is_lettering(track: &Track, clip: &Clip) -> bool {
 }
 
 /// `tf` without what lettering does not draw: the burned-in render cannot
-/// crop, flip or blend it.
+/// crop, flip or blend it, nor pin its corners (ASS's 3D rotations tilt a
+/// line but cannot map it onto an arbitrary quad), so the viewer and the
+/// agent's views don't either.
 pub fn lettering_transform(mut tf: Transform) -> Transform {
     tf.crop = [0.0; 4];
     tf.flip = [false; 2];
     tf.blend = BlendMode::Normal;
+    tf.corner_pin = [[0.0; 2]; 4];
     tf
 }
 

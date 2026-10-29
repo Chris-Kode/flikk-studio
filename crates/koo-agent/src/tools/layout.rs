@@ -129,7 +129,8 @@ pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
                 "transform": transform_json(&tf),
             });
             let turned = shape.placement.rotation_deg.rem_euclid(90.0).abs() > 0.01
-                || shape.placement.skew_deg.iter().any(|v| v.abs() > 0.01);
+                || shape.placement.skew_deg.iter().any(|v| v.abs() > 0.01)
+                || shape.placement.is_pinned();
             if turned {
                 v["corners"] = json!(shape.corners().map(|c| c.map(round)));
             }
@@ -175,6 +176,7 @@ pub fn transform_json(tf: &Transform) -> Value {
         "crop": tf.crop.map(n),
         "flip": tf.flip,
         "blend": super::edit::blend_name(tf.blend),
+        "corner_pin": tf.corner_pin.map(|c| c.map(n)),
     })
 }
 
@@ -280,6 +282,12 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
     let ids = super::edit::target_clips(ctx, args)?;
     let project = ctx.project();
     let t = time_in_all(&ids, args.opt_time("at")?, project)?;
+    if let Some(points) = super::edit::corner_points(args, "pin_to")? {
+        let [id] = ids[..] else {
+            return fail("`pin_to` pins one clip.");
+        };
+        return pin_to(ctx, id, t, points, reason);
+    }
     let align = args.opt_str("align")?.unwrap_or("center");
     if !ALIGNS.contains(&align) {
         return fail(format!("`align` is one of {}", ALIGNS.join(", ")));
@@ -343,6 +351,62 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
             return JobDone::Done(Done::text(
                 "already placed",
                 "The clip is already there; nothing to change.",
+            ));
+        }
+        JobDone::Propose {
+            commands,
+            reason,
+            excerpts: Vec::new(),
+        }
+    });
+    Ok(Step::Job(job))
+}
+
+/// `place` with `pin_to`: the corner pin that puts the whole picture's
+/// corners on `points` (frame pixels) at `t`.
+fn pin_to(
+    ctx: &ToolCtx,
+    id: ClipId,
+    t: Time,
+    points: [[f32; 2]; 4],
+    reason: &str,
+) -> Result<Step, ToolError> {
+    let project = Arc::new(ctx.project().clone());
+    let services = ctx.services.clone();
+    let reason = reason.to_owned();
+    let job: Job = Box::new(move || {
+        let shapes = shapes_at(&project, &services, t);
+        let Some(shape) = shapes.iter().find(|s| s.clip == id) else {
+            return JobDone::Done(Done::error(format!(
+                "The clip draws nothing at {t} (hidden, transparent or covered by a transition); pass `at`."
+            )));
+        };
+        if shape.lettering {
+            return JobDone::Done(Done::error(
+                "Captions and titles have no corner pin: the render burns them in with ASS, which cannot draw them in perspective.",
+            ));
+        }
+        let Some((_, clip)) = project.timeline.clip(id) else {
+            return JobDone::Done(Done::error("clip not found"));
+        };
+        let local = t - clip.start;
+        let mut tf = clip.transform_at(local);
+        let place = shape.placed(&tf);
+        let rest = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for i in 0..4 {
+            let Some(uv) = place.unpinned_to_picture(points[i]) else {
+                return JobDone::Done(Done::error("The clip is scaled to nothing."));
+            };
+            tf.corner_pin[i] = [uv[0] - rest[i][0], uv[1] - rest[i][1]];
+        }
+        if shape.placed(&tf).homography().is_none() {
+            return JobDone::Done(Done::error("Those points make no quad (three in a line?)."));
+        }
+        let commands = Command::transform_at(clip, local, &tf);
+        if commands.is_empty() {
+            return JobDone::Done(Done::text(
+                "already pinned",
+                "The corners are already there; nothing to change.",
             ));
         }
         JobDone::Propose {
@@ -472,7 +536,14 @@ pub fn transform_group(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<S
         return fail("`group` moves several clips as one: give two or more in `clips`.");
     }
     let others = [
-        "stretch", "skew", "anchor", "opacity", "crop", "flip", "blend",
+        "stretch",
+        "skew",
+        "anchor",
+        "opacity",
+        "crop",
+        "flip",
+        "blend",
+        "corner_pin",
     ];
     if let Some(key) = others.iter().find(|k| args.has(k)) {
         return fail(format!(

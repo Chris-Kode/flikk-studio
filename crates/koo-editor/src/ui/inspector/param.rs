@@ -25,6 +25,9 @@ pub enum Key {
     Opacity,
     /// Crop edge: left, top, right, bottom.
     Crop(usize),
+    /// Corner pin, corner by corner (top-left, top-right, bottom-right,
+    /// bottom-left), x then y: `corner × 2 + axis`.
+    Pin(usize),
     /// The selected transition's length in seconds.
     TransitionDuration,
     Exposure,
@@ -86,6 +89,15 @@ impl Key {
             Key::Crop(i) => s(
                 ["Left", "Top", "Right", "Bottom"][i.min(3)],
                 0.,
+                100.,
+                0.5,
+                1,
+                100.,
+                0.,
+            ),
+            Key::Pin(i) => s(
+                ["↖ X", "↖ Y", "↗ X", "↗ Y", "↘ X", "↘ Y", "↙ X", "↙ Y"][i.min(7)],
+                -100.,
                 100.,
                 0.5,
                 1,

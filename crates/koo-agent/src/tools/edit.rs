@@ -801,8 +801,8 @@ fn set_transform(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, T
 }
 
 /// `t` with the values in `args`. With `relative`, position, rotation,
-/// skew and anchor add to the current values, and scale, stretch and
-/// opacity multiply them; crop, flip and blend are always set.
+/// skew, anchor and corner pin add to the current values, and scale,
+/// stretch and opacity multiply them; crop, flip and blend are always set.
 fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultOf<Transform> {
     let add = |current: f32, v: f32| if relative { current + v } else { v };
     let times = |current: f32, v: f32| if relative { current * v } else { v };
@@ -819,6 +819,11 @@ fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultO
     t.skew_deg = pair("skew", t.skew_deg, &add)?
         .map(|v| v.clamp(-koo_core::compose::MAX_SKEW, koo_core::compose::MAX_SKEW));
     t.anchor = pair("anchor", t.anchor, &add)?;
+    if let Some(pin) = corner_points(args, "corner_pin")? {
+        for (corner, given) in t.corner_pin.iter_mut().zip(pin) {
+            *corner = [add(corner[0], given[0]), add(corner[1], given[1])];
+        }
+    }
     if let Some(v) = args.opt_f64("scale")? {
         t.scale = times(t.scale, v as f32).max(0.0);
     }
@@ -849,6 +854,28 @@ fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultO
             .ok_or_else(|| ToolError(format!("unknown blend mode `{name}`")))?;
     }
     Ok(t)
+}
+
+/// Four `[x, y]` points (top-left, top-right, bottom-right, bottom-left)
+/// under `key`, if given.
+pub(super) fn corner_points(args: &Args, key: &str) -> ToolResultOf<Option<[[f32; 2]; 4]>> {
+    let Some(v) = args.value(key) else {
+        return Ok(None);
+    };
+    let points: Option<Vec<[f32; 2]>> = v.as_array().filter(|a| a.len() == 4).and_then(|a| {
+        a.iter()
+            .map(|p| {
+                let p = p.as_array().filter(|p| p.len() == 2)?;
+                Some([p[0].as_f64()? as f32, p[1].as_f64()? as f32])
+            })
+            .collect()
+    });
+    match points {
+        Some(p) => Ok(Some([p[0], p[1], p[2], p[3]])),
+        None => fail(format!(
+            "`{key}` is four [x, y] points: top-left, top-right, bottom-right, bottom-left"
+        )),
+    }
 }
 
 pub(super) fn blend_name(b: BlendMode) -> String {

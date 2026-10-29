@@ -340,7 +340,7 @@ impl FxBatch for Batch<'_> {
         let mut pictures = Vec::with_capacity(layers.len());
         for (surface, placement) in layers {
             let p = placement;
-            if p.size[0] > 0.0 && p.size[1] > 0.0 && p.opacity > 0.0 && p.inverse().is_some() {
+            if p.size[0] > 0.0 && p.size[1] > 0.0 && p.opacity > 0.0 && p.uv_map().is_some() {
                 pictures.push((self.view(*surface)?, self.size(*surface), p));
             }
         }
