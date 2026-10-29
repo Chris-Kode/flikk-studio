@@ -16,7 +16,8 @@ use koo_core::{EffectId, FxId, Time};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// Edit tools served here.
+/// Edit operations served here (some are flags of a listed tool; see
+/// `tools::internal`).
 pub const TOOLS: [&str; 10] = [
     "add_effect",
     "set_effect",

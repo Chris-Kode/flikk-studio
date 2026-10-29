@@ -20,15 +20,17 @@
 
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
+use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
 use crate::{prompt, recipes, session};
 use koo_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
 use koo_core::bus::{AgentRole, Author, CommandBus};
 use koo_core::changeset::ChangeSetState;
+use koo_core::command::ToolCategory;
 use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -88,6 +90,10 @@ struct Turn {
     finished: Option<Option<String>>,
     cancelled: bool,
     saw_text: bool,
+    /// Tool groups the chat lists, fixed when it started (see
+    /// `tools::groups`).
+    groups: BTreeSet<ToolCategory>,
+    usage: Usage,
 }
 
 type JobResult = (Origin, Reply, String, Value, JobDone);
@@ -274,6 +280,17 @@ impl AgentHost {
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let system_prompt = prompt::system_prompt(self.role, &q.settings);
+        let backend = q.settings.backend;
+        let resume = session::load(project.id, &self.chat, backend, self.role);
+        let picked = groups::pick(&text, project, &q.context, self.role);
+        // A conversation keeps the list it started with, so its cached
+        // prompt stays valid; a new one starts from this message's picks.
+        let key = session::key(project.id, &self.chat, backend, self.role);
+        let groups = resume
+            .as_ref()
+            .and_then(|_| groups::stored(&key))
+            .unwrap_or_else(|| picked.clone());
+        groups::store(&key, &groups);
 
         let launch = (|| -> std::io::Result<(McpLaunch, PathBuf, PathBuf)> {
             if self.bridge.is_none() {
@@ -306,13 +323,13 @@ impl AgentHost {
             }
         };
 
-        let backend = q.settings.backend;
         let spec = TurnSpec {
             system_prompt,
             message,
-            resume: session::load(project.id, &self.chat, backend, self.role),
+            resume,
             model: q.settings.models.get(backend).clone(),
             mcp,
+            web: q.settings.web,
             workdir,
             run_dir,
         };
@@ -341,6 +358,8 @@ impl AgentHost {
             finished: None,
             cancelled: false,
             saw_text: false,
+            usage: Usage::new(picked, groups.clone()),
+            groups,
         });
     }
 
@@ -420,6 +439,8 @@ impl AgentHost {
             });
         }
         close_open_sets(bus, &turn.author, &mut self.events);
+        turn.usage
+            .log(&turn.settings, role_of(&turn.author), &turn.context, now());
         let _ = std::fs::remove_dir_all(&turn.spec.run_dir);
         self.events.push(AgentEvent::TurnDone);
     }
@@ -442,19 +463,38 @@ impl AgentHost {
                         self.external.connections.remove(&id);
                     }
                 }
-                (Origin::Turn, IncomingKind::List) => {
-                    let role = self.turn.as_ref().map_or(self.role, |t| role_of(&t.author));
-                    reply.tools(tools::list(bus, role));
-                }
+                (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
+                    Some(turn) => {
+                        let list = tools::list(bus, role_of(&turn.author), Some(&turn.groups));
+                        turn.usage.listed = list.len();
+                        turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
+                        reply.tools(list);
+                    }
+                    None => reply.tools(tools::list(bus, self.role, None)),
+                },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, self.role));
+                    reply.tools(tools::list(bus, self.role, None));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;
                     };
+                    let via_run = tool == groups::RUN_TOOL;
+                    let (tool, args) = groups::unwrap_run(tool, args);
+                    turn.usage.calls.push((tool.clone(), via_run));
+                    if tool == groups::LOAD_TOOLS {
+                        let done = groups::load(
+                            bus,
+                            role_of(&turn.author),
+                            &turn.groups,
+                            &mut turn.usage.loaded,
+                            &args,
+                        );
+                        self.finish_call(reply, tool, args, done);
+                        continue;
+                    }
                     let mut ctx = ToolCtx {
                         bus,
                         services,
@@ -474,6 +514,7 @@ impl AgentHost {
                     }
                 }
                 (Origin::External(id), IncomingKind::Call { tool, args }) => {
+                    let (tool, args) = groups::unwrap_run(tool, args);
                     self.external.connections.insert(id);
                     self.external.last_call = Some(Instant::now());
                     let mut ctx = ToolCtx {

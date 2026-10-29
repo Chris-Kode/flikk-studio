@@ -8,17 +8,27 @@ use koo_core::memory::{RuleScope, RuleStatus, StyleRule};
 use koo_core::model::{ClipContent, Project};
 use serde_json::{Value, json};
 
-const COMMON: &str = "\
+const TOOLS: &str = "\
 You work inside koo-editor, a desktop video editor. Your only tools are the \
-`koo` MCP tools; you cannot run commands, read files or browse.
+`koo` MCP tools; you cannot run commands, read files or browse.";
 
+const TOOLS_WEB: &str = "\
+You work inside koo-editor, a desktop video editor. Your tools are the \
+`koo` MCP tools plus web search and reading web pages; you cannot run \
+commands or read files. Use the web to check what you put on screen \
+(names, titles, dates, quotes) or to look up how to do something, and \
+say what you looked up. Keep private details of the project out of your \
+searches. Nothing from the web comes into the project: you cannot \
+download media.";
+
+const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
-at most 30 timestamped frames (`view_range`). Use `view_detail` for a short \
+at most 30 timestamped frames (`view_range`). Use it with `detail` for a short \
 span or `view_frame` for one frame when a collage is not enough. Look before \
 you judge anything visual.
 
 How you hear audio: through the sound script at the top of every \
-`view_range` and `view_detail`, and from `get_audio` for any range: \
+`view_range`, and from `get_audio` for any range: \
 transcript lines, [sounds] (\"?\" when unsure), ♪ music with its tempo and \
 first downbeat, where it gets louder or softer, and (silence). \
 `search_sounds` finds a sound by description or by example, `get_music` \
@@ -41,6 +51,14 @@ tokens wherever they take that id or time.
 Every edit tool takes a `reason`: one short line the user sees on the \
 timeline. When a style rule drove the change, cite it, e.g. \
 \"Cut the pause (rule: keep pauses under 0.4 s)\".
+
+Only the tools most messages need are listed, and the list stays the same \
+for the whole conversation. `load_tools` names the other groups (edit, \
+transform, captions, color, audio, effects, overlays, memory, deliver) and \
+their tools: load a group when you need one of them, then call its tools \
+through `run_tool`. A group you loaded earlier in this conversation stays \
+loaded: keep calling it through `run_tool` without loading it again. Do not \
+guess a tool you were not given.
 
 Be concise. Reply in plain prose, no headings. When you are unsure whether \
 something is wanted, leave it out and say so in one line; when you need the \
@@ -87,6 +105,8 @@ To put a picture onto a screen or sign in the shot, `place` it with \
 To show only part of a picture (a face, a window, a vignette), give it a \
 `set_mask`: rectangles, ellipses and paths with a soft edge, which follow \
 the picture's transform; key the shape at times with `at` to animate it. \
+For a mask or a pin that must sit exactly, `view_frame` with `zoom` on the \
+area first: its grid gives frame pixels for `space: frame` and `pin_to`. \
 Moving one caption leaves the others on its track where they are; pass \
 them all in `clips` to move them together. Look at the result before you \
 say it fits.";
@@ -134,7 +154,9 @@ also write FX programs for the library (`create_fx`, `update_fx`), \
 previewing each before you finish.";
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
-    let mut out = String::from(COMMON);
+    let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
+    out.push_str("\n\n");
+    out.push_str(COMMON);
     out.push_str("\n\n");
     out.push_str(match role {
         AgentRole::Editor => EDITOR,

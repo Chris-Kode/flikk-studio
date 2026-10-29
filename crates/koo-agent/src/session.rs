@@ -24,7 +24,8 @@ fn file() -> PathBuf {
 /// projects had several chats, so existing conversations still resume.
 pub const MAIN_CHAT: &str = "main";
 
-fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
+/// The key a backend session is stored under.
+pub fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
     let base = format!(
         "{}/{}/{}",
         project.0,
@@ -73,11 +74,16 @@ pub fn store(
 pub fn forget_chat(project: ProjectId, chat: &str) {
     let mut all = load_all();
     let before = all.len();
+    let mut keys = Vec::new();
     for backend in [Backend::Claude, Backend::Codex] {
         for role in [AgentRole::Editor, AgentRole::Builder] {
-            all.remove(&key(project, chat, backend, role));
+            keys.push(key(project, chat, backend, role));
         }
     }
+    for k in &keys {
+        all.remove(k);
+    }
+    crate::tools::groups::forget(&keys);
     if all.len() != before {
         save_all(&all);
     }

@@ -1,7 +1,7 @@
 //! Masks on picture clips (`koo_core::mask`): `set_mask` adds one or
 //! changes it (shape, mode, edge, opacity; keyed at a time with `at`), in
 //! the picture's own coordinates or, with `space: frame`, in frame pixels
-//! at that time; `remove_mask` takes them away. `get_clip` lists them.
+//! at that time; `set_mask` with `remove` takes them away. `get_clip` lists them.
 
 use super::edit::with_notes;
 use super::{Done, Job, JobDone, Step, ToolCtx, propose};
@@ -114,7 +114,9 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
         _ => {
             let (p0, smooth0) = match current {
                 Some(MaskShape::Path { points, smooth }) => (points.clone(), *smooth),
-                _ => (Vec::new(), true),
+                // Straight edges unless asked: points read off a zoomed
+                // frame should be the corners of the shape.
+                _ => (Vec::new(), false),
             };
             let points = match v.get("points") {
                 None => p0,

@@ -19,9 +19,15 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Longest span `view_detail` accepts.
+/// Longest span `view_range` with `detail` accepts.
 const DETAIL_MAX: f64 = 20.0;
 const FRAME_WIDTH: u32 = 1280;
+/// Longest side of a zoomed view.
+const ZOOM_SIDE: u32 = 1280;
+/// Smallest zoom region side, in frame pixels.
+const ZOOM_MIN: f64 = 16.0;
+/// Widest frame rendered for a zoom; past it the view only magnifies.
+const ZOOM_RENDER_MAX: u32 = 7680;
 
 /// The source frame under timeline time `t`, through the topmost video clip.
 fn sample_at(project: &Project, t: Time) -> Option<SamplePoint> {
@@ -152,7 +158,7 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
     let range = args.range("range")?;
     if detail && range.duration().as_secs_f64() > DETAIL_MAX + 0.001 {
         return Err(ToolError(format!(
-            "view_detail takes at most {DETAIL_MAX} s; use view_range for longer spans"
+            "view_range with `detail` takes at most {DETAIL_MAX} s; leave `detail` out for longer spans"
         )));
     }
     let n = ctx.settings.vision.frames_per_collage.clamp(1, 30) as usize;
@@ -326,15 +332,24 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let t = args.time("t")?;
     let annotate = args.opt_bool("annotate")?.unwrap_or(false);
+    let zoom = zoom_region(project, args)?;
     let rate = project.timeline.settings.rate;
     let t = t.max(Time::ZERO).floor_to_frame(rate);
     let span = TimeRange::new(t, t + rate.frame_duration());
-    if annotate || wants_program(project, span, ctx.services) {
+    if annotate || zoom.is_some() || wants_program(project, span, ctx.services) {
         let project = Arc::new(project.clone());
         let services = ctx.services.clone();
         let job: Job = Box::new(move || {
-            let size = compose::size_for_width(&project, FRAME_WIDTH);
-            let mut stills = Stills::new(services.media.clone(), FRAME_WIDTH);
+            let frame_w = project.timeline.settings.width.max(2);
+            // Rendered wide enough that the region fills the view at its
+            // own resolution (the sources' detail, not an upscaled preview).
+            let width = match zoom {
+                Some(r) => ((frame_w as f64 * ZOOM_SIDE as f64 / r[2].max(r[3])).ceil() as u32)
+                    .clamp(FRAME_WIDTH, ZOOM_RENDER_MAX.max(frame_w)),
+                None => FRAME_WIDTH,
+            };
+            let size = compose::size_for_width(&project, width);
+            let mut stills = Stills::new(services.media.clone(), width);
             let mut frame = compose::program(&project, t, size, &services, &mut stills);
             let mut text = format!("Program frame at {t} ({}).", program_note(&services));
             if annotate {
@@ -350,13 +365,23 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     }
                 }
             }
+            if let Some(region) = zoom {
+                let (zoomed, note) = zoomed(&frame, region, frame_w);
+                frame = zoomed;
+                text.push('\n');
+                text.push_str(&note);
+            }
             match save_png(&frame).and_then(|path| Ok((image_content(&path)?, path))) {
                 Ok((image, path)) => JobDone::Done(Done {
                     result: ToolResult {
                         content: vec![Content::Text { text }, image],
                         is_error: false,
                     },
-                    summary: format!("frame at {t}"),
+                    summary: if zoom.is_some() {
+                        format!("zoomed frame at {t}")
+                    } else {
+                        format!("frame at {t}")
+                    },
                     images: vec![path],
                     ..Default::default()
                 }),
@@ -404,6 +429,150 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         }
     });
     Ok(Step::Job(job))
+}
+
+/// `zoom` as [left, top, width, height] in frame pixels, kept inside the
+/// frame.
+fn zoom_region(project: &Project, args: &Args) -> Result<Option<[f64; 4]>, ToolError> {
+    let Some(value) = args.value("zoom") else {
+        return Ok(None);
+    };
+    let n: Vec<f64> = value
+        .as_array()
+        .map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect())
+        .unwrap_or_default();
+    let [x, y, w, h] = n[..] else {
+        return Err(ToolError(
+            "`zoom` is [left, top, width, height] in frame pixels".into(),
+        ));
+    };
+    let s = &project.timeline.settings;
+    let (fw, fh) = (s.width.max(2) as f64, s.height.max(2) as f64);
+    let (w, h) = (w.clamp(ZOOM_MIN, fw), h.clamp(ZOOM_MIN, fh));
+    let (x, y) = (x.clamp(0.0, fw - w), y.clamp(0.0, fh - h));
+    Ok(Some([x, y, w, h]))
+}
+
+/// The `region` (frame pixels) of `frame`, rendered for a frame `frame_w`
+/// pixels wide, scaled up to fit [`ZOOM_SIDE`] with a grid labelled in
+/// frame pixels, and the line that explains it.
+fn zoomed(frame: &Frame, region: [f64; 4], frame_w: u32) -> (Frame, String) {
+    let k = frame.width as f64 / frame_w as f64;
+    let [rx, ry, rw, rh] = region;
+    let fit = ZOOM_SIDE as f64 / rw.max(rh);
+    let (ow, oh) = (
+        ((rw * fit).round() as u32).max(1),
+        ((rh * fit).round() as u32).max(1),
+    );
+    let mut buf = vec![0u8; (ow * oh * 4) as usize];
+    // Bilinear, sampling the render at the frame pixel each output pixel
+    // stands for.
+    let px = |x: i64, y: i64| -> [f32; 4] {
+        let x = x.clamp(0, frame.width as i64 - 1) as u32;
+        let y = y.clamp(0, frame.height as i64 - 1) as u32;
+        let d = ((y * frame.width + x) * 4) as usize;
+        let p = &frame.rgba[d..d + 4];
+        [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32]
+    };
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let fx = (rx + (ox as f64 + 0.5) / fit) * k - 0.5;
+            let fy = (ry + (oy as f64 + 0.5) / fit) * k - 0.5;
+            let (x0, y0) = (fx.floor(), fy.floor());
+            let (tx, ty) = ((fx - x0) as f32, (fy - y0) as f32);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let (a, b, c, d) = (
+                px(x0, y0),
+                px(x0 + 1, y0),
+                px(x0, y0 + 1),
+                px(x0 + 1, y0 + 1),
+            );
+            let o = ((oy * ow + ox) * 4) as usize;
+            for i in 0..4 {
+                let top = a[i] + (b[i] - a[i]) * tx;
+                let bottom = c[i] + (d[i] - c[i]) * tx;
+                buf[o + i] = (top + (bottom - top) * ty).round() as u8;
+            }
+        }
+    }
+    // Grid lines every `step` frame pixels, about eight across.
+    let step = [
+        1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0,
+    ]
+    .into_iter()
+    .find(|s| rw.max(rh) / s <= 10.0)
+    .unwrap_or(1000.0);
+    let line = [255u8, 220, 40];
+    let blend = |buf: &mut [u8], x: u32, y: u32| {
+        let o = ((y * ow + x) * 4) as usize;
+        for i in 0..3 {
+            buf[o + i] = ((buf[o + i] as u16 + line[i] as u16 * 2) / 3) as u8;
+        }
+        buf[o + 3] = 255;
+    };
+    let label = |buf: &mut [u8], text: &str, x: u32, y: u32| {
+        let (tw, th) = (text.len() as u32 * 12 + 4, 18);
+        let x = x.min(ow.saturating_sub(tw));
+        let y = y.min(oh.saturating_sub(th));
+        for py in y..(y + th).min(oh) {
+            for qx in x..(x + tw).min(ow) {
+                let o = ((py * ow + qx) * 4) as usize;
+                buf[o..o + 4].copy_from_slice(&[16, 16, 20, 255]);
+            }
+        }
+        draw_text(buf, ow, text, x + 2, y + 2, 2, line);
+    };
+    let first = |from: f64| (from / step).ceil() * step;
+    let mut v = first(rx);
+    while v <= rx + rw {
+        let x = ((v - rx) * fit).round() as u32;
+        if x < ow {
+            for y in 0..oh {
+                blend(&mut buf, x, y);
+            }
+        }
+        v += step;
+    }
+    let mut v = first(ry);
+    while v <= ry + rh {
+        let y = ((v - ry) * fit).round() as u32;
+        if y < oh {
+            for x in 0..ow {
+                blend(&mut buf, x, y);
+            }
+        }
+        v += step;
+    }
+    // Labels last, so lines never cross them: x along the top, y down the
+    // left.
+    let mut v = first(rx);
+    while v <= rx + rw {
+        let x = ((v - rx) * fit).round() as u32;
+        label(&mut buf, &format!("{v}"), x + 2, 0);
+        v += step * 2.0;
+    }
+    let mut v = first(ry) + step;
+    while v <= ry + rh {
+        let y = ((v - ry) * fit).round() as u32;
+        label(&mut buf, &format!("{v}"), 0, y + 2);
+        v += step * 2.0;
+    }
+    let note = format!(
+        "Zoomed ×{:.1} on frame pixels x {:.0}–{:.0}, y {:.0}–{:.0}. Grid lines every {step} px, labelled in frame pixels: use those numbers with `space: frame` in set_mask, or in place's `pin_to`.",
+        fit,
+        rx,
+        rx + rw,
+        ry,
+        ry + rh
+    );
+    (
+        Frame {
+            width: ow,
+            height: oh,
+            rgba: Arc::from(buf),
+        },
+        note,
+    )
 }
 
 /// PNG under `paths::cache()/agent/frames`, kept for the activity log.

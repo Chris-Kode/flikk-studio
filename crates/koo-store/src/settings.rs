@@ -26,6 +26,7 @@ pub struct SettingsOverrides {
     /// `Some(None)` forces "follow the source" over a user language.
     pub language: Option<Option<String>>,
     pub style_profile: Option<Option<RuleId>>,
+    pub web: Option<bool>,
 }
 
 impl SettingsOverrides {
@@ -53,6 +54,9 @@ impl SettingsOverrides {
         if let Some(v) = &self.style_profile {
             s.style_profile = *v;
         }
+        if let Some(v) = self.web {
+            s.web = v;
+        }
         s
     }
 
@@ -69,6 +73,7 @@ impl SettingsOverrides {
             vision: changed(&user.vision, &effective.vision),
             language: changed(&user.language, &effective.language),
             style_profile: changed(&user.style_profile, &effective.style_profile),
+            web: changed(&user.web, &effective.web),
         }
     }
 }
