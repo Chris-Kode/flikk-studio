@@ -599,7 +599,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "stretch": numbers(2, "[x, y] per-axis scale on top of `scale`, 1 = none"),
                     "rotation": number("Degrees clockwise, about the anchor"),
                     "skew": numbers(2, "[x, y] slant in degrees, ±80: x leans vertical edges right going down, y leans horizontal edges down going right"),
-                    "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. Moving it alone does not move the picture"),
+                    "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. It stays where it rests, so changing it shifts a scaled, rotated or skewed picture: set it first, then place it"),
                     "opacity": number("0..1"),
                     "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
                     "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },

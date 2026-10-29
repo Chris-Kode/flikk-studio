@@ -510,7 +510,9 @@ pub struct Transform {
     pub skew_deg: [f32; 2],
     /// The point of the picture it is scaled, skewed and rotated about, as
     /// a fraction of its size from its centre: (0, 0) = centre, (-0.5,
-    /// -0.5) = top-left corner. Moving it alone does not move the picture.
+    /// -0.5) = top-left corner. It stays where it rests (plus `position`),
+    /// so moving it shifts a scaled, rotated or skewed picture; the
+    /// viewer's anchor handle moves `position` to keep the picture still.
     pub anchor: [f32; 2],
     /// Fractions of the source picture cut away before scaling:
     /// [left, top, right, bottom], each 0..1, 0 = none.

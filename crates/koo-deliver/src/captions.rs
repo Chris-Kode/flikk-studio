@@ -204,24 +204,22 @@ fn tags(t: &str) -> String {
 const STEP: f64 = 1.0 / 30.0;
 
 /// Where a clip's transform puts lettering at one moment, as ASS override
-/// values about the event's alignment point.
+/// values about the event's alignment point. The transform is written as
+/// libass applies it: scale, then a horizontal shear, then rotation (any
+/// rotation, skew and stretch can be), so no `\\fay` is needed.
 #[derive(Clone, Copy, PartialEq)]
 struct Moved {
     pos: [f32; 2],
-    /// `\fscx`, `\fscy`: percent, the pose's scale included.
+    /// `\\fscx`, `\\fscy`: percent, the pose's scale included.
     scale: [f32; 2],
-    /// `\frz`: degrees counter-clockwise.
+    /// `\\frz`: degrees counter-clockwise.
     turn: f32,
-    /// `\fax`, `\fay`.
-    shear: [f32; 2],
+    /// `\\fax`.
+    shear: f32,
     opacity: f32,
 }
 
 impl Moved {
-    fn turned(&self) -> bool {
-        self.turn.abs() > 1e-3 || self.shear.iter().any(|v| v.abs() > 1e-4)
-    }
-
     /// Override tags for a span from `self` to `to` over `ms`.
     fn tags(&self, to: &Moved, ms: i64) -> String {
         let mut tags = String::new();
@@ -231,13 +229,12 @@ impl Moved {
         } else {
             let _ = write!(tags, "\\move({x0:.1},{y0:.1},{x1:.1},{y1:.1},0,{ms})");
         }
-        if self.turned() || to.turned() {
-            let _ = write!(tags, "\\org({x0:.1},{y0:.1})");
-        }
+        // No \\org: the default origin is the alignment point, which
+        // follows \\move.
         let look = |m: &Moved| {
             format!(
-                "\\fscx{:.2}\\fscy{:.2}\\frz{:.3}\\fax{:.4}\\fay{:.4}",
-                m.scale[0], m.scale[1], m.turn, m.shear[0], m.shear[1]
+                "\\fscx{:.2}\\fscy{:.2}\\frz{:.3}\\fax{:.4}",
+                m.scale[0], m.scale[1], m.turn, m.shear
             )
         };
         let (a, b) = (look(self), look(to));
@@ -281,24 +278,59 @@ fn moved(
     clip: &Clip,
     t: f64,
     at: [f32; 2],
+    drop: f32,
     (width, height): (f32, f32),
 ) -> Option<Moved> {
     let canvas = (width as u32, height as u32);
-    let (center, size) = lettering::rest(letters, canvas)?;
+    // Measured fully shown: a fade's ends still have a place.
+    let shown = Letters {
+        pose: Pose {
+            opacity: 1.0,
+            ..letters.pose
+        },
+        ..letters.clone()
+    };
+    let (center, size) = lettering::rest(&shown, canvas)?;
     let tf = compose::lettering_transform(clip.transform_at(Time::from_secs_f64(t)));
     let place = compose::placement_from(&tf, center, size, canvas);
     let uv = [
         (at[0] - center[0]) / size[0].max(1e-3) + 0.5,
         (at[1] - center[1]) / size[1].max(1e-3) + 0.5,
     ];
-    let k = letters.pose.scale * tf.scale.max(0.0) * 100.0;
+    // The whole map from the style's unscaled lettering, split as
+    // rotation · (scale, then shear): its QR decomposition.
+    let [a, b, c, d] = place.linear();
+    let k = letters.pose.scale * tf.scale.max(0.0);
+    let (kx, ky) = (k * tf.stretch[0].max(0.0), k * tf.stretch[1].max(0.0));
+    let [m00, m01, m10, m11] = [a * kx, b * ky, c * kx, d * ky];
+    let turn = m10.atan2(m00);
+    let (sin, cos) = turn.sin_cos();
+    let sx = m00.hypot(m10);
+    let skewed = cos * m01 + sin * m11;
+    let sy = cos * m11 - sin * m01;
+    // libass shears each line about its top, `drop` above the alignment
+    // point (on average); take that back out.
+    let shift = [cos * skewed * drop, sin * skewed * drop];
+    let [x, y] = place.to_canvas(uv);
     Some(Moved {
-        pos: place.to_canvas(uv),
-        scale: [k * tf.stretch[0].max(0.0), k * tf.stretch[1].max(0.0)],
-        turn: -place.rotation_deg,
-        shear: place.skew_deg.map(|d| d.to_radians().tan()),
+        pos: [x - shift[0], y - shift[1]],
+        scale: [sx * 100.0, sy * 100.0],
+        turn: -turn.to_degrees(),
+        shear: if sx > 1e-6 { skewed / sx } else { 0.0 },
         opacity: letters.pose.opacity * tf.opacity.clamp(0.0, 1.0),
     })
+}
+
+/// How far below its lines' tops an event's alignment point sits, on
+/// average, for `lines` lines of an `edge`-aligned block whose lines are
+/// `line` pixels apart (libass spaces them by the font size).
+fn line_drop(edge: CaptionPosition, lines: usize, line: f32) -> f32 {
+    let n = lines.max(1) as f32;
+    match edge {
+        CaptionPosition::Bottom => line * (n + 1.0) / 2.0,
+        CaptionPosition::Middle => line / 2.0,
+        CaptionPosition::Top => -line * (n - 1.0) / 2.0,
+    }
 }
 
 /// `cuts` with a cut every [`STEP`] seconds where they overlap `within`.
@@ -394,8 +426,9 @@ fn write_caption(
         let letters = |t: f64| Letters::of(track, caption, Time::from_secs_f64(t), styles);
         let moves = transformed
             .then(|| {
-                let m0 = moved(&letters(t0)?, caption, t0, [pin.x, y0], size)?;
-                let m1 = moved(&letters(t1)?, caption, t1, [pin.x, y1], size)?;
+                let drop = line_drop(pin.edge, lines.len(), style.size * k);
+                let m0 = moved(&letters(t0)?, caption, t0, [pin.x, y0], drop, size)?;
+                let m1 = moved(&letters(t1)?, caption, t1, [pin.x, y1], drop, size)?;
                 Some((m0, m1))
             })
             .flatten();
@@ -588,7 +621,14 @@ pub fn to_ass(
                         [w / 2.0, h / 2.0]
                     };
                     let letters = Letters::title(text, lower);
-                    let span = |t: f64| moved(&letters, clip, t, at, (w, h));
+                    // Bottom-left or centred, as the title styles align.
+                    let (edge, size) = if lower {
+                        (CaptionPosition::Bottom, 54.0 * k)
+                    } else {
+                        (CaptionPosition::Middle, 96.0 * k)
+                    };
+                    let drop = line_drop(edge, lines.len(), size);
+                    let span = |t: f64| moved(&letters, clip, t, at, drop, (w, h));
                     let length = clip.duration.as_secs_f64();
                     let mut cuts = vec![0.0, length];
                     if let Some(span) = changes {

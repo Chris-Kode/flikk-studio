@@ -197,7 +197,8 @@ fn handles(
     out
 }
 
-/// Whether `p` is inside the quadrilateral `q` (screen pixels).
+/// Whether `p` is inside the quadrilateral `q` (screen pixels); never
+/// inside a flat one.
 fn inside(q: &[Point<Pixels>; 4], p: Point<Pixels>) -> bool {
     let mut sign = 0.0f32;
     for i in 0..4 {
@@ -213,7 +214,7 @@ fn inside(q: &[Point<Pixels>; 4], p: Point<Pixels>) -> bool {
             return false;
         }
     }
-    true
+    sign != 0.0
 }
 
 fn near(a: Point<Pixels>, b: Point<Pixels>, reach: f32) -> bool {

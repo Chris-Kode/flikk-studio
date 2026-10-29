@@ -428,12 +428,18 @@ impl Command {
                 continue;
             }
             if clip.keyframes.iter().any(|k| k.property == p) {
+                // A keyframe already there keeps its easing.
+                let ease = clip
+                    .keyframes
+                    .iter()
+                    .find(|k| k.property == p && k.at == at)
+                    .map_or_else(Ease::default, |k| k.ease);
                 keys.push(Command::SetKeyframe {
                     clip: clip.id,
                     property: p,
                     at: clip.start + at,
                     value: v,
-                    ease: Ease::default(),
+                    ease,
                 });
             } else {
                 fixed.set(p, v);

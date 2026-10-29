@@ -340,15 +340,18 @@ fn picture_tracks(project: &Project) -> impl Iterator<Item = &Track> {
     })
 }
 
-/// Tracks that can show lettering, bottom-up: titles and captions are
-/// drawn over every picture, as the render burns them in.
+/// Tracks that can show lettering, bottom-up: captions, then titles, over
+/// every picture, as the render burns them in.
 fn lettering_tracks(project: &Project) -> impl Iterator<Item = &Track> {
-    project
-        .timeline
-        .tracks
-        .iter()
-        .rev()
-        .filter(|t| matches!(t.kind, TrackKind::Title | TrackKind::Caption) && !t.mix.mute)
+    let shown = |kind: TrackKind| {
+        project
+            .timeline
+            .tracks
+            .iter()
+            .rev()
+            .filter(move |t| t.kind == kind && !t.mix.mute)
+    };
+    shown(TrackKind::Caption).chain(shown(TrackKind::Title))
 }
 
 /// Whether `clip` on `track` is lettering: a title on a title track, or a

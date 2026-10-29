@@ -91,9 +91,7 @@ pub fn layout(
         else {
             continue;
         };
-        // Coarse: only the rectangle is needed.
-        if let Some((l, placement)) = lettering_layer(services, track, clip, t, canvas, Some(0.25))
-        {
+        if let Some((l, placement)) = lettering_layer(services, track, clip, t, canvas, Some(1.0)) {
             shapes.push(Shape {
                 track: track.id,
                 clip: clip.id,
@@ -180,6 +178,8 @@ fn picture_shape(
         ClipContent::Title { .. } | ClipContent::Caption { .. } => return None,
     };
     let place = placement(&tf, size, canvas);
+    // Scaled to nothing: not drawn, so nothing to pick.
+    place.inverse()?;
     let fit = (canvas.0 as f32 / size.0.max(1) as f32).min(canvas.1 as f32 / size.1.max(1) as f32);
     // Drawn part, in the picture's own uv, cut by the crop, then flipped
     // into the placement's uv.
