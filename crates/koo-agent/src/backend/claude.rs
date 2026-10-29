@@ -1,14 +1,19 @@
 //! Claude Code, run as `claude -p` with streaming JSON in and out
 //! (flags checked against `claude --help`, v2.1.x).
 //!
-//! The only tools are the `koo` MCP server's: built-in tools are removed with
-//! `--tools ""`, other MCP servers are ignored with `--strict-mcp-config`,
-//! settings files are not loaded, and `dontAsk` denies anything not allowed.
+//! The only tools are the `koo` MCP server's (plus `WebSearch` and
+//! `WebFetch` when the user allows the web): other built-in tools are
+//! removed with `--tools`, other MCP servers are ignored with
+//! `--strict-mcp-config`, settings files are not loaded, and `dontAsk`
+//! denies anything not allowed.
 
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use koo_core::agent::Backend as BackendKind;
 use serde_json::{Value, json};
 use std::process::Command;
+
+/// Claude Code's own tools for the web.
+const WEB_TOOLS: &str = "WebSearch,WebFetch";
 
 #[derive(Default)]
 pub struct Claude {
@@ -50,9 +55,13 @@ impl Adapter for Claude {
             "--include-partial-messages",
             "--strict-mcp-config",
             "--tools",
-            "",
+            if turn.web { WEB_TOOLS } else { "" },
             "--allowedTools",
-            "mcp__koo",
+            if turn.web {
+                "mcp__koo,WebSearch,WebFetch"
+            } else {
+                "mcp__koo"
+            },
             "--permission-mode",
             "dontAsk",
             "--setting-sources",

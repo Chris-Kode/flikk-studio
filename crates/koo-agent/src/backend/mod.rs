@@ -39,6 +39,8 @@ pub struct TurnSpec {
     /// Model and thinking level; `None` fields keep the CLI default.
     pub model: ModelChoice,
     pub mcp: McpLaunch,
+    /// Let the backend search the web and read pages with its own tools.
+    pub web: bool,
     /// Empty working directory under `paths::home()`, so no project file of
     /// the user's (CLAUDE.md, AGENTS.md, .codex) is ever picked up.
     pub workdir: PathBuf,

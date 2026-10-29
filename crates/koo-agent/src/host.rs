@@ -329,6 +329,7 @@ impl AgentHost {
             resume,
             model: q.settings.models.get(backend).clone(),
             mcp,
+            web: q.settings.web,
             workdir,
             run_dir,
         };

@@ -121,6 +121,11 @@ pub struct AgentSettings {
     /// recipes in a sandbox); both run on `backend`.
     #[serde(default)]
     pub role: crate::bus::AgentRole,
+    /// Web search and page reading through the backend's own tools. Off by
+    /// default: the agent writes the queries, and they can carry details of
+    /// the project.
+    #[serde(default)]
+    pub web: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -199,7 +199,24 @@ impl SettingsPanel {
                 )
                 .child(control)
         });
-        v_flex().children(rows)
+        let web = TabBar::new("perm-web")
+            .segmented()
+            .xsmall()
+            .selected_index(settings.web as usize)
+            .child(Tab::new().label("Off"))
+            .child(Tab::new().label("On"))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                let on = *ix == 1;
+                this.update(cx, |s| s.web = on);
+            }));
+        v_flex().children(rows).child(
+            h_flex()
+                .h(px(30.))
+                .justify_between()
+                .text_sm()
+                .child("Web")
+                .child(web),
+        )
     }
 
     fn slider_row(

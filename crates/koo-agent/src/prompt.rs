@@ -8,10 +8,20 @@ use koo_core::memory::{RuleScope, RuleStatus, StyleRule};
 use koo_core::model::{ClipContent, Project};
 use serde_json::{Value, json};
 
-const COMMON: &str = "\
+const TOOLS: &str = "\
 You work inside koo-editor, a desktop video editor. Your only tools are the \
-`koo` MCP tools; you cannot run commands, read files or browse.
+`koo` MCP tools; you cannot run commands, read files or browse.";
 
+const TOOLS_WEB: &str = "\
+You work inside koo-editor, a desktop video editor. Your tools are the \
+`koo` MCP tools plus web search and reading web pages; you cannot run \
+commands or read files. Use the web to check what you put on screen \
+(names, titles, dates, quotes) or to look up how to do something, and \
+say what you looked up. Keep private details of the project out of your \
+searches. Nothing from the web comes into the project: you cannot \
+download media.";
+
+const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
 at most 30 timestamped frames (`view_range`). Use it with `detail` for a short \
 span or `view_frame` for one frame when a collage is not enough. Look before \
@@ -144,7 +154,9 @@ also write FX programs for the library (`create_fx`, `update_fx`), \
 previewing each before you finish.";
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
-    let mut out = String::from(COMMON);
+    let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
+    out.push_str("\n\n");
+    out.push_str(COMMON);
     out.push_str("\n\n");
     out.push_str(match role {
         AgentRole::Editor => EDITOR,

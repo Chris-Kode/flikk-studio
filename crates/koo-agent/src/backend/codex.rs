@@ -4,9 +4,10 @@
 //!
 //! Codex has no single "MCP only" switch, so the turn turns off what it can:
 //! the user's `config.toml` is not loaded (`--ignore-user-config`, which
-//! also drops their other MCP servers), the shell, exec, patch and web
-//! search tools are disabled, the sandbox is read-only and approvals never
-//! prompt. Auth still comes from `CODEX_HOME`.
+//! also drops their other MCP servers), the shell, exec and patch tools are
+//! disabled (web search too, unless the user allows the web), the sandbox
+//! is read-only and approvals never prompt. Auth still comes from
+//! `CODEX_HOME`.
 
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use koo_core::agent::Backend as BackendKind;
@@ -79,11 +80,15 @@ impl Adapter for Codex {
             "mcp_servers.koo.tool_timeout_sec=300".into(),
             format!("developer_instructions={}", toml_str(&turn.system_prompt)),
             "approval_policy=\"never\"".into(),
-            "web_search=\"disabled\"".into(),
+            if turn.web {
+                "web_search=\"live\"".into()
+            } else {
+                "web_search=\"disabled\"".into()
+            },
             "features.shell_tool=false".into(),
             "features.unified_exec=false".into(),
             "features.apply_patch_freeform=false".into(),
-            "features.web_search_request=false".into(),
+            format!("features.web_search_request={}", turn.web),
             "include_apply_patch_tool=false".into(),
             "tools.view_image=false".into(),
         ];
