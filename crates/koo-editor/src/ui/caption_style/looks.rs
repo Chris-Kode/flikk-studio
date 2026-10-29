@@ -2,7 +2,7 @@
 //! the edited style.
 
 use super::CaptionStylePanel;
-use crate::ui::lettering::{self, Lettering, Place};
+use crate::ui::lettering::{self, Lettering};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -30,7 +30,6 @@ fn letters(style: &CaptionStyle, text: &str) -> Lettering {
     Lettering {
         lines: wrap(text, style).into_iter().map(Into::into).collect(),
         style: style.clone(),
-        place: Place::Center,
         pose: Pose::REST,
         spoken: Some(spoken),
     }

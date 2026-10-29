@@ -17,7 +17,15 @@ use koo_core::Time;
 use koo_core::command::Command;
 use koo_core::model::{BlendMode, Clip, Keyframe, Property};
 
-const TRANSFORM: [Key; 4] = [Key::PosX, Key::PosY, Key::Scale, Key::Rotation];
+const TRANSFORM: [Key; 6] = [
+    Key::PosX,
+    Key::PosY,
+    Key::Scale,
+    Key::ScaleX,
+    Key::ScaleY,
+    Key::Rotation,
+];
+const SHAPE: [Key; 4] = [Key::SkewX, Key::SkewY, Key::AnchorX, Key::AnchorY];
 const CROP: [Key; 4] = [Key::Crop(0), Key::Crop(1), Key::Crop(2), Key::Crop(3)];
 
 impl InspectorPanel {
@@ -41,10 +49,13 @@ impl InspectorPanel {
         }
     }
 
-    /// Transform with keyframe toggles, then the clip's keyframes.
+    /// Transform with keyframe toggles, then the clip's keyframes. Lettering
+    /// (captions, titles) has no crop, flip or blend mode: the render cannot
+    /// burn them in.
     pub(super) fn transform_view(
         &mut self,
         clip: &Clip,
+        lettering: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -67,23 +78,25 @@ impl InspectorPanel {
                 .collect::<Vec<_>>()
         };
         let transform_rows = keyed_rows(&TRANSFORM, self, cx);
+        let shape_rows = keyed_rows(&SHAPE, self, cx);
         let opacity = keyed_rows(&[Key::Opacity], self, cx);
         let crop_rows = keyed_rows(&CROP, self, cx);
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
         let transform = section("Transform", cx)
             .children(transform_rows)
-            .child(self.flip_row(&clip, cx));
+            .children(shape_rows)
+            .when(!lettering, |s| s.child(self.flip_row(&clip, cx)));
         let composite = section("Composite", cx)
             .children(opacity)
-            .child(self.blend_row(&clip, cx));
-        let crop = section("Crop", cx).children(crop_rows);
+            .when(!lettering, |s| s.child(self.blend_row(&clip, cx)));
+        let crop = (!lettering).then(|| section("Crop", cx).children(crop_rows));
         let list = (!frames.is_empty()).then(|| self.keyframe_list(&clip, frames, at, frame, cx));
         v_flex()
             .gap_4()
             .child(transform)
             .child(composite)
-            .child(crop)
+            .children(crop)
             .children(list)
             .into_any_element()
     }
@@ -314,7 +327,13 @@ fn transform_key(p: Property) -> Option<Key> {
         Property::PositionX => Key::PosX,
         Property::PositionY => Key::PosY,
         Property::Scale => Key::Scale,
+        Property::ScaleX => Key::ScaleX,
+        Property::ScaleY => Key::ScaleY,
         Property::Rotation => Key::Rotation,
+        Property::SkewX => Key::SkewX,
+        Property::SkewY => Key::SkewY,
+        Property::AnchorX => Key::AnchorX,
+        Property::AnchorY => Key::AnchorY,
         Property::Opacity => Key::Opacity,
         Property::CropLeft => Key::Crop(0),
         Property::CropTop => Key::Crop(1),

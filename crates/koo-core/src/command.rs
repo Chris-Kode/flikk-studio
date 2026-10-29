@@ -413,6 +413,43 @@ pub enum Command {
 }
 
 impl Command {
+    /// The commands that give `clip` transform `tf` at clip-relative time
+    /// `at`: a keyframe there for each changed property that has keyframes,
+    /// and one [`Command::SetTransform`] for the rest (flip and blend
+    /// included). Empty when nothing changes.
+    pub fn transform_at(clip: &Clip, at: Time, tf: &Transform) -> Vec<Command> {
+        let mut fixed = clip.transform.clone();
+        fixed.flip = tf.flip;
+        fixed.blend = tf.blend;
+        let mut keys = Vec::new();
+        for p in Property::TRANSFORM {
+            let v = tf.get(p);
+            if (v - clip.value_at(p, at)).abs() <= 1e-6 {
+                continue;
+            }
+            if clip.keyframes.iter().any(|k| k.property == p) {
+                keys.push(Command::SetKeyframe {
+                    clip: clip.id,
+                    property: p,
+                    at: clip.start + at,
+                    value: v,
+                    ease: Ease::default(),
+                });
+            } else {
+                fixed.set(p, v);
+            }
+        }
+        let mut out = Vec::new();
+        if fixed != clip.transform {
+            out.push(Command::SetTransform {
+                clip: clip.id,
+                transform: fixed,
+            });
+        }
+        out.extend(keys);
+        out
+    }
+
     pub fn category(&self) -> ToolCategory {
         use Command::*;
         match self {

@@ -79,8 +79,10 @@ impl Writer<'_> {
                     let tr = &clip.transform;
                     let k = self.project.timeline.settings.width as f32
                         / self.project.timeline.settings.height.max(1) as f32;
+                    let [sx, sy] = tr.stretch.map(|s| s * tr.scale);
                     if tr.position != [0.0, 0.0]
-                        || (tr.scale - 1.0).abs() > 1e-3
+                        || (sx - 1.0).abs() > 1e-3
+                        || (sy - 1.0).abs() > 1e-3
                         || tr.rotation_deg != 0.0
                     {
                         // FCP positions are percent of frame height, y up.
@@ -89,8 +91,8 @@ impl Writer<'_> {
                             "<adjust-transform position=\"{:.3} {:.3}\" scale=\"{:.4} {:.4}\" rotation=\"{:.3}\"/>",
                             tr.position[0] * 100.0 * k,
                             -tr.position[1] * 100.0,
-                            tr.scale,
-                            tr.scale,
+                            sx,
+                            sy,
                             -tr.rotation_deg
                         );
                     }

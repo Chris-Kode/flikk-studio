@@ -4,7 +4,7 @@
 use crate::analysis::{Analysis, Loudness, SoundVectors};
 use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MediaId};
-use crate::model::{BlendMode, Fingerprint, MediaInfo, MediaItem};
+use crate::model::{BlendMode, Clip, Fingerprint, MediaInfo, MediaItem, Track};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -326,10 +326,14 @@ pub trait FxBatch {
 pub struct Placement {
     /// Centre of the picture.
     pub center: [f32; 2],
-    /// Drawn size of the whole (uncropped) picture before rotation.
+    /// Drawn size of the whole (uncropped) picture before skew and rotation.
     pub size: [f32; 2],
     /// Clockwise, around the centre.
     pub rotation_deg: f32,
+    /// Slant before rotation, [x, y] degrees, as [`Transform::skew_deg`].
+    ///
+    /// [`Transform::skew_deg`]: crate::model::Transform::skew_deg
+    pub skew_deg: [f32; 2],
     /// Fractions of the picture cut away, [left, top, right, bottom], in
     /// the picture's own (unflipped) coordinates.
     pub crop: [f32; 4],
@@ -346,11 +350,57 @@ impl Placement {
             center: [width as f32 / 2.0, height as f32 / 2.0],
             size: [width as f32, height as f32],
             rotation_deg: 0.0,
+            skew_deg: [0.0; 2],
             crop: [0.0; 4],
             flip: [false; 2],
             opacity: 1.0,
             blend: BlendMode::Normal,
         }
+    }
+
+    /// Rotation after skew, `[a, b, c, d]`: a picture point `(x, y)` pixels
+    /// from its centre lands at `center + (a·x + b·y, c·x + d·y)`.
+    pub fn linear(&self) -> [f32; 4] {
+        let (s, c) = self.rotation_deg.to_radians().sin_cos();
+        let [kx, ky] = self.skew_deg.map(|d| d.to_radians().tan());
+        [c - s * ky, c * kx - s, s + c * ky, s * kx + c]
+    }
+
+    /// Canvas point of `uv`, 0..1 across the whole picture.
+    pub fn to_canvas(&self, uv: [f32; 2]) -> [f32; 2] {
+        let [a, b, c, d] = self.linear();
+        let x = (uv[0] - 0.5) * self.size[0];
+        let y = (uv[1] - 0.5) * self.size[1];
+        [
+            self.center[0] + a * x + b * y,
+            self.center[1] + c * x + d * y,
+        ]
+    }
+
+    /// Canvas → picture `uv` (0..1 across the whole picture), as `[a, b, c,
+    /// d]`: `uv = (a·dx + b·dy, c·dx + d·dy) + 0.5` for a canvas point `d`
+    /// from `center`. `None` when the picture is flat.
+    pub fn inverse(&self) -> Option<[f32; 4]> {
+        let [a, b, c, d] = self.linear();
+        let det = a * d - b * c;
+        let [w, h] = self.size;
+        if det.abs() < 1e-6 || w.abs() < 1e-6 || h.abs() < 1e-6 {
+            return None;
+        }
+        Some([d / det / w, -b / det / w, -c / det / h, a / det / h])
+    }
+
+    /// Picture `uv` under canvas point `p`, if the picture is not flat.
+    pub fn to_picture(&self, p: [f32; 2]) -> Option<[f32; 2]> {
+        let [a, b, c, d] = self.inverse()?;
+        let (dx, dy) = (p[0] - self.center[0], p[1] - self.center[1]);
+        Some([a * dx + b * dy + 0.5, c * dx + d * dy + 0.5])
+    }
+
+    /// The whole picture's corners on the canvas: top-left, top-right,
+    /// bottom-right, bottom-left.
+    pub fn corners(&self) -> [[f32; 2]; 4] {
+        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|uv| self.to_canvas(uv))
     }
 }
 
@@ -373,6 +423,35 @@ pub trait HtmlService: Send + Sync {
     fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame>;
 }
 
+/// Captions and titles drawn as pictures (`koo-deliver`), in the caption
+/// styles the service was made with.
+pub trait LetteringService: Send + Sync {
+    /// What `clip` (a caption on caption track `track`, or a title) shows at
+    /// clip-relative time `t` in a `canvas`-sized frame, drawn `zoom` times
+    /// its resting size so a scaled-up caption stays sharp. `None` when it
+    /// shows nothing.
+    fn letter(
+        &self,
+        track: &Track,
+        clip: &Clip,
+        t: Time,
+        canvas: (u32, u32),
+        zoom: f32,
+    ) -> Option<Lettered>;
+}
+
+/// Lettering from [`LetteringService::letter`].
+#[derive(Clone, Debug)]
+pub struct Lettered {
+    /// Tight around the lettering (box, stroke and shadow included), with
+    /// alpha.
+    pub frame: Frame,
+    /// Where the picture rests before the clip's transform, in canvas
+    /// pixels.
+    pub center: [f32; 2],
+    pub size: [f32; 2],
+}
+
 /// The engines the UI and agent host call. `None` until wired, or when the
 /// machine lacks them (no GPU adapter, no Chromium); callers degrade quietly.
 #[derive(Clone, Default)]
@@ -381,6 +460,9 @@ pub struct Services {
     pub analysis: Option<Arc<dyn AnalysisService>>,
     pub fx: Option<Arc<dyn FxService>>,
     pub html: Option<Arc<dyn HtmlService>>,
+    /// Draws captions and titles into the program. Renders leave it out:
+    /// they burn lettering in with FFmpeg.
+    pub lettering: Option<Arc<dyn LetteringService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -391,6 +473,7 @@ impl std::fmt::Debug for Services {
             .field("analysis", &self.analysis.is_some())
             .field("fx", &self.fx.is_some())
             .field("html", &self.html.is_some())
+            .field("lettering", &self.lettering.is_some())
             .finish()
     }
 }

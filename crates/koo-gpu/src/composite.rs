@@ -11,9 +11,8 @@ use std::num::NonZeroU64;
 const SHADER: &str = r#"
 struct Layer {
     center: vec2<f32>,
-    inv_size: vec2<f32>,
-    sin_cos: vec2<f32>,
     frame: vec2<f32>,
+    inv: vec4<f32>,
     crop: vec4<f32>,
     flip: vec2<f32>,
     opacity: f32,
@@ -71,9 +70,8 @@ fn blend(b: f32, s: f32) -> f32 {
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let dst = textureLoad(canvas, vec2<i32>(pos.xy), 0);
     let d = pos.xy - layer.center;
-    let s = layer.sin_cos.x;
-    let c = layer.sin_cos.y;
-    var uv = vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c) * layer.inv_size + 0.5;
+    let m = layer.inv;
+    var uv = vec2<f32>(m.x * d.x + m.y * d.y, m.z * d.x + m.w * d.y) + 0.5;
     if (layer.flip.x > 0.5) {
         uv.x = 1.0 - uv.x;
     }
@@ -217,18 +215,18 @@ fn mode_index(mode: BlendMode) -> u32 {
 }
 
 /// The uniform block of a `frame`-sized picture at placement `p`, as laid
-/// out in [`SHADER`].
+/// out in [`SHADER`]. The batch leaves out flat pictures ([`Placement::inverse`] is `None`).
 pub(crate) fn uniforms(p: &Placement, frame: (u32, u32)) -> [u8; UNIFORM_SIZE as usize] {
-    let (sin, cos) = p.rotation_deg.to_radians().sin_cos();
+    let inv = p.inverse().unwrap_or_default();
     let floats = [
         p.center[0],
         p.center[1],
-        1.0 / p.size[0],
-        1.0 / p.size[1],
-        sin,
-        cos,
         frame.0 as f32,
         frame.1 as f32,
+        inv[0],
+        inv[1],
+        inv[2],
+        inv[3],
         p.crop[0].clamp(0.0, 1.0),
         p.crop[1].clamp(0.0, 1.0),
         p.crop[2].clamp(0.0, 1.0),

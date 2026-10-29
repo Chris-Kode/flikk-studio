@@ -5,9 +5,11 @@ mod motion;
 
 pub use motion::{Pin, Pose, WordLook, pin, pose_at, spoken, word_look, word_starts};
 
+use crate::lettering::{self, Letters};
 use anyhow::{Context as _, Result};
-use koo_core::memory::{CaptionHighlight, CaptionPosition, CaptionStyle, Color};
-use koo_core::model::{ClipContent, Project, Track, TrackKind};
+use koo_core::compose;
+use koo_core::memory::{CaptionHighlight, CaptionPosition, CaptionStyle, Color, MotionKind};
+use koo_core::model::{Clip, ClipContent, Project, Property, Track, TrackKind};
 use koo_core::{Time, TimeRange, TrackId};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -197,20 +199,150 @@ fn tags(t: &str) -> String {
     }
 }
 
+/// How far apart moments of a moving transform are sampled, in seconds;
+/// FFmpeg moves lettering in straight lines between them.
+const STEP: f64 = 1.0 / 30.0;
+
+/// Where a clip's transform puts lettering at one moment, as ASS override
+/// values about the event's alignment point.
+#[derive(Clone, Copy, PartialEq)]
+struct Moved {
+    pos: [f32; 2],
+    /// `\fscx`, `\fscy`: percent, the pose's scale included.
+    scale: [f32; 2],
+    /// `\frz`: degrees counter-clockwise.
+    turn: f32,
+    /// `\fax`, `\fay`.
+    shear: [f32; 2],
+    opacity: f32,
+}
+
+impl Moved {
+    fn turned(&self) -> bool {
+        self.turn.abs() > 1e-3 || self.shear.iter().any(|v| v.abs() > 1e-4)
+    }
+
+    /// Override tags for a span from `self` to `to` over `ms`.
+    fn tags(&self, to: &Moved, ms: i64) -> String {
+        let mut tags = String::new();
+        let ([x0, y0], [x1, y1]) = (self.pos, to.pos);
+        if (x0 - x1).abs() < 0.05 && (y0 - y1).abs() < 0.05 {
+            let _ = write!(tags, "\\pos({x0:.1},{y0:.1})");
+        } else {
+            let _ = write!(tags, "\\move({x0:.1},{y0:.1},{x1:.1},{y1:.1},0,{ms})");
+        }
+        if self.turned() || to.turned() {
+            let _ = write!(tags, "\\org({x0:.1},{y0:.1})");
+        }
+        let look = |m: &Moved| {
+            format!(
+                "\\fscx{:.2}\\fscy{:.2}\\frz{:.3}\\fax{:.4}\\fay{:.4}",
+                m.scale[0], m.scale[1], m.turn, m.shear[0], m.shear[1]
+            )
+        };
+        let (a, b) = (look(self), look(to));
+        tags.push_str(&a);
+        if a != b {
+            let _ = write!(tags, "\\t(0,{ms},{b})");
+        }
+        if self.opacity < 0.999 || to.opacity < 0.999 {
+            let alpha = |o: f32| (255.0 * (1.0 - o.clamp(0.0, 1.0))).round() as u8;
+            let (a0, a1) = (alpha(self.opacity), alpha(to.opacity));
+            let _ = write!(tags, "\\fade({a0},{a1},{a1},0,{ms},{ms},{ms})");
+        }
+        tags
+    }
+}
+
+/// Whether `clip`'s transform moves its lettering at all, and from when to
+/// when it changes (clip seconds, between its first and last keyframe).
+fn transform_use(clip: &Clip) -> (bool, Option<(f64, f64)>) {
+    let keyed = clip
+        .keyframes
+        .iter()
+        .filter(|k| Property::GEOMETRY.contains(&k.property) || k.property == Property::Opacity)
+        .map(|k| k.at.as_secs_f64());
+    let changes = keyed.fold(None, |span: Option<(f64, f64)>, t| {
+        Some(span.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
+    });
+    let tf = &clip.transform;
+    let still = tf.position != [0.0, 0.0]
+        || (tf.scale - 1.0).abs() > 1e-6
+        || tf.rotation_deg.abs() > 1e-6
+        || (tf.opacity - 1.0).abs() > 1e-6
+        || compose::is_free_form(tf);
+    (changes.is_some() || still, changes)
+}
+
+/// Where `clip`'s transform at clip time `t` puts `letters`, whose
+/// alignment point rests at `at` on a `width` × `height` frame.
+fn moved(
+    letters: &Letters,
+    clip: &Clip,
+    t: f64,
+    at: [f32; 2],
+    (width, height): (f32, f32),
+) -> Option<Moved> {
+    let canvas = (width as u32, height as u32);
+    let (center, size) = lettering::rest(letters, canvas)?;
+    let tf = compose::lettering_transform(clip.transform_at(Time::from_secs_f64(t)));
+    let place = compose::placement_from(&tf, center, size, canvas);
+    let uv = [
+        (at[0] - center[0]) / size[0].max(1e-3) + 0.5,
+        (at[1] - center[1]) / size[1].max(1e-3) + 0.5,
+    ];
+    let k = letters.pose.scale * tf.scale.max(0.0) * 100.0;
+    Some(Moved {
+        pos: place.to_canvas(uv),
+        scale: [k * tf.stretch[0].max(0.0), k * tf.stretch[1].max(0.0)],
+        turn: -place.rotation_deg,
+        shear: place.skew_deg.map(|d| d.to_radians().tan()),
+        opacity: letters.pose.opacity * tf.opacity.clamp(0.0, 1.0),
+    })
+}
+
+/// `cuts` with a cut every [`STEP`] seconds where they overlap `within`.
+fn fine_cuts(cuts: Vec<f64>, (w0, w1): (f64, f64)) -> Vec<f64> {
+    let mut out = Vec::with_capacity(cuts.len());
+    for span in cuts.windows(2) {
+        let (a, b) = (span[0], span[1]);
+        out.push(a);
+        let (lo, hi) = (a.max(w0), b.min(w1));
+        if lo >= hi {
+            continue;
+        }
+        out.push(lo);
+        let n = ((hi - lo) / STEP).ceil().max(1.0) as usize;
+        out.extend((1..n).map(|i| lo + (hi - lo) * i as f64 / n as f64));
+        out.push(hi);
+    }
+    out.extend(cuts.last());
+    out.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
+    out
+}
+
 /// Dialogue lines for one caption over `window`: one event per span where
-/// only its pose changes, on up to three layers (the background, the
-/// spoken word's box, the text) so the boxes sit behind every glyph.
+/// only its pose changes (and its transform, sampled every [`STEP`] when it
+/// moves), on up to three layers (the background, the spoken word's box,
+/// the text) so the boxes sit behind every glyph.
 #[allow(clippy::too_many_arguments)]
 fn write_caption(
     out: &mut String,
     n: usize,
     style: &CaptionStyle,
-    clip: TimeRange,
-    text: &str,
-    times: &[Time],
+    styles: &[CaptionStyle],
+    track: &Track,
+    caption: &Clip,
     window: TimeRange,
     (width, height): (f32, f32),
 ) {
+    let ClipContent::Caption {
+        text, words: times, ..
+    } = &caption.content
+    else {
+        return;
+    };
+    let clip = caption.range();
     let Some(shown) = clip.intersect(&window) else {
         return;
     };
@@ -230,6 +362,13 @@ fn write_caption(
             .filter(|t| *t > from + 0.005 && *t < to - 0.005),
     );
     cuts.push(to);
+    let (transformed, changes) = transform_use(caption);
+    let moving = style.intro.kind != MotionKind::None || style.outro.kind != MotionKind::None;
+    if transformed && moving {
+        cuts = fine_cuts(cuts, (0.0, duration));
+    } else if let Some(span) = changes {
+        cuts = fine_cuts(cuts, span);
+    }
     let pin = pin(style, width, height);
     let align = match pin.edge {
         CaptionPosition::Bottom => 2,
@@ -251,20 +390,31 @@ fn write_caption(
         let ms = ((t1 - t0) * 1000.0).round() as i64;
         let mut motion = format!("\\an{align}");
         let (y0, y1) = (pin.y - p0.rise * height, pin.y - p1.rise * height);
-        if (y0 - y1).abs() < 0.05 {
+        let size = (width, height);
+        let letters = |t: f64| Letters::of(track, caption, Time::from_secs_f64(t), styles);
+        let moves = transformed
+            .then(|| {
+                let m0 = moved(&letters(t0)?, caption, t0, [pin.x, y0], size)?;
+                let m1 = moved(&letters(t1)?, caption, t1, [pin.x, y1], size)?;
+                Some((m0, m1))
+            })
+            .flatten();
+        if let Some((m0, m1)) = moves {
+            motion.push_str(&m0.tags(&m1, ms));
+        } else if (y0 - y1).abs() < 0.05 {
             let _ = write!(motion, "\\pos({:.1},{y0:.1})", pin.x);
         } else {
             let x = pin.x;
             let _ = write!(motion, "\\move({x:.1},{y0:.1},{x:.1},{y1:.1},0,{ms})");
         }
-        if p0.scale != 1.0 || p1.scale != 1.0 {
+        if moves.is_none() && (p0.scale != 1.0 || p1.scale != 1.0) {
             let (s0, s1) = (p0.scale * 100.0, p1.scale * 100.0);
             let _ = write!(
                 motion,
                 "\\fscx{s0:.1}\\fscy{s0:.1}\\t(0,{ms},\\fscx{s1:.1}\\fscy{s1:.1})"
             );
         }
-        if p0.opacity != 1.0 || p1.opacity != 1.0 {
+        if moves.is_none() && (p0.opacity != 1.0 || p1.opacity != 1.0) {
             let alpha = |p: Pose| (255.0 * (1.0 - p.opacity)).round() as u8;
             let (a0, a1) = (alpha(p0), alpha(p1));
             let _ = write!(motion, "\\fade({a0},{a1},{a1},0,{ms},{ms},{ms})");
@@ -389,19 +539,17 @@ pub fn to_ass(
 
     for (i, track) in caption_tracks.iter().enumerate() {
         let style = style_for(track, styles);
-        for clip in &track.clips {
-            if let ClipContent::Caption { text, words, .. } = &clip.content {
-                write_caption(
-                    &mut out,
-                    i,
-                    &style,
-                    clip.range(),
-                    text,
-                    words,
-                    range,
-                    (width as f32, height as f32),
-                );
-            }
+        for clip in track.clips.iter().filter(|c| c.enabled) {
+            write_caption(
+                &mut out,
+                i,
+                &style,
+                styles,
+                track,
+                clip,
+                range,
+                (width as f32, height as f32),
+            );
         }
     }
     let mut event = |layer: u32, r: TimeRange, style: &str, text: &str| {
@@ -421,15 +569,43 @@ pub fn to_ass(
             .iter()
             .filter(|t| t.kind == TrackKind::Title && !t.mix.mute)
         {
-            for clip in &track.clips {
+            for clip in track.clips.iter().filter(|c| c.enabled) {
                 if let ClipContent::Title { template, text } = &clip.content {
-                    let style = if template.to_lowercase().contains("lower") {
-                        "LowerThird"
-                    } else {
-                        "Title"
-                    };
+                    let lower = template.to_lowercase().contains("lower");
+                    let style = if lower { "LowerThird" } else { "Title" };
                     let lines: Vec<String> = text.lines().map(str::to_string).collect();
-                    event(3, clip.range(), style, &ass_text(&lines));
+                    let body = ass_text(&lines);
+                    let (transformed, changes) = transform_use(clip);
+                    if !transformed {
+                        event(3, clip.range(), style, &body);
+                        continue;
+                    }
+                    // The style's alignment point: centre, or bottom-left.
+                    let (w, h) = (width as f32, height as f32);
+                    let at = if lower {
+                        [(w * 0.06).round(), h - (h * 0.12).round()]
+                    } else {
+                        [w / 2.0, h / 2.0]
+                    };
+                    let letters = Letters::title(text, lower);
+                    let span = |t: f64| moved(&letters, clip, t, at, (w, h));
+                    let length = clip.duration.as_secs_f64();
+                    let mut cuts = vec![0.0, length];
+                    if let Some(span) = changes {
+                        cuts = fine_cuts(cuts, span);
+                    }
+                    for pair in cuts.windows(2) {
+                        let (t0, t1) = (pair[0], pair[1]);
+                        let (Some(m0), Some(m1)) = (span(t0), span(t1)) else {
+                            continue;
+                        };
+                        let ms = ((t1 - t0) * 1000.0).round() as i64;
+                        let r = TimeRange::new(
+                            clip.start + Time::from_secs_f64(t0),
+                            clip.start + Time::from_secs_f64(t1),
+                        );
+                        event(3, r, style, &format!("{{{}}}{body}", m0.tags(&m1, ms)));
+                    }
                 }
             }
         }

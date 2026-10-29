@@ -4,10 +4,8 @@
 //! blend modes look the same everywhere.
 //!
 //! Layers are drawn bottom-up from the unmuted video, overlay and title
-//! tracks (titles and captions themselves are lettering, drawn by the
-//! viewer and burned in by the export; generators on title tracks are
-//! pictures). On each track, the enabled clip under the playhead, or the
-//! transition covering it:
+//! tracks (generators on title tracks are pictures). On each track, the
+//! enabled clip under the playhead, or the transition covering it:
 //!
 //! 1. **Picture**: a media frame at the clip's source time
 //!    ([`Clip::to_source`], so speed is honoured), an overlay asset, or a
@@ -21,10 +19,16 @@
 //!    measure `iResolution` in sequence pixels whatever size they run at,
 //!    so a blur radius means the same in a small viewer and in any render.
 //! 4. **Transform** and **blend**: fitted inside the canvas (as the export
-//!    graph does), scaled, rotated clockwise about its centre, offset by
-//!    `position` × canvas size, cropped, flipped, faded by opacity and
+//!    graph does), stretched and scaled, skewed and rotated clockwise about
+//!    its anchor, which lands at the centre plus `position` × canvas size
+//!    ([`placement`]), cropped, flipped, faded by opacity and
 //!    blended with its [`BlendMode`] ([`FxService::composite`], or
 //!    [`composite_cpu`] without a GPU engine).
+//!
+//! Titles and captions are lettering, drawn over every picture by
+//! [`Services::lettering`] when it is wired (the viewer and the agent's
+//! views) and transformed like pictures; renders burn them in with FFmpeg
+//! instead.
 //!
 //! A transition renders each side's layer onto its own transparent canvas,
 //! blends them with [`FxService::transition`] at the transition's progress
@@ -47,9 +51,11 @@
 
 mod batch;
 mod cpu;
+mod layout;
 mod pictures;
 
 pub use cpu::{blend_channel, composite_cpu};
+pub use layout::{Shape, layout};
 pub use pictures::{Pictures, Stills, Streams, overlay_item};
 
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
@@ -58,7 +64,7 @@ use crate::model::{
     BlendMode, Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind, Transform,
 };
 use crate::services::{
-    Frame, FxBatch, FxCall, PendingFrame, PixelOrder, Placement, Services, Surface,
+    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, Surface,
 };
 use crate::time::{Time, TimeRange};
 use batch::CpuBatch;
@@ -209,8 +215,8 @@ fn black((w, h): (u32, u32)) -> Frame {
 }
 
 /// Whether `range` uses anything the FFmpeg graph cannot draw exactly:
-/// effects, generators, transitions, non-normal blend modes, crop, flip or
-/// retimed media.
+/// effects, generators, transitions, non-normal blend modes, crop, flip,
+/// stretch, skew, an anchor off the centre or retimed media.
 pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
     picture_tracks(project).any(|track| {
         fx::transitions(track)
@@ -227,6 +233,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                         || tf.blend != BlendMode::Normal
                         || tf.flip.iter().any(|f| *f)
                         || tf.crop.iter().any(|v| *v > 0.0)
+                        || is_free_form(tf)
                         || c.keyframes.iter().any(|k| {
                             matches!(
                                 k.property,
@@ -234,6 +241,12 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                                     | Property::CropTop
                                     | Property::CropRight
                                     | Property::CropBottom
+                                    | Property::ScaleX
+                                    | Property::ScaleY
+                                    | Property::SkewX
+                                    | Property::SkewY
+                                    | Property::AnchorX
+                                    | Property::AnchorY
                             )
                         })
                         || (c.media().is_some() && (c.speed - 1.0).abs() > 1e-9)
@@ -249,26 +262,62 @@ pub fn size_for_width(project: &Project, width: u32) -> (u32, u32) {
     (width.max(2) & !1, (h as u32).max(2) & !1)
 }
 
+/// Steepest slant drawn, in degrees; beyond it a picture is nearly flat.
+pub const MAX_SKEW: f32 = 80.0;
+
 /// Where a `picture`-sized frame with transform `tf` lands on a `canvas`:
-/// fitted inside it, scaled, centred plus `position` × canvas size, as in
-/// the export graph.
+/// fitted inside it and centred, then transformed ([`placement_from`]), as
+/// in the export graph.
 pub fn placement(tf: &Transform, picture: (u32, u32), canvas: (u32, u32)) -> Placement {
     let (pw, ph) = (picture.0.max(1) as f32, picture.1.max(1) as f32);
     let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
     let fit = (cw / pw).min(ch / ph);
+    placement_from(tf, [cw / 2.0, ch / 2.0], [pw * fit, ph * fit], canvas)
+}
+
+/// Where a picture resting at `center` with `size` (canvas pixels) lands
+/// with transform `tf`: stretched and scaled, skewed and rotated clockwise
+/// about its anchor, then moved by `position` × canvas size.
+pub fn placement_from(
+    tf: &Transform,
+    center: [f32; 2],
+    size: [f32; 2],
+    canvas: (u32, u32),
+) -> Placement {
+    let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
     let s = tf.scale.max(0.0);
-    Placement {
-        center: [
-            cw / 2.0 + tf.position[0] * cw,
-            ch / 2.0 + tf.position[1] * ch,
-        ],
-        size: [pw * fit * s, ph * fit * s],
+    let drawn = [
+        size[0] * s * tf.stretch[0].max(0.0),
+        size[1] * s * tf.stretch[1].max(0.0),
+    ];
+    let mut place = Placement {
+        center: [0.0, 0.0],
+        size: drawn,
         rotation_deg: tf.rotation_deg,
+        skew_deg: tf.skew_deg.map(|d| d.clamp(-MAX_SKEW, MAX_SKEW)),
         crop: tf.crop.map(|c| c.clamp(0.0, 1.0)),
         flip: tf.flip,
         opacity: tf.opacity.clamp(0.0, 1.0),
         blend: tf.blend,
-    }
+    };
+    // The anchor stays where it rests (plus `position`); the centre is the
+    // anchor's offset from it, scaled and turned with the picture.
+    let [a, b, c, d] = place.linear();
+    let rest = [tf.anchor[0] * size[0], tf.anchor[1] * size[1]];
+    let (ax, ay) = (tf.anchor[0] * drawn[0], tf.anchor[1] * drawn[1]);
+    place.center = [
+        center[0] + rest[0] + tf.position[0] * cw - (a * ax + b * ay),
+        center[1] + rest[1] + tf.position[1] * ch - (c * ax + d * ay),
+    ];
+    place
+}
+
+/// Whether `tf` uses anything beyond position, uniform scale, rotation and
+/// opacity: stretch, skew or an anchor off the centre.
+pub fn is_free_form(tf: &Transform) -> bool {
+    tf.stretch.iter().any(|v| (v - 1.0).abs() > 1e-6)
+        || tf.skew_deg.iter().any(|v| v.abs() > 1e-6)
+        || tf.anchor.iter().any(|v| v.abs() > 1e-6)
 }
 
 /// `picture` fitted inside `canvas`, in whole pixels.
@@ -289,6 +338,64 @@ fn picture_tracks(project: &Project) -> impl Iterator<Item = &Track> {
             TrackKind::Video | TrackKind::Overlay | TrackKind::Title
         ) && !t.mix.mute
     })
+}
+
+/// Tracks that can show lettering, bottom-up: titles and captions are
+/// drawn over every picture, as the render burns them in.
+fn lettering_tracks(project: &Project) -> impl Iterator<Item = &Track> {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .rev()
+        .filter(|t| matches!(t.kind, TrackKind::Title | TrackKind::Caption) && !t.mix.mute)
+}
+
+/// Whether `clip` on `track` is lettering: a title on a title track, or a
+/// caption on a caption track.
+pub fn is_lettering(track: &Track, clip: &Clip) -> bool {
+    matches!(
+        (&clip.content, track.kind),
+        (ClipContent::Title { .. }, TrackKind::Title)
+            | (ClipContent::Caption { .. }, TrackKind::Caption)
+    )
+}
+
+/// `tf` without what lettering does not draw: the burned-in render cannot
+/// crop, flip or blend it.
+pub fn lettering_transform(mut tf: Transform) -> Transform {
+    tf.crop = [0.0; 4];
+    tf.flip = [false; 2];
+    tf.blend = BlendMode::Normal;
+    tf
+}
+
+/// The caption or title `clip` on `track` shows at `t` on a `canvas`
+/// (drawn `zoom` × finer, see [`LetteringService::letter`]), where it rests
+/// and where it lands.
+///
+/// [`LetteringService::letter`]: crate::services::LetteringService::letter
+fn lettering_layer(
+    services: &Services,
+    track: &Track,
+    clip: &Clip,
+    t: Time,
+    canvas: (u32, u32),
+    zoom: Option<f32>,
+) -> Option<(Lettered, Placement)> {
+    if !is_lettering(track, clip) {
+        return None;
+    }
+    let service = services.lettering.as_ref()?;
+    let tf = lettering_transform(clip.transform_at(t - clip.start));
+    if tf.opacity <= 0.0 || tf.scale <= 0.0 || tf.stretch.iter().any(|s| *s <= 0.0) {
+        return None;
+    }
+    let zoom =
+        zoom.unwrap_or_else(|| (tf.scale * tf.stretch[0].max(tf.stretch[1])).clamp(0.25, 4.0));
+    let l = service.letter(track, clip, t - clip.start, canvas, zoom)?;
+    let place = placement_from(&tf, l.center, l.size, canvas);
+    Some((l, place))
 }
 
 struct Ctx<'a, 'b> {
@@ -325,14 +432,25 @@ impl Ctx<'_, '_> {
                 layers.extend(self.layer(clip, t));
             }
         }
+        for track in lettering_tracks(project) {
+            if let Some(clip) = track.clip_at(t).filter(|c| c.enabled) {
+                layers.extend(self.lettering(track, clip, t));
+            }
+        }
         let (w, h) = self.size;
         self.batch.composite(w, h, [0, 0, 0, 255], &layers).ok()
+    }
+
+    /// `clip`'s caption or title at `t`, ready to composite.
+    fn lettering(&mut self, track: &Track, clip: &Clip, t: Time) -> Option<(Surface, Placement)> {
+        let (l, place) = lettering_layer(self.services, track, clip, t, self.size, None)?;
+        Some((self.batch.upload(&l.frame).ok()?, place))
     }
 
     /// `clip` at `t`, ready to composite.
     fn layer(&mut self, clip: &Clip, t: Time) -> Option<(Surface, Placement)> {
         let tf = clip.transform_at(t - clip.start);
-        if tf.opacity <= 0.0 || tf.scale <= 0.0 {
+        if tf.opacity <= 0.0 || tf.scale <= 0.0 || tf.stretch.iter().any(|s| *s <= 0.0) {
             return None;
         }
         let picture = self.picture(clip, t, None)?;

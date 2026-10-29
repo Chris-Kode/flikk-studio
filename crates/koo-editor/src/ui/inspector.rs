@@ -222,7 +222,18 @@ impl InspectorPanel {
         let mut commands = Vec::new();
         let mut label = "edit";
         match key {
-            Key::PosX | Key::PosY | Key::Scale | Key::Rotation | Key::Opacity | Key::Crop(_) => {
+            Key::PosX
+            | Key::PosY
+            | Key::Scale
+            | Key::ScaleX
+            | Key::ScaleY
+            | Key::Rotation
+            | Key::SkewX
+            | Key::SkewY
+            | Key::AnchorX
+            | Key::AnchorY
+            | Key::Opacity
+            | Key::Crop(_) => {
                 let Some(clip) = clips.first() else {
                     return none;
                 };
@@ -415,7 +426,13 @@ fn property_of(key: Key) -> Option<Property> {
         Key::PosX => Property::PositionX,
         Key::PosY => Property::PositionY,
         Key::Scale => Property::Scale,
+        Key::ScaleX => Property::ScaleX,
+        Key::ScaleY => Property::ScaleY,
         Key::Rotation => Property::Rotation,
+        Key::SkewX => Property::SkewX,
+        Key::SkewY => Property::SkewY,
+        Key::AnchorX => Property::AnchorX,
+        Key::AnchorY => Property::AnchorY,
         Key::Opacity => Property::Opacity,
         Key::Crop(0) => Property::CropLeft,
         Key::Crop(1) => Property::CropTop,

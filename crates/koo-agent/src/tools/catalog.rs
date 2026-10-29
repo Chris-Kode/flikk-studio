@@ -2,6 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
+use super::layout;
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
 use koo_core::model::{BlendMode, ClipColor, Property};
@@ -197,7 +198,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_clip",
             Some(ReadProject),
-            "Everything about one clip: source, name, color, speed, enabled, transform (crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
+            "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
             object(json!({ "clip": string("Clip id") }), &["clip"]),
         ),
         spec(
@@ -318,8 +319,23 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "view_frame",
             Some(View),
-            "One full frame of the program at a timeline time.",
-            object(json!({ "t": time("Timeline seconds") }), &["t"]),
+            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip.",
+            object(
+                json!({
+                    "t": time("Timeline seconds"),
+                    "annotate": boolean("Box and number each visible item")
+                }),
+                &["t"],
+            ),
+        ),
+        spec(
+            "get_layout",
+            Some(View),
+            "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform, whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",
+            object(
+                json!({ "t": time("Timeline seconds (default: the playhead)") }),
+                &[],
+            ),
         ),
         spec(
             "view_audio",
@@ -573,20 +589,61 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_transform",
             Some(Transform),
-            "Propose a clip's static transform. Only the values given change.",
+            "Propose clips' transform: pictures, overlays, generators, captions and titles alike. Only the values given change. Without `at` it sets the static transform (keyframed properties keep overriding it); with `at`, properties that have keyframes get one there and the rest change statically. Captions and titles ignore crop, flip and blend.",
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "position": numbers(2, "[x, y] offset, (0, 0) = centered"),
-                    "scale": number("1 = fit"),
-                    "rotation": number("Degrees"),
+                    "clips": strings("More clip ids, changed alike"),
+                    "position": numbers(2, "[x, y] offset from where it rests (centred; captions where their style puts them), as a fraction of the frame: [0.25, 0] moves it a quarter of the frame width right"),
+                    "scale": number("1 = fitted (captions: their style's size)"),
+                    "stretch": numbers(2, "[x, y] per-axis scale on top of `scale`, 1 = none"),
+                    "rotation": number("Degrees clockwise, about the anchor"),
+                    "skew": numbers(2, "[x, y] slant in degrees, ±80: x leans vertical edges right going down, y leans horizontal edges down going right"),
+                    "anchor": numbers(2, "[x, y] the point it scales, skews and rotates about, as a fraction of its size from its centre: [-0.5, -0.5] = top-left corner. Moving it alone does not move the picture"),
                     "opacity": number("0..1"),
                     "crop": numbers(4, "[left, top, right, bottom], fractions 0..1 cut away"),
                     "flip": { "type": "array", "items": { "type": "boolean" }, "minItems": 2, "maxItems": 2, "description": "[horizontal, vertical]" },
                     "blend": one_of(&blends, "Composite mode over the tracks below"),
+                    "relative": boolean("Position, rotation, skew and anchor add to the current values; scale, stretch and opacity multiply them"),
+                    "at": time("Timeline time to set it at, keyframe-aware (see above)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "place",
+            Some(Transform),
+            "Propose putting a clip somewhere by meaning: align what it draws (its opaque part: a logo's pixels, a lower third inside its frame, a caption's box) to a corner, edge or the centre, a margin in from the frame edges, and size it. Keyframe-aware at `at`. Check the result with get_layout or view_frame.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "align": one_of(&layout::ALIGNS, "Where it goes (default center)"),
+                    "margin": number("Distance from the frame edges, as a fraction of the frame height (default 0.05)"),
+                    "safe_area": boolean("Keep it inside the title-safe area (a 10% margin), instead of `margin`"),
+                    "fit": one_of(&layout::FITS, "keep its size (default); contain: fit inside the margins; cover: fill the frame, cropping; fill: stretch to the frame; width / height: `size` of the frame's width / height"),
+                    "size": number("For fit width / height: the fraction of the frame, e.g. 0.15"),
+                    "at": time("Timeline time inside the clip to place it at (default: its middle)"),
                     "reason": reason()
                 }),
                 &["clip"],
+            ),
+        ),
+        spec(
+            "animate",
+            Some(Transform),
+            "Propose a preset move as ordinary keyframes the user can edit, around the clip's own transform. *_in presets end at rest, *_out presets start at rest; slide_in_<side> enters from that side, slide_out_<side> leaves toward it. pulse, shake and drift play over `duration` (default: the whole clip).",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "preset": one_of(&layout::PRESETS, "The move"),
+                    "duration": number("Seconds (default 0.4; loops: the clip)"),
+                    "at": time("Timeline time it starts (default: the clip's start; *_out: so it ends with the clip)"),
+                    "distance": number("Slides: how far, as a fraction of the frame (default 0.3)"),
+                    "intensity": number("pulse, shake, drift: 1 = default strength"),
+                    "reason": reason()
+                }),
+                &["clip", "preset"],
             ),
         ),
         // ---- captions and titles

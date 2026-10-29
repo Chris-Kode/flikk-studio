@@ -2,7 +2,7 @@
 //! when there is no GPU engine; `koo-gpu` implements the same arithmetic.
 //!
 //! For every canvas pixel centre, the layer's picture is found through the
-//! inverse of its placement (scale, clockwise rotation, flip), cut by its
+//! inverse of its placement (scale, skew, clockwise rotation, flip), cut by its
 //! crop, and sampled bilinearly from premultiplied texels (clamped at the
 //! edges, transparent outside the picture). The sample, straight again and
 //! with alpha × opacity, is blended onto the canvas with the W3C
@@ -53,9 +53,8 @@ fn hard_light(b: f32, s: f32) -> f32 {
 struct Map<'a> {
     frame: &'a Frame,
     center: [f32; 2],
-    sin: f32,
-    cos: f32,
-    inv: [f32; 2],
+    /// Canvas offset from `center` → picture uv ([`Placement::inverse`]).
+    inv: [f32; 4],
     crop: [f32; 4],
     flip: [bool; 2],
     opacity: f32,
@@ -75,26 +74,25 @@ impl<'a> Map<'a> {
         if frame.width == 0 || frame.height == 0 {
             return None;
         }
-        let (sin, cos) = p.rotation_deg.to_radians().sin_cos();
-        let (hw, hh) = (p.size[0] / 2.0, p.size[1] / 2.0);
-        let ex = hw * cos.abs() + hh * sin.abs();
-        let ey = hw * sin.abs() + hh * cos.abs();
-        let span = |c: f32, e: f32, max: u32| {
-            let lo = (c - e - 1.0).floor().clamp(0.0, max as f32) as u32;
-            let hi = (c + e + 1.0).ceil().clamp(0.0, max as f32) as u32;
+        let inv = p.inverse()?;
+        let corners = p.corners();
+        let span = |axis: usize, max: u32| {
+            let (lo, hi) = corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
+                (lo.min(c[axis]), hi.max(c[axis]))
+            });
+            let lo = (lo - 1.0).floor().clamp(0.0, max as f32) as u32;
+            let hi = (hi + 1.0).ceil().clamp(0.0, max as f32) as u32;
             (lo, hi)
         };
-        let (x0, x1) = span(p.center[0], ex, width);
-        let (y0, y1) = span(p.center[1], ey, height);
+        let (x0, x1) = span(0, width);
+        let (y0, y1) = span(1, height);
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
         Some(Self {
             frame,
             center: p.center,
-            sin,
-            cos,
-            inv: [1.0 / p.size[0], 1.0 / p.size[1]],
+            inv,
             crop: p.crop.map(|c| c.clamp(0.0, 1.0)),
             flip: p.flip,
             opacity,
@@ -106,10 +104,9 @@ impl<'a> Map<'a> {
     /// Premultiplied sample at canvas point (`x`, `y`), alpha × opacity.
     fn sample(&self, x: f32, y: f32) -> Option<[f32; 4]> {
         let (dx, dy) = (x - self.center[0], y - self.center[1]);
-        let lx = dx * self.cos + dy * self.sin;
-        let ly = -dx * self.sin + dy * self.cos;
-        let mut u = lx * self.inv[0] + 0.5;
-        let mut v = ly * self.inv[1] + 0.5;
+        let [a, b, c, d] = self.inv;
+        let mut u = a * dx + b * dy + 0.5;
+        let mut v = c * dx + d * dy + 0.5;
         if self.flip[0] {
             u = 1.0 - u;
         }

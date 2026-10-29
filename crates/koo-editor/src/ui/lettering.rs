@@ -1,11 +1,11 @@
-//! Captions and titles drawn over a picture as the render burns them in
+//! Caption style previews lettered as the render burns captions in
 //! (`koo_deliver::captions::to_ass`): a box behind each line, the spoken
-//! word's highlight, shadow, stroke and fill, moved by the intro and outro.
-//! The viewer and the caption style previews both paint with this.
+//! word's highlight, shadow, stroke and fill, centred. The viewer letters
+//! the program itself with `koo_deliver::Letterer`.
 
 use gpui_kit::*;
-use koo_core::memory::{CaptionPosition, CaptionStyle, Color};
-use koo_deliver::captions::{Pose, WordLook, pin, word_look};
+use koo_core::memory::{CaptionStyle, Color};
+use koo_deliver::captions::{Pose, WordLook, word_look};
 use std::ops::Range;
 
 /// Text to letter, in one style, at one moment.
@@ -13,45 +13,9 @@ pub struct Lettering {
     /// Wrapped and cased.
     pub lines: Vec<SharedString>,
     pub style: CaptionStyle,
-    pub place: Place,
     pub pose: Pose,
     /// The word being spoken, counted across lines.
     pub spoken: Option<usize>,
-}
-
-/// Where the block of lines goes in the frame.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Place {
-    /// Where the style puts captions.
-    Caption,
-    /// Centred, ignoring the style's placement.
-    Center,
-    /// Left-aligned, 6% in and 12% up.
-    LowerThird,
-}
-
-impl Lettering {
-    /// A title as the render draws it: bold white Inter with a black stroke.
-    pub fn title(text: &str, lower: bool) -> Self {
-        let style = CaptionStyle {
-            font: "Inter".into(),
-            size: if lower { 54. } else { 96. },
-            outline: if lower { 2. } else { 3. },
-            position: CaptionPosition::Middle,
-            ..CaptionStyle::default()
-        };
-        Self {
-            lines: text.lines().map(|l| l.to_string().into()).collect(),
-            style,
-            place: if lower {
-                Place::LowerThird
-            } else {
-                Place::Center
-            },
-            pose: Pose::REST,
-            spoken: None,
-        }
-    }
 }
 
 /// One shaped line and where its words are.
@@ -168,25 +132,8 @@ pub fn paint(l: &Lettering, frame: Bounds<Pixels>, k: f32, window: &mut Window, 
         .map_or((px(0.), px(0.)), |l| (l.shaped.ascent, l.shaped.descent));
     let line_h = ascent + descent;
     let block = line_h * lines.len() as f32;
-    let (w, h) = (frame.size.width, frame.size.height);
-    let (x, top) = match l.place {
-        Place::Caption => {
-            let p = pin(s, f32::from(w), f32::from(h));
-            let y = frame.top() + px(p.y) - h * pose.rise;
-            let top = match p.edge {
-                CaptionPosition::Bottom => y - block,
-                CaptionPosition::Middle => y - block / 2.,
-                CaptionPosition::Top => y,
-            };
-            (frame.left() + px(p.x), top)
-        }
-        Place::Center => (frame.center().x, frame.center().y - block / 2.),
-        Place::LowerThird => (frame.left() + w * 0.06, frame.bottom() - h * 0.12 - block),
-    };
-    let left = |line: &Line| match l.place {
-        Place::LowerThird => x,
-        _ => x - line.width / 2.,
-    };
+    let (x, top) = (frame.center().x, frame.center().y - block / 2.);
+    let left = |line: &Line| x - line.width / 2.;
     let look = |j: usize| word_look(s.highlight, l.spoken, j);
     let alpha = pose.opacity;
 

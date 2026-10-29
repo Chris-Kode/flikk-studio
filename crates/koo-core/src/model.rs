@@ -495,11 +495,23 @@ impl ClipColor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Transform {
-    /// Normalized offset, (0, 0) = centered.
+    /// Offset from where the picture rests (centred, or where the style
+    /// puts a caption), as a fraction of the canvas: (0, 0) = at rest, (0.5,
+    /// 0) = its anchor moved half the frame width to the right.
     pub position: [f32; 2],
     pub scale: f32,
+    /// Clockwise, about the anchor.
     pub rotation_deg: f32,
     pub opacity: f32,
+    /// Per-axis scale on top of `scale`, [x, y]; 1 = none.
+    pub stretch: [f32; 2],
+    /// Slant in degrees, [x, y]: x leans vertical edges to the right going
+    /// down, y leans horizontal edges down going right; 0 = none.
+    pub skew_deg: [f32; 2],
+    /// The point of the picture it is scaled, skewed and rotated about, as
+    /// a fraction of its size from its centre: (0, 0) = centre, (-0.5,
+    /// -0.5) = top-left corner. Moving it alone does not move the picture.
+    pub anchor: [f32; 2],
     /// Fractions of the source picture cut away before scaling:
     /// [left, top, right, bottom], each 0..1, 0 = none.
     pub crop: [f32; 4],
@@ -516,6 +528,9 @@ impl Default for Transform {
             scale: 1.0,
             rotation_deg: 0.0,
             opacity: 1.0,
+            stretch: [1.0, 1.0],
+            skew_deg: [0.0, 0.0],
+            anchor: [0.0, 0.0],
             crop: [0.0; 4],
             flip: [false; 2],
             blend: BlendMode::Normal,
@@ -578,7 +593,16 @@ pub enum Property {
     PositionX,
     PositionY,
     Scale,
+    /// [`Transform::stretch`].
+    ScaleX,
+    ScaleY,
     Rotation,
+    /// [`Transform::skew_deg`].
+    SkewX,
+    SkewY,
+    /// [`Transform::anchor`].
+    AnchorX,
+    AnchorY,
     Opacity,
     CropLeft,
     CropTop,
@@ -590,11 +614,17 @@ pub enum Property {
 }
 
 impl Property {
-    pub const ALL: [Property; 10] = [
+    pub const ALL: [Property; 16] = [
         Self::PositionX,
         Self::PositionY,
         Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
         Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
         Self::Opacity,
         Self::CropLeft,
         Self::CropTop,
@@ -604,16 +634,37 @@ impl Property {
     ];
 
     /// The properties stored in [`Transform`].
-    pub const TRANSFORM: [Property; 9] = [
+    pub const TRANSFORM: [Property; 15] = [
         Self::PositionX,
         Self::PositionY,
         Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
         Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
         Self::Opacity,
         Self::CropLeft,
         Self::CropTop,
         Self::CropRight,
         Self::CropBottom,
+    ];
+
+    /// The properties that place the picture: everything in [`Transform`]
+    /// but opacity and crop.
+    pub const GEOMETRY: [Property; 10] = [
+        Self::PositionX,
+        Self::PositionY,
+        Self::Scale,
+        Self::ScaleX,
+        Self::ScaleY,
+        Self::Rotation,
+        Self::SkewX,
+        Self::SkewY,
+        Self::AnchorX,
+        Self::AnchorY,
     ];
 
     /// Tool / JSON name, e.g. `crop_left`.
@@ -629,6 +680,12 @@ impl Property {
             Self::CropRight => "crop_right",
             Self::CropBottom => "crop_bottom",
             Self::Volume => "volume",
+            Self::ScaleX => "scale_x",
+            Self::ScaleY => "scale_y",
+            Self::SkewX => "skew_x",
+            Self::SkewY => "skew_y",
+            Self::AnchorX => "anchor_x",
+            Self::AnchorY => "anchor_y",
         }
     }
 

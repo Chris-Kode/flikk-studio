@@ -43,6 +43,8 @@ pub struct EditorState {
     pub preview: Option<ChangeSetId>,
     /// Uncommitted edit the viewer shows while a control is dragged.
     live: Option<Project>,
+    /// Counts changes to `live`, so the viewer knows to redraw.
+    pub live_version: u64,
     /// Last error or notice for the status line; cleared on the next action.
     pub status: Option<String>,
     // --- panels
@@ -56,6 +58,10 @@ pub struct EditorState {
     /// Unsaved caption style the viewer shows while a control is dragged,
     /// with its index.
     caption_live: Option<(usize, koo_core::memory::CaptionStyle)>,
+    /// The caption styles `services.lettering` letters in.
+    lettering_styles: Vec<koo_core::memory::CaptionStyle>,
+    /// Counts changes to `services.lettering`, so the viewer knows to redraw.
+    pub lettering_version: u64,
     // --- timeline/viewer
     /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
     pub play_speed: f64,
@@ -146,11 +152,14 @@ impl EditorState {
             chats,
             preview: None,
             live: None,
+            live_version: 0,
             status: persistence::take_notice(),
             source_media: None,
             presets: koo_core::memory::Presets::default(),
             caption_style: 0,
             caption_live: None,
+            lettering_styles: Vec::new(),
+            lettering_version: 0,
             play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
@@ -275,6 +284,7 @@ impl EditorState {
         let last = self.live.take();
         if commands.is_empty() {
             if last.is_some() {
+                self.live_version += 1;
                 cx.notify();
             }
             return;
@@ -287,6 +297,7 @@ impl EditorState {
         });
         // Not applicable: keep the last good preview.
         self.live = if applied { Some(project) } else { last };
+        self.live_version += 1;
         cx.notify();
     }
 
@@ -343,7 +354,9 @@ impl EditorState {
     }
 
     fn finish<T>(&mut self, result: koo_core::Result<T>, cx: &mut Context<Self>) -> Option<T> {
-        self.live = None;
+        if self.live.take().is_some() {
+            self.live_version += 1;
+        }
         self.status = result.as_ref().err().map(|e| e.to_string());
         if result.is_ok() {
             persistence::autosave(&self.bus);
@@ -452,6 +465,18 @@ impl EditorState {
         self.presets = presets;
         self.caption_style = 0;
         self.sync_caption_style();
+        self.refresh_lettering();
+    }
+
+    /// Letter captions in the styles the viewer shows, when they changed.
+    fn refresh_lettering(&mut self) {
+        let styles = self.caption_styles().into_owned();
+        if self.services.lettering.is_some() && styles == self.lettering_styles {
+            return;
+        }
+        self.services.lettering = Some(Arc::new(koo_deliver::Letterer::new(styles.clone())));
+        self.lettering_styles = styles;
+        self.lettering_version += 1;
     }
 
     /// Change the presets and save them to the selected style profile,
@@ -463,6 +488,7 @@ impl EditorState {
     ) {
         let before = self.presets.clone();
         f(&mut self.presets);
+        self.refresh_lettering();
         if self.presets == before {
             return;
         }
@@ -558,6 +584,7 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.caption_live = Some((index, style));
+        self.refresh_lettering();
         cx.notify();
     }
 
@@ -577,6 +604,7 @@ impl EditorState {
             },
             cx,
         );
+        self.refresh_lettering();
         cx.notify();
     }
 
@@ -927,6 +955,8 @@ fn services() -> Services {
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
         html,
+        // Made with the caption styles, see `EditorState::refresh_lettering`.
+        lettering: None,
     }
 }
 
