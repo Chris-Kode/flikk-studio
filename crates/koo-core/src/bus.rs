@@ -362,13 +362,11 @@ impl CommandBus {
             .iter_mut()
             .find(|s| s.id == id && s.state == ChangeSetState::Open)
         {
-            // The user may have reviewed every item while the turn ran.
-            if set.pending_items().next().is_none() {
-                set.state = ChangeSetState::Resolved;
-                set.draft = None;
+            set.state = if set.items.is_empty() {
+                ChangeSetState::Resolved
             } else {
-                set.state = ChangeSetState::Pending;
-            }
+                ChangeSetState::Pending
+            };
         }
     }
 

@@ -677,8 +677,7 @@ impl AgentHost {
     }
 }
 
-/// Offer `author`'s open change set for review, or drop it if nothing in it
-/// is pending. A
+/// Offer `author`'s open change set for review, or drop it if empty. A
 /// `carried` set that got nothing new was offered already.
 fn close_open_sets(
     bus: &mut CommandBus,
@@ -690,12 +689,12 @@ fn close_open_sets(
         .change_sets()
         .iter()
         .filter(|s| &s.author == author && s.state == ChangeSetState::Open)
-        .map(|s| (s.id, s.items.len(), s.pending_items().next().is_some()))
+        .map(|s| (s.id, s.items.len()))
         .collect();
-    for (id, len, pending) in open {
+    for (id, len) in open {
         // Closing twice is harmless: `EditorState` closes it again on the event.
         bus.close_change_set(id);
-        if pending && carried != Some((id, len)) {
+        if len > 0 && carried != Some((id, len)) {
             events.push(AgentEvent::ChangeSetReady { change_set: id });
         }
     }

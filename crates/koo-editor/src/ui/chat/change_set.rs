@@ -58,6 +58,8 @@ impl ChatPanel {
         let warnings = set.items.iter().filter(|i| !i.warnings.is_empty()).count();
         let listen = set.items.iter().filter(|i| needs_listen(i)).count();
         let resolved = set.state == ChangeSetState::Resolved;
+        // The agent is still adding to it this turn.
+        let working = set.state == ChangeSetState::Open;
 
         let summary = h_flex()
             .gap_3()
@@ -160,6 +162,7 @@ impl ChatPanel {
                         .label("Reject")
                         .xsmall()
                         .ghost()
+                        .disabled(working)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
                                 if s.preview == Some(id) {
@@ -183,7 +186,7 @@ impl ChatPanel {
                         })
                         .xsmall()
                         .primary()
-                        .disabled(chosen == 0)
+                        .disabled(chosen == 0 || working)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if open {
                                 this.accept_selected(id, cx);
