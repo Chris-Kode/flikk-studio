@@ -30,7 +30,7 @@ use koo_core::command::ToolCategory;
 use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -90,8 +90,8 @@ struct Turn {
     finished: Option<Option<String>>,
     cancelled: bool,
     saw_text: bool,
-    /// Tool groups listed this turn (see `tools::groups`); `load_tools`
-    /// adds to it, and the chat keeps it for its next turns.
+    /// Tool groups the chat lists, fixed when it started (see
+    /// `tools::groups`).
     groups: BTreeSet<ToolCategory>,
     usage: Usage,
 }
@@ -114,10 +114,6 @@ pub struct AgentHost {
     /// What became of approval requests, told to the agent on its next turn.
     outcomes: Vec<String>,
     external: External,
-    /// Tool groups each backend session has used, by session key. They only
-    /// grow, so a chat's tool list (which the backends cache the prompt
-    /// behind) changes only when it needs a new group.
-    groups: HashMap<String, BTreeSet<ToolCategory>>,
 }
 
 impl Default for AgentHost {
@@ -143,7 +139,6 @@ impl AgentHost {
             next_approval: 1,
             outcomes: Vec::new(),
             external: External::default(),
-            groups: HashMap::new(),
         }
     }
 
@@ -286,13 +281,16 @@ impl AgentHost {
         }
         let system_prompt = prompt::system_prompt(self.role, &q.settings);
         let backend = q.settings.backend;
+        let resume = session::load(project.id, &self.chat, backend, self.role);
         let picked = groups::pick(&text, project, &q.context, self.role);
-        let mut groups = self
-            .groups
-            .get(&session::key(project.id, &self.chat, backend, self.role))
-            .cloned()
-            .unwrap_or_default();
-        groups.extend(picked.iter().copied());
+        // A conversation keeps the list it started with, so its cached
+        // prompt stays valid; a new one starts from this message's picks.
+        let key = session::key(project.id, &self.chat, backend, self.role);
+        let groups = resume
+            .as_ref()
+            .and_then(|_| groups::stored(&key))
+            .unwrap_or_else(|| picked.clone());
+        groups::store(&key, &groups);
 
         let launch = (|| -> std::io::Result<(McpLaunch, PathBuf, PathBuf)> {
             if self.bridge.is_none() {
@@ -328,7 +326,7 @@ impl AgentHost {
         let spec = TurnSpec {
             system_prompt,
             message,
-            resume: session::load(project.id, &self.chat, backend, self.role),
+            resume,
             model: q.settings.models.get(backend).clone(),
             mcp,
             workdir,
@@ -440,12 +438,8 @@ impl AgentHost {
             });
         }
         close_open_sets(bus, &turn.author, &mut self.events);
-        let role = role_of(&turn.author);
-        self.groups.insert(
-            session::key(turn.project, &turn.chat, turn.backend, role),
-            turn.usage.next_groups(&turn.groups),
-        );
-        turn.usage.log(&turn.settings, role, &turn.context, now());
+        turn.usage
+            .log(&turn.settings, role_of(&turn.author), &turn.context, now());
         let _ = std::fs::remove_dir_all(&turn.spec.run_dir);
         self.events.push(AgentEvent::TurnDone);
     }
@@ -490,12 +484,13 @@ impl AgentHost {
                     let (tool, args) = groups::unwrap_run(tool, args);
                     turn.usage.calls.push((tool.clone(), via_run));
                     if tool == groups::LOAD_TOOLS {
-                        let before = turn.groups.clone();
-                        let done =
-                            groups::load(bus, role_of(&turn.author), &mut turn.groups, &args);
-                        turn.usage
-                            .loaded
-                            .extend(turn.groups.difference(&before).copied());
+                        let done = groups::load(
+                            bus,
+                            role_of(&turn.author),
+                            &turn.groups,
+                            &mut turn.usage.loaded,
+                            &args,
+                        );
                         self.finish_call(reply, tool, args, done);
                         continue;
                     }

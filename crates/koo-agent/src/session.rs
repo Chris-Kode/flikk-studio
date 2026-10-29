@@ -74,11 +74,16 @@ pub fn store(
 pub fn forget_chat(project: ProjectId, chat: &str) {
     let mut all = load_all();
     let before = all.len();
+    let mut keys = Vec::new();
     for backend in [Backend::Claude, Backend::Codex] {
         for role in [AgentRole::Editor, AgentRole::Builder] {
-            all.remove(&key(project, chat, backend, role));
+            keys.push(key(project, chat, backend, role));
         }
     }
+    for k in &keys {
+        all.remove(k);
+    }
+    crate::tools::groups::forget(&keys);
     if all.len() != before {
         save_all(&all);
     }

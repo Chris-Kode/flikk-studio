@@ -1,11 +1,13 @@
 //! Tool groups, so a turn lists only the tools it is likely to need.
 //!
-//! Every turn lists the [`CORE`] tools plus the groups picked for it
-//! ([`pick`]: the workspace, the selection and words in the message) and
-//! those the chat already used. `load_tools` hands the agent another group's
-//! schemas mid-turn and `run_tool` calls them, so the list stays the same
-//! for the whole turn (the backends cache the prompt behind it). External
-//! clients still see every tool.
+//! A chat's first turn lists the [`CORE`] tools plus the groups picked for
+//! it ([`pick`]: the workspace, the selection and words in the message),
+//! and the chat keeps that list for good ([`stored`]): the backends cache
+//! the prompt behind it, so a list that changed would make them read the
+//! whole conversation again. Any other group comes through `load_tools`,
+//! whose schemas stay in the conversation, and `run_tool` calls it, in that
+//! turn and later ones (as Claude's own tool search keeps found tools out of
+//! the cached prefix). External clients still see every tool.
 //!
 //! Groups follow the permission categories, except that a few read tools
 //! sit with the edits they serve (`get_scopes` with color, `preview_fx`
@@ -18,8 +20,9 @@ use koo_core::bus::{AgentRole, CommandBus};
 use koo_core::command::ToolCategory;
 use koo_core::model::{ClipContent, Project, TrackKind};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::PathBuf;
 
 pub const LOAD_TOOLS: &str = "load_tools";
 pub const RUN_TOOL: &str = "run_tool";
@@ -372,10 +375,13 @@ pub fn unwrap_run(tool: String, args: Value) -> (String, Value) {
 }
 
 /// `load_tools`: add groups to the turn and hand back their schemas.
+/// `load_tools`: hand back the schemas of groups the chat does not list.
+/// `loaded` holds those already handed over this turn.
 pub fn load(
     bus: &CommandBus,
     role: AgentRole,
-    groups: &mut BTreeSet<ToolCategory>,
+    listed: &BTreeSet<ToolCategory>,
+    loaded: &mut BTreeSet<ToolCategory>,
     args: &Value,
 ) -> Done {
     let asked: Vec<&str> = match args.get("groups") {
@@ -403,9 +409,16 @@ pub fn load(
     let mut schemas = Vec::new();
     let mut notes = Vec::new();
     for g in wanted {
-        if groups.contains(&g) {
+        if listed.contains(&g) {
             notes.push(format!(
                 "`{}` is already listed; call its tools directly.",
+                key(g)
+            ));
+            continue;
+        }
+        if loaded.contains(&g) {
+            notes.push(format!(
+                "`{}` was loaded earlier in this message; call its tools through `run_tool`.",
                 key(g)
             ));
             continue;
@@ -422,7 +435,7 @@ pub fn load(
             ));
             continue;
         }
-        groups.insert(g);
+        loaded.insert(g);
         schemas.extend(found.iter().map(|t| t.to_mcp()));
     }
     let loaded: Vec<_> = schemas
@@ -435,7 +448,7 @@ pub fn load(
             text.push_str("\n\n");
         }
         text.push_str(&format!(
-            "Loaded {}. Call them through `run_tool` with `name` and `arguments` for the rest of this message; from the next message on they are listed directly.\n\n{}",
+            "Loaded {}. Call them through `run_tool` with `name` and `arguments`, in this message and later ones; load again only if these schemas are no longer in the conversation.\n\n{}",
             loaded.join(", "),
             serde_json::to_string(&schemas).unwrap_or_default()
         ));
@@ -468,24 +481,6 @@ impl Usage {
         }
     }
 
-    /// The groups the chat lists from the next turn on: those listed now,
-    /// those loaded, and those of tools called through `run_tool`.
-    pub fn next_groups(&self, now: &BTreeSet<ToolCategory>) -> BTreeSet<ToolCategory> {
-        let tools = catalog();
-        let mut out = now.clone();
-        for (name, _) in &self.calls {
-            if let Some(g) = tools
-                .iter()
-                .find(|t| t.name == name)
-                .and_then(group_of)
-                .filter(|g| GROUPS.contains(g))
-            {
-                out.insert(g);
-            }
-        }
-        out
-    }
-
     pub fn log(&self, settings: &AgentSettings, role: AgentRole, ctx: &EditorContext, at: i64) {
         let keys =
             |set: &BTreeSet<ToolCategory>| -> Vec<&str> { set.iter().map(|g| key(*g)).collect() };
@@ -515,6 +510,52 @@ impl Usage {
             .open(path)
         {
             let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+fn stored_file() -> PathBuf {
+    crate::session::agent_dir().join("tool_groups.json")
+}
+
+fn stored_all() -> BTreeMap<String, Vec<String>> {
+    std::fs::read(stored_file())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// The groups a backend session (by `session::key`) was started with.
+pub fn stored(session: &str) -> Option<BTreeSet<ToolCategory>> {
+    let keys = stored_all().remove(session)?;
+    Some(keys.iter().filter_map(|k| from_key(k)).collect())
+}
+
+/// Remember the groups `session` lists, for the rest of its life.
+pub fn store(session: &str, groups: &BTreeSet<ToolCategory>) {
+    let mut all = stored_all();
+    all.insert(
+        session.to_owned(),
+        groups.iter().map(|g| key(*g).to_owned()).collect(),
+    );
+    save_all(&all);
+}
+
+/// Forget the lists of `sessions` (a deleted chat's).
+pub fn forget(sessions: &[String]) {
+    let mut all = stored_all();
+    let before = all.len();
+    all.retain(|k, _| !sessions.contains(k));
+    if all.len() != before {
+        save_all(&all);
+    }
+}
+
+fn save_all(all: &BTreeMap<String, Vec<String>>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(all) {
+        let tmp = stored_file().with_extension("json.tmp");
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, stored_file());
         }
     }
 }
