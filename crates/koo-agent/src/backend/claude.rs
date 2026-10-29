@@ -61,6 +61,12 @@ impl Adapter for Claude {
         ]);
         c.arg("--mcp-config").arg(&config_path);
         c.arg("--system-prompt").arg(&turn.system_prompt);
+        if let Some(model) = &turn.model.model {
+            c.arg("--model").arg(model);
+        }
+        if let Some(effort) = &turn.model.effort {
+            c.arg("--effort").arg(effort);
+        }
         match &turn.resume {
             Some(session) => c.arg("--resume").arg(session),
             // Name new conversations ourselves rather than trust whatever

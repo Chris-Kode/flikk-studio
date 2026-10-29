@@ -9,11 +9,13 @@ use crate::state::EditorState;
 use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InlineToken, InputEvent, InputToken, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_core::agent::ModelChoice;
 use std::ops::Range;
 
 actions!(
@@ -299,6 +301,79 @@ impl Composer {
         true
     }
 
+    /// Model and thinking level for the current backend, applied from the
+    /// next message on.
+    fn render_model_pickers(&self, cx: &App) -> impl IntoElement {
+        let settings = &self.state.read(cx).settings;
+        let backend = settings.backend;
+        let choice = settings.models.get(backend).clone();
+        let label = |options: &[(&str, &'static str)], value: &Option<String>, none| {
+            value
+                .as_deref()
+                .and_then(|v| options.iter().find(|(id, _)| *id == v))
+                .map_or(none, |(_, label)| *label)
+        };
+        let model = label(backend.models(), &choice.model, "Default");
+        let effort = label(backend.efforts(), &choice.effort, "Auto");
+        let picker = |id: &'static str,
+                      tooltip: &'static str,
+                      current: &'static str,
+                      none: &'static str,
+                      options: &'static [(&'static str, &'static str)],
+                      selected: Option<String>,
+                      set: fn(&mut ModelChoice, Option<String>)| {
+            let state = self.state.clone();
+            Button::new(id)
+                .label(current)
+                .ghost()
+                .xsmall()
+                .dropdown_caret(true)
+                .tooltip(tooltip)
+                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                    let item = |label: &'static str, value: Option<&'static str>| {
+                        let state = state.clone();
+                        PopupMenuItem::new(label)
+                            .checked(selected.as_deref() == value)
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| {
+                                    let mut settings = s.settings.clone();
+                                    set(settings.models.get_mut(backend), value.map(str::to_owned));
+                                    if settings != s.settings {
+                                        s.set_settings(settings, cx);
+                                    }
+                                })
+                            })
+                    };
+                    let mut menu = menu.item(item(none, None)).separator();
+                    for (value, label) in options {
+                        menu = menu.item(item(label, Some(value)));
+                    }
+                    menu
+                })
+        };
+        h_flex()
+            .min_w_0()
+            .gap_0p5()
+            .child(picker(
+                "chat-model",
+                "Model",
+                model,
+                "Default",
+                backend.models(),
+                choice.model,
+                |c, v| c.model = v,
+            ))
+            .child(picker(
+                "chat-effort",
+                "Thinking",
+                effort,
+                "Auto",
+                backend.efforts(),
+                choice.effort,
+                |c, v| c.effort = v,
+            ))
+    }
+
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggestions.as_ref()?;
         let theme = cx.theme();
@@ -482,7 +557,15 @@ impl Render for Composer {
                                 }
                             }),
                     )
-                    .child(h_flex().px_1p5().pb_1p5().justify_end().child(action)),
+                    .child(
+                        h_flex()
+                            .px_1p5()
+                            .pb_1p5()
+                            .gap_2()
+                            .justify_between()
+                            .child(self.render_model_pickers(cx))
+                            .child(action),
+                    ),
             )
             .children(self.render_suggestions(cx))
     }

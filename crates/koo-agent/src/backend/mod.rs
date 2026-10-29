@@ -8,7 +8,7 @@ mod codex;
 pub use claude::Claude;
 pub use codex::Codex;
 
-use koo_core::agent::Backend as BackendKind;
+use koo_core::agent::{Backend as BackendKind, ModelChoice};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -34,6 +34,8 @@ pub struct TurnSpec {
     pub message: String,
     /// Backend session to continue, if any.
     pub resume: Option<String>,
+    /// Model and thinking level; `None` fields keep the CLI default.
+    pub model: ModelChoice,
     pub mcp: McpLaunch,
     /// Empty working directory under `paths::home()`, so no project file of
     /// the user's (CLAUDE.md, AGENTS.md, .codex) is ever picked up.

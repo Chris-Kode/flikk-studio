@@ -1,5 +1,5 @@
 //! Agent settings: one set per user, plus per-project overrides for
-//! everything except `backend` (PRD "Agent configuration").
+//! everything except `backend` and `models` (PRD "Agent configuration").
 
 use crate::{Store, recipes, uuid_text};
 use anyhow::Result;
