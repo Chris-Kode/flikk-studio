@@ -26,6 +26,66 @@ impl Backend {
     }
 }
 
+/// A model a backend CLI offers, as the CLI itself lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    /// Passed back to the CLI as is.
+    pub id: String,
+    pub label: String,
+    /// Thinking levels it takes, lowest first; empty when there is no
+    /// choice.
+    pub efforts: Vec<String>,
+    /// What the CLI runs when no model is picked.
+    pub default: bool,
+}
+
+/// Label for a thinking level a CLI reports (`xhigh` reads "Extra high").
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Model and thinking level for one backend. `None` leaves the CLI's own
+/// default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelChoice {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// A [`ModelChoice`] per backend, so switching backends keeps each pick.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelChoices {
+    pub claude: ModelChoice,
+    pub codex: ModelChoice,
+}
+
+impl ModelChoices {
+    pub fn get(&self, backend: Backend) -> &ModelChoice {
+        match backend {
+            Backend::Claude => &self.claude,
+            Backend::Codex => &self.codex,
+        }
+    }
+
+    pub fn get_mut(&mut self, backend: Backend) -> &mut ModelChoice {
+        match backend {
+            Backend::Claude => &mut self.claude,
+            Backend::Codex => &mut self.codex,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VisionSettings {
     /// At most 30 (PRD V2).
@@ -43,10 +103,13 @@ impl Default for VisionSettings {
 }
 
 /// Agent settings (PRD "Agent configuration"). Per user, with per-project
-/// overrides for everything except `backend`.
+/// overrides for everything except `backend` and `models`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentSettings {
     pub backend: Backend,
+    /// Model and thinking level, picked in the chat composer.
+    #[serde(default)]
+    pub models: ModelChoices,
     pub permissions: Permissions,
     pub instructions: String,
     pub enabled_recipes: Vec<RecipeId>,

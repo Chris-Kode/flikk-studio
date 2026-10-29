@@ -14,6 +14,7 @@ use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
 use koo_core::services::{AnalysisService, MediaService, Services};
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -88,6 +89,11 @@ pub struct EditorState {
     /// the notices were last brought up to date.
     models_seen: (Vec<bool>, u64),
     _models_poll: Task<()>,
+    /// Models each backend's CLI offers: the list it gave last time until
+    /// it answers again.
+    pub agent_models: HashMap<Backend, Vec<AgentModel>>,
+    /// Backends whose CLI was asked for its models this run, or is being.
+    models_asked: HashSet<Backend>,
 }
 
 impl EditorState {
@@ -160,11 +166,45 @@ impl EditorState {
             models: koo_models::Downloads::default(),
             notices: Notices::default(),
             _models_poll: models_poll,
+            agent_models: HashMap::new(),
+            models_asked: HashSet::new(),
         };
         this.refresh_model_notices();
         this.load_agent_memory();
         this.load_presets();
+        this.load_agent_models(cx);
         this
+    }
+
+    /// Ask the backend's CLI which models it offers, once per run. Until it
+    /// answers the list from last time stands; a failed ask is tried again
+    /// on the next call.
+    pub fn load_agent_models(&mut self, cx: &mut Context<Self>) {
+        let backend = self.settings.backend;
+        if !self.models_asked.insert(backend) {
+            return;
+        }
+        self.agent_models
+            .entry(backend)
+            .or_insert_with(|| koo_agent::backend::cached_models(backend));
+        let task = cx
+            .background_executor()
+            .spawn(async move { koo_agent::backend::refresh_models(backend) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(models) => {
+                        this.agent_models.insert(backend, models);
+                    }
+                    Err(_) => {
+                        this.models_asked.remove(&backend);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Hand the agent its role, its recipes, the approved rules of the
@@ -781,10 +821,14 @@ impl EditorState {
         self.bus.set_permissions(settings.permissions.clone());
         persistence::save_settings(&settings);
         let profile_changed = settings.style_profile != self.settings.style_profile;
+        let backend_changed = settings.backend != self.settings.backend;
         self.settings = settings;
         self.load_agent_memory();
         if profile_changed {
             self.load_presets();
+        }
+        if backend_changed {
+            self.load_agent_models(cx);
         }
         cx.notify();
     }

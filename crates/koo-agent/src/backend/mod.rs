@@ -4,11 +4,13 @@
 
 mod claude;
 mod codex;
+mod models;
 
 pub use claude::Claude;
 pub use codex::Codex;
+pub use models::{cached_models, refresh_models};
 
-use koo_core::agent::Backend as BackendKind;
+use koo_core::agent::{Backend as BackendKind, ModelChoice};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -34,6 +36,8 @@ pub struct TurnSpec {
     pub message: String,
     /// Backend session to continue, if any.
     pub resume: Option<String>,
+    /// Model and thinking level; `None` fields keep the CLI default.
+    pub model: ModelChoice,
     pub mcp: McpLaunch,
     /// Empty working directory under `paths::home()`, so no project file of
     /// the user's (CLAUDE.md, AGENTS.md, .codex) is ever picked up.
@@ -96,16 +100,7 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // When the editor itself runs under Claude Code, don't let the child
-    // think it is a nested session.
-    for var in [
-        "CLAUDECODE",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_ENTRYPOINT",
-    ] {
-        command.env_remove(var);
-    }
-    hide_window(&mut command);
+    isolate(&mut command);
     let mut child = command.spawn()?;
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
@@ -174,6 +169,20 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
             waiter.lock().unwrap().take();
         })?;
     Ok(RunningTurn { child, events: rx })
+}
+
+/// Prepare a backend CLI command: no console window, and when the editor
+/// itself runs under Claude Code, don't let the child think it is a nested
+/// session.
+fn isolate(command: &mut Command) {
+    for var in [
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+    ] {
+        command.env_remove(var);
+    }
+    hide_window(command);
 }
 
 /// Pump stdout through the adapter. Returns whether `Finished` was sent.

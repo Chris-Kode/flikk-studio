@@ -311,6 +311,7 @@ impl AgentHost {
             system_prompt,
             message,
             resume: session::load(project.id, &self.chat, backend, self.role),
+            model: q.settings.models.get(backend).clone(),
             mcp,
             workdir,
             run_dir,

@@ -60,7 +60,7 @@ impl Adapter for Codex {
             .iter()
             .map(|(k, v)| format!("{k}={}", toml_str(v)))
             .collect();
-        let overrides = [
+        let mut overrides = vec![
             format!(
                 "mcp_servers.koo.command={}",
                 toml_str(&turn.mcp.command.to_string_lossy())
@@ -87,6 +87,12 @@ impl Adapter for Codex {
             "include_apply_patch_tool=false".into(),
             "tools.view_image=false".into(),
         ];
+        if let Some(model) = &turn.model.model {
+            overrides.push(format!("model={}", toml_str(model)));
+        }
+        if let Some(effort) = &turn.model.effort {
+            overrides.push(format!("model_reasoning_effort={}", toml_str(effort)));
+        }
         for o in overrides {
             c.arg("-c").arg(o);
         }
