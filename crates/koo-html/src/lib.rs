@@ -7,11 +7,17 @@
 //! - `window.koo.params` holds numbers, booleans and text as is, colors as
 //!   `rgba()` strings, points as `[x, y]` in 0..1 from the top-left and
 //!   images as `file://` URLs (empty when unset);
-//! - `Math.random` is seeded per load, so it repeats across renders;
+//! - GSAP and its plugins are preloaded with 2D transforms by default;
+//!   every copy of GSAP the page holds has its root timeline rendered at
+//!   the clip time instead of from its ticker, and keeps finished
+//!   animations, and `kooTimeline` runs in a `gsap.context`;
+//! - `Math.random` is seeded per load and per `kooTimeline` run, so it
+//!   repeats across renders;
 //! - `requestAnimationFrame` runs at 60 Hz of clip time while seeking
 //!   forward, and once more at the frame's exact time;
-//! - seeking backward re-seeks CSS and Web Animations directly, and reloads
-//!   the page when its scripts used timers or animation frames;
+//! - seeking backward re-seeks CSS and Web Animations directly, reruns
+//!   `kooTimeline` and replays GSAP from 0, and reloads the page when its
+//!   scripts used timers or animation frames;
 //! - fonts and `<img>` decoding are awaited before every capture.
 //!
 //! One worker thread owns the browser, launched on first use with its

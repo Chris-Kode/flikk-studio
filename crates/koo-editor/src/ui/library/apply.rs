@@ -400,10 +400,14 @@ const HTML: &str = r#"<div class="title">{{text}}</div>
     place-items: center;
     font: 700 120px/1.1 system-ui, sans-serif;
     color: var(--color);
-    animation: rise 0.8s cubic-bezier(.2, .8, .2, 1) both;
-  }
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(40px); }
   }
 </style>
+<script>
+  // Reruns when the parameters or the clip length change.
+  window.kooTimeline = (koo) => {
+    gsap.timeline()
+      .from('.title', { opacity: 0, y: 40, duration: 0.8, ease: 'power3.out' })
+      .to('.title', { opacity: 0, duration: 0.4 }, koo.duration - 0.4);
+  };
+</script>
 "#;

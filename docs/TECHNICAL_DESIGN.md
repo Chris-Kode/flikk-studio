@@ -50,7 +50,7 @@ behaviour and this file wins on structure.
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
 | `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
-| `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock | core, tungstenite |
+| `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
 | `koo-models` | Everything about the models: a folder per task (its interface, the models that can do it) and per model (its files pinned to a commit, its config, its runner); whether the files are on disk, and the downloads the user starts | core, ureq, whisper-rs, ort |
 | `koo-editor` | GPUI app: layout, `EditorState`, panels, wiring of all of the above | all |
 
@@ -496,9 +496,12 @@ with the same precision as the UI.
 * **GLSL** follows ShaderToy/gl-transitions: authors write
   `effect(uv)`, `transition(uv)` or `generate(uv)`; the engine adds
   uniforms and helpers and reports errors against the author's lines.
-* **HTML** renders in headless Chromium with an engine-owned clock (CSS
-  animations, Web Animations, rAF and timers all follow clip time), so
-  frames are deterministic and exportable, with alpha.
+* **HTML** renders in headless Chromium with an engine-owned clock (GSAP,
+  CSS animations, Web Animations, rAF and timers all follow clip time), so
+  frames are deterministic and exportable, with alpha. GSAP 3.15 and its
+  motion-graphics plugins are vendored in `koo-html/src/gsap` and preloaded;
+  templates build their animation in `kooTimeline`, which the engine reruns
+  when parameters or the clip length change.
 * **Engines behind traits:** `services::FxService` (`koo-gpu`, wgpu — the
   same wgpu GPUI uses) and `services::HtmlService` (`koo-html`). Both may be
   `None` (no GPU adapter, no browser); callers degrade quietly.

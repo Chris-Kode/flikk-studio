@@ -14,6 +14,41 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 const CLOCK: &str = include_str!("clock.js");
+/// GSAP 3.15.0 and its motion-graphics plugins, as published on npm, under
+/// <https://gsap.com/standard-license>. Loaded after the clock, which takes
+/// over its timing as `window.gsap` is set. Transforms stay 2D: GPU layers
+/// keep a raster scale from earlier frames, so a frame would depend on the
+/// frames before it.
+const GSAP: &str = concat!(
+    include_str!("gsap/gsap.min.js"),
+    "\n",
+    include_str!("gsap/CustomEase.min.js"),
+    "\n",
+    include_str!("gsap/CustomBounce.min.js"),
+    "\n",
+    include_str!("gsap/CustomWiggle.min.js"),
+    "\n",
+    include_str!("gsap/EasePack.min.js"),
+    "\n",
+    include_str!("gsap/SplitText.min.js"),
+    "\n",
+    include_str!("gsap/TextPlugin.min.js"),
+    "\n",
+    include_str!("gsap/ScrambleTextPlugin.min.js"),
+    "\n",
+    include_str!("gsap/DrawSVGPlugin.min.js"),
+    "\n",
+    include_str!("gsap/MorphSVGPlugin.min.js"),
+    "\n",
+    include_str!("gsap/MotionPathPlugin.min.js"),
+    "\n",
+    include_str!("gsap/Physics2DPlugin.min.js"),
+    "\n",
+    include_str!("gsap/PhysicsPropsPlugin.min.js"),
+    "\ngsap.registerPlugin(CustomEase, CustomBounce, CustomWiggle, SplitText, TextPlugin, \
+     ScrambleTextPlugin, DrawSVGPlugin, MorphSVGPlugin, MotionPathPlugin, Physics2DPlugin, \
+     PhysicsPropsPlugin);\ngsap.config({ force3D: false });\n",
+);
 const TABS: usize = 4;
 const CALL: Duration = Duration::from_secs(10);
 const LOAD: Duration = Duration::from_secs(15);
@@ -283,12 +318,14 @@ fn open(cdp: &mut Cdp) -> Result<Tab> {
         .to_owned();
     let s = Some(session.as_str());
     cdp.call(s, "Page.enable", json!({}), CALL)?;
-    cdp.call(
-        s,
-        "Page.addScriptToEvaluateOnNewDocument",
-        json!({ "source": CLOCK }),
-        CALL,
-    )?;
+    for source in [CLOCK, GSAP] {
+        cdp.call(
+            s,
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": source }),
+            CALL,
+        )?;
+    }
     cdp.call(
         s,
         "Emulation.setDefaultBackgroundColorOverride",
