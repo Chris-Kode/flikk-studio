@@ -15,7 +15,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use koo_core::agent::ModelChoice;
+use koo_core::agent::{AgentModel, Backend, ModelChoice, effort_label};
 use std::ops::Range;
 
 actions!(
@@ -301,77 +301,104 @@ impl Composer {
         true
     }
 
-    /// Model and thinking level for the current backend, applied from the
-    /// next message on.
+    /// Model and thinking level for the current backend, as its CLI lists
+    /// them, applied from the next message on.
     fn render_model_pickers(&self, cx: &App) -> impl IntoElement {
-        let settings = &self.state.read(cx).settings;
-        let backend = settings.backend;
-        let choice = settings.models.get(backend).clone();
-        let label = |options: &[(&str, &'static str)], value: &Option<String>, none| {
-            value
-                .as_deref()
-                .and_then(|v| options.iter().find(|(id, _)| *id == v))
-                .map_or(none, |(_, label)| *label)
+        let s = self.state.read(cx);
+        let backend = s.settings.backend;
+        let choice = s.settings.models.get(backend).clone();
+        let models = s.agent_models.get(&backend).cloned().unwrap_or_default();
+        let efforts = efforts_of(&models, choice.model.as_deref()).to_vec();
+        let model_text = match &choice.model {
+            Some(id) => models
+                .iter()
+                .find(|m| &m.id == id)
+                .map_or_else(|| id.clone(), |m| m.label.clone()),
+            None => "Default".to_owned(),
         };
-        let model = label(backend.models(), &choice.model, "Default");
-        let effort = label(backend.efforts(), &choice.effort, "Auto");
-        let picker = |id: &'static str,
-                      tooltip: &'static str,
-                      current: &'static str,
-                      none: &'static str,
-                      options: &'static [(&'static str, &'static str)],
-                      selected: Option<String>,
-                      set: fn(&mut ModelChoice, Option<String>)| {
-            let state = self.state.clone();
-            Button::new(id)
-                .label(current)
-                .ghost()
-                .xsmall()
-                .dropdown_caret(true)
-                .tooltip(tooltip)
-                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                    let item = |label: &'static str, value: Option<&'static str>| {
+        let effort_text = choice
+            .effort
+            .as_deref()
+            .map_or_else(|| "Auto".to_owned(), effort_label);
+        let state = self.state.clone();
+        let model_picker = Button::new("chat-model")
+            .label(model_text)
+            .ghost()
+            .xsmall()
+            .dropdown_caret(true)
+            .tooltip("Model")
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, {
+                let (state, choice) = (state.clone(), choice.clone());
+                move |menu, _, _| {
+                    let item = |label: String, id: Option<String>| {
+                        // A level the new model doesn't take goes back to Auto.
+                        let keep = choice
+                            .effort
+                            .as_ref()
+                            .is_some_and(|e| efforts_of(&models, id.as_deref()).contains(e));
                         let state = state.clone();
                         PopupMenuItem::new(label)
-                            .checked(selected.as_deref() == value)
+                            .checked(id == choice.model)
                             .on_click(move |_, _, cx| {
-                                state.update(cx, |s, cx| {
-                                    let mut settings = s.settings.clone();
-                                    set(settings.models.get_mut(backend), value.map(str::to_owned));
-                                    if settings != s.settings {
-                                        s.set_settings(settings, cx);
+                                let id = id.clone();
+                                set_choice(&state, backend, cx, move |c| {
+                                    c.model = id;
+                                    if !keep {
+                                        c.effort = None;
                                     }
                                 })
                             })
                     };
-                    let mut menu = menu.item(item(none, None)).separator();
-                    for (value, label) in options {
-                        menu = menu.item(item(label, Some(value)));
+                    let mut menu = menu
+                        .max_h(px(360.))
+                        .scrollable(true)
+                        .item(item("Default".into(), None));
+                    if !models.is_empty() {
+                        menu = menu.separator();
+                    }
+                    for m in &models {
+                        menu = menu.item(item(m.label.clone(), Some(m.id.clone())));
+                    }
+                    menu
+                }
+            })
+            .on_open_change({
+                let state = state.clone();
+                move |open, _, cx| {
+                    if *open {
+                        state.update(cx, |s, cx| s.load_agent_models(cx));
+                    }
+                }
+            });
+        let effort_picker = (!efforts.is_empty()).then(|| {
+            Button::new("chat-effort")
+                .label(effort_text)
+                .ghost()
+                .xsmall()
+                .dropdown_caret(true)
+                .tooltip("Thinking")
+                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                    let item = |label: String, effort: Option<String>| {
+                        let state = state.clone();
+                        PopupMenuItem::new(label)
+                            .checked(effort == choice.effort)
+                            .on_click(move |_, _, cx| {
+                                let effort = effort.clone();
+                                set_choice(&state, backend, cx, move |c| c.effort = effort)
+                            })
+                    };
+                    let mut menu = menu.item(item("Auto".into(), None)).separator();
+                    for effort in &efforts {
+                        menu = menu.item(item(effort_label(effort), Some(effort.clone())));
                     }
                     menu
                 })
-        };
+        });
         h_flex()
             .min_w_0()
             .gap_0p5()
-            .child(picker(
-                "chat-model",
-                "Model",
-                model,
-                "Default",
-                backend.models(),
-                choice.model,
-                |c, v| c.model = v,
-            ))
-            .child(picker(
-                "chat-effort",
-                "Thinking",
-                effort,
-                "Auto",
-                backend.efforts(),
-                choice.effort,
-                |c, v| c.effort = v,
-            ))
+            .child(model_picker)
+            .children(effort_picker)
     }
 
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -569,6 +596,32 @@ impl Render for Composer {
             )
             .children(self.render_suggestions(cx))
     }
+}
+
+/// Thinking levels of model `id`, or of the CLI's default model for `None`.
+fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
+    models
+        .iter()
+        .find(|m| match id {
+            Some(id) => m.id == id,
+            None => m.default,
+        })
+        .map_or(&[], |m| &m.efforts)
+}
+
+fn set_choice(
+    state: &Entity<EditorState>,
+    backend: Backend,
+    cx: &mut App,
+    f: impl FnOnce(&mut ModelChoice),
+) {
+    state.update(cx, |s, cx| {
+        let mut settings = s.settings.clone();
+        f(settings.models.get_mut(backend));
+        if settings != s.settings {
+            s.set_settings(settings, cx);
+        }
+    });
 }
 
 /// Whether item `ix` opens a new group (and gets a header row).

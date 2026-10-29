@@ -24,43 +24,31 @@ impl Backend {
             Backend::Codex => "Codex",
         }
     }
+}
 
-    /// Models offered in the chat, as (id passed to the CLI, label). Claude
-    /// takes aliases that follow the latest version of each model.
-    pub fn models(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Backend::Claude => &[
-                ("fable", "Fable"),
-                ("opus", "Opus"),
-                ("sonnet", "Sonnet"),
-                ("haiku", "Haiku"),
-            ],
-            Backend::Codex => &[
-                ("gpt-5.5", "GPT-5.5"),
-                ("gpt-5.4", "GPT-5.4"),
-                ("gpt-5.4-mini", "GPT-5.4 mini"),
-            ],
-        }
-    }
+/// A model a backend CLI offers, as the CLI itself lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    /// Passed back to the CLI as is.
+    pub id: String,
+    pub label: String,
+    /// Thinking levels it takes, lowest first; empty when there is no
+    /// choice.
+    pub efforts: Vec<String>,
+    /// What the CLI runs when no model is picked.
+    pub default: bool,
+}
 
-    /// Thinking levels, as (value passed to the CLI, label), lowest first:
-    /// Claude's `--effort`, Codex's `model_reasoning_effort`.
-    pub fn efforts(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Backend::Claude => &[
-                ("low", "Low"),
-                ("medium", "Medium"),
-                ("high", "High"),
-                ("xhigh", "Extra high"),
-                ("max", "Max"),
-            ],
-            Backend::Codex => &[
-                ("minimal", "Minimal"),
-                ("low", "Low"),
-                ("medium", "Medium"),
-                ("high", "High"),
-                ("xhigh", "Extra high"),
-            ],
+/// Label for a thinking level a CLI reports (`xhigh` reads "Extra high").
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
         }
     }
 }
