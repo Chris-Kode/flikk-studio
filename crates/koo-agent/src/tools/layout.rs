@@ -180,6 +180,7 @@ pub fn transform_json(tf: &Transform) -> Value {
             "crop": tf.crop.map(n),
             "flip": tf.flip,
             "blend": super::edit::blend_name(tf.blend),
+            "fit": tf.fit.name(),
             "corner_pin": tf.corner_pin.map(|c| c.map(n)),
         })
     };

@@ -365,8 +365,9 @@ fn plan(fonts: &mut Fonts, l: &Letters, canvas: (u32, u32), zoom: f32) -> Option
     }
     let z = zoom.clamp(0.05, MAX_ZOOM);
     let (w, h) = (canvas.0 as f32, canvas.1 as f32);
-    // Drawing pixels per 1080p pixel.
-    let k = h / 1080.0 * pose.scale * z;
+    // Drawing pixels per 1080p pixel, by the short side so a vertical
+    // frame letters as a horizontal one of the same width.
+    let k = w.min(h) / 1080.0 * pose.scale * z;
     let lines = shape(fonts, l, (s.size * k).max(1.0), s.spacing * k);
     let (ascent, line_h) = lines
         .first()

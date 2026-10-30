@@ -2,7 +2,9 @@
 //! See the module docs of [`super`] for how time and parameters reach the
 //! page.
 //!
-//! Every template lays out on a 1920 × 1080 canvas with system fonts only,
+//! Every template lays out on a page with a 1080 CSS px short side (1920 ×
+//! 1080 landscape, 1080 × 1920 portrait; bottom-anchored ones rise above
+//! the controls vertical apps draw over the bottom), with system fonts only,
 //! keeps its background transparent (full-screen cards take a `background`
 //! color), and animates with GSAP in `kooTimeline`, timing its exit against
 //! `koo.duration`, so it ends cleanly however long the clip is.
@@ -97,6 +99,7 @@ pub(super) fn all() -> Vec<FxAsset> {
   .name { color: #fff; font-size: 64px; font-weight: 750; letter-spacing: -.01em; line-height: 1.05; }
   .role { color: rgba(255, 255, 255, .78); font-size: 30px; font-weight: 600; letter-spacing: .1em;
           text-transform: uppercase; margin-top: 12px; }
+  @media (orientation: portrait) { .lt { bottom: 440px; } }
 </style>
 <div class="lt"><div class="bar"></div><div class="panel"><div class="name">{{name}}</div><div class="role">{{role}}</div></div></div>
 <script>
@@ -132,6 +135,7 @@ pub(super) fn all() -> Vec<FxAsset> {
   [data-side="Right"] .line { transform-origin: right; }
   .role { display: inline-block; font-size: 26px; font-weight: 600; letter-spacing: .3em;
           text-transform: uppercase; opacity: .85; }
+  @media (orientation: portrait) { .lt { bottom: 440px; } }
 </style>
 <div class="lt" data-side="{{side}}">
   <div class="clip"><span class="name">{{name}}</span></div>
@@ -171,6 +175,7 @@ pub(super) fn all() -> Vec<FxAsset> {
   .logo[src=""] { display: none; }
   .name { font-size: 54px; font-weight: 800; letter-spacing: -.015em; line-height: 1.05; }
   .role { font-size: 28px; font-weight: 500; opacity: .7; margin-top: 8px; }
+  @media (orientation: portrait) { .lt { bottom: 440px; } }
 </style>
 <div class="lt"><img class="logo" src="{{logo}}" alt=""><div class="text"><div class="name">{{name}}</div><div class="role">{{role}}</div></div><div class="stripe"></div></div>
 <script>
@@ -431,6 +436,10 @@ pub(super) fn all() -> Vec<FxAsset> {
   .after svg { transform-origin: 50% 8%; }
   .cursor { position: absolute; right: 18%; bottom: -70px; width: 64px; height: 64px;
             filter: drop-shadow(0 4px 8px rgba(0, 0, 0, .45)); }
+  @media (orientation: portrait) {
+    [data-at^="Bottom"] { bottom: 440px; }
+    [data-at="Bottom right"] { right: 170px; }
+  }
 </style>
 <div class="spot" data-at="{{position}}">
   <div class="btn">
@@ -488,6 +497,10 @@ pub(super) fn all() -> Vec<FxAsset> {
   [data-platform="YouTube"] .yt, [data-platform="Instagram"] .ig, [data-platform="X"] .x,
   [data-platform="Website"] .web, [data-platform="Email"] .mail { display: block; }
   .handle { font-size: 44px; font-weight: 700; letter-spacing: -.005em; white-space: nowrap; }
+  @media (orientation: portrait) {
+    [data-at^="Bottom"] { bottom: 440px; }
+    [data-at="Bottom right"] { right: 170px; }
+  }
 </style>
 <div class="badge" data-at="{{position}}" data-platform="{{platform}}">
   <div class="icon">
@@ -682,6 +695,7 @@ pub(super) fn all() -> Vec<FxAsset> {
   .feed { flex: 1; margin-left: -26px; overflow: hidden; background: var(--bar); display: flex; align-items: center; }
   .run { display: flex; white-space: nowrap; font-size: 40px; font-weight: 600; }
   .run span::after { content: "\25C6"; margin: 0 40px; color: var(--accent); font-size: 26px; vertical-align: 4px; }
+  @media (orientation: portrait) { .bar { bottom: 440px; } }
 </style>
 <div class="bar"><div class="tab"><div class="label">{{label}}</div></div><div class="feed"><div class="run"></div></div></div>
 <script>

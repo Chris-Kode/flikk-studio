@@ -136,8 +136,10 @@ the bottom-left; colors are straight RGBA 0..1. Available: `iResolution`, \
 name (float; int and choice → int; bool; color → vec4; point → vec2; image \
 → `vec4 image_<name>(vec2 uv)`).
 
-HTML: a document or fragment on a transparent page at the sequence size in \
-CSS px. Animate with GSAP 3.15, preloaded as `gsap` with SplitText, \
+HTML: a document or fragment on a transparent page of the sequence's \
+shape with a 1080 CSS px short side (1920 × 1080 for 16:9, 1080 × 1920 \
+for 9:16), so lay out with flexbox, %, vw/vh or `koo.width` rather than \
+fixed offsets that assume a landscape page. Animate with GSAP 3.15, preloaded as `gsap` with SplitText, \
 CustomEase, DrawSVG, MorphSVG, MotionPath, Text and ScrambleText \
 registered; never load it from a CDN. Build the animation in \
 `window.kooTimeline = (koo) => { gsap.timeline()... }`: it reruns when \
@@ -213,6 +215,7 @@ pub fn project_summary(project: &Project) -> Value {
         "duration": secs(tl.duration()),
         "fps": tl.settings.rate.fps(),
         "size": [tl.settings.width, tl.settings.height],
+        "format": tl.settings.format().map(|f| f.name()),
         "media_items": project.media.len(),
         "tracks": tracks,
         "markers": tl.markers.len(),

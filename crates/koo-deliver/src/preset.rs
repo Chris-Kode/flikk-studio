@@ -1,5 +1,6 @@
 //! Render settings and the built-in presets (PRD D1).
 
+use koo_core::model::SequenceSettings;
 use koo_core::{Rate, TimeRange};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +65,10 @@ pub struct RenderSettings {
     /// Output size; `None` uses the sequence size.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Without `width` and `height`: the sequence scaled to this short side,
+    /// so "1080p" is 1920 × 1080 for 16:9 and 1080 × 1920 for 9:16.
+    #[serde(default)]
+    pub short_side: Option<u32>,
     /// Output rate; `None` uses the sequence rate.
     pub rate: Option<Rate>,
     /// `None` renders audio only.
@@ -77,11 +82,12 @@ pub struct RenderSettings {
 }
 
 impl RenderSettings {
-    fn video(name: &str, w: u32, h: u32, rate: Rate, crf: u8) -> Self {
+    fn video(name: &str, short_side: u32, rate: Rate, crf: u8) -> Self {
         Self {
             name: name.into(),
-            width: Some(w),
-            height: Some(h),
+            width: None,
+            height: None,
+            short_side: Some(short_side),
             rate: Some(rate),
             video: Some(VideoCodec::H264 { crf }),
             audio: AudioCodec::Aac { kbps: 320 },
@@ -93,15 +99,15 @@ impl RenderSettings {
     }
 
     pub fn h264_1080p60() -> Self {
-        Self::video("1080p60 H.264", 1920, 1080, Rate::FPS_60, 18)
+        Self::video("1080p60 H.264", 1080, Rate::FPS_60, 18)
     }
 
     pub fn h264_1080p30() -> Self {
-        Self::video("1080p30 H.264", 1920, 1080, Rate::FPS_30, 18)
+        Self::video("1080p30 H.264", 1080, Rate::FPS_30, 18)
     }
 
     pub fn h264_4k30() -> Self {
-        Self::video("4K30 H.264", 3840, 2160, Rate::FPS_30, 18)
+        Self::video("4K30 H.264", 2160, Rate::FPS_30, 18)
     }
 
     pub fn prores_422_hq() -> Self {
@@ -109,6 +115,7 @@ impl RenderSettings {
             name: "ProRes 422 HQ".into(),
             width: None,
             height: None,
+            short_side: None,
             rate: None,
             video: Some(VideoCodec::ProRes422Hq),
             audio: AudioCodec::Pcm24,
@@ -124,6 +131,7 @@ impl RenderSettings {
             name: "Audio WAV".into(),
             width: None,
             height: None,
+            short_side: None,
             rate: None,
             video: None,
             audio: AudioCodec::Pcm24,
@@ -140,6 +148,7 @@ impl RenderSettings {
             name: "Custom".into(),
             width: None,
             height: None,
+            short_side: None,
             rate: None,
             ..Self::h264_1080p60()
         }
@@ -158,6 +167,15 @@ impl RenderSettings {
 
     pub fn extension(&self) -> &'static str {
         self.container.extension()
+    }
+
+    /// Output frame size for a sequence of `seq`'s size, both sides even.
+    pub fn size(&self, seq: &SequenceSettings) -> (u32, u32) {
+        match (self.width, self.height, self.short_side) {
+            (Some(w), Some(h), _) => (w, h),
+            (None, None, Some(short)) => seq.scaled(short),
+            (w, h, _) => (w.unwrap_or(seq.width), h.unwrap_or(seq.height)),
+        }
     }
 
     pub(crate) fn codec_args(&self) -> Vec<String> {

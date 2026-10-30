@@ -382,7 +382,7 @@ fn write_caption(
     if lines.is_empty() {
         return;
     }
-    let k = height / 1080.0;
+    let k = width.min(height) / 1080.0;
     let duration = clip.duration().as_secs_f64();
     let starts = word_starts(text, times, duration);
     let from = (shown.start - clip.start).as_secs_f64();
@@ -507,7 +507,7 @@ pub fn to_ass(
     range: TimeRange,
     titles: bool,
 ) -> String {
-    let k = height as f32 / 1080.0;
+    let k = width.min(height) as f32 / 1080.0;
     let mut out = String::new();
     let _ = write!(
         out,

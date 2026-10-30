@@ -40,6 +40,21 @@ impl Project {
     pub fn media(&self, id: MediaId) -> Option<&MediaItem> {
         self.media.iter().find(|m| m.id == id)
     }
+
+    /// Footage and photos on video tracks: the clips that fit or fill the
+    /// frame ([`Fit`]) as a whole. Overlays and generators keep their place.
+    pub fn framed_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.timeline
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video)
+            .flat_map(|t| &t.clips)
+            .filter(|c| {
+                c.media()
+                    .and_then(|m| self.media(m))
+                    .is_some_and(|m| m.kind != MediaKind::Audio)
+            })
+    }
 }
 
 // ---------------------------------------------------------------- media pool
@@ -182,6 +197,100 @@ impl Default for SequenceSettings {
             height: 1080,
             rate: Rate::FPS_60,
             sample_rate: 48_000,
+        }
+    }
+}
+
+impl SequenceSettings {
+    /// The smaller of width and height: what "1080p" names in any shape.
+    pub fn short_side(&self) -> u32 {
+        self.width.min(self.height)
+    }
+
+    /// The built-in format this size has, if any.
+    pub fn format(&self) -> Option<Format> {
+        Format::of(self.width, self.height)
+    }
+
+    /// This frame's shape with `short` pixels on the short side, both even.
+    pub fn scaled(&self, short: u32) -> (u32, u32) {
+        if let Some(f) = self.format() {
+            return f.size(short);
+        }
+        let k = short as f64 / self.short_side().max(1) as f64;
+        let even = |v: u32| ((v as f64 * k / 2.0).round() as u32).max(1) * 2;
+        (even(self.width), even(self.height))
+    }
+}
+
+/// A frame shape for the sequence, named for where it plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Format {
+    /// Width : height, e.g. `(9, 16)`.
+    pub aspect: (u32, u32),
+    /// Platforms that play this shape.
+    pub uses: &'static str,
+}
+
+impl Format {
+    pub const ALL: [Format; 6] = [
+        Format {
+            aspect: (16, 9),
+            uses: "YouTube, TV, desktop",
+        },
+        Format {
+            aspect: (9, 16),
+            uses: "TikTok, Reels, Shorts, Stories",
+        },
+        Format {
+            aspect: (1, 1),
+            uses: "Instagram, Facebook, LinkedIn square posts",
+        },
+        Format {
+            aspect: (4, 5),
+            uses: "Instagram and Facebook feed",
+        },
+        Format {
+            aspect: (21, 9),
+            uses: "Cinema widescreen",
+        },
+        Format {
+            aspect: (4, 3),
+            uses: "Classic TV, presentations",
+        },
+    ];
+
+    /// Short sides offered for every format, with their names.
+    pub const RESOLUTIONS: [(u32, &'static str); 4] = [
+        (720, "720p"),
+        (1080, "1080p"),
+        (1440, "1440p"),
+        (2160, "4K"),
+    ];
+
+    /// `"9:16"`.
+    pub fn name(self) -> String {
+        format!("{}:{}", self.aspect.0, self.aspect.1)
+    }
+
+    /// The format whose shape `width` × `height` has, to within rounding to
+    /// even sizes.
+    pub fn of(width: u32, height: u32) -> Option<Format> {
+        Self::ALL.into_iter().find(|f| {
+            let (w, h) = f.size(width.min(height));
+            w.abs_diff(width) <= 2 && h.abs_diff(height) <= 2
+        })
+    }
+
+    /// Frame size with `short` pixels on the short side, both even.
+    pub fn size(self, short: u32) -> (u32, u32) {
+        let (a, b) = (self.aspect.0.max(1) as f64, self.aspect.1.max(1) as f64);
+        let long = |ratio: f64| ((short as f64 * ratio / 2.0).round() as u32) * 2;
+        let short = short & !1;
+        if a >= b {
+            (long(a / b), short)
+        } else {
+            (short, long(b / a))
         }
     }
 }
@@ -527,6 +636,8 @@ pub struct Transform {
     pub flip: [bool; 2],
     /// How the clip composites over the tracks below it.
     pub blend: BlendMode,
+    /// How the picture rests in the frame before the rest applies.
+    pub fit: Fit,
     /// Corner pin: how far each corner of the picture moves, [top-left,
     /// top-right, bottom-right, bottom-left] as [x, y] fractions of its
     /// size, before it is stretched, scaled, skewed and turned; all zero =
@@ -548,6 +659,7 @@ impl Default for Transform {
             crop: [0.0; 4],
             flip: [false; 2],
             blend: BlendMode::Normal,
+            fit: Fit::Contain,
             corner_pin: [[0.0; 2]; 4],
         }
     }
@@ -557,6 +669,38 @@ impl Transform {
     /// Whether any corner is pinned away from where it rests.
     pub fn is_pinned(&self) -> bool {
         self.corner_pin.iter().flatten().any(|v| v.abs() > 1e-6)
+    }
+}
+
+/// How a picture of another shape rests in the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fit {
+    /// Whole picture inside the frame, with bars on the other sides.
+    #[default]
+    Contain,
+    /// Picture covering the frame, its overflow cut off; `position` pans it.
+    Cover,
+}
+
+impl Fit {
+    pub const ALL: [Fit; 2] = [Fit::Contain, Fit::Cover];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fit::Contain => "contain",
+            Fit::Cover => "cover",
+        }
+    }
+
+    /// Scale that rests a `picture`-sized frame on a `canvas`.
+    pub fn scale(self, picture: (u32, u32), canvas: (u32, u32)) -> f64 {
+        let x = canvas.0 as f64 / picture.0.max(1) as f64;
+        let y = canvas.1 as f64 / picture.1.max(1) as f64;
+        match self {
+            Fit::Contain => x.min(y),
+            Fit::Cover => x.max(y),
+        }
     }
 }
 

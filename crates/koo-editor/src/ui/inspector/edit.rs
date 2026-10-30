@@ -10,12 +10,14 @@ use crate::ui::library::{FxGlyph, fx_glyph};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::Time;
 use koo_core::command::Command;
-use koo_core::model::{BlendMode, Clip, Keyframe, Property};
+use koo_core::model::{BlendMode, Clip, Fit, Format, Keyframe, Property, Transform};
 
 const TRANSFORM: [Key; 6] = [
     Key::PosX,
@@ -95,6 +97,7 @@ impl InspectorPanel {
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
         let transform = section("Transform", cx)
+            .when(!lettering, |s| s.child(self.fit_row(&clip, cx)))
             .children(transform_rows)
             .children(shape_rows)
             .when(!lettering, |s| s.child(self.flip_row(&clip, cx)));
@@ -114,6 +117,37 @@ impl InspectorPanel {
             .children(masks)
             .children(list)
             .into_any_element()
+    }
+
+    /// Fit inside the frame or fill it; not animatable.
+    fn fit_row(&self, clip: &Clip, cx: &mut Context<Self>) -> Div {
+        let current = clip.transform.fit;
+        let buttons = Fit::ALL.map(|fit| {
+            let (id, transform) = (clip.id, clip.transform.clone());
+            Button::new(fit.name())
+                .ghost()
+                .xsmall()
+                .selected(fit == current)
+                .label(fit_label(fit))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if fit == current {
+                        return;
+                    }
+                    let transform = Transform {
+                        fit,
+                        ..transform.clone()
+                    };
+                    this.run(
+                        vec![Command::SetTransform {
+                            clip: id,
+                            transform,
+                        }],
+                        "set_transform",
+                        cx,
+                    );
+                }))
+        });
+        labeled("Frame", h_flex().gap_1().children(buttons), cx)
     }
 
     /// Mirror toggles; not animatable.
@@ -315,10 +349,10 @@ impl InspectorPanel {
         }))
     }
 
-    /// Nothing selected: the sequence format, read-only for now.
+    /// Nothing selected: the sequence format and resolution.
     fn sequence_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let project = self.project(cx);
-        let s = &project.timeline.settings;
+        let s = project.timeline.settings.clone();
         let fps = format!("{:.2}", s.rate.fps());
         let fps = fps.trim_end_matches('0').trim_end_matches('.');
         let line = format!(
@@ -329,10 +363,169 @@ impl InspectorPanel {
             s.sample_rate / 1000,
             crate::ui::media_pool::clock(project.timeline.duration()),
         );
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
+        let (active, hover) = (theme.list_active, theme.list_hover);
+        let current = s.format();
+        let short = s.short_side();
+
+        let tiles = Format::ALL.into_iter().enumerate().map(|(i, f)| {
+            let on = current == Some(f);
+            let (w, h) = format_glyph(f);
+            let size = f.size(short);
+            div()
+                .id(("format", i))
+                .flex_1()
+                .py_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .when(on, |d| d.bg(active))
+                .when(!on, |d| d.hover(|s| s.bg(hover)))
+                .child(
+                    v_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .size(px(GLYPH))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .w(px(w))
+                                        .h(px(h))
+                                        .rounded_xs()
+                                        .border_1()
+                                        .border_color(if on { fg } else { muted }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if on { fg } else { muted })
+                                .child(f.name()),
+                        ),
+                )
+                .tooltip(move |window, cx| Tooltip::new(f.uses).build(window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_format(size, cx);
+                }))
+        });
+        let mut tiles: Vec<_> = tiles.collect();
+        let second = tiles.split_off(Format::ALL.len().div_ceil(2));
+        let resolutions = Format::RESOLUTIONS.into_iter().map(|(px_short, name)| {
+            let size = s.scaled(px_short);
+            Button::new(name)
+                .ghost()
+                .xsmall()
+                .selected(short == px_short)
+                .label(name)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_format(size, cx)))
+        });
+        let resolutions: Vec<_> = resolutions.collect();
+        let framing = self.framing_row(cx);
+
         section("Sequence", cx)
-            .child(div().text_xs().text_color(muted).child(line))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(h_flex().gap_1().children(tiles))
+                    .child(h_flex().gap_1().children(second)),
+            )
+            .child(h_flex().pt_1().gap_1().children(resolutions))
+            .children(framing)
+            .child(div().pt_1().text_xs().text_color(muted).child(line))
             .into_any_element()
+    }
+
+    /// Fit or fill every framed clip at once, or have the agent reframe
+    /// them around their subjects; `None` without footage.
+    fn framing_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.state.read(cx);
+        let busy = state.agent_busy();
+        let project = state.bus.project();
+        let clips: Vec<Clip> = project.framed_clips().cloned().collect();
+        if clips.is_empty() {
+            return None;
+        }
+        let border = cx.theme().border;
+        let buttons = Fit::ALL.map(|fit| {
+            let commands: Vec<Command> = clips
+                .iter()
+                .filter(|c| c.transform.fit != fit)
+                .map(|c| Command::SetTransform {
+                    clip: c.id,
+                    transform: Transform {
+                        fit,
+                        ..c.transform.clone()
+                    },
+                })
+                .collect();
+            Button::new(fit.name())
+                .ghost()
+                .xsmall()
+                .selected(commands.is_empty())
+                .label(fit_label(fit))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.run(commands.clone(), "set_fit", cx);
+                }))
+        });
+        let reframe = Button::new("reframe")
+            .ghost()
+            .xsmall()
+            .disabled(busy)
+            .label("Reframe")
+            .tooltip("Ask the agent to keep each subject in shot")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let text = REFRAME.to_owned();
+                this.state.update(cx, |s, cx| s.send_chat(text, cx));
+            }));
+        Some(
+            h_flex()
+                .mt_1()
+                .pt_1()
+                .gap_1()
+                .border_t_1()
+                .border_color(border)
+                .children(buttons)
+                .child(div().flex_1())
+                .child(reframe),
+        )
+    }
+
+    fn set_format(&self, (width, height): (u32, u32), cx: &mut Context<Self>) {
+        let s = &self.project(cx).timeline.settings;
+        if (s.width, s.height) != (width, height) {
+            self.run(vec![Command::SetFormat { width, height }], "set_format", cx);
+        }
+    }
+}
+
+/// What the Reframe button asks the agent.
+const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \
+(with keyframes where the subject moves) so its subject stays in shot.";
+
+fn fit_label(fit: Fit) -> &'static str {
+    match fit {
+        Fit::Contain => "Fit",
+        Fit::Cover => "Fill",
+    }
+}
+
+/// Side of the box a format's outline is drawn in.
+const GLYPH: f32 = 20.;
+
+/// A format's outline size: its shape, fitted in [`GLYPH`].
+fn format_glyph(f: Format) -> (f32, f32) {
+    let (a, b) = (f.aspect.0 as f32, f.aspect.1 as f32);
+    if a >= b {
+        (GLYPH, (GLYPH * b / a).max(4.))
+    } else {
+        ((GLYPH * a / b).max(4.), GLYPH)
     }
 }
 

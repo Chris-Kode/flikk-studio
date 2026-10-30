@@ -71,6 +71,8 @@ pub struct DeliverPanel {
     preset_select: Entity<PresetSelect>,
     /// Custom preset: width, height, fps, CRF.
     custom: [Entity<InputState>; 4],
+    /// Sequence size the custom width and height were last filled from.
+    sequence_size: (u32, u32),
     output: Option<PathBuf>,
     loudness: bool,
     burn_captions: bool,
@@ -106,7 +108,17 @@ impl DeliverPanel {
             input("CRF", "18".into(), window, cx),
         ];
         let _subscriptions = vec![
-            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe_in(&state, window, |this: &mut Self, state, window, cx| {
+                let seq = &state.read(cx).bus.project().timeline.settings;
+                let size = (seq.width, seq.height);
+                if size != this.sequence_size {
+                    this.sequence_size = size;
+                    for (input, v) in this.custom.iter().zip([size.0, size.1]) {
+                        input.update(cx, |i, cx| i.set_value(v.to_string(), window, cx));
+                    }
+                }
+                cx.notify();
+            }),
             cx.subscribe(
                 &preset_select,
                 |this, _, event: &SelectEvent<SearchableVec<SharedString>>, cx| {
@@ -133,6 +145,7 @@ impl DeliverPanel {
             preset: 0,
             preset_select,
             custom,
+            sequence_size: (seq.width, seq.height),
             output: None,
             loudness: false,
             burn_captions: true,

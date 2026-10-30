@@ -28,6 +28,7 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::RemoveMedia { .. }
             | Command::RenameClip { .. }
             | Command::SetClipColor { .. }
+            | Command::SetFormat { .. }
             | Command::AddEffect { .. }
             | Command::SetEffect { .. }
             | Command::RemoveEffect { .. }
@@ -341,6 +342,22 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 .filter(|n| !n.is_empty())
         }),
         Command::SetClipColor { clips, color } => update_clips(tl, clips, |c| c.color = *color),
+        Command::SetFormat { width, height } => {
+            let valid = |v: u32| (16..=8192).contains(&v) && v.is_multiple_of(2);
+            if !valid(*width) || !valid(*height) {
+                return Err(CoreError::Invalid(format!(
+                    "frame size {width}×{height}: each side must be even, 16 to 8192"
+                )));
+            }
+            Ok(ops(vec![Op::SetSequence {
+                before: tl.settings.clone(),
+                after: SequenceSettings {
+                    width: *width,
+                    height: *height,
+                    ..tl.settings.clone()
+                },
+            }]))
+        }
 
         Command::AddEffect {
             clips,

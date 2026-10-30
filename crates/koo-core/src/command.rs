@@ -215,6 +215,12 @@ pub enum Command {
         clips: Vec<ClipId>,
         color: Option<ClipColor>,
     },
+    /// Frame size of the sequence (see [`Format`]). Clips keep their
+    /// transforms, which are relative to the frame.
+    SetFormat {
+        width: u32,
+        height: u32,
+    },
 
     // ---- transform (E5)
     SetTransform {
@@ -483,7 +489,8 @@ impl Command {
             | SetSpeed { .. }
             | SetClipsEnabled { .. }
             | RenameClip { .. }
-            | SetClipColor { .. } => ToolCategory::EditTimeline,
+            | SetClipColor { .. }
+            | SetFormat { .. } => ToolCategory::EditTimeline,
             SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }

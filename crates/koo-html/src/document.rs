@@ -39,7 +39,7 @@ pub fn prepare(call: &FxCall<'_>) -> Prepared {
     };
     let header_lines = if fragment { HEAD.lines().count() } else { 0 };
     let (params, vars) = params(call.asset, call.values);
-    let (w, h) = call.canvas;
+    let (w, h) = page_size(call.canvas);
     let vars = format!(
         "{vars}--duration: {}; --width: {w}; --height: {h};",
         num(call.duration)
@@ -59,8 +59,24 @@ pub fn prepare(call: &FxCall<'_>) -> Prepared {
         state_key,
         state,
         header_lines,
-        canvas: call.canvas,
+        canvas: (w, h),
     }
+}
+
+/// CSS pixels on the short side of every page, whatever the sequence size:
+/// pages lay out as at 1080p and are drawn scaled to the output.
+const PAGE_SHORT_SIDE: f64 = 1080.0;
+
+/// The page's size in CSS pixels: `canvas`'s shape with a
+/// [`PAGE_SHORT_SIDE`] short side, so 1920 × 1080 for 16:9 at any
+/// resolution and 1080 × 1920 for 9:16.
+fn page_size(canvas: (u32, u32)) -> (u32, u32) {
+    let (w, h) = (canvas.0.max(1) as f64, canvas.1.max(1) as f64);
+    let k = PAGE_SHORT_SIDE / w.min(h);
+    (
+        ((w * k).round() as u32).max(1),
+        ((h * k).round() as u32).max(1),
+    )
 }
 
 fn is_document(code: &str) -> bool {
