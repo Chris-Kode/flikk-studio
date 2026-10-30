@@ -12,8 +12,8 @@ use koo_core::fx::ParamKind;
 use koo_core::heard::{self, Target};
 use koo_core::memory::Presets;
 use koo_core::model::{
-    BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Format, Grade, MarkerKind, Property,
-    TrackKind, Transform,
+    BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Fit, Format, Grade, MarkerKind,
+    Property, TrackKind, Transform,
 };
 use koo_core::query;
 use koo_core::{Time, TimeRange, TrackId};
@@ -184,7 +184,22 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 },
                 _ => return Err(ToolError("give both `width` and `height`".into())),
             };
-            vec![Command::SetFormat { width, height }]
+            let mut out = vec![Command::SetFormat { width, height }];
+            if args.opt_bool("fill")? == Some(true) {
+                out.extend(
+                    ctx.project()
+                        .framed_clips()
+                        .filter(|c| c.transform.fit != Fit::Cover)
+                        .map(|c| Command::SetTransform {
+                            clip: c.id,
+                            transform: Transform {
+                                fit: Fit::Cover,
+                                ..c.transform.clone()
+                            },
+                        }),
+                );
+            }
+            out
         }
         "set_clip_color" => {
             let color = match args.opt_str("color")?.map(str::trim) {
@@ -824,7 +839,7 @@ fn set_transform(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, T
 
 /// `t` with the values in `args`. With `relative`, position, rotation,
 /// skew, anchor and corner pin add to the current values, and scale,
-/// stretch and opacity multiply them; crop, flip and blend are always set.
+/// stretch and opacity multiply them; crop, flip, blend and fit are always set.
 fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultOf<Transform> {
     let add = |current: f32, v: f32| if relative { current + v } else { v };
     let times = |current: f32, v: f32| if relative { current * v } else { v };
@@ -868,6 +883,12 @@ fn merge_transform(mut t: Transform, args: &Args, relative: bool) -> ToolResultO
             t.flip = [v[0].as_bool() == Some(true), v[1].as_bool() == Some(true)];
         }
         Some(_) => return fail("`flip` is [horizontal, vertical] booleans"),
+    }
+    if let Some(name) = args.opt_str("fit")? {
+        t.fit = Fit::ALL
+            .into_iter()
+            .find(|f| f.name() == name)
+            .ok_or_else(|| ToolError(format!("unknown fit `{name}`")))?;
     }
     if let Some(name) = args.opt_str("blend")? {
         t.blend = BlendMode::ALL

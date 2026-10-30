@@ -272,12 +272,12 @@ pub fn size_for_width(project: &Project, width: u32) -> (u32, u32) {
 pub const MAX_SKEW: f32 = 80.0;
 
 /// Where a `picture`-sized frame with transform `tf` lands on a `canvas`:
-/// fitted inside it and centred, then transformed ([`placement_from`]), as
-/// in the export graph.
+/// fitted to it by `tf.fit` and centred, then transformed
+/// ([`placement_from`]), as in the export graph.
 pub fn placement(tf: &Transform, picture: (u32, u32), canvas: (u32, u32)) -> Placement {
     let (pw, ph) = (picture.0.max(1) as f32, picture.1.max(1) as f32);
     let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
-    let fit = (cw / pw).min(ch / ph);
+    let fit = tf.fit.scale(picture, canvas) as f32;
     placement_from(tf, [cw / 2.0, ch / 2.0], [pw * fit, ph * fit], canvas)
 }
 

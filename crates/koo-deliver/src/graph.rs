@@ -425,7 +425,7 @@ impl Builder<'_> {
         f.push("format=yuva420p".into());
 
         let (sw, sh) = (pic.size.0.max(1) as f64, pic.size.1.max(1) as f64);
-        let fit = (w as f64 / sw).min(h as f64 / sh);
+        let fit = tr.fit.scale(pic.size, (w, h));
         let (mut cw, mut ch) = (sw * fit, sh * fit);
         let rotated = !matches!(rot, Anim::Const(v) if v.abs() < 1e-6);
         let unscaled = matches!(scale, Anim::Const(v) if (v - 1.0).abs() < 1e-6);

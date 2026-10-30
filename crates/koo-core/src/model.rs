@@ -40,6 +40,21 @@ impl Project {
     pub fn media(&self, id: MediaId) -> Option<&MediaItem> {
         self.media.iter().find(|m| m.id == id)
     }
+
+    /// Footage and photos on video tracks: the clips that fit or fill the
+    /// frame ([`Fit`]) as a whole. Overlays and generators keep their place.
+    pub fn framed_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.timeline
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video)
+            .flat_map(|t| &t.clips)
+            .filter(|c| {
+                c.media()
+                    .and_then(|m| self.media(m))
+                    .is_some_and(|m| m.kind != MediaKind::Audio)
+            })
+    }
 }
 
 // ---------------------------------------------------------------- media pool
@@ -621,6 +636,8 @@ pub struct Transform {
     pub flip: [bool; 2],
     /// How the clip composites over the tracks below it.
     pub blend: BlendMode,
+    /// How the picture rests in the frame before the rest applies.
+    pub fit: Fit,
     /// Corner pin: how far each corner of the picture moves, [top-left,
     /// top-right, bottom-right, bottom-left] as [x, y] fractions of its
     /// size, before it is stretched, scaled, skewed and turned; all zero =
@@ -642,6 +659,7 @@ impl Default for Transform {
             crop: [0.0; 4],
             flip: [false; 2],
             blend: BlendMode::Normal,
+            fit: Fit::Contain,
             corner_pin: [[0.0; 2]; 4],
         }
     }
@@ -651,6 +669,38 @@ impl Transform {
     /// Whether any corner is pinned away from where it rests.
     pub fn is_pinned(&self) -> bool {
         self.corner_pin.iter().flatten().any(|v| v.abs() > 1e-6)
+    }
+}
+
+/// How a picture of another shape rests in the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fit {
+    /// Whole picture inside the frame, with bars on the other sides.
+    #[default]
+    Contain,
+    /// Picture covering the frame, its overflow cut off; `position` pans it.
+    Cover,
+}
+
+impl Fit {
+    pub const ALL: [Fit; 2] = [Fit::Contain, Fit::Cover];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fit::Contain => "contain",
+            Fit::Cover => "cover",
+        }
+    }
+
+    /// Scale that rests a `picture`-sized frame on a `canvas`.
+    pub fn scale(self, picture: (u32, u32), canvas: (u32, u32)) -> f64 {
+        let x = canvas.0 as f64 / picture.0.max(1) as f64;
+        let y = canvas.1 as f64 / picture.1.max(1) as f64;
+        match self {
+            Fit::Contain => x.min(y),
+            Fit::Cover => x.max(y),
+        }
     }
 }
 

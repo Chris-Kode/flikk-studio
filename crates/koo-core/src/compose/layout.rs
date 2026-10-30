@@ -262,7 +262,7 @@ fn picture_shape(
     let place = placement(&tf, size, canvas);
     // Scaled to nothing: not drawn, so nothing to pick.
     place.uv_map()?;
-    let fit = (canvas.0 as f32 / size.0.max(1) as f32).min(canvas.1 as f32 / size.1.max(1) as f32);
+    let fit = tf.fit.scale(size, canvas) as f32;
     // Drawn part, in the picture's own uv, cut by the crop, then flipped
     // into the placement's uv.
     let [mut x0, mut y0, mut x1, mut y1] = drawn.unwrap_or([0.0, 0.0, 1.0, 1.0]);

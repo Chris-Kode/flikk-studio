@@ -209,8 +209,8 @@ pub struct FxCall<'a> {
     /// length (`iDuration`). A transition's `progress` is `time / duration`.
     pub time: f64,
     pub duration: f64,
-    /// Sequence size: HTML lays out at this size in CSS px, and GLSL
-    /// programs measure `iResolution` in its pixels.
+    /// Sequence size: HTML lays out in its shape (see [`crate::fx`]), and
+    /// GLSL programs measure `iResolution` in its pixels.
     pub canvas: (u32, u32),
 }
 

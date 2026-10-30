@@ -44,8 +44,9 @@
 //! # HTML (generators only: motion graphics, titles, image layouts)
 //!
 //! The code is an HTML document or fragment rendered with a transparent
-//! background at the sequence size (e.g. 1920 × 1080 CSS px), then scaled to
-//! the output. The engine owns the clock, so frames are deterministic:
+//! background on a page of the sequence's shape with a 1080 CSS px short
+//! side (1920 × 1080 for 16:9, 1080 × 1920 for 9:16, at any resolution),
+//! then scaled to the output. The engine owns the clock, so frames are deterministic:
 //! - GSAP timelines, CSS animations and transitions and the Web Animations
 //!   API are paused and seeked to the clip time;
 //! - `requestAnimationFrame`, `performance.now()`, `Date.now()` and timers

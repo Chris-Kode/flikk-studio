@@ -11,13 +11,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::Time;
 use koo_core::command::Command;
-use koo_core::model::{BlendMode, Clip, Format, Keyframe, Property};
+use koo_core::model::{BlendMode, Clip, Fit, Format, Keyframe, Property, Transform};
 
 const TRANSFORM: [Key; 6] = [
     Key::PosX,
@@ -97,6 +97,7 @@ impl InspectorPanel {
         let mut frames: Vec<Keyframe> = clip.keyframes.clone();
         frames.sort_by_key(|k| (k.at, k.property as u8));
         let transform = section("Transform", cx)
+            .when(!lettering, |s| s.child(self.fit_row(&clip, cx)))
             .children(transform_rows)
             .children(shape_rows)
             .when(!lettering, |s| s.child(self.flip_row(&clip, cx)));
@@ -116,6 +117,37 @@ impl InspectorPanel {
             .children(masks)
             .children(list)
             .into_any_element()
+    }
+
+    /// Fit inside the frame or fill it; not animatable.
+    fn fit_row(&self, clip: &Clip, cx: &mut Context<Self>) -> Div {
+        let current = clip.transform.fit;
+        let buttons = Fit::ALL.map(|fit| {
+            let (id, transform) = (clip.id, clip.transform.clone());
+            Button::new(fit.name())
+                .ghost()
+                .xsmall()
+                .selected(fit == current)
+                .label(fit_label(fit))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if fit == current {
+                        return;
+                    }
+                    let transform = Transform {
+                        fit,
+                        ..transform.clone()
+                    };
+                    this.run(
+                        vec![Command::SetTransform {
+                            clip: id,
+                            transform,
+                        }],
+                        "set_transform",
+                        cx,
+                    );
+                }))
+        });
+        labeled("Frame", h_flex().gap_1().children(buttons), cx)
     }
 
     /// Mirror toggles; not animatable.
@@ -392,6 +424,7 @@ impl InspectorPanel {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_format(size, cx)))
         });
         let resolutions: Vec<_> = resolutions.collect();
+        let framing = self.framing_row(cx);
 
         section("Sequence", cx)
             .child(
@@ -404,8 +437,64 @@ impl InspectorPanel {
                     .child(h_flex().gap_1().children(second)),
             )
             .child(h_flex().pt_1().gap_1().children(resolutions))
+            .children(framing)
             .child(div().pt_1().text_xs().text_color(muted).child(line))
             .into_any_element()
+    }
+
+    /// Fit or fill every framed clip at once, or have the agent reframe
+    /// them around their subjects; `None` without footage.
+    fn framing_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.state.read(cx);
+        let busy = state.agent_busy();
+        let project = state.bus.project();
+        let clips: Vec<Clip> = project.framed_clips().cloned().collect();
+        if clips.is_empty() {
+            return None;
+        }
+        let border = cx.theme().border;
+        let buttons = Fit::ALL.map(|fit| {
+            let commands: Vec<Command> = clips
+                .iter()
+                .filter(|c| c.transform.fit != fit)
+                .map(|c| Command::SetTransform {
+                    clip: c.id,
+                    transform: Transform {
+                        fit,
+                        ..c.transform.clone()
+                    },
+                })
+                .collect();
+            Button::new(fit.name())
+                .ghost()
+                .xsmall()
+                .selected(commands.is_empty())
+                .label(fit_label(fit))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.run(commands.clone(), "set_fit", cx);
+                }))
+        });
+        let reframe = Button::new("reframe")
+            .ghost()
+            .xsmall()
+            .disabled(busy)
+            .label("Reframe")
+            .tooltip("Ask the agent to keep each subject in shot")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let text = REFRAME.to_owned();
+                this.state.update(cx, |s, cx| s.send_chat(text, cx));
+            }));
+        Some(
+            h_flex()
+                .mt_1()
+                .pt_1()
+                .gap_1()
+                .border_t_1()
+                .border_color(border)
+                .children(buttons)
+                .child(div().flex_1())
+                .child(reframe),
+        )
     }
 
     fn set_format(&self, (width, height): (u32, u32), cx: &mut Context<Self>) {
@@ -413,6 +502,17 @@ impl InspectorPanel {
         if (s.width, s.height) != (width, height) {
             self.run(vec![Command::SetFormat { width, height }], "set_format", cx);
         }
+    }
+}
+
+/// What the Reframe button asks the agent.
+const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \
+(with keyframes where the subject moves) so its subject stays in shot.";
+
+fn fit_label(fit: Fit) -> &'static str {
+    match fit {
+        Fit::Contain => "Fit",
+        Fit::Cover => "Fill",
     }
 }
 
