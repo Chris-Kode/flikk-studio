@@ -3668,6 +3668,7 @@ name = "koo-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "koo-core",
  "rusqlite",
  "serde",

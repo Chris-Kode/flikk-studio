@@ -1,38 +1,48 @@
-//! Load, autosave and settings. Owned by the store work stream; backed by
-//! `koo-store` under `koo_core::paths::home()`.
+//! Project files, autosave and settings. Owned by the store work stream;
+//! backed by `koo-store`.
 //!
-//! One session per process: the open project, a store connection for the
-//! UI thread and a background [`Autosaver`]. If the database cannot be
-//! opened the editor still runs on an in-memory "Untitled" project and
-//! [`take_notice`] says why.
+//! Projects are `.koo` files the user saves where they like; this module
+//! reads and writes them, recovers unsaved changes a crash left in
+//! `paths::autosave()` and keeps the recent-files list. Whether the open
+//! project has unsaved changes is the editor state's to track.
+//!
+//! One session per process: a store connection for the UI thread (user
+//! settings, profiles, facts, recipes, recent files) and a background
+//! [`Autosaver`]. If the database cannot be opened the editor still opens
+//! and saves projects, and [`take_notice`] says why.
 
 use koo_agent::session::MAIN_CHAT;
 use koo_core::agent::{AgentSettings, ChatMessage};
-use koo_core::bus::CommandBus;
-use koo_core::history::History;
 use koo_core::ids::ProjectId;
 use koo_core::model::Project;
-use koo_store::{Autosaver, OpenedProject, Store};
+use koo_store::project_file::{self, ProjectFile};
+use koo_store::{Autosaver, SettingsOverrides, Snapshot, Store};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Everything needed to start editing a project.
 pub struct Loaded {
     pub project: Project,
-    pub history: History,
+    /// Agent settings the project overrides; saved in its file.
+    pub overrides: SettingsOverrides,
+    /// User settings with the project's overrides.
     pub settings: AgentSettings,
+    /// The file it was opened from; `None` until first saved.
+    pub file: Option<PathBuf>,
+    /// Unsaved changes recovered from an autosave: it opens with them.
+    pub recovered: bool,
 }
 
 struct Session {
-    store: Store,
+    store: Option<Store>,
     autosaver: Autosaver,
-    project: ProjectId,
-    /// Bus version of the last snapshot handed to the autosaver.
-    saved_version: Option<u64>,
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static NOTICE: Mutex<Option<String>> = Mutex::new(None);
+/// A project file named on the command line.
+static LAUNCH_FILE: OnceLock<PathBuf> = OnceLock::new();
 
 fn session() -> MutexGuard<'static, Option<Session>> {
     SESSION.lock().unwrap_or_else(|e| e.into_inner())
@@ -42,132 +52,198 @@ fn notify(text: impl Into<String>) {
     *NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.into());
 }
 
-/// A one-off status line message from loading (recovery, errors).
+/// A one-off status line message from loading or saving (recovery, errors).
 pub fn take_notice() -> Option<String> {
     NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// Open the last project (recovering a crashed session's autosave), or
-/// create "Untitled". Also starts the autosaver.
+/// Open `path` at launch instead of the most recent project.
+pub fn set_launch_file(path: PathBuf) {
+    let _ = LAUNCH_FILE.set(path);
+}
+
+/// Start the session and pick the first project: the file named at
+/// launch, else unsaved changes a crash left, else the most recent file,
+/// else a new "Untitled".
 pub fn load_session() -> Loaded {
-    match try_load() {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            notify(format!("Projects can't be saved: {e:#}"));
-            Loaded {
-                project: Project::new("Untitled"),
-                history: History::default(),
-                settings: AgentSettings::default(),
+    {
+        let mut guard = session();
+        let store = match Store::open() {
+            Ok(store) => Some(store),
+            Err(e) => {
+                notify(format!("Settings can't be saved: {e:#}"));
+                None
             }
+        };
+        *guard = Some(Session {
+            store,
+            autosaver: Autosaver::spawn(),
+        });
+    }
+    if let Some(path) = LAUNCH_FILE.get()
+        && let Some(loaded) = open(path)
+    {
+        return loaded;
+    }
+    for autosave in project_file::autosaves() {
+        match project_file::read(&autosave) {
+            Ok(file) => {
+                notify("Recovered unsaved changes");
+                return loaded(file, true);
+            }
+            Err(e) => eprintln!("koo-editor: can't recover {}: {e:#}", autosave.display()),
         }
     }
-}
-
-fn try_load() -> koo_store::Result<Loaded> {
-    let mut guard = session();
-    if let Some(old) = guard.take() {
-        old.autosaver.close();
+    for path in recent() {
+        if path.exists()
+            && let Some(loaded) = open(&path)
+        {
+            // An older error about another file is not news.
+            let _ = take_notice();
+            return loaded;
+        }
     }
-    let store = Store::open()?;
-    let autosaver = Autosaver::spawn(store.reopen()?);
-    let opened = store.open_last_or_new()?;
-    let loaded = loaded(&store, opened)?;
-    *guard = Some(Session {
-        store,
-        autosaver,
-        project: loaded.project.id,
-        saved_version: None,
-    });
-    Ok(loaded)
+    new_project()
 }
 
-fn loaded(store: &Store, opened: OpenedProject) -> koo_store::Result<Loaded> {
-    if opened.recovered {
-        notify("Recovered unsaved changes");
-    }
-    Ok(Loaded {
-        settings: store.load_settings(opened.project.id)?,
-        project: opened.project,
-        history: opened.history,
-    })
+/// A new "Untitled" project, not saved anywhere yet.
+pub fn new_project() -> Loaded {
+    loaded(
+        ProjectFile {
+            project: Project::new("Untitled"),
+            settings: SettingsOverrides::default(),
+            autosave_of: None,
+        },
+        false,
+    )
 }
 
-/// Queue a snapshot of the bus for the background writer. Cheap: skips
-/// unchanged versions, and the clone is the only work on this thread.
-pub fn autosave(bus: &CommandBus) {
-    let mut guard = session();
-    let Some(s) = guard.as_mut() else {
-        return;
+/// Read a project file, with the unsaved changes a crash left for it.
+/// Errors are reported through [`take_notice`].
+pub fn open(path: &Path) -> Option<Loaded> {
+    let file = match project_file::read(path) {
+        Ok(file) => file,
+        Err(e) => {
+            notify(format!("{e:#}"));
+            return None;
+        }
     };
-    let project = bus.project();
-    if project.id == s.project && s.saved_version == Some(bus.version()) {
-        return;
+    let recovered = recover(path, file.project.id);
+    with_store(|s| s.add_recent_project(path));
+    let mut opened = match recovered {
+        Some(autosave) => {
+            notify("Recovered unsaved changes");
+            loaded(autosave, true)
+        }
+        None => loaded(file, false),
+    };
+    opened.file = Some(path.to_path_buf());
+    opened.project.name = project_file::name_of(path);
+    Some(opened)
+}
+
+/// The autosave of project `id` when it holds newer changes to `path`.
+fn recover(path: &Path, id: ProjectId) -> Option<ProjectFile> {
+    let autosave = project_file::autosave_path(id);
+    let newer = match (modified(&autosave), modified(path)) {
+        (Some(a), Some(f)) => a > f,
+        (a, _) => a.is_some(),
+    };
+    if !newer {
+        return None;
     }
-    s.project = project.id;
-    s.saved_version = Some(bus.version());
-    s.autosaver.save(project.clone(), bus.history().clone());
+    let file = project_file::read(&autosave).ok()?;
+    let same = |p: &Path| std::fs::canonicalize(p).ok();
+    let of = file.autosave_of.as_deref()?;
+    (of == path || same(of).is_some_and(|of| Some(of) == same(path))).then_some(file)
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn loaded(file: ProjectFile, recovered: bool) -> Loaded {
+    let settings = with_store(|s| s.load_settings(&file.settings))
+        .unwrap_or_else(|| file.settings.apply(&AgentSettings::default()));
+    Loaded {
+        project: file.project,
+        overrides: file.settings,
+        settings,
+        file: file.autosave_of,
+        recovered,
+    }
+}
+
+/// Write `project` to `path`: the file, a backup now and then, and the
+/// recent list; its autosave is no longer needed. Errors are reported
+/// through [`take_notice`].
+pub fn save(path: &Path, project: &Project, overrides: &SettingsOverrides) -> bool {
+    if let Err(e) = project_file::write(path, project, overrides) {
+        notify(format!("{e:#}"));
+        return false;
+    }
+    discard(project.id);
+    if let Err(e) = project_file::backup(path, project.id) {
+        eprintln!("koo-editor: backup of {} failed: {e:#}", path.display());
+    }
+    with_store(|s| s.add_recent_project(path));
+    true
+}
+
+/// Queue unsaved changes for the background writer, for crash recovery.
+pub fn autosave(project: &Project, overrides: &SettingsOverrides, file: Option<&Path>) {
+    if let Some(s) = session().as_ref() {
+        s.autosaver.save(Snapshot {
+            project: project.clone(),
+            settings: overrides.clone(),
+            file: file.map(Path::to_path_buf),
+        });
+    }
+}
+
+/// The project's unsaved changes were saved or thrown away: drop its
+/// autosave.
+pub fn discard(project: ProjectId) {
+    match session().as_ref() {
+        Some(s) => s.autosaver.clear(project),
+        None => project_file::remove_autosave(project),
+    }
+}
+
+/// Recently opened project files, newest first.
+pub fn recent() -> Vec<PathBuf> {
+    with_store(|s| s.recent_projects()).unwrap_or_default()
+}
+
+pub fn forget_recent(path: &Path) {
+    with_store(|s| s.remove_recent_project(path));
 }
 
 /// Save settings edited in the UI. Fields the open project overrides stay
-/// project-specific; everything else is saved for the user.
-pub fn save_settings(settings: &AgentSettings) {
-    with_session(|s| s.store.save_effective_settings(s.project, settings));
+/// project-specific (the returned overrides, saved with the project);
+/// everything else is saved for the user.
+pub fn save_settings(
+    overrides: &SettingsOverrides,
+    settings: &AgentSettings,
+) -> Option<SettingsOverrides> {
+    with_store(|s| s.save_effective_settings(overrides, settings))
 }
 
-/// Switch projects: the current one is closed cleanly first.
-pub fn open_project(id: ProjectId) -> Option<Loaded> {
-    with_session(|s| {
-        s.autosaver.close();
-        let Some(opened) = s.store.open_project(id)? else {
-            anyhow::bail!("project not found");
-        };
-        switch(s, opened)
-    })
-}
-
-/// Create a project and switch to it.
-pub fn new_project(name: &str) -> Option<Loaded> {
-    with_session(|s| {
-        s.autosaver.close();
-        let project = s.store.create_project(name)?;
-        s.store.set_last_project(Some(project.id))?;
-        switch(
-            s,
-            OpenedProject {
-                project,
-                history: History::default(),
-                recovered: false,
-            },
-        )
-    })
-}
-
-fn switch(s: &mut Session, opened: OpenedProject) -> koo_store::Result<Loaded> {
-    let loaded = loaded(&s.store, opened)?;
-    s.project = loaded.project.id;
-    s.saved_version = None;
-    Ok(loaded)
-}
-
-/// Clean exit: write and close the open project. Call on app quit; without
-/// it the next start treats the session as crashed and recovers it.
+/// App quit: pending unsaved changes are written as an autosave, so they
+/// are recovered on the next start unless the user discarded them.
 pub fn shutdown() {
     if let Some(s) = session().take() {
         drop(s.autosaver);
     }
 }
 
-/// Run `f` with the UI thread's store (project list, profiles, facts,
-/// recipes). `None` if the store is unavailable or `f` failed; failures are
+/// Run `f` with the UI thread's store (profiles, facts, recipes, recent
+/// files). `None` if the store is unavailable or `f` failed; failures are
 /// reported through [`take_notice`].
 pub fn with_store<T>(f: impl FnOnce(&Store) -> koo_store::Result<T>) -> Option<T> {
-    with_session(|s| f(&s.store))
-}
-
-fn with_session<T>(f: impl FnOnce(&mut Session) -> koo_store::Result<T>) -> Option<T> {
-    let mut guard = session();
-    let s = guard.as_mut()?;
-    match f(s) {
+    let guard = session();
+    let store = guard.as_ref()?.store.as_ref()?;
+    match f(store) {
         Ok(v) => Some(v),
         Err(e) => {
             notify(format!("{e:#}"));

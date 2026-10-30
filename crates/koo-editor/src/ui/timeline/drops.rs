@@ -91,6 +91,9 @@ impl TimelinePanel {
             cx.notify();
             return;
         };
+        let Some(program) = drag.program(&self.state, cx) else {
+            return;
+        };
         match target {
             FxTarget::Effect(_, clip, _) => {
                 // On a selected clip: the whole picture selection gets it.
@@ -111,7 +114,7 @@ impl TimelinePanel {
                         vec![clip]
                     }
                 };
-                let effect = FxInstance::new(drag.fx.clone());
+                let effect = FxInstance::new(program);
                 self.state.update(cx, |s, cx| {
                     s.edit(
                         Command::AddEffect {
@@ -125,7 +128,7 @@ impl TimelinePanel {
             }
             FxTarget::Transition(_, target) => {
                 let (clip, edge) = target.owner;
-                let transition = Some(Transition::new(drag.fx.clone(), target.duration));
+                let transition = Some(Transition::new(program, target.duration));
                 let applied = self.state.update(cx, |s, cx| {
                     s.edit(
                         Command::SetTransition {
@@ -142,7 +145,7 @@ impl TimelinePanel {
                 }
             }
             FxTarget::Generator(track, range) => {
-                let fx = FxInstance::new(drag.fx.clone());
+                let fx = FxInstance::new(program);
                 let added = self.state.update(cx, |s, cx| {
                     s.edit(Command::AddGenerator { track, range, fx }, cx)?;
                     s.bus

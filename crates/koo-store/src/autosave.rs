@@ -1,16 +1,19 @@
-//! Debounced background autosave. The UI thread hands over a snapshot and
-//! returns at once; a worker thread coalesces snapshots and writes the newest
-//! one [`DEBOUNCE`] after the last change (at most [`MAX_DELAY`] after the
-//! first unsaved one, so a long drag still gets saved).
+//! Debounced background autosave for crash recovery. The UI thread hands
+//! over a snapshot of unsaved changes and returns at once; a worker thread
+//! coalesces snapshots and writes the newest one [`DEBOUNCE`] after the last
+//! change (at most [`MAX_DELAY`] after the first unsaved one, so a long drag
+//! still gets saved).
 //!
-//! Debounced writes go to the autosave row. Closing cleanly (drop, or
-//! [`Autosaver::close`]) promotes the latest state into the project row, so
-//! an autosave row found on the next open means the editor crashed.
+//! Snapshots go to the project's autosave file
+//! ([`crate::project_file::autosave_path`]), never to the user's `.koo`
+//! file. Saving or discarding the changes [`Autosaver::clear`]s it, so an
+//! autosave found on the next start means the editor did not close cleanly.
 
-use crate::Store;
-use koo_core::history::History;
+use crate::SettingsOverrides;
+use crate::project_file::{autosave_path, remove_autosave, write_file};
 use koo_core::ids::ProjectId;
 use koo_core::model::Project;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -18,12 +21,20 @@ use std::time::{Duration, Instant};
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
 pub const MAX_DELAY: Duration = Duration::from_secs(5);
 
+/// Unsaved state of the open project.
+pub struct Snapshot {
+    pub project: Project,
+    pub settings: SettingsOverrides,
+    /// The file it belongs to; `None` while never saved.
+    pub file: Option<PathBuf>,
+}
+
 enum Msg {
-    Snapshot(Box<(Project, History)>),
+    Snapshot(Box<Snapshot>),
     /// Write anything pending now; reply when done.
     Flush(Sender<()>),
-    /// Clean close of the current project; reply when done.
-    Close(Sender<()>),
+    /// Drop the project's pending snapshot and its autosave; reply when done.
+    Clear(ProjectId, Sender<()>),
 }
 
 pub struct Autosaver {
@@ -32,12 +43,11 @@ pub struct Autosaver {
 }
 
 impl Autosaver {
-    /// Start the worker. It takes its own connection to the store.
-    pub fn spawn(store: Store) -> Self {
+    pub fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("koo-autosave".into())
-            .spawn(move || run(store, rx))
+            .spawn(move || run(rx))
             .ok();
         Self {
             tx: Some(tx),
@@ -46,20 +56,19 @@ impl Autosaver {
     }
 
     /// Queue a snapshot. Cheap: no I/O or serialization on the caller's
-    /// thread. A snapshot of another project first closes the previous one.
-    pub fn save(&self, project: Project, history: History) {
-        self.send(Msg::Snapshot(Box::new((project, history))));
+    /// thread.
+    pub fn save(&self, snapshot: Snapshot) {
+        self.send(Msg::Snapshot(Box::new(snapshot)));
     }
 
-    /// Write pending changes now (as an autosave) and wait for it.
+    /// Write pending changes now and wait for it.
     pub fn flush(&self) {
         self.request(Msg::Flush);
     }
 
-    /// Cleanly close the current project and wait: pending changes are
-    /// written and promoted, leaving nothing to recover.
-    pub fn close(&self) {
-        self.request(Msg::Close);
+    /// The project's changes were saved or discarded: forget them and wait.
+    pub fn clear(&self, project: ProjectId) {
+        self.request(|ack| Msg::Clear(project, ack));
     }
 
     fn send(&self, msg: Msg) {
@@ -68,7 +77,7 @@ impl Autosaver {
         }
     }
 
-    fn request(&self, make: fn(Sender<()>) -> Msg) {
+    fn request(&self, make: impl FnOnce(Sender<()>) -> Msg) {
         let (ack, done) = mpsc::channel();
         self.send(make(ack));
         let _ = done.recv();
@@ -76,8 +85,9 @@ impl Autosaver {
 }
 
 impl Drop for Autosaver {
+    /// Pending changes are written, so they are recovered next time.
     fn drop(&mut self) {
-        self.close();
+        self.flush();
         self.tx = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -85,30 +95,25 @@ impl Drop for Autosaver {
     }
 }
 
-fn run(store: Store, rx: Receiver<Msg>) {
-    let mut pending: Option<Box<(Project, History)>> = None;
-    // Project whose autosave row this session may have written.
-    let mut current: Option<ProjectId> = None;
+fn run(rx: Receiver<Msg>) {
+    let mut pending: Option<Box<Snapshot>> = None;
     let mut first_change = Instant::now();
     let mut last_change = Instant::now();
 
-    let write = |pending: &mut Option<Box<(Project, History)>>| {
-        if let Some(snapshot) = pending.take() {
-            let (project, history) = &*snapshot;
-            if let Err(e) = store.write_autosave(project, history) {
+    let write = |pending: &mut Option<Box<Snapshot>>| {
+        if let Some(s) = pending.take() {
+            let path = autosave_path(s.project.id);
+            let relative_to = s.file.as_deref().unwrap_or(&path);
+            let written = write_file(
+                &path,
+                relative_to,
+                &s.project,
+                &s.settings,
+                s.file.as_deref(),
+            );
+            if let Err(e) = written {
                 eprintln!("koo-store: autosave failed: {e:#}");
             }
-        }
-    };
-    let close = |pending: &mut Option<Box<(Project, History)>>, current: Option<ProjectId>| {
-        let result = match pending.take() {
-            Some(snapshot) => store.save_project(&snapshot.0, &snapshot.1),
-            None => current
-                .map_or(Ok(false), |id| store.promote_autosave(id))
-                .map(|_| ()),
-        };
-        if let Err(e) = result {
-            eprintln!("koo-store: save on close failed: {e:#}");
         }
     };
 
@@ -131,11 +136,13 @@ fn run(store: Store, rx: Receiver<Msg>) {
         };
         match msg {
             Msg::Snapshot(snapshot) => {
-                let id = snapshot.0.id;
-                if current.is_some_and(|c| c != id) {
-                    close(&mut pending, current);
+                // Another project's changes are kept before switching.
+                if pending
+                    .as_ref()
+                    .is_some_and(|p| p.project.id != snapshot.project.id)
+                {
+                    write(&mut pending);
                 }
-                current = Some(id);
                 if pending.is_none() {
                     first_change = Instant::now();
                 }
@@ -146,12 +153,14 @@ fn run(store: Store, rx: Receiver<Msg>) {
                 write(&mut pending);
                 let _ = ack.send(());
             }
-            Msg::Close(ack) => {
-                close(&mut pending, current);
-                current = None;
+            Msg::Clear(id, ack) => {
+                if pending.as_ref().is_some_and(|p| p.project.id == id) {
+                    pending = None;
+                }
+                remove_autosave(id);
                 let _ = ack.send(());
             }
         }
     }
-    close(&mut pending, current);
+    write(&mut pending);
 }

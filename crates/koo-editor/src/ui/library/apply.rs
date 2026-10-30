@@ -78,28 +78,13 @@ pub fn apply_fx(s: &mut EditorState, r: &FxRef, cx: &mut Context<EditorState>) {
 
 /// Add an audio effect after the others on the selected clips' sound.
 pub fn apply_audio(s: &mut EditorState, kind: AudioFxKind, cx: &mut Context<EditorState>) {
-    let tl = &s.bus.project().timeline;
-    let mut targets: Vec<ClipId> = Vec::new();
-    for id in &s.selection.clips {
-        let Some((_, clip)) = tl.clip(*id) else {
-            continue;
-        };
-        if clip.media().is_none() {
-            continue;
-        }
-        let sound = crate::ui::inspector::sound_clip(tl, clip);
-        let on_audio = tl
-            .clip(sound.id)
-            .is_some_and(|(t, _)| t.kind == TrackKind::Audio);
-        if on_audio && !targets.contains(&sound.id) {
-            targets.push(sound.id);
-        }
-    }
+    let targets = sound_clips(s);
     if targets.is_empty() {
         s.status = Some("Select a clip with sound".into());
         cx.notify();
         return;
     }
+    let tl = &s.bus.project().timeline;
     let commands: Vec<Command> = targets
         .iter()
         .filter_map(|id| tl.clip(*id))
@@ -119,8 +104,30 @@ pub fn apply_audio(s: &mut EditorState, kind: AudioFxKind, cx: &mut Context<Edit
     }
 }
 
+/// The audio clips that carry the selected clips' sound.
+pub(super) fn sound_clips(s: &EditorState) -> Vec<ClipId> {
+    let tl = &s.bus.project().timeline;
+    let mut targets: Vec<ClipId> = Vec::new();
+    for id in &s.selection.clips {
+        let Some((_, clip)) = tl.clip(*id) else {
+            continue;
+        };
+        if clip.media().is_none() {
+            continue;
+        }
+        let sound = crate::ui::inspector::sound_clip(tl, clip);
+        let on_audio = tl
+            .clip(sound.id)
+            .is_some_and(|(t, _)| t.kind == TrackKind::Audio);
+        if on_audio && !targets.contains(&sound.id) {
+            targets.push(sound.id);
+        }
+    }
+    targets
+}
+
 /// Selected clips that can take video effects and transitions.
-fn picture_clips(s: &EditorState) -> Vec<ClipId> {
+pub(super) fn picture_clips(s: &EditorState) -> Vec<ClipId> {
     let tl = &s.bus.project().timeline;
     s.selection
         .clips
@@ -312,6 +319,7 @@ impl Starter {
             description: String::new(),
             code: code.into(),
             params,
+            origin: None,
         }
     }
 }

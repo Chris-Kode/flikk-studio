@@ -85,6 +85,13 @@ const MIGRATIONS: &[&str] = &[
         updated_at  INTEGER NOT NULL
     );
     "#,
+    // 2: projects moved to `.koo` files the user saves; recent files replace
+    // the last opened project.
+    r#"
+    DROP TABLE autosaves;
+    DROP TABLE projects;
+    DELETE FROM meta WHERE key = 'last_project';
+    "#,
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {

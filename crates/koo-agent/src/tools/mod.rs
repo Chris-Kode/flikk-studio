@@ -159,7 +159,7 @@ pub fn list(
 }
 
 /// Builders write FX programs too, but don't put them on the timeline.
-const BUILDER_TOOLS: [&str; 2] = ["create_fx", "update_fx"];
+const BUILDER_TOOLS: [&str; 3] = ["create_fx", "update_fx", "use_library_fx"];
 
 fn role_allows(role: AgentRole, category: ToolCategory, tool: &str) -> bool {
     match role {
@@ -266,6 +266,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
 
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),
+        "use_library_fx" => fx::use_library(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }

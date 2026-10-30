@@ -3,6 +3,8 @@ mod app;
 mod demo;
 mod notices;
 mod persistence;
+mod projects;
+mod relink;
 mod state;
 mod ui;
 #[cfg(all(windows, target_env = "msvc"))]
@@ -19,6 +21,17 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // `koo-editor Film.koo` opens that project.
+    if let Some(path) = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e == koo_store::project_file::EXTENSION)
+        })
+    {
+        persistence::set_launch_file(path);
     }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)

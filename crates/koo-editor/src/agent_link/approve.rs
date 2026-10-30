@@ -1,5 +1,5 @@
 //! Carrying out an approved agent request: memory goes to the store,
-//! renders and exports to `koo-deliver`. Outputs always get a free name, so
+//! programs to the user's library, renders and exports to `koo-deliver`. Outputs always get a free name, so
 //! nothing here overwrites a file.
 
 use crate::persistence;
@@ -42,6 +42,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         "propose_rule" => save_rule(args, inputs.project, inputs.settings),
         "add_source_fact" => save_fact(args),
         "save_recipe" => save_recipe(args),
+        "save_fx_to_library" => save_fx(args, inputs.project),
         "queue_render" => {
             let mut settings = preset(str_arg(args, "preset")?);
             settings.range = args.get("range").and_then(range);
@@ -170,6 +171,18 @@ fn save_recipe(args: &Value) -> Result<Started> {
     };
     store(|s| s.save_recipe(&recipe))?;
     Ok(Started::Done("Saved".into()))
+}
+
+/// Save a project program to the user's library. The editor links the
+/// project's copy to it afterwards (see `EditorState::approve`).
+fn save_fx(args: &Value, project: &Project) -> Result<Started> {
+    let text = str_arg(args, "fx")?;
+    let asset = koo_core::fx::find(project, text)
+        .and_then(|r| koo_core::fx::asset(project, &r))
+        .ok_or_else(|| anyhow!("program {text} is no longer in the project"))?;
+    let lib = koo_core::library::Library::load();
+    koo_core::library::save_program(&lib, asset).map_err(|e| anyhow!(e))?;
+    Ok(Started::Done("Saved to the library".into()))
 }
 
 /// A recipe parameter, as a bare name or `{name, description, default}`.

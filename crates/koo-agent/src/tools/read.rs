@@ -6,6 +6,7 @@ use super::{Done, Step, ToolCtx};
 use crate::args::{Args, ToolError, clip_id, kind_name, num, range_json, secs, short};
 use koo_core::audiofx::{AudioFx, AudioFxKind};
 use koo_core::fx::{self, FxKind, FxLanguage};
+use koo_core::library::Library;
 use koo_core::model::{
     Clip, ClipAudio, ClipContent, Curves, Grade, MarkerKind, Project, Track, Transform,
 };
@@ -537,10 +538,44 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     } else {
         Vec::new()
     };
-    let n = programs.len() + audio.len();
+    // The user's library, less what the project already has a copy of.
+    let library: Vec<Value> = if kind == Some("audio") {
+        Vec::new()
+    } else {
+        let lib = Library::load();
+        lib.programs
+            .iter()
+            .filter(|p| !project.fx.iter().any(|a| a.origin == Some(p.id)))
+            .filter(|p| wanted_kind.is_none_or(|k| p.asset.kind == k))
+            .filter(|p| wanted_language.is_none_or(|l| p.asset.language == l))
+            .filter(|p| {
+                category
+                    .as_ref()
+                    .is_none_or(|c| p.asset.category.to_lowercase() == *c)
+            })
+            .filter(|p| matches_text(&[&p.asset.name, &p.asset.description, &p.asset.category]))
+            .map(|p| {
+                let a = &p.asset;
+                json!({
+                    "library_id": p.id.to_string(),
+                    "name": a.name,
+                    "kind": fx_kind(a.kind),
+                    "language": super::fx::language_name(a.language),
+                    "category": a.category,
+                    "description": a.description,
+                })
+            })
+            .collect()
+    };
+    let n = programs.len() + audio.len() + library.len();
     let mut out = json!({ "programs": programs });
     if !audio.is_empty() {
         out["audio_effects"] = json!(audio);
+    }
+    if !library.is_empty() {
+        out["library"] = json!(library);
+        out["library_note"] =
+            json!("The user's own programs: use_library_fx copies one into this project.");
     }
     Ok(Done::json(format!("{n} effects"), &out).into())
 }

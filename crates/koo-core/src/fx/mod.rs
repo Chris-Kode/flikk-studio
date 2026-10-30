@@ -81,7 +81,7 @@
 mod shaders;
 mod templates;
 
-use crate::ids::{EffectId, FxId};
+use crate::ids::{EffectId, FxId, LibraryId};
 use crate::model::{Clip, ClipContent, Ease, Project, Track};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -160,6 +160,10 @@ pub struct FxAsset {
     pub code: String,
     #[serde(default)]
     pub params: Vec<ParamSpec>,
+    /// The library program a project program was copied from (see
+    /// [`crate::library`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LibraryId>,
 }
 
 impl FxAsset {

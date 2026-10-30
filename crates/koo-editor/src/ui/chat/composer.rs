@@ -563,7 +563,10 @@ impl Render for Composer {
                         this.insert_refs(vec![(token, drag.name.clone())], window, cx)
                     }))
                     .on_drop(cx.listener(|this, drag: &FxDrag, window, cx| {
-                        let token = format!("@fx {}", drag.fx);
+                        let Some(fx) = drag.program(&this.state, cx) else {
+                            return;
+                        };
+                        let token = format!("@fx {fx}");
                         this.insert_refs(vec![(token, drag.name.clone())], window, cx)
                     }))
                     .on_drop(cx.listener(|this, drag: &AudioFxDrag, window, cx| {

@@ -3,6 +3,7 @@
 //! agent chat docked on the right in every workspace (PRD AG1).
 
 use crate::notices::NoticeAction;
+use crate::projects::{self, NewProject, OpenProject, SaveProject, SaveProjectAs};
 use crate::state::EditorState;
 use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
@@ -37,7 +38,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    projects::bind_keys(cx);
 }
 
 /// What the Edit workspace's left panel shows.
@@ -65,6 +66,8 @@ pub struct KooEditor {
     left_tab: LeftTab,
     /// The notice list is dropped down.
     notices_open: bool,
+    /// Unsaved changes as last told to the window.
+    edited: bool,
     _observe: Subscription,
 }
 
@@ -75,6 +78,10 @@ impl KooEditor {
             state.update(cx, crate::demo::seed);
         }
         let _observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let closing = state.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            projects::should_close(&closing, window, cx)
+        });
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
             viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
@@ -91,6 +98,7 @@ impl KooEditor {
             code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
             settings: cx.new(|cx| EditorSettings::new(state.clone(), window, cx)),
             notices_open: false,
+            edited: false,
             left_tab: match crate::demo::fx_view().as_deref() {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
@@ -100,34 +108,54 @@ impl KooEditor {
         }
     }
 
-    /// Project name; opens recent projects and "New project".
+    /// Project name, with a dot while there are unsaved changes; opens
+    /// the project file commands and recent projects.
     fn project_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.clone();
-        let name = state.read(cx).bus.project().name.clone();
+        let s = state.read(cx);
+        let name = s.bus.project().name.clone();
+        let label = if s.is_dirty() {
+            format!("{name} •")
+        } else {
+            name
+        };
         Button::new("project")
             .ghost()
             .small()
-            .label(name)
+            .label(label)
             .dropdown_menu(move |menu, _, cx| {
-                let current = state.read(cx).bus.project().id;
-                let new = state.clone();
-                let mut menu =
-                    menu.item(PopupMenuItem::new("New project").on_click(move |_, _, cx| {
-                        new.update(cx, |s, cx| s.new_project(cx));
-                    }));
-                let projects = state.read(cx).projects();
-                if !projects.is_empty() {
+                let item =
+                    |label: &'static str,
+                     action: Box<dyn Action>,
+                     f: fn(&Entity<EditorState>, &mut Window, &mut App)| {
+                        let state = state.clone();
+                        PopupMenuItem::new(label)
+                            .action(action)
+                            .on_click(move |_, window, cx| f(&state, window, cx))
+                    };
+                let mut menu = menu
+                    .item(item(
+                        "New Project",
+                        Box::new(NewProject),
+                        projects::new_project,
+                    ))
+                    .item(item("Open…", Box::new(OpenProject), projects::open_dialog))
+                    .item(item("Save", Box::new(SaveProject), projects::save))
+                    .item(item("Save As…", Box::new(SaveProjectAs), projects::save_as));
+                let (current, recent) = {
+                    let s = state.read(cx);
+                    (s.file.clone(), s.recent_projects())
+                };
+                if !recent.is_empty() {
                     menu = menu.item(PopupMenuItem::separator());
                 }
-                for p in projects {
+                for path in recent {
                     let state = state.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(p.name)
-                            .checked(p.id == current)
-                            .on_click(move |_, _, cx| {
-                                state.update(cx, |s, cx| s.open_project(p.id, cx))
-                            }),
-                    );
+                    let label = koo_store::project_file::name_of(&path);
+                    let checked = current.as_ref() == Some(&path);
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, window, cx| projects::open(&state, path.clone(), window, cx),
+                    ));
                 }
                 menu
             })
@@ -160,6 +188,7 @@ impl KooEditor {
             move |action, window, cx| {
                 let _ = this.update(cx, |this, cx| match action {
                     NoticeAction::OpenModels => this.open_settings(SettingsTab::Models, window, cx),
+                    NoticeAction::Relink => crate::relink::relink_folder(&this.state, cx),
                 });
             },
             cx,
@@ -323,7 +352,12 @@ impl KooEditor {
 }
 
 impl Render for KooEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edited = self.state.read(cx).is_dirty();
+        if edited != self.edited {
+            self.edited = edited;
+            window.set_window_edited(edited);
+        }
         let theme = cx.theme();
         let (bg, fg, border) = (theme.background, theme.foreground, theme.border);
         let status = self.state.read(cx).status.clone();
@@ -342,6 +376,21 @@ impl Render for KooEditor {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(SettingsTab::Models, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+                projects::new_project(&this.state, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
+                projects::open_dialog(&this.state, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveProject, window, cx| {
+                projects::save(&this.state, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
+                projects::save_as(&this.state, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &Quit, window, cx| projects::quit(&this.state, window, cx)),
+            )
             .child(
                 // Project menu on the left, notices and Settings on the
                 // right; workspaces stay centred.
