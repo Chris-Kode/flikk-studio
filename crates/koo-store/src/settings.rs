@@ -1,12 +1,12 @@
 //! Agent settings: one set per user, plus per-project overrides for
-//! everything except `backend` and `models` (PRD "Agent configuration").
+//! everything except `backend` and `models` (PRD "Agent configuration"),
+//! kept in the project's `.koo` file.
 
-use crate::{Store, recipes, uuid_text};
+use crate::{Store, recipes};
 use anyhow::Result;
 use koo_core::agent::{AgentSettings, VisionSettings};
 use koo_core::bus::Permissions;
-use koo_core::ids::{ProjectId, RecipeId, RuleId};
-use rusqlite::{OptionalExtension, params};
+use koo_core::ids::{RecipeId, RuleId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -95,65 +95,22 @@ impl Store {
         self.set_meta(USER_SETTINGS, settings)
     }
 
-    pub fn project_overrides(&self, project: ProjectId) -> Result<SettingsOverrides> {
-        let text: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT settings FROM projects WHERE id = ?1",
-                [uuid_text(&project.0)],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(match text.flatten() {
-            Some(t) => serde_json::from_str(&t).unwrap_or_default(),
-            None => SettingsOverrides::default(),
-        })
-    }
-
-    /// No-op if the project row does not exist.
-    pub fn save_project_overrides(
-        &self,
-        project: ProjectId,
-        overrides: &SettingsOverrides,
-    ) -> Result<()> {
-        let text = (!overrides.is_empty())
-            .then(|| serde_json::to_string(overrides))
-            .transpose()?;
-        self.conn.execute(
-            "UPDATE projects SET settings = ?2 WHERE id = ?1",
-            params![uuid_text(&project.0), text],
-        )?;
-        Ok(())
-    }
-
-    /// Store `effective` as this project's settings: only the fields that
-    /// differ from the user settings become overrides.
-    pub fn save_project_settings(
-        &self,
-        project: ProjectId,
-        effective: &AgentSettings,
-    ) -> Result<()> {
-        let user = self.user_settings()?;
-        self.save_project_overrides(project, &SettingsOverrides::diff(&user, effective))
-    }
-
     /// Save settings edited in the UI, where `effective` is the merged view:
-    /// fields this project overrides update the override, the rest (and the
-    /// backend) update the user settings.
+    /// fields the project overrides update its overrides, the rest (and the
+    /// backend) update the user settings. Returns the project's overrides.
     pub fn save_effective_settings(
         &self,
-        project: ProjectId,
+        overrides: &SettingsOverrides,
         effective: &AgentSettings,
-    ) -> Result<()> {
+    ) -> Result<SettingsOverrides> {
         let old_user = self.user_settings()?;
-        let old = self.project_overrides(project)?;
         let mut user = effective.clone();
-        let mut overrides = SettingsOverrides::default();
+        let mut next = SettingsOverrides::default();
         macro_rules! split {
             ($($field:ident),*) => {$(
-                if old.$field.is_some() {
+                if overrides.$field.is_some() {
                     user.$field = old_user.$field.clone();
-                    overrides.$field = Some(effective.$field.clone());
+                    next.$field = Some(effective.$field.clone());
                 }
             )*};
         }
@@ -163,20 +120,16 @@ impl Store {
             enabled_recipes,
             vision,
             language,
-            style_profile
+            style_profile,
+            web
         );
-        let tx = self.conn.unchecked_transaction()?;
         self.save_user_settings(&user)?;
-        self.save_project_overrides(project, &overrides)?;
-        tx.commit()?;
-        Ok(())
+        Ok(next)
     }
 
     /// Effective settings for a project: user settings with its overrides.
-    pub fn load_settings(&self, project: ProjectId) -> Result<AgentSettings> {
-        Ok(self
-            .project_overrides(project)?
-            .apply(&self.user_settings()?))
+    pub fn load_settings(&self, overrides: &SettingsOverrides) -> Result<AgentSettings> {
+        Ok(overrides.apply(&self.user_settings()?))
     }
 
     /// Ids of the models the user picked in Settings → Models, per user.

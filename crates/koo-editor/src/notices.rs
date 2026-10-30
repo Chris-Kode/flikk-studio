@@ -14,6 +14,8 @@ pub enum Level {
 pub enum NoticeAction {
     /// Open Settings on the Models tab.
     OpenModels,
+    /// Pick a folder to relink offline media from.
+    Relink,
 }
 
 #[derive(Clone, Debug, PartialEq)]

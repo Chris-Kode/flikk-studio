@@ -43,6 +43,24 @@ pub struct FxDrag {
     pub fx: koo_core::fx::FxRef,
     pub kind: koo_core::fx::FxKind,
     pub name: SharedString,
+    /// A library program, copied into the project when dropped (`fx` is
+    /// then a placeholder).
+    pub library: Option<koo_core::LibraryId>,
+}
+
+impl FxDrag {
+    /// The program to use where it is dropped, copying a library program
+    /// into the project first.
+    pub fn program(
+        &self,
+        state: &Entity<crate::state::EditorState>,
+        cx: &mut App,
+    ) -> Option<koo_core::fx::FxRef> {
+        match self.library {
+            Some(id) => state.update(cx, |s, cx| library::shared::use_program(s, id, cx)),
+            None => Some(self.fx.clone()),
+        }
+    }
 }
 
 impl Render for FxDrag {

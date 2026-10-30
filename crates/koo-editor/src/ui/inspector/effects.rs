@@ -4,7 +4,7 @@
 
 use super::controls::{FxOwner, FxTarget};
 use super::{InspectorPanel, section_with};
-use crate::ui::library::{FxGlyph, fx_glyph};
+use crate::ui::library::{FxGlyph, fx_glyph, shared};
 use crate::ui::timeline::glyph::{Glyph, glyph};
 use crate::ui::{FxDrag, RefDrag};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -15,7 +15,7 @@ use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::fx::{self, FxInstance, FxKind, FxRef};
 use koo_core::model::Clip;
-use koo_core::{ClipId, EffectId};
+use koo_core::{ClipId, EffectId, LibraryId};
 
 /// Chat token and label for an effect on a clip.
 pub(super) fn effect_mention(clip: ClipId, effect: EffectId, name: &str) -> (String, SharedString) {
@@ -48,8 +48,10 @@ impl InspectorPanel {
                 }
             })
             .on_drop(cx.listener(move |this, d: &FxDrag, _, cx| {
-                if d.kind == FxKind::Effect {
-                    this.add_effect(clip_id, d.fx.clone(), cx);
+                if d.kind == FxKind::Effect
+                    && let Some(fx) = d.program(&this.state, cx)
+                {
+                    this.add_effect(clip_id, fx, cx);
                 }
             }))
             .rounded_md()
@@ -62,6 +64,42 @@ impl InspectorPanel {
             })
             .child(list)
             .into_any_element()
+    }
+
+    fn pick_effect(&mut self, clip: ClipId, pick: &Pick, cx: &mut Context<Self>) {
+        match pick {
+            Pick::Fx(r) => self.add_effect(clip, r.clone(), cx),
+            Pick::Program(id) => {
+                let r = self
+                    .state
+                    .update(cx, |s, cx| shared::use_program(s, *id, cx));
+                if let Some(r) = r {
+                    self.add_effect(clip, r, cx);
+                }
+            }
+            Pick::Preset(id) => self.state.update(cx, |s, cx| {
+                if let Some(preset) = s.library.preset(*id).cloned() {
+                    shared::apply_preset_to(s, &preset, &[clip], &[], cx);
+                }
+            }),
+        }
+    }
+
+    /// Save effects of `clip`'s stack as a library preset.
+    fn save_preset(&mut self, clip: ClipId, only: Option<EffectId>, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let Some((_, c)) = s.bus.project().timeline.clip(clip) else {
+                return;
+            };
+            let effects = c
+                .effects
+                .iter()
+                .filter(|e| only.is_none_or(|id| e.id == id))
+                .cloned()
+                .collect();
+            let preset = shared::effects_preset(s, effects);
+            shared::save_preset(s, preset, cx);
+        });
     }
 
     fn add_effect(&mut self, clip: ClipId, fx: FxRef, cx: &mut Context<Self>) {
@@ -77,18 +115,31 @@ impl InspectorPanel {
     }
 
     /// "+" with every effect program, built-ins by category, then the
-    /// project's.
+    /// project's and the library's, then the effect presets.
     fn add_effect_button(&self, clip: ClipId, cx: &mut Context<Self>) -> AnyElement {
-        let effects: Vec<(String, String, FxRef)> = fx::library(self.project(cx))
+        let mut effects: Vec<(String, String, Pick)> = fx::library(self.project(cx))
             .filter(|a| a.kind == FxKind::Effect)
             .map(|a| {
                 let group = match a.id {
                     FxRef::Builtin(_) => a.category.clone(),
                     FxRef::Project(_) => "Project".into(),
                 };
-                (group, a.name.clone(), a.id.clone())
+                (group, a.name.clone(), Pick::Fx(a.id.clone()))
             })
             .collect();
+        let s = self.state.read(cx);
+        effects.extend(
+            shared::programs_to_add(s.bus.project(), &s.library, FxKind::Effect)
+                .into_iter()
+                .map(|(id, name)| ("Library".into(), name, Pick::Program(id))),
+        );
+        effects.extend(
+            s.library
+                .presets
+                .iter()
+                .filter(|p| !p.effects.is_empty())
+                .map(|p| ("Presets".into(), p.name.clone(), Pick::Preset(p.id))),
+        );
         let panel = cx.entity();
         Button::new("add-effect")
             .ghost()
@@ -97,7 +148,7 @@ impl InspectorPanel {
             .tooltip("Add effect")
             .dropdown_menu(move |mut menu, _, _| {
                 let mut group: Option<&str> = None;
-                for (g, name, r) in &effects {
+                for (g, name, pick) in &effects {
                     if group != Some(g.as_str()) {
                         if group.is_some() {
                             menu = menu.item(PopupMenuItem::separator());
@@ -107,9 +158,9 @@ impl InspectorPanel {
                         }
                         group = Some(g);
                     }
-                    let (panel, r) = (panel.clone(), r.clone());
+                    let (panel, pick) = (panel.clone(), pick.clone());
                     menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
-                        panel.update(cx, |this, cx| this.add_effect(clip, r.clone(), cx))
+                        panel.update(cx, |this, cx| this.pick_effect(clip, &pick, cx))
                     }));
                 }
                 menu
@@ -324,6 +375,7 @@ impl InspectorPanel {
                         })
                 };
                 let (p_reset, p_remove) = (panel.clone(), panel.clone());
+                let (p_one, p_all) = (panel.clone(), panel.clone());
                 let (s_chat, s_code, s_dup) = (state.clone(), state.clone(), state.clone());
                 let (m, f_code, f_dup) = (mention.clone(), fx.clone(), fx.clone());
                 menu.item(mv("Move up", index.saturating_sub(1), index > 0))
@@ -360,6 +412,19 @@ impl InspectorPanel {
                         ))
                     })
                     .item(PopupMenuItem::separator())
+                    .item(
+                        PopupMenuItem::new("Save as Preset").on_click(move |_, _, cx| {
+                            p_one.update(cx, |this, cx| this.save_preset(clip, Some(id), cx))
+                        }),
+                    )
+                    .when(count > 1, |menu| {
+                        menu.item(PopupMenuItem::new("Save All as Preset").on_click(
+                            move |_, _, cx| {
+                                p_all.update(cx, |this, cx| this.save_preset(clip, None, cx))
+                            },
+                        ))
+                    })
+                    .item(PopupMenuItem::separator())
                     .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
                         p_remove.update(cx, |this, cx| {
                             this.run(
@@ -372,6 +437,14 @@ impl InspectorPanel {
             })
             .into_any_element()
     }
+}
+
+/// An entry of the "+" menu.
+#[derive(Clone)]
+enum Pick {
+    Fx(FxRef),
+    Program(LibraryId),
+    Preset(LibraryId),
 }
 
 /// The short id of an effect of `clip` that `drag` carries, if any.

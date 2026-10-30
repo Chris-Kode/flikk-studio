@@ -863,6 +863,7 @@ vec4 effect(vec2 uv) {
                 default: ParamValue::Text("Fine".into()),
             },
         ],
+        origin: None,
     };
     let grain_ref = grain.id.clone();
     let mut blur = FxInstance::new(FxRef::builtin("gaussian_blur"));

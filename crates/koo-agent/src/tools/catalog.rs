@@ -1081,6 +1081,18 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "use_library_fx",
+            Some(Effects),
+            "Copy a program from the user's library (list_fx `library`) into this project; then use it by the project id returned. A program copied before is reused.",
+            object(
+                json!({
+                    "fx": string("Library id or name"),
+                    "reason": reason()
+                }),
+                &["fx"],
+            ),
+        ),
+        spec(
             "update_fx",
             Some(Effects),
             "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow.",
@@ -1140,6 +1152,15 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "params": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "default": { "type": "string" } }, "required": ["name"] } }
                 }),
                 &["name", "prompt"],
+            ),
+        ),
+        spec(
+            "save_fx_to_library",
+            Some(ProjectMemory),
+            "Ask the user to approve saving one of this project's FX programs to their library, so other projects can use it.",
+            object(
+                json!({ "fx": string("Project id or `@fx` token") }),
+                &["fx"],
             ),
         ),
         spec(

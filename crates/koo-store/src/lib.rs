@@ -1,10 +1,12 @@
-//! Persistence: projects, history, settings, style profiles, source facts
-//! and recipes in SQLite under `koo_core::paths::database()`.
+//! Persistence. Projects are `.koo` files the user saves anywhere
+//! ([`project_file`]), with debounced crash-recovery snapshots through
+//! [`Autosaver`]. Everything else belongs to the user, not a project:
+//! settings, style profiles, source facts, recipes and recent files, in
+//! SQLite under `koo_core::paths::database()`.
 //!
 //! One [`Store`] wraps one connection. It is `Send`, so it can move to a
 //! background thread; open one per thread when several need it (WAL lets
-//! readers and one writer work side by side). Debounced project writes go
-//! through [`Autosaver`].
+//! readers and one writer work side by side).
 //!
 //! Memory is read in small pieces: every list call takes an
 //! offset and a limit, so the agent never has to load a whole profile.
@@ -13,17 +15,18 @@ mod autosave;
 mod facts;
 mod notes;
 mod profiles;
-mod projects;
+pub mod project_file;
+mod recent;
 mod recipes;
 mod schema;
 mod settings;
 
 pub use anyhow::{Error, Result};
-pub use autosave::{Autosaver, DEBOUNCE, MAX_DELAY};
+pub use autosave::{Autosaver, DEBOUNCE, MAX_DELAY, Snapshot};
 pub use facts::FactFilter;
 pub use notes::parse_notes;
 pub use profiles::{ProfileSummary, RuleFilter};
-pub use projects::{OpenedProject, ProjectSummary};
+pub use project_file::ProjectFile;
 pub use recipes::builtin_recipes;
 pub use settings::SettingsOverrides;
 
@@ -98,12 +101,6 @@ impl Store {
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             params![key, serde_json::to_string(value)?],
         )?;
-        Ok(())
-    }
-
-    fn delete_meta(&self, key: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM meta WHERE key = ?1", [key])?;
         Ok(())
     }
 }

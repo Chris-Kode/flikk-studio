@@ -24,6 +24,7 @@ fn glsl(
         description: description.into(),
         code: code.into(),
         params,
+        origin: None,
     }
 }
 

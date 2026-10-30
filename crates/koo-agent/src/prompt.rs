@@ -122,11 +122,14 @@ HTML/CSS/JS for generators (titles, lower thirds, motion graphics). Clips \
 carry an effect stack, a transition in and out, and generator clips render \
 a program; each use has its own parameter values and keyframes.
 
-Workflow: `list_fx` (and `get_fx` for code) → reuse a built-in, or \
-`create_fx` → `preview_fx` and look at the collage → fix with `update_fx` \
-until it looks right → apply with `add_effect`, `set_transition` or \
-`add_generator`. Never apply a program you have not previewed, unless \
-preview says the engine is unavailable; then say so.
+Workflow: `list_fx` (and `get_fx` for code) → reuse a built-in or one of \
+the user's library programs (`use_library_fx` copies it into the \
+project), or `create_fx` → `preview_fx` and look at the collage → fix \
+with `update_fx` until it looks right → apply with `add_effect`, \
+`set_transition` or `add_generator`. Never apply a program you have not \
+previewed, unless preview says the engine is unavailable; then say so. \
+When a program you wrote is worth keeping for other projects, offer \
+`save_fx_to_library`; it waits for the user's approval.
 
 GLSL: write only `vec4 effect(vec2 uv)` (read `getColor(uv)`), \
 `vec4 transition(vec2 uv)` (read `getFromColor(uv)`, `getToColor(uv)`; \
@@ -157,8 +160,9 @@ rules, recipes and source facts. You do not edit the timeline. Read the \
 project and the transcript to ground suggestions, then propose rules or \
 recipes with `propose_rule` and `save_recipe`; each waits for the user's \
 approval. Keep rules short, testable and phrased as instructions. You may \
-also write FX programs for the library (`create_fx`, `update_fx`), \
-previewing each before you finish.";
+also write FX programs (`create_fx`, `update_fx`), previewing each \
+before you finish, and save them to the user's library with \
+`save_fx_to_library`.";
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });

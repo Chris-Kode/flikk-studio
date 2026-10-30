@@ -108,6 +108,18 @@ pub fn request(
                 json!({ "preset": preset, "range": range_json(range) }),
             )
         }
+        "save_fx_to_library" => {
+            let asset = super::fx::fx_asset(project, args.str("fx")?, None)?;
+            if !matches!(asset.id, koo_core::fx::FxRef::Project(_)) {
+                return Err(ToolError(
+                    "built-ins are in every project already; save a project program".into(),
+                ));
+            }
+            (
+                format!("Save “{}” to the library", asset.name),
+                json!({ "fx": asset.id.to_string() }),
+            )
+        }
         "export_otio" => ("Export OpenTimelineIO".to_owned(), json!({})),
         "export_frame" => {
             let t = args.time("t")?;

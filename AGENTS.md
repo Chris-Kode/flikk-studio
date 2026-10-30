@@ -26,7 +26,9 @@ having nothing to run.
 ### 2. User data lives in `~/.koo-editor/`
 
 Never write inside a reviewed repository. Honor `KOOEDITOR_HOME` for anything that
-resolves a user-data path, and use it in manual checks:
+resolves a user-data path, and use it in manual checks. The only files written
+elsewhere are the ones the user saves there: `.koo` project files and exports.
+Autosaves, backups and the shared library stay under the user-data folder.
 
 ```sh
 KOOEDITOR_HOME=/tmp/koo-editor-dev cargo run -p koo-editor

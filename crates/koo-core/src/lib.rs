@@ -26,6 +26,7 @@ pub mod heard;
 pub mod history;
 pub mod ids;
 pub mod jobs;
+pub mod library;
 pub mod mask;
 pub mod memory;
 pub mod model;

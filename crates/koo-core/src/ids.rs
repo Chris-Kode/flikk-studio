@@ -49,4 +49,6 @@ id_type!(
     FxId,
     // One mask on a clip.
     MaskId,
+    // A program or preset in the user's library.
+    LibraryId,
 );

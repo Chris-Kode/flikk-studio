@@ -576,7 +576,7 @@ fn parse_rate(text: &str) -> Option<Rate> {
 }
 
 /// Movies (macOS), Videos (Windows), else the home folder.
-fn default_dir() -> PathBuf {
+pub(crate) fn default_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

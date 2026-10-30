@@ -12,7 +12,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -473,6 +473,7 @@ impl MediaPoolPanel {
         let thumb = self.thumbs.get(item, &self.state, cx);
         let progress = self.progress(item.id);
         let selected = self.selected == Some(item.id);
+        let offline = self.state.read(cx).offline.contains(&item.id);
         let theme = cx.theme();
         let id = item.id;
         let name: SharedString = item_name(item).into();
@@ -501,6 +502,22 @@ impl MediaPoolPanel {
                     (None, MediaKind::Video) => d,
                 })
                 .children(progress.map(|p| progress_bar(p, cx)))
+                .when(offline, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.background.opacity(0.6))
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .small()
+                                    .text_color(theme.warning),
+                            ),
+                    )
+                })
         };
         let panel = cx.entity();
         let more = Button::new(ElementId::Name(format!("media-menu-{id}").into()))
@@ -710,6 +727,15 @@ struct AnalyzeEntry {
 /// it opens, so what it offers is current.
 fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &App) -> PopupMenu {
     let mut menu = menu;
+    let state = panel.read(cx).state.clone();
+    if state.read(cx).offline.contains(&id) {
+        menu = menu
+            .item(
+                PopupMenuItem::new("Relink…")
+                    .on_click(move |_, _, cx| crate::relink::relink_item(&state, id, cx)),
+            )
+            .item(PopupMenuItem::separator());
+    }
     if let Some(entry) = panel.read(cx).analyze_entry(id, cx) {
         let panel = panel.clone();
         let label = if entry.again {

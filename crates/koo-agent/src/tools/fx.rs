@@ -10,6 +10,7 @@ use koo_core::fx::{
     self, FxAsset, FxInstance, FxKind, FxLanguage, FxRef, ParamKind, ParamSpec, ParamValue,
     Transition, TransitionAlign,
 };
+use koo_core::library;
 use koo_core::model::{Clip, ClipContent, Project, TrackKind};
 use koo_core::services::FxCall;
 use koo_core::{EffectId, FxId, Time};
@@ -457,6 +458,42 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
     Ok(done.into())
 }
 
+/// Copy a program from the user's library into the project, or name the
+/// copy it already has.
+pub fn use_library(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
+    let lib = library::Library::load();
+    let text = strip_token(args.str("fx")?).trim().to_lowercase();
+    let program = lib
+        .programs
+        .iter()
+        .find(|p| p.id.to_string() == text || p.id.0.to_string() == text)
+        .or_else(|| {
+            lib.programs
+                .iter()
+                .find(|p| p.asset.name.to_lowercase() == text)
+        })
+        .ok_or_else(|| {
+            ToolError(format!(
+                "no library program `{text}`; list_fx lists them under `library`"
+            ))
+        })?;
+    let (r, copy) = library::copy_of(ctx.project(), program);
+    let Some(asset) = copy else {
+        return Ok(Done::text(format!("{r}"), format!("Already in the project as {r}.")).into());
+    };
+    let reason = args
+        .opt_str("reason")?
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .unwrap_or("use_library_fx")
+        .to_owned();
+    let mut done = propose(ctx, vec![Command::SetFxAsset { asset }], &reason);
+    if !done.result.is_error {
+        append(&mut done, &format!("Project id: {r}"));
+    }
+    Ok(done.into())
+}
+
 fn transition_edge(args: &Args) -> ToolResultOf<Edge> {
     // `@transition c/in` in `clip` names the edge too.
     if !args.has("edge")
@@ -571,6 +608,7 @@ pub fn author(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolEr
             description: String::new(),
             code: args.str("code")?.to_owned(),
             params: Vec::new(),
+            origin: None,
         }
     } else {
         let asset = fx_asset(p, args.str("fx")?, None)?;

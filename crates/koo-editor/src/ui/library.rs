@@ -1,10 +1,12 @@
 //! Effects library (Resolve-style): video effects, transitions, shader
-//! generators, HTML titles and motion graphics, audio effects and the
-//! project's own programs, grouped by category and searchable. Items drag
+//! generators, HTML titles and motion graphics, audio effects, the
+//! project's own programs and the user's library of programs and presets
+//! shared by every project, grouped by category and searchable. Items drag
 //! onto the timeline and the chat; double-click applies to the selection.
 
 mod apply;
 mod glyphs;
+pub mod shared;
 
 pub use apply::{apply_fx, duplicate, fx_mention};
 pub use glyphs::{FxGlyph, fx_glyph};
@@ -20,9 +22,12 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_core::LibraryId;
 use koo_core::audiofx::AudioFxKind;
 use koo_core::fx::{self, FxAsset, FxKind, FxLanguage, FxRef};
+use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset};
 use koo_core::model::Project;
+use shared::Link;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,16 +38,20 @@ enum Section {
     Titles,
     Audio,
     Project,
+    Library,
+    Presets,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 8] = [
         Self::Video,
         Self::Transitions,
         Self::Generators,
         Self::Titles,
         Self::Audio,
         Self::Project,
+        Self::Library,
+        Self::Presets,
     ];
 
     fn label(self) -> &'static str {
@@ -53,6 +62,8 @@ impl Section {
             Self::Titles => "Titles & Motion",
             Self::Audio => "Audio Effects",
             Self::Project => "Project",
+            Self::Library => "Library",
+            Self::Presets => "Presets",
         }
     }
 
@@ -71,6 +82,9 @@ impl Section {
 enum Item {
     Fx(FxRef),
     Audio(AudioFxKind),
+    /// A program in the user's library.
+    Program(LibraryId),
+    Preset(LibraryId),
 }
 
 struct Entry {
@@ -117,7 +131,35 @@ fn audio_description(kind: AudioFxKind) -> &'static str {
     }
 }
 
-fn entries(project: &Project, section: Section) -> Vec<Entry> {
+/// A project or library program's group: its category, else its kind.
+fn program_category(a: &FxAsset) -> String {
+    if a.category.trim().is_empty() {
+        a.kind.label().to_owned() + "s"
+    } else {
+        a.category.clone()
+    }
+}
+
+/// Presets group by what they hold.
+fn preset_entry(p: &Preset) -> Entry {
+    let (category, glyph) = if !p.effects.is_empty() {
+        ("Effects", FxGlyph::Effect)
+    } else if p.grade.is_some() {
+        ("Color", FxGlyph::Effect)
+    } else {
+        ("Audio", FxGlyph::Audio)
+    };
+    Entry {
+        item: Item::Preset(p.id),
+        name: p.name.clone().into(),
+        category: category.into(),
+        description: SharedString::default(),
+        glyph,
+        kind: None,
+    }
+}
+
+fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
     let fx_entry = |a: &FxAsset| Entry {
         item: Item::Fx(a.id.clone()),
         name: a.name.clone().into(),
@@ -142,15 +184,22 @@ fn entries(project: &Project, section: Section) -> Vec<Entry> {
             .fx
             .iter()
             .map(|a| Entry {
-                category: if a.category.trim().is_empty() {
-                    a.kind.label().to_owned() + "s"
-                } else {
-                    a.category.clone()
-                },
+                category: program_category(a),
                 glyph: FxGlyph::Code,
                 ..fx_entry(a)
             })
             .collect(),
+        Section::Library => lib
+            .programs
+            .iter()
+            .map(|p| Entry {
+                item: Item::Program(p.id),
+                category: program_category(&p.asset),
+                glyph: FxGlyph::Code,
+                ..fx_entry(&p.asset)
+            })
+            .collect(),
+        Section::Presets => lib.presets.iter().map(preset_entry).collect(),
         _ => fx::builtins()
             .iter()
             .filter(|a| Section::of(a) == section)
@@ -176,21 +225,33 @@ pub struct LibraryPanel {
     search: Entity<InputState>,
     collapsed: HashSet<Section>,
     selected: Option<Item>,
+    /// Library item being renamed in `name`.
+    renaming: Option<LibraryId>,
+    name: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl LibraryPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let name = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe_in(&name, window, |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let name = input.read(cx).value().trim().to_owned();
+                    this.finish_rename(name, cx);
+                }
+            }),
         ];
         Self {
             state,
             search,
             collapsed: HashSet::new(),
             selected: None,
+            renaming: None,
+            name,
             _subscriptions,
         }
     }
@@ -200,11 +261,64 @@ impl LibraryPanel {
         self.state.update(cx, |s, cx| match &item {
             Item::Fx(r) => apply_fx(s, r, cx),
             Item::Audio(kind) => apply::apply_audio(s, *kind, cx),
+            Item::Program(id) => shared::apply_program(s, *id, cx),
+            Item::Preset(id) => shared::apply_preset(s, *id, cx),
         });
     }
 
-    fn toolbar(&self) -> impl IntoElement + use<> {
+    fn start_rename(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
+        let lib = &self.state.read(cx).library;
+        let Some(name) = lib
+            .program(id)
+            .map(|p| p.asset.name.clone())
+            .or_else(|| lib.preset(id).map(|p| p.name.clone()))
+        else {
+            return;
+        };
+        self.renaming = Some(id);
+        self.name.update(cx, |n, cx| {
+            n.set_value(name, window, cx);
+            n.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming.take() else {
+            return;
+        };
+        self.state
+            .update(cx, |s, cx| shared::rename(s, id, &name, cx));
+        cx.notify();
+    }
+
+    /// Pick library files and copy them in.
+    fn import(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
         let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await {
+                let paths: Vec<_> = paths
+                    .into_iter()
+                    .filter(|p| {
+                        p.extension()
+                            .is_some_and(|e| e == PROGRAM_EXT || e == PRESET_EXT)
+                    })
+                    .collect();
+                state.update(cx, |s, cx| shared::import(s, &paths, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let state = self.state.clone();
+        let panel = cx.entity();
         h_flex()
             .gap_1()
             .p_2()
@@ -231,14 +345,19 @@ impl LibraryPanel {
                                 },
                             ));
                         }
-                        menu
+                        let panel = panel.clone();
+                        menu.item(PopupMenuItem::separator()).item(
+                            PopupMenuItem::new("Import to Library…").on_click(move |_, _, cx| {
+                                panel.update(cx, |this, cx| this.import(cx))
+                            }),
+                        )
                     }),
             )
     }
 
     fn section(&self, section: Section, query: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let project = self.state.read(cx).bus.project();
-        let all = entries(project, section);
+        let state = self.state.read(cx);
+        let all = entries(state.bus.project(), &state.library, section);
         let matches = |e: &Entry| {
             query.is_empty()
                 || [e.name.as_ref(), e.category.as_str(), e.description.as_ref()]
@@ -310,7 +429,21 @@ impl LibraryPanel {
         let id = match &e.item {
             Item::Fx(r) => format!("fx-{r}"),
             Item::Audio(k) => format!("afx-{}", k.name()),
+            Item::Program(id) => format!("lib-{}", id.0),
+            Item::Preset(id) => format!("preset-{}", id.0),
         };
+        let renaming = match &e.item {
+            Item::Program(id) | Item::Preset(id) => self.renaming == Some(*id),
+            _ => false,
+        };
+        if renaming {
+            return h_flex()
+                .h(px(26.))
+                .pl(px(24.))
+                .pr_2()
+                .child(Input::new(&self.name).xsmall())
+                .into_any_element();
+        }
         let item = e.item.clone();
         let description = e.description.clone();
         let row = h_flex()
@@ -346,6 +479,16 @@ impl LibraryPanel {
                     fx: r.clone(),
                     kind,
                     name: e.name.clone(),
+                    library: None,
+                },
+                |drag, _, _, cx| cx.new(|_| drag.clone()),
+            ),
+            (Item::Program(id), Some(kind)) => row.on_drag(
+                FxDrag {
+                    fx: FxRef::builtin(""),
+                    kind,
+                    name: e.name.clone(),
+                    library: Some(*id),
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
@@ -359,7 +502,7 @@ impl LibraryPanel {
             _ => row,
         };
         let (panel, state, item) = (cx.entity(), self.state.clone(), e.item.clone());
-        row.context_menu(move |menu, _, _| item_menu(menu, &panel, &state, &item))
+        row.context_menu(move |menu, _, cx| item_menu(menu, &panel, &state, &item, cx))
             .into_any_element()
     }
 }
@@ -369,14 +512,18 @@ fn item_menu(
     panel: &Entity<LibraryPanel>,
     state: &Entity<EditorState>,
     item: &Item,
+    cx: &App,
 ) -> gpui_kit::component::menu::PopupMenu {
     let (p, it) = (panel.clone(), item.clone());
     let menu = menu.item(
         PopupMenuItem::new("Apply")
             .on_click(move |_, _, cx| p.update(cx, |this, cx| this.apply(&it, cx))),
     );
-    let Item::Fx(r) = item else {
-        return menu;
+    let r = match item {
+        Item::Fx(r) => r,
+        Item::Audio(_) => return menu,
+        Item::Program(id) => return library_menu(menu, panel, state, *id, true),
+        Item::Preset(id) => return library_menu(menu, panel, state, *id, false),
     };
     let state = state.clone();
     let (s1, r1) = (state.clone(), r.clone());
@@ -403,14 +550,75 @@ fn item_menu(
         })
         .on_click(move |_, _, cx| s3.update(cx, |s, cx| duplicate(s, &r3, cx))),
     );
-    if !builtin {
-        let (s4, r4) = (state, r.clone());
-        menu = menu.item(PopupMenuItem::separator()).item(
-            PopupMenuItem::new("Delete")
-                .on_click(move |_, _, cx| s4.update(cx, |s, cx| apply::remove(s, &r4, cx))),
+    if builtin {
+        return menu;
+    }
+    let link = shared::link(state.read(cx), r);
+    let (s5, r5) = (state.clone(), r.clone());
+    let save = PopupMenuItem::new(if link == Link::None {
+        "Add to Library"
+    } else {
+        "Save to Library"
+    })
+    .on_click(move |_, _, cx| s5.update(cx, |s, cx| shared::save_program(s, &r5, cx)));
+    menu = menu.item(PopupMenuItem::separator());
+    if link != Link::Same {
+        menu = menu.item(save);
+    }
+    if link == Link::Differs {
+        let (s6, r6) = (state.clone(), r.clone());
+        menu = menu.item(
+            PopupMenuItem::new("Update from Library").on_click(move |_, _, cx| {
+                s6.update(cx, |s, cx| shared::update_from_library(s, &r6, cx))
+            }),
         );
     }
-    menu
+    let (s4, r4) = (state, r.clone());
+    menu.item(PopupMenuItem::separator()).item(
+        PopupMenuItem::new("Delete")
+            .on_click(move |_, _, cx| s4.update(cx, |s, cx| apply::remove(s, &r4, cx))),
+    )
+}
+
+/// What a library program or preset offers besides Apply.
+fn library_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: &Entity<LibraryPanel>,
+    state: &Entity<EditorState>,
+    id: LibraryId,
+    program: bool,
+) -> gpui_kit::component::menu::PopupMenu {
+    let mut menu = menu.item(PopupMenuItem::separator());
+    if program {
+        let (s1, s2) = (state.clone(), state.clone());
+        menu = menu
+            .item(
+                PopupMenuItem::new("Edit code").on_click(move |_, _, cx| {
+                    s1.update(cx, |s, cx| shared::edit_program(s, id, cx))
+                }),
+            )
+            .item(PopupMenuItem::new("Duplicate").on_click(move |_, _, cx| {
+                s2.update(cx, |s, cx| shared::duplicate_program(s, id, cx))
+            }));
+    }
+    let (p, s3, s4) = (panel.clone(), state.clone(), state.clone());
+    menu.item(
+        PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+            p.update(cx, |this, cx| this.start_rename(id, window, cx))
+        }),
+    )
+    .item(
+        PopupMenuItem::new("Show in Folder").on_click(move |_, _, cx| {
+            if let Some(path) = shared::file_of(s3.read(cx), id) {
+                cx.reveal_path(&path);
+            }
+        }),
+    )
+    .item(PopupMenuItem::separator())
+    .item(
+        PopupMenuItem::new("Remove from Library")
+            .on_click(move |_, _, cx| s4.update(cx, |s, cx| shared::remove(s, id, cx))),
+    )
 }
 
 impl Render for LibraryPanel {
@@ -422,7 +630,7 @@ impl Render for LibraryPanel {
             .collect();
         let muted = cx.theme().muted_foreground;
         let empty = sections.is_empty();
-        v_flex().size_full().child(self.toolbar()).child(
+        v_flex().size_full().child(self.toolbar(cx)).child(
             div()
                 .id("library-items")
                 .flex_1()

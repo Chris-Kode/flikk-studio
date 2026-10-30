@@ -10,6 +10,7 @@ mod wheels;
 
 use super::param::Key;
 use super::{InspectorPanel, empty, is_media};
+use crate::ui::library::shared;
 use editor::{GradeUi, Target};
 use fields::{PRIMARY, TONE};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,8 +21,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use koo_core::command::Command;
+use koo_core::library::Preset;
 use koo_core::model::{Clip, ClipContent, Grade, MediaKind, Project, TrackKind};
-use koo_core::{ClipId, Time};
+use koo_core::{ClipId, LibraryId, Time};
 use std::path::PathBuf;
 
 /// Source width of the frames shot matching measures.
@@ -124,6 +126,7 @@ impl InspectorPanel {
             && self.state.read(cx).services.media.is_some()
             && !ui.read(cx).matching;
         let (reset_ui, match_ui, match_targets) = (ui.clone(), ui.clone(), ids.clone());
+        let presets = self.grade_presets(clip.id, ids.clone(), g.clone(), cx);
         let this = cx.entity();
         let actions = h_flex()
             .gap_1()
@@ -172,6 +175,7 @@ impl InspectorPanel {
                         this.run(vec![Command::CopyGrade { from, to }], "copy_grade", cx);
                     })),
             )
+            .child(presets)
             .child(
                 Button::new("grade-reset")
                     .ghost()
@@ -184,6 +188,67 @@ impl InspectorPanel {
                     }),
             );
         self.grade_controls(ui, title, actions, window, cx)
+    }
+
+    /// Grade presets from the library to apply to `clips`, and saving
+    /// `grade` as one.
+    fn grade_presets(
+        &self,
+        clip: ClipId,
+        clips: Vec<ClipId>,
+        grade: Grade,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let presets: Vec<(LibraryId, String)> = self
+            .state
+            .read(cx)
+            .library
+            .presets
+            .iter()
+            .filter(|p| p.grade.is_some())
+            .map(|p| (p.id, p.name.clone()))
+            .collect();
+        let state = self.state.clone();
+        let neutral = grade == Grade::default();
+        Button::new("grade-presets")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Star)
+            .tooltip("Presets")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (id, name) in &presets {
+                    let (state, id, clips) = (state.clone(), *id, clips.clone());
+                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| {
+                            if let Some(preset) = s.library.preset(id).cloned() {
+                                shared::apply_preset_to(s, &preset, &clips, &[], cx);
+                            }
+                        })
+                    }));
+                }
+                if !presets.is_empty() {
+                    menu = menu.item(PopupMenuItem::separator());
+                }
+                let (state, grade) = (state.clone(), grade.clone());
+                menu.item(
+                    PopupMenuItem::new("Save as Preset")
+                        .disabled(neutral)
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |s, cx| {
+                                let base = s
+                                    .bus
+                                    .project()
+                                    .timeline
+                                    .clip(clip)
+                                    .and_then(|(_, c)| c.name.clone())
+                                    .unwrap_or_else(|| "Grade".into());
+                                let name = s.library.free_preset_name(&base);
+                                let preset = Preset::grade(&name, grade.clone());
+                                shared::save_preset(s, preset, cx);
+                            })
+                        }),
+                )
+            })
     }
 
     /// Wheels, sliders, LUT and curves for `ui`'s target.

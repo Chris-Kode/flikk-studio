@@ -14,7 +14,9 @@ use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
 use koo_core::services::{AnalysisService, MediaService, Services};
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
+use koo_store::SettingsOverrides;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +29,15 @@ const MODELS_NOTICE: &str = "models-missing";
 
 pub struct EditorState {
     pub bus: CommandBus,
+    /// The open project's file; `None` until first saved.
+    pub file: Option<PathBuf>,
+    /// Agent settings the project overrides; saved in its file.
+    overrides: SettingsOverrides,
+    /// Bus version and overrides as last saved or opened. The version is
+    /// `None` when the project opened with unsaved changes (recovered).
+    saved: (Option<u64>, SettingsOverrides),
+    /// Bus version of the last snapshot handed to the autosaver.
+    autosaved: Option<u64>,
     pub services: Services,
     pub workspace: Workspace,
     pub playhead: Time,
@@ -84,6 +95,8 @@ pub struct EditorState {
     // --- library (effects library, inspector, FX code editor)
     /// FX program open in the code editor; built-ins open read-only.
     pub editing_fx: Option<koo_core::fx::FxRef>,
+    /// The user's programs and presets, as last read from disk.
+    pub library: koo_core::library::Library,
     // --- models
     /// The tasks analysis runs on a model, in the order it runs them.
     pub model_tasks: Vec<koo_models::Task>,
@@ -91,6 +104,10 @@ pub struct EditorState {
     pub models: koo_models::Downloads,
     /// Warnings and errors under the top bar's notice button.
     pub notices: Notices,
+    /// Media whose source file is missing.
+    pub offline: HashSet<koo_core::MediaId>,
+    /// The media paths `offline` was worked out for.
+    media_paths: Vec<(koo_core::MediaId, PathBuf)>,
     /// Which of `model_tasks` had their model, and `models.finished()`, when
     /// the notices were last brought up to date.
     models_seen: (Vec<bool>, u64),
@@ -106,9 +123,10 @@ impl EditorState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let persistence::Loaded {
             project,
-            history,
+            overrides,
             settings,
-            ..
+            file,
+            recovered,
         } = persistence::load_session();
         // Before analysis is wired, so it runs on the models the user picked.
         koo_models::restore_picks(
@@ -116,8 +134,9 @@ impl EditorState {
         );
         let chats = persistence::load_chats(project.id);
         let chat = active_messages(&chats);
-        let mut bus = CommandBus::with_history(project, history);
+        let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
+        let version = bus.version();
         let pump = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGENT_PUMP).await;
@@ -141,6 +160,11 @@ impl EditorState {
             .collect();
         let mut this = Self {
             bus,
+            file,
+            saved: ((!recovered).then_some(version), overrides.clone()),
+            // A recovered project's autosave already holds its changes.
+            autosaved: Some(version),
+            overrides,
             services: services(),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
@@ -165,6 +189,7 @@ impl EditorState {
             selected_transition: None,
             pending_mentions: Vec::new(),
             editing_fx: None,
+            library: koo_core::library::Library::load(),
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
@@ -174,11 +199,14 @@ impl EditorState {
             model_tasks,
             models: koo_models::Downloads::default(),
             notices: Notices::default(),
+            offline: HashSet::new(),
+            media_paths: Vec::new(),
             _models_poll: models_poll,
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
         };
         this.refresh_model_notices();
+        this.check_offline();
         this.load_agent_memory();
         this.load_presets();
         this.load_agent_models(cx);
@@ -360,7 +388,8 @@ impl EditorState {
         }
         self.status = result.as_ref().err().map(|e| e.to_string());
         if result.is_ok() {
-            persistence::autosave(&self.bus);
+            self.autosave();
+            self.check_offline();
         }
         cx.notify();
         result.ok()
@@ -508,7 +537,7 @@ impl EditorState {
                 let mut settings = self.settings.clone();
                 settings.style_profile = Some(id);
                 // The profile already holds these presets.
-                persistence::save_settings(&settings);
+                self.store_settings(&settings);
                 self.settings = settings;
                 self.load_agent_memory();
             }
@@ -803,45 +832,201 @@ impl EditorState {
 
     // --------------------------------------------------------------- projects
 
-    /// Saved projects, most recent first.
-    pub fn projects(&self) -> Vec<koo_store::ProjectSummary> {
-        persistence::with_store(|s| s.list_projects()).unwrap_or_default()
+    /// Changes not saved to the project's file (or never saved at all).
+    pub fn is_dirty(&self) -> bool {
+        self.saved.0 != Some(self.bus.version()) || self.saved.1 != self.overrides
     }
 
-    pub fn open_project(&mut self, id: koo_core::ProjectId, cx: &mut Context<Self>) {
-        if id != self.bus.project().id
-            && let Some(loaded) = persistence::open_project(id)
-        {
-            self.switch_to(loaded, cx);
+    /// Recently opened project files that still exist, newest first.
+    pub fn recent_projects(&self) -> Vec<PathBuf> {
+        persistence::recent()
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect()
+    }
+
+    /// Hand unsaved changes to the autosaver, for crash recovery.
+    fn autosave(&mut self) {
+        let version = self.bus.version();
+        if !self.is_dirty() || self.autosaved == Some(version) {
+            return;
         }
+        self.autosaved = Some(version);
+        persistence::autosave(self.bus.project(), &self.overrides, self.file.as_deref());
     }
 
+    /// Replace the open project with a new "Untitled" one. Unsaved changes
+    /// must be settled first (see `crate::projects`).
     pub fn new_project(&mut self, cx: &mut Context<Self>) {
-        let n = self.projects().len() + 1;
-        if let Some(loaded) = persistence::new_project(&format!("Untitled {n}")) {
-            self.switch_to(loaded, cx);
+        self.switch_to(persistence::new_project(), cx);
+    }
+
+    /// Open a project file in place of the open project; unsaved changes
+    /// must be settled first. Whether it opened.
+    pub fn open_project(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        if self.file.as_deref() == Some(path) {
+            return true;
+        }
+        match persistence::open(path) {
+            Some(loaded) => {
+                self.switch_to(loaded, cx);
+                true
+            }
+            None => {
+                if !path.exists() {
+                    persistence::forget_recent(path);
+                }
+                self.status = persistence::take_notice();
+                cx.notify();
+                false
+            }
         }
     }
 
-    /// Replace everything tied to the open project; engines stay.
+    /// Save the project to `path`, which becomes its file (Save As when it
+    /// differs). The project takes the file's name. Whether it saved.
+    pub fn save_project(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
+        let name = koo_store::project_file::name_of(&path);
+        if self.bus.project().name != name {
+            self.bus.rename_project(&name);
+        }
+        let saved = persistence::save(&path, self.bus.project(), &self.overrides);
+        if saved {
+            self.file = Some(path);
+            self.saved = (Some(self.bus.version()), self.overrides.clone());
+            self.autosaved = None;
+            self.status = None;
+        } else {
+            self.status = persistence::take_notice();
+        }
+        cx.notify();
+        saved
+    }
+
+    /// The user chose not to save: forget the unsaved changes kept for
+    /// crash recovery.
+    pub fn discard_changes(&mut self) {
+        persistence::discard(self.bus.project().id);
+        self.autosaved = None;
+    }
+
+    /// Replace everything tied to the open project; engines stay. Undo
+    /// history does not carry over.
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
         self.set_playing(false, cx);
         self.agent.cancel();
         self.save_chat();
         self.chats = persistence::load_chats(loaded.project.id);
         self.chat = active_messages(&self.chats);
-        self.bus = CommandBus::with_history(loaded.project, loaded.history);
+        self.bus = CommandBus::new(loaded.project);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
+        let version = self.bus.version();
+        self.file = loaded.file;
+        self.saved = (
+            (!loaded.recovered).then_some(version),
+            loaded.overrides.clone(),
+        );
+        self.autosaved = Some(version);
+        self.overrides = loaded.overrides;
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;
         self.in_out = None;
         self.selection = Selection::default();
+        self.selected_transition = None;
+        self.source_media = None;
         self.preview = None;
+        self.focused_change = None;
+        self.editing_fx = None;
+        self.settled.clear();
         self.status = persistence::take_notice();
+        self.check_offline();
         self.load_agent_memory();
         self.load_presets();
         cx.notify();
+    }
+
+    /// Work out which sources are missing when the media list changed, and
+    /// keep the notice about them current.
+    fn check_offline(&mut self) {
+        let paths: Vec<_> = self
+            .bus
+            .project()
+            .media
+            .iter()
+            .map(|m| (m.id, m.path.clone()))
+            .collect();
+        if paths == self.media_paths {
+            return;
+        }
+        self.offline = paths
+            .iter()
+            .filter(|(_, p)| !p.exists())
+            .map(|(id, _)| *id)
+            .collect();
+        self.media_paths = paths;
+        self.offline_notice();
+    }
+
+    /// Missing sources that came back, e.g. a drive plugged in again.
+    /// Whether any did.
+    fn recheck_offline(&mut self) -> bool {
+        let project = self.bus.project();
+        let back: Vec<_> = self
+            .offline
+            .iter()
+            .copied()
+            .filter(|id| project.media(*id).is_some_and(|m| m.path.exists()))
+            .collect();
+        if back.is_empty() {
+            return false;
+        }
+        for id in back {
+            self.offline.remove(&id);
+        }
+        self.offline_notice();
+        true
+    }
+
+    fn offline_notice(&mut self) {
+        const KEY: &str = "offline-media";
+        if self.offline.is_empty() {
+            self.notices.clear(KEY);
+            return;
+        }
+        let items: Vec<String> = self
+            .bus
+            .project()
+            .media
+            .iter()
+            .filter(|m| self.offline.contains(&m.id))
+            .map(crate::ui::media_pool::item_name)
+            .collect();
+        let title = match items.len() {
+            1 => "1 media file is offline".to_owned(),
+            n => format!("{n} media files are offline"),
+        };
+        self.notices.set(Notice {
+            key: KEY.into(),
+            level: Level::Warning,
+            title,
+            items,
+            detail: None,
+            action: Some(NoticeAction::Relink),
+        });
+    }
+
+    /// Save settings: fields the project overrides go with the project,
+    /// the rest to the user's settings.
+    fn store_settings(&mut self, settings: &AgentSettings) {
+        let Some(overrides) = persistence::save_settings(&self.overrides, settings) else {
+            return;
+        };
+        if overrides != self.overrides {
+            self.overrides = overrides;
+            self.autosaved = None;
+            self.autosave();
+        }
     }
 
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
@@ -851,7 +1036,7 @@ impl EditorState {
 
     pub fn set_settings(&mut self, settings: AgentSettings, cx: &mut Context<Self>) {
         self.bus.set_permissions(settings.permissions.clone());
-        persistence::save_settings(&settings);
+        self.store_settings(&settings);
         let profile_changed = settings.style_profile != self.settings.style_profile;
         let backend_changed = settings.backend != self.settings.backend;
         self.settings = settings;
@@ -1029,6 +1214,10 @@ impl EditorState {
     /// When a download ends or a model file appears or goes, bring the
     /// notices up to date.
     fn poll_models(&mut self, cx: &mut Context<Self>) {
+        // The same clock looks for offline sources coming back.
+        if self.recheck_offline() {
+            cx.notify();
+        }
         let seen = (
             self.model_tasks
                 .iter()
@@ -1332,6 +1521,12 @@ impl EditorState {
         let outcome = match started {
             Ok(approve::Started::Done(line)) => {
                 self.agent.report_outcome(format!("approved: {summary}"));
+                if pending.request.tool == "save_fx_to_library" {
+                    self.reload_library(cx);
+                    if let Some(fx) = pending.request.args.get("fx").and_then(|v| v.as_str()) {
+                        crate::ui::library::shared::link_to_library(self, fx, cx);
+                    }
+                }
                 ApprovalOutcome::Done(line)
             }
             Ok(approve::Started::Render(job, path)) => {
@@ -1394,6 +1589,12 @@ impl EditorState {
 
 // --- library (effects library, inspector, FX code editor)
 impl EditorState {
+    /// Read the library again after it changed.
+    pub fn reload_library(&mut self, cx: &mut Context<Self>) {
+        self.library = koo_core::library::Library::load();
+        cx.notify();
+    }
+
     /// Open `fx` in the code editor, or close it with `None`.
     pub fn edit_fx(&mut self, fx: Option<koo_core::fx::FxRef>, cx: &mut Context<Self>) {
         if self.editing_fx != fx {

@@ -44,7 +44,7 @@ behaviour and this file wins on structure.
 | Crate | Role | Depends on |
 | --- | --- | --- |
 | `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
-| `koo-store` | SQLite persistence, autosave, crash recovery, settings, memory stores | core, rusqlite |
+| `koo-store` | `.koo` project files, autosave, crash recovery, backups; SQLite for settings, memory stores, recent files | core, rusqlite |
 | `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms, audio pictures | core, image |
 | `koo-analysis` | Background jobs: the analysis pipeline (voice activity, transcript, word times, speakers, sounds, music and beats, sound vectors) over the task interfaces of `koo-models`; shot changes, silences, loudness, the energy VAD | core, models |
 | `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
@@ -78,8 +78,9 @@ except `koo-analysis`, which runs its models through `koo-models`.
 | Caches | Everything derived is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
 | Agent ↔ editor | The backend CLI launches `koo-mcp` (stdio MCP server). It connects to the editor over `127.0.0.1:<port>` with a per-session token; the editor serves tool calls on the UI thread in `AgentLink::pump` | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments and results are seconds (`f64`) or `"M:SS.mmm"` strings, converted to `Time` at the boundary | What models read and write reliably |
-| Persistence | SQLite (WAL) at `paths::database()`; project JSON + op-log for crash recovery | Already in the scaffold; one file per user |
-| User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`) | AGENTS.md hard rule 2 |
+| Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()` for crash recovery, saved files get timed copies in `paths::backups()`. Undo history lasts the session. User data (settings, profiles, facts, recipes, recent files) is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
+| Library | FX programs (`.koofx`) and presets (`.koopreset`: effects, audio effects or a grade with their values) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated |
+| User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
 docs before relying on them (PRD note).
@@ -154,7 +155,7 @@ listed. The coordinator session merges the branches. To keep merges clean:
 | # | Stream | Owns | Delivers |
 | --- | --- | --- | --- |
 | 1 | core-editing | `koo-core/src/edit.rs`, new `koo-core/src/query.rs` | Every `NotImplemented` planner (insert/overwrite, trim, roll, slip, slide, zoom, keyframes, playlist); protected-range warnings on every cut; keyframe evaluation; timeline queries: topmost clip at t, `sample_points(range, n)` (V3), transcript↔timeline word mapping, typed timestamp/reference resolution (AG3), effective style rules (S3) |
-| 2 | store | `crates/koo-store`, `koo-editor/src/persistence.rs` | Schema + migrations, project save/load with history, debounced autosave + crash recovery, settings, profiles/rules/facts/recipes CRUD, F2 suspension, 7 built-in recipes, Markdown → draft rules (S5) |
+| 2 | store | `crates/koo-store`, `koo-editor/src/persistence.rs` | Schema + migrations, `.koo` project files, debounced autosave + crash recovery, backups, settings, profiles/rules/facts/recipes CRUD, F2 suspension, 7 built-in recipes, Markdown → draft rules (S5) |
 | 3 | media | `crates/koo-media` | `MediaService` impl: probe, fingerprint, frame, streaming playback decoder, proxies, collages (6×5, stamped timeline and source timecodes, cached), waveforms |
 | 4 | analysis | `crates/koo-analysis` | `AnalysisService` impl: job queue, Whisper word-level transcript, VAD, silences, shot changes, loudness, basic speaker labels, fingerprint-keyed cache |
 | 5 | agent | `crates/koo-agent`, `koo-editor/src/agent_link.rs` | Claude/Codex adapters, `koo-mcp` binary + IPC, tool catalog for every PRD tool, read/view tools incl. `view_range`, `ask_user`, context and prompt builder, activity entries, per-project resume, recipe slash commands |
@@ -392,9 +393,11 @@ All nine streams are merged. What runs today:
 * **Agent:** `claude -p` verified end to end (collage → proposals → one
   change set → accept); Codex adapter written from its docs, not yet run.
   The editor binary doubles as the MCP server (`koo-editor mcp`).
-* **Store:** projects with undo history, autosave and crash recovery,
-  settings, style profiles, source facts, built-in recipes, chat
-  sessions per project (each resumes its own backend conversation).
+* **Store:** `.koo` project files (New, Open, Save, Save As, recent
+  files, unsaved-changes prompts), autosave and crash recovery, backups,
+  offline media with relink, settings, style profiles, source facts,
+  built-in recipes, chat sessions per project (each resumes its own
+  backend conversation), and the shared library of programs and presets.
 * **Deliver:** FFmpeg render graph, render queue, SRT/ASS, OTIO, FCPXML,
   frame export.
 * **UI:** all six workspaces, timeline with change-set overlay, track
@@ -540,9 +543,11 @@ with the same precision as the UI.
   titles, lower thirds, motion graphics, image layouts) plus typed
   parameters (number, bool, color, point, text, choice, image). Built-ins
   ship in `fx/shaders.rs` and `fx/templates.rs`; programs the user or the
-  agent writes live in `Project::fx`. An `FxInstance` uses an asset with
-  parameter values and keyframes: on a clip's effect stack, as a clip's
-  transition, or as a generator clip's content.
+  agent writes live in `Project::fx`, and can be saved to the user's
+  library (`koo-core::library`) for other projects, which use a copy. An
+  `FxInstance` uses an asset with parameter values and keyframes: on a
+  clip's effect stack, as a clip's transition, or as a generator clip's
+  content.
 * **GLSL** follows ShaderToy/gl-transitions: authors write
   `effect(uv)`, `transition(uv)` or `generate(uv)`; the engine adds
   uniforms and helpers and reports errors against the author's lines.

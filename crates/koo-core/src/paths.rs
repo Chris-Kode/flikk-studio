@@ -1,5 +1,7 @@
 //! User data lives in `~/.koo-editor/`, or `$KOOEDITOR_HOME` when set.
-//! Nothing is ever written next to sources or inside a repository.
+//! Nothing is ever written next to sources or inside a repository; the only
+//! files written elsewhere are the ones the user saves there (`.koo`
+//! projects, exports).
 
 use std::path::PathBuf;
 
@@ -25,8 +27,25 @@ pub fn database() -> PathBuf {
     home().join("koo-editor.db")
 }
 
+/// Per-project data that stays with the user, not the `.koo` file (chats),
+/// keyed by project id.
 pub fn projects() -> PathBuf {
     sub("projects")
+}
+
+/// Unsaved changes of open projects, for crash recovery.
+pub fn autosave() -> PathBuf {
+    sub("autosave")
+}
+
+/// Timed copies of saved projects.
+pub fn backups() -> PathBuf {
+    sub("backups")
+}
+
+/// FX programs and presets shared by every project.
+pub fn library() -> PathBuf {
+    sub("library")
 }
 
 /// Proxies, collages, waveforms, analysis results; keyed by fingerprint.

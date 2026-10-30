@@ -162,6 +162,12 @@ impl CommandBus {
         &self.project
     }
 
+    /// The project's name follows its file (Save As), so renaming is not an
+    /// edit: no undo step, no version bump.
+    pub fn rename_project(&mut self, name: &str) {
+        self.project.name = name.to_owned();
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
