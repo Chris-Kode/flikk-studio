@@ -1,58 +1,61 @@
 # koo-editor — technical design
 
 Engineering companion to the PRD ("AI-native video editor with agent chat",
-Oct 26 2026). The PRD says *what*; this file says *how*, and how the work is
-split so it can be built in parallel. When the two disagree, the PRD wins on
-behaviour and this file wins on structure.
+Oct 26 2026). The PRD says *what*; this file says *how* the code does it
+today. When the two disagree, the PRD wins on behaviour and this file wins on
+structure. Keep it in step with the code: when a change alters something
+described here, update the section in the same commit.
 
 ## 1. Shape of the system
 
 ```
-                 ┌──────────────────────── koo-editor (GPUI app) ───────────────────────┐
-  user ──input──▶│ panels (ui/*) ──▶ EditorState ──▶ CommandBus (koo-core) ◀── AgentLink │
-                 │        ▲               │  services: MediaService, AnalysisService   │
-                 │        └──── notify ───┘                                   │        │
-                 └────────────────────────────────────────────────────────────┼────────┘
-                        koo-media (FFmpeg)   koo-analysis (Whisper, VAD)       │ local IPC
-                        koo-store (SQLite)   koo-deliver (render/export)       ▼
-                                                     claude -p / codex exec ──▶ koo-mcp (stdio MCP)
+                 ┌──────────────────────────── koo-editor (GPUI app) ────────────────────────────┐
+  user ──input──▶│ workspaces (ui/*) ──▶ EditorState ──▶ CommandBus (koo-core) ◀── AgentLink     │
+                 │        ▲                    │  Services: media, analysis, fx, html, lettering │
+                 │        └────── notify ──────┘                                    │            │
+                 └──────────────────────────────────────────────────────────────────┼────────────┘
+     koo-media (FFmpeg)   koo-analysis + koo-models (Whisper, ONNX)                  │ TCP 127.0.0.1
+     koo-gpu (wgpu FX)    koo-html (headless Chromium)                               │ + token
+     koo-store (.koo files, SQLite)   koo-deliver (render, export)                   ▼
+                                 claude -p / codex exec ──stdio──▶ koo-mcp (or `koo-editor mcp`)
+                                 external MCP clients  ──stdio──▶ koo-editor mcp ── bridge.json
 ```
 
 * **One command bus.** Every change, from a button, a shortcut, the agent or a
   recipe, is a `koo_core::command::Command` submitted to
   `koo_core::bus::CommandBus`. Permissions, undo and change sets live there
-  and nowhere else (PRD principles 1–3).
-* **Commands plan into ops.** `Command::plan(&Project) -> Plan` is pure and
-  returns invertible `ops::Op`s. Each op carries the value it replaces, so:
-  undo = inverse ops in reverse; applying stale ops fails with
-  `CoreError::Conflict` instead of overwriting a hand edit (AG6); the timeline
-  draws a pending change set straight from its ops.
-* **Agents propose, users apply.** `Author::User` commands apply immediately as
-  one undo step. `Author::Agent`/`Recipe` commands go into the author's open
-  `ChangeSet`, planned against that set's *draft* (committed project + its own
-  pending items), so the agent sees the effect of its earlier calls. On accept,
-  items whose clips the user touched after the set opened become `Conflicted`.
-  Other items replay their ops, or are re-planned from their command if an
-  earlier item was rejected. The whole accept is one history entry (AG5).
-* **Engines behind traits.** The UI and the agent host call
-  `services::MediaService` and `services::AnalysisService`, implemented by
-  `koo-media` and `koo-analysis`. `EditorState.services` holds them; until a
-  stream lands, they are `None` and panels degrade quietly.
+  and nowhere else (PRD principles 1–3). Any UI action that changes the
+  project goes through a `Command`, so the agent can do it too.
+* **Commands plan into ops.** `Command::plan(&Project) -> Result<Plan>` is
+  pure; a `Plan` is invertible `ops::Op`s plus warnings
+  (`TouchesProtected`, `NeedsConfirmation`). Each op carries the value it
+  replaces, so undo is the inverse ops in reverse, applying stale ops fails
+  with `CoreError::Conflict` instead of overwriting a hand edit (AG6), and the
+  timeline draws a pending change set straight from its ops.
+* **Agents propose, users apply.** `Author::User` commands apply at once as
+  one undo step (`execute_batch` groups several). `Author::Agent` and
+  `Author::Recipe` commands go into a change set for review (§4).
+* **Engines behind traits.** The UI, the compositor and the agent host call
+  the traits in `koo_core::services`: `MediaService` (`koo-media`),
+  `AnalysisService` (`koo-analysis`), `FxService` (`koo-gpu`), `HtmlService`
+  (`koo-html`) and `LetteringService` (`koo-deliver`). `EditorState.services`
+  holds each as an `Option<Arc<dyn …>>`; an engine that fails to start (no
+  ffmpeg, no GPU adapter, no browser) is `None` and callers degrade quietly.
 
 ### Crates
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, commands, ops, bus, change sets, history, shared types, service traits, paths | serde, uuid |
-| `koo-store` | `.koo` project files, autosave, crash recovery, backups; SQLite for settings, memory stores, recent files | core, rusqlite |
-| `koo-media` | ffprobe, fingerprint, proxies, frame decode, collages, waveforms, audio pictures | core, image |
-| `koo-analysis` | Background jobs: the analysis pipeline (voice activity, transcript, word times, speakers, sounds, music and beats, sound vectors) over the task interfaces of `koo-models`; shot changes, silences, loudness, the energy VAD | core, models |
-| `koo-agent` | Backend adapters, MCP server + bridge, tool catalog, prompt/context builder | core |
-| `koo-deliver` | Render graph → FFmpeg, render queue, SRT/ASS, OTIO, FCPXML, frame export | core |
-| `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, layer compositing | core, wgpu |
-| `koo-html` | `HtmlService`: HTML generators in headless Chromium with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
-| `koo-models` | Everything about the models: a folder per task (its interface, the models that can do it) and per model (its files pinned to a commit, its config, its runner); whether the files are on disk, and the downloads the user starts | core, ureq, whisper-rs, ort |
-| `koo-editor` | GPUI app: layout, `EditorState`, panels, wiring of all of the above | all |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
+| `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache | core, models |
+| `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort |
+| `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
+| `koo-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
+| `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
+| `koo-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
+| `koo-editor` | GPUI app (gpui-kit): `EditorState`, workspaces and panels, agent link, persistence, playback, wiring of all of the above | all, cpal, image |
 
 Crates other than `koo-editor` depend only on `koo-core`, never on each other,
 except `koo-analysis`, which runs its models through `koo-models`.
@@ -63,22 +66,24 @@ except `koo-analysis`, which runs its models through `koo-models`.
 | --- | --- | --- |
 | Time | `Time(i64)` in flicks (1/705 600 000 s); `TimeRange` half-open | Exact for every common frame and sample rate; no drift on long timelines |
 | IDs | UUID v4 newtypes; `Display` prints 8 hex chars | Stable across save/load and safe to show in chat (`@clip 3f2a91c0`) |
-| Model | One timeline per project (nested sequences, E7, come later as compound clips) | Keeps the v1 bus simple |
-| Captions | Clips on `TrackKind::Caption` tracks | Ripple, move and undo retime captions for free (C3) |
+| Model | One timeline per project; nested sequences / compound clips are not built | Keeps the bus simple |
+| Format | `SequenceSettings` sizes the frame by aspect (`Format::ALL`: 16:9, 9:16, 1:1, 4:5, 21:9, 4:3) and short side (720p–4K), changed by the undoable `SetFormat` | One project can be landscape, vertical or square; presets and lettering follow the short side |
+| Captions | Clips on `TrackKind::Caption` tracks, with per-word times | Ripple, move and undo retime captions for free (C3); highlights follow the speech |
 | Protected ranges | `Marker { kind: Protected }`; cut planners add `Warning::TouchesProtected` | F4 enforced in the bus for hand and agent edits alike |
-| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`KOOEDITOR_FFMPEG` / `KOOEDITOR_FFPROBE`, else `PATH`, later bundled) | No libav linking on Windows/macOS; `-hwaccel auto` for GPU decode |
-| Playback | Proxies by default (720p, short GOP H.264, `cache/proxies/<fp>.mp4`); a streaming decoder pipes RGBA frames from a long-lived ffmpeg process | Smooth 1080p60 on a laptop (PRD NFR); revisit after the GPUI video spike |
-| Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks | Fast on multi-GB files; good enough to detect replacement (F2) |
+| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`KOOEDITOR_FFMPEG` / `KOOEDITOR_FFPROBE`, else `PATH`) | No libav linking on Windows/macOS |
+| Playback | A 720p proxy (`cache/proxies/<fp>.mp4`) is made on import and used once it exists; streams pipe RGBA from a long-lived ffmpeg (`-hwaccel auto`, software fallback); frames are composed on the GPU and painted as images | Smooth playback on a laptop without a GPU video surface |
+| Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks (whole file under 10 MiB) | Fast on multi-GB files; good enough to detect replacement (F2) |
+| Compositor | One `koo_core::compose::program` draws the frame for the viewer, the agent's views and composited render ranges | The preview matches the export |
 | Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`; on the GPU (Metal on macOS, Vulkan on Windows and Linux), else the CPU | Local, word timestamps, any language; no per-use cost |
-| Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB in `paths::models()`) on ONNX Runtime (`ort`, prebuilt and linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
+| Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB) on ONNX Runtime (`ort`, linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
 | Hearing | The model never hears audio: analysis turns it into the sound script (words, `[sounds]`, `♪` music with tempo and changes, silences), beats to cut on, vectors to search by description, and spectrogram pictures | Neither backend takes audio input, and models place sounds in time far worse than in text; the transcript and collages already work this way |
 | Sounds | EfficientAT mn10_as (MIT; 527 AudioSet classes) on 2 s windows every second, each followed by 4 s of silence, grouped into about 180 names for the script | Small (20 MB) and fast on the CPU; trained on 10 s clips, it answers nonsense for 2 s alone, and 6 s gets nine in ten of its 10 s answers at half the cost |
 | Beats | Beat This! `final0` (MIT) on each stretch of music, 30 s chunks, its own minimal peak picking | State of the art for beats and downbeats without a DBN; runs only where the tagger heard music |
 | Sound search | LAION's larger_clap_general (Apache-2.0): a vector per 4 s window every 2 s, int8, in `<fp>.vectors`; the text tower encodes a description at query time | Finds sounds outside the tagger's vocabulary ("sizzling bacon") and sounds like an example; 2 s steps scored by the lower of their two windows place a sound to about 2 s |
-| Caches | Everything derived is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
-| Agent ↔ editor | The backend CLI launches `koo-mcp` (stdio MCP server). It connects to the editor over `127.0.0.1:<port>` with a per-session token; the editor serves tool calls on the UI thread in `AgentLink::pump` | One code path for Windows and macOS; the bus stays single-threaded |
-| Tool schema | Times in tool arguments and results are seconds (`f64`) or `"M:SS.mmm"` strings, converted to `Time` at the boundary | What models read and write reliably |
-| Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()` for crash recovery, saved files get timed copies in `paths::backups()`. Undo history lasts the session. User data (settings, profiles, facts, recipes, recent files) is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
+| Caches | Derived media data is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
+| Agent ↔ editor | The backend CLI launches an MCP server over stdio; it connects to the editor over `127.0.0.1:<port>` with a token, and the editor serves calls in `AgentLink::pump` on the UI thread | One code path for Windows and macOS; the bus stays single-threaded |
+| Tool schema | Times in tool arguments are seconds, `"M:SS.mmm"`, `"H:MM:SS.s"`, timecode `"HH:MM:SS:FF"`, frames `"f:1234"` or `@time`/`@range`; results are seconds to the millisecond | What models read and write reliably |
+| Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.koofx`) and presets (`.koopreset`: effects, audio effects or a grade with their values) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
 
@@ -88,181 +93,263 @@ docs before relying on them (PRD note).
 ## 3. Threading
 
 GPUI owns the main thread. `EditorState` (the bus, selection, chat) lives
-there. Anything slow (probing, decoding, collages, analysis, rendering, the
-agent subprocess) runs on background threads or `cx.background_executor()`
-and reports back through `Entity::update`. The bus is not `Sync`, by design:
-agent tool calls arrive over a channel and are executed in
-`AgentLink::pump`, called every ~33 ms from `EditorState`. View tools that need
-FFmpeg take a `Project` snapshot and finish off-thread.
+there. Anything slow (probing, decoding, proxies, collages, analysis,
+rendering, the agent subprocess) runs on background threads or
+`cx.background_executor()` and reports back through `Entity::update`. The
+bus is not `Sync`, by design: agent tool calls arrive over a channel and are
+served in `AgentLink::pump`, which `EditorState` calls every 33 ms. Slow
+tools (views, previews, FFmpeg work) return a job that runs off-thread on a
+`Project` snapshot; its proposals are applied back on the UI thread.
 
-## 4. UI guidelines
+Heavy background work that must not pile up goes through
+`koo_core::jobs::JobQueue`: FIFO, at most `limit` jobs at once on threads of
+its own, a key already queued or running returns that job, and a job that
+panics fails without stopping the queue.
 
-The user asked for a clean, minimal UI, and CLAUDE.md says "let the layout do
-the explaining":
+## 4. Editing model
 
-* No secondary labels, helper text or descriptions under controls. Use icons
-  with tooltips, placeholders in inputs, and grouping by spacing.
-* Colors come from `cx.theme()` only. Change sets use `theme.green` (added),
-  `theme.red` (removed) and `theme.yellow` (modified), drawn as tints and
-  outlines, never as banners.
-* Dark theme by default, compact density (`text_sm`/`text_xs`, 28 px rows).
-* Empty states are a single muted line or an icon, not a paragraph.
-* Prefer gpui-kit components (`gpui_kit::component::*`: button, input, slider,
-  tab, list, popover, dialog, tooltip, resizable) over hand-rolled widgets.
-* Check visually: `scripts/screenshot.sh out.png` renders the app under Xvfb.
+* **Project** (`koo-core/src/model.rs`): media, bins, one `Timeline` (tracks
+  of kind Video, Audio, Title, Caption, Overlay; markers; ducking; a timeline
+  grade; `SequenceSettings`) and the project's FX programs.
+* **Clips** carry speed, enabled, name, color, a transform, a grade, an
+  effect stack, audio effects, volume automation, `transition_in` /
+  `transition_out` (resolved by `fx::transitions`) and masks.
+* **Transform:** position, scale, rotation, opacity, per-axis stretch, skew,
+  anchor, crop, flip, blend mode, `fit` (`Contain` with bars, or `Cover`,
+  filling the frame and panned by position) and a corner pin; all keyframable.
+  A pinned picture is placed through a homography (`Placement::homography`),
+  others through one affine matrix shared by the GPU and CPU compositors.
+  `compose::GroupMove` moves, scales and turns several clips about a common
+  pivot and turns that back into each clip's transform.
+* **Masks** (`koo-core/src/mask.rs`): rectangles, ellipses and closed paths
+  (straight or smooth) in the picture's own uv, with feather, expansion,
+  opacity and invert, combined in order by add, subtract or intersect, each
+  keyframable as a whole. Captions and titles take no masks or corner pins:
+  renders burn them in with ASS, which cannot draw them.
+* **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
+  words, clear of both (40 ms after the earlier, 30 ms before the later), on
+  a frame boundary when the pause holds one, with a 10 ms audio fade at the
+  join. The transcript panel's word delete and the agent's `cut_words` use
+  it; the agent's `blade` and `ripple_delete` move a cut that falls on a word
+  into the nearest pause and say so (`snap: false` turns it off).
+* **Queries** (`koo-core/src/query.rs`): topmost clip at a time, sample
+  points, transcript↔timeline word mapping, typed timestamp and chat
+  reference resolution, effective style rules.
 
-## 5. PRD → code map (MVP / P0)
+### Change sets
 
-| PRD | Where |
-| --- | --- |
-| M1 import, bins, search | `ui/media_pool.rs`, `Command::ImportMedia` |
-| M2 inspector, M4 proxies | `koo-media`, `ui/media_pool.rs` |
-| M3 analysis | `koo-analysis` |
-| E1, E2 timeline and tools | `ui/timeline*`, `koo-core/src/edit.rs` |
-| E3 transcript editing | `ui/transcript.rs` + transcript↔timeline mapping in core |
-| E4 silences | `AnalysisService::silences` + timeline toolbar |
-| E5 transform, keyframes | `Command::AddZoom/SetKeyframe`, `ui/inspector.rs`, viewer preview |
-| E8 timecode readout | `Clip::to_source`, viewer |
-| C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle` (`koo-core/src/memory.rs`), `ui/caption_style.rs`, `koo-deliver` SRT/ASS; the viewer letters captions like the ASS burn-in (`ui/lettering.rs`, `koo-deliver/src/captions/motion.rs`) |
-| K1 primary grade | `model::Grade`, `ui/inspector.rs`, render graph |
-| A1–A3 mixer, loudness, ducking | `ui/inspector.rs`, `AnalysisService::loudness`, render graph |
-| D1 render | `koo-deliver`, `ui/deliver.rs` |
-| AG1–AG10 | `koo-agent`, `agent_link.rs`, `ui/chat.rs`, `ui/settings.rs` |
-| V1–V7 collages | `MediaService::collage`, `koo-agent` `view_*` tools |
-| S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
+`Author::Agent { role }` and `Author::Recipe` commands go into the author's
+open `ChangeSet` (`koo-core/src/changeset.rs`, `bus.rs`), planned against that
+set's *draft* (committed project + its own pending items), so the agent sees
+the effect of its earlier calls.
 
-## 6. Work streams
+* **One growing set per chat.** Agent sets are stamped with the bus's current
+  chat; the timeline overlay shows only the open chat's sets. At the start of
+  each turn the host calls `reopen_change_set`: the chat's pending set opens
+  again and the turn adds to it. If the user edited since, the draft is
+  rebuilt on the current project by replaying each item's ops (re-planning
+  those that fail, dropping those that still fail).
+* **Review waits for the turn.** At the end of a turn the set becomes
+  `Pending`, or `Resolved` if empty; the card is posted on the newest message
+  only if the set grew. While the set is `Open`, the card's Accept and Reject
+  are disabled; Preview and Review still work.
+* **Accept** takes all pending items or the ticked subset. An item becomes
+  `Conflicted` if a clip its ops touch was changed by the user after the
+  version it was planned against; otherwise its ops replay, or its command
+  is re-planned if they no longer apply. The whole accept is one history
+  entry (AG5).
+* Change sets live in the bus only; saved chats keep a message's change-set
+  id, not the set.
 
-Each stream runs in its own cloud session on its own branch
-(`claude/koo-<stream>`) cut from the foundation commit, and owns the files
-listed. The coordinator session merges the branches. To keep merges clean:
+## 5. Compositor and FX
 
-* **Edit only files you own.** Cross-stream needs go in your summary, not in
-  someone else's file.
-* **Shared files, additive only:** `crates/koo-editor/src/state.rs` (add
-  fields and methods, don't change existing signatures) and
-  `crates/koo-core/src/lib.rs` (add a `pub mod` line).
-* **Never change a public type in `koo-core`** except in stream 1 (core
-  editing), and there only additively. If you need a change, add a new
-  item and explain in your summary.
-* Dependencies go in your crate's `Cargo.toml`, not in
-  `[workspace.dependencies]`. `Cargo.lock` conflicts are resolved by the
-  coordinator.
-* No tests of any kind (AGENTS.md rule 1). Run `cargo fmt`,
-  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`
-  before every push.
+* **One FX format** (`koo-core/src/fx/mod.rs`; its module docs are the
+  authoritative GLSL and HTML conventions). An `FxAsset` is a GLSL program
+  (effect, transition or generator) or an HTML/CSS/JS document (generator:
+  titles, lower thirds, motion graphics, image layouts) plus typed
+  parameters (number, bool, color, point, text, choice, image). Built-ins:
+  51 GLSL programs in `fx/shaders.rs` (27 effects, 17 transitions,
+  7 generators) and 15 HTML templates in `fx/templates.rs`. Programs the
+  user or the agent writes live in `Project::fx` and are edited in the FX
+  code editor. An `FxInstance` uses an asset with parameter values and
+  keyframes: on a clip's effect stack, as a transition, or as a generator
+  clip's content.
+* **GLSL** follows ShaderToy/gl-transitions: authors write `effect(uv)`,
+  `transition(uv)` or `generate(uv)`; `koo-gpu` wraps it as `#version 450`,
+  compiles it with naga on a thread with a 16 MiB stack, caches the result
+  and reports errors against the author's lines. `iResolution` is in
+  sequence pixels whatever size the effect runs at.
+* **HTML** renders in headless Chromium (Chrome, Chromium, Edge or Brave, or
+  `KOOEDITOR_CHROME`) over CDP with an engine-owned clock (`clock.js`: time,
+  timers, rAF, CSS animations, Web Animations and GSAP all follow clip time,
+  `Math.random` is seeded), so frames are deterministic and exportable, with
+  alpha. GSAP 3.15 and its plugins are vendored in `koo-html/src/gsap` and
+  preloaded; templates build their animation in `kooTimeline`, which the
+  engine reruns when parameters or the clip length change. Pages lay out on
+  the sequence's shape with a 1080 CSS px short side, so templates keep
+  their proportions at any resolution; in portrait, bottom elements rise
+  above the controls vertical apps draw.
+* **Program frame** (`koo_core::compose::program`): for each layer, the
+  picture (a media frame at the speed-aware source time, an overlay, or a
+  generator) → clip grade, then timeline grade → effect stack → masks (a
+  coverage raster multiplied into alpha) → transform and blend mode;
+  transitions render each side onto its own canvas and mix them. Titles and
+  captions are lettered on top by `LetteringService` (cosmic-text
+  `koo_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
+  upload per source picture, every pass in one submit, one readback (already
+  BGRA); submit and wait are separate so playback pipelines frames.
+  Without a GPU, `CpuBatch` and `compose/cpu.rs` composite in memory
+  (transitions become a dissolve; effects and GLSL generators are skipped).
+* **Grade** (`koo-core/src/grade.rs`): one pipeline (exposure, contrast, saturation,
+  temperature/tint, lift/gamma/gain, offset, shadows/highlights, hue,
+  curves, a LUT file), baked into a 65³ LUT for export.
+  `scopes.rs` reads waveform, parade, vectorscope and histogram and matches
+  shots.
+* **Audio effects** (`koo-core/src/audiofx.rs`, `audiofx/dsp.rs`) run in the
+  preview mixer and map to FFmpeg filters in `koo-deliver/src/audio_fx.rs`,
+  table by table, so preview and export match.
 
-| # | Stream | Owns | Delivers |
-| --- | --- | --- | --- |
-| 1 | core-editing | `koo-core/src/edit.rs`, new `koo-core/src/query.rs` | Every `NotImplemented` planner (insert/overwrite, trim, roll, slip, slide, zoom, keyframes, playlist); protected-range warnings on every cut; keyframe evaluation; timeline queries: topmost clip at t, `sample_points(range, n)` (V3), transcript↔timeline word mapping, typed timestamp/reference resolution (AG3), effective style rules (S3) |
-| 2 | store | `crates/koo-store`, `koo-editor/src/persistence.rs` | Schema + migrations, `.koo` project files, debounced autosave + crash recovery, backups, settings, profiles/rules/facts/recipes CRUD, F2 suspension, 7 built-in recipes, Markdown → draft rules (S5) |
-| 3 | media | `crates/koo-media` | `MediaService` impl: probe, fingerprint, frame, streaming playback decoder, proxies, collages (6×5, stamped timeline and source timecodes, cached), waveforms |
-| 4 | analysis | `crates/koo-analysis` | `AnalysisService` impl: job queue, Whisper word-level transcript, VAD, silences, shot changes, loudness, basic speaker labels, fingerprint-keyed cache |
-| 5 | agent | `crates/koo-agent`, `koo-editor/src/agent_link.rs` | Claude/Codex adapters, `koo-mcp` binary + IPC, tool catalog for every PRD tool, read/view tools incl. `view_range`, `ask_user`, context and prompt builder, activity entries, per-project resume, recipe slash commands |
-| 6 | deliver | `crates/koo-deliver`, `koo-editor/src/ui/deliver.rs` | Timeline → FFmpeg render graph (cuts, transforms/zooms, grades, captions burn-in, gain/fades/ducking, loudnorm), render queue with progress, presets, SRT/ASS, OTIO, FCPXML, frame export, Deliver panel |
-| 7 | ui-timeline | `koo-editor/src/ui/timeline.rs` (+ `ui/timeline/`), `ui/viewer.rs` (+ `ui/viewer/`) | Multi-track timeline, ruler, playhead, zoom/scroll, select/move/trim/blade, snapping, markers, in/out, JKL, change-set overlay, silence tool; program viewer with playback, transform preview, timecode readout |
-| 8 | ui-agent | `koo-editor/src/ui/chat.rs` (+ `ui/chat/`), `ui/settings.rs` | Chat thread, input with @references, choice chips, change-set card (preview / accept all / review one by one / reject), activity log, quick command bar, Agent settings |
-| 9 | ui-panels | `ui/media_pool.rs`, `ui/inspector.rs`, `ui/transcript.rs` (+ subdirs), new `koo-core/src/captions.rs` | Media pool (import, bins, search, tags, analysis progress, drag to timeline); inspector (transform/keyframes, primary grade, gain/fades, mixer, loudness, ducking); transcript editing and captions (C1 grouping, inline edit, styles) |
+## 6. Media and playback
 
-### Merge order
+* `koo-media`: ffprobe (variable rates snapped to standard ones),
+  fingerprints, single frames (96 MiB in-memory cache), playback streams
+  (RGBA frames as PAM over a pipe) and f32 PCM streams, proxies (short side
+  ≤ 720, x264 veryfast, no B-frames, half-second GOP), 6 × 5 collages stamped
+  with timeline and source timecodes, waveform peaks (200/s) and spectrogram
+  pictures (`showspectrumpic`, one lane per track, words, sounds and beats
+  marked). Derived files are written atomically.
+* Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
+  `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
+  `<fp>.vectors`, `html/` (pages and browser profiles), `render/<job>/`
+  (scratch), `agent/frames/` (images for the activity log).
+* **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
+  own thread (`compose/pictures.rs`); the player submits frame N+1 before
+  reading N back and drops to 1/2 or 1/4 resolution when frames cost more
+  than the frame time, probing back up when they cost under half of it.
+  Paused and full-resolution frames are cached (768 MiB, LRU, keyed by
+  project version and previewed change set), and the 4 s after a resting
+  playhead render ahead. Audio plays through cpal. The viewer zooms and pans
+  with a safe-area overlay; gizmos move, scale, stretch, rotate, skew and
+  corner-pin one or several items with snapping, and a mask mode draws and
+  edits masks.
 
-1 → 2 → 3 → 4 → 6 → 5 → 9 → 7 → 8. Core first, then engines, then the agent,
-then the panels that use them. After each merge, the coordinator runs the
-full check suite; wiring (`EditorState.services`, removing the temporary
-`#![allow(dead_code)]` in `main.rs`) happens last.
+## 7. Analysis and models
 
-## 7. Status
+Analysis starts only when the user asks, from an item's "⋯" menu in the
+media pool (or its right-click menu): "Analyze", or "Analyze again" once it
+has results, which runs every step anew on the models picked now. It is
+disabled while any task's picked model is missing, or while the item is
+queued or analyzing; images are not analyzed. Items are analyzed one at a
+time, in the order asked, on a `JobQueue`. A result is written to
+`cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
+kept for the session and the job fails, naming the steps.
+`ANALYSIS_VERSION` (1) marks the results: those of another version, and the
+sound vectors beside them, are not read, so the item is not analyzed until
+the user analyzes it again.
 
-All nine streams are merged. What runs today:
+### Models (`koo-models`)
 
-* **Editing:** every PRD edit command plans through the bus, with undo,
-  change sets, protected-range warnings and conflict-safe accept.
-* **Media:** FFmpeg probe, fingerprint, frames, playback/audio streams,
-  proxies, 6 × 5 collages (cached) and waveforms.
-* **Analysis jobs:** analysis starts only when the user asks, from an
-  item's "⋯" menu in the media pool (or its right-click menu): "Analyze",
-  or "Analyze again" once it has results, which runs every step anew on
-  the models picked now. It is disabled while any task's picked model is
-  missing, or while the item is queued or analyzing; images are not
-  analyzed. Items are analyzed one at a time, in the order asked, on a
-  `JobQueue` (`koo-core/src/jobs.rs`): at most `limit` jobs at once on
-  threads of its own, work under a key already queued or running is that
-  job, and a job that panics fails without stopping the queue. Other
-  heavy work can have a queue of its own. A result is written to
-  `cache/analysis/<fp>.json` only when every step succeeded; otherwise it
-  is kept for the session and the job fails, naming the steps.
-  `ANALYSIS_VERSION` (1) marks the results: those of another version, and
-  the sound vectors beside them, are not read, so the item is not
-  analyzed until the user analyzes it again.
-* **Analysis:** VAD, silences, shot changes, loudness, speakers (below);
-  Whisper transcription behind the default `whisper` feature, in small
-  (264 MB, the default) or large (large-v3-turbo, 874 MB), both with
-  8-bit weights, picked in Settings → Models. whisper.cpp is built for
+One folder per task (voice activity, transcription, word timing, speakers,
+sound tagging, beats, sound search). Its `mod.rs` holds the task's
+interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`); `MODELS`, the
+models that can do it, the default first; and `runner`, which builds the
+runner of one of them. In it, one folder per model: `mod.rs` is the model as
+the user sees it, `config.rs` its files (pinned to a commit, with their
+sizes) and the settings it runs with, `runner.rs` the code that loads and
+runs it (behind its feature) and finds its own files. What models share
+sits at the crate root: the catalog types, the audio rates, the downloads,
+ONNX Runtime (`onnx.rs`; one environment per process, shared by the
+aligner, the diarizer and the sound models) and the BPE tokenizer
+(`bpe.rs`).
+
+Analysis only orchestrates: it asks each task's runner for the selected
+model (`Task::model`: the one the user picked, else the default) and never
+names a model; a new pick of transcription model applies from the next
+transcript, and results made already stay. A new model is a folder under
+its task, its `MODEL` in `MODELS` and an arm in `runner`; a model in several
+sizes (Whisper) has a `MODEL` for each in one folder.
+
+Nothing downloads on its own. Settings → Models (the gear in the top bar, or
+cmd-,) lists each task with its model, picked there when the task has more
+than one (saved per user in the store), and downloads one or all of them,
+with progress and cancel, through `<file>.part`; a failed download stays
+there with Retry. `LocalAnalysis::model_tasks` says which tasks a build
+runs; "Analyze" stays disabled until each has its picked model downloaded.
+A runner whose files are missing fails ("… is not downloaded") and its step
+is left out. While a model is missing, the top bar's notices button lists
+them; its notices (warnings and errors, such as a failed download or
+offline media) can be dismissed for the session.
+
+Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
+`aligner`, `diarizer`, `sounds`. Without one, its models stay listed but its
+step falls back as described below.
+
+### Speech
+
+* **Voice activity:** Silero VAD v6.2 (`voice_activity/silero/`;
+  `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit, or
+  `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until under
+  0.35, pauses under 250 ms kept, 60 ms before each range. Music is not
+  speech to it. The energy VAD (`koo-analysis/src/vad.rs`), which took a
+  music bed for speech, stands in without the `whisper` feature, or for the
+  session when the model can't be had. Silero hears the audio in one go and
+  in 4 s blocks, each after the second before it, and a window is speech
+  when either finds it: music holds it down for seconds after, and a block
+  that starts during a sentence doubts the rest of it. A silence never takes
+  a transcribed word, so the quiet last word of a phrase Silero let go of
+  stays.
+* **Transcription:** Whisper small (264 MB, the default) or large
+  (large-v3-turbo, 874 MB), both with 8-bit weights, picked in Settings →
+  Models, or `KOOEDITOR_WHISPER_MODEL` (a path or a ggml file name in
+  `paths::models()`) for whichever size is picked. whisper.cpp is built for
   the GPU (Metal on macOS, Vulkan on Windows and Linux, with flash
   attention), so building needs Xcode or the Vulkan SDK (`glslc` and the
-  Vulkan headers on Linux). On a machine without a GPU it runs on the
-  CPU. On Windows the editor loads `vulkan-1.dll` only when Whisper first
-  runs (`/DELAYLOAD`), and where the DLL is missing
-  `koo-editor/src/vulkan_fallback.rs` makes Vulkan fail to start, so
-  Whisper runs on the CPU there too. The picked size is in
-  `paths::models()` once the user downloads it (Models, below), or set
-  `KOOEDITOR_WHISPER_MODEL` to a path or a ggml file name there, which
-  stands in for whichever size is picked. Speech, and so silences, comes
-  from Silero VAD v6.2 (`koo-models/src/voice_activity/silero/`;
-  `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit,
-  or `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until
-  under 0.35, pauses under 250 ms kept, 60 ms before each range. Music is
-  not speech to it. The energy VAD (`vad.rs`), which took a music bed for
-  speech, stands in without the `whisper` feature, or for the session
-  when the model can't be had. Silero
-  hears the audio in one go and in 4 s blocks, each after the second
-  before it, and a window is speech when either finds it: music holds it
-  down for seconds after, and a block that starts during a sentence
-  doubts the rest of it. A silence never takes a transcribed word, so
-  the quiet last word of a phrase Silero let go of stays. Whisper hears
-  only speech (`koo-models/src/transcription/whisper/`): given music, a
-  long silence, or a 30 s window that starts with either, it made words
-  up, often repeating what was said before, and its times came loose. It
-  hears the stretches Silero finds as faster-whisper's VAD filter does
-  (pauses under 2 s kept, 400 ms either side), each on its own, without
-  the text of the window before, in the language of the longest; its
-  notes such as "(upbeat music)" are dropped. A stretch that fits one
-  window starts with 0.5 s of silence: Whisper took speech from the very
-  start of what it heard for a phrase cut off and dropped it (the first
-  words of an item that starts talking), and Whisper that started on
-  speech more often left out the last phrase of the stretch too. A
-  longer stretch goes on in windows whisper.cpp starts where Whisper
-  finished a segment; silence before it moved those windows, and in
-  conversation one then ended at its first sentence and skipped the rest.
-  Decoding is a beam search of 5, as OpenAI's transcribe does. Now and
-  then Whisper gives one sentence a segment that runs on over seconds of
-  speech it skips, or takes the short last phrase of a stretch for
-  silence; so once words are aligned, Silero's speech that no word comes
-  within 250 ms of, for 600 ms or more, is heard again on its own, and
-  the words found there are aligned against that audio alone and added
-  (on the measurements below every such hole held words that had been
-  lost, and there were none otherwise). Word times come from a forced
-  aligner
-  (`koo-models/src/word_timing/qwen3_aligner/`, behind the default `aligner` feature):
+  Vulkan headers on Linux); without a GPU it runs on the CPU. On Windows
+  the editor delay-loads `vulkan-1.dll` (`koo-editor/build.rs`), and where
+  the DLL is missing `koo-editor/src/vulkan_fallback.rs` makes Vulkan fail
+  to start, so Whisper runs on the CPU there too.
+
+  Whisper hears only speech (`transcription/whisper/`): given music, a long
+  silence, or a 30 s window that starts with either, it made words up,
+  often repeating what was said before, and its times came loose. It hears
+  the stretches Silero finds as faster-whisper's VAD filter does (pauses
+  under 2 s kept, 400 ms either side), each on its own, without the text of
+  the window before, in the language of the longest; its notes such as
+  "(upbeat music)" are dropped. A stretch that fits one window starts with
+  0.5 s of silence: Whisper took speech from the very start of what it
+  heard for a phrase cut off and dropped it (the first words of an item
+  that starts talking), and Whisper that started on speech more often left
+  out the last phrase of the stretch too. A longer stretch goes on in
+  windows whisper.cpp starts where Whisper finished a segment; silence
+  before it moved those windows, and in conversation one then ended at its
+  first sentence and skipped the rest. Decoding is a beam search of 5, as
+  OpenAI's transcribe does. Now and then Whisper gives one sentence a
+  segment that runs on over seconds of speech it skips, or takes the short
+  last phrase of a stretch for silence; so once words are aligned, Silero's
+  speech that no word comes within 250 ms of, for 600 ms or more, is heard
+  again on its own, and the words found there are aligned against that
+  audio alone and added (on the measurements below every such hole held
+  words that had been lost, and there were none otherwise).
+* **Word times** (`word_timing/qwen3_aligner/`, `aligner` feature):
   Qwen3-ForcedAligner-0.6B hears up to 30 s of audio with Whisper's words
   and answers with each word's start and end, in 80 ms steps; starts then
   move 20 ms earlier, never into the word before, and the edges of words
   next to a pause of 100 ms or more 20 ms into it, never past its middle
   (its starts after a pause came late and its ends before one early,
-  against forced-aligned LibriSpeech). It knows English,
-  Spanish, French, German, Italian, Portuguese, Russian, Chinese,
-  Cantonese, Japanese and Korean. Its tokenizer (`koo-models/src/bpe.rs`) comes from
-  Qwen's repository and the model from ours (below), or set
-  `KOOEDITOR_ALIGNER_MODEL` to a path. Other languages keep word edges
-  measured on the audio levels (`koo-analysis/src/align.rs`), and so does
-  the result for the session when the model can't be loaded; words with
-  neither letters nor digits stay between the aligned words around them.
-  That measurement runs only where the aligner can't: run before it, it
-  moved words over the pause between two speakers and the aligner
-  followed (at 12 of 55 turns in four conversations, 4 without; the
-  word error rate there went from 5.9% to 7.1%), and run after it, it
-  made cuts worse. The aligner's times never pass the audio it was
-  given, so words stay in order.
+  against forced-aligned LibriSpeech). It knows English, Spanish, French,
+  German, Italian, Portuguese, Russian, Chinese, Cantonese, Japanese and
+  Korean. Its tokenizer comes from Qwen's repository and the model from
+  ours (below), or `KOOEDITOR_ALIGNER_MODEL`. Other languages keep word
+  edges measured on the audio levels (`koo-analysis/src/align.rs`), and so
+  does the result for the session when the model can't be loaded; words
+  with neither letters nor digits stay between the aligned words around
+  them. That measurement runs only where the aligner can't: run before it,
+  it moved words over the pause between two speakers and the aligner
+  followed (at 12 of 55 turns in four conversations, 4 without; the word
+  error rate there went from 5.9% to 7.1%), and run after it, it made cuts
+  worse. The aligner's times never pass the audio it was given, so words
+  stay in order.
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)
@@ -279,303 +366,151 @@ All nine streams are merged. What runs today:
   Runtime's basic optimizer; `Gemm` nodes rewritten as `MatMul` + `Add`;
   weights quantized with `MatMulNBitsQuantizer` (4 bits, block 32,
   symmetric; the embedding table as `GatherBlockQuantized`). It matches
-  Qwen's own pipeline exactly before quantization and to within 0.5
-  points of clean cuts after; dynamic int8 quantization breaks it. The
-  repository carries the Apache-2.0 licence text and states that it is a
-  modified (exported, quantized) Qwen3-ForcedAligner-0.6B.
-* **Speakers** (`koo-models/src/speakers/pyannote/`, behind the default
-  `diarizer` feature) follow pyannote's speaker-diarization-3.1 on ONNX
-  Runtime. pyannote segmentation-3.0 (MIT) hears 10 s windows 2.5 s
-  apart and says, every 17 ms, which of up to three voices of the window
-  speak. WeSpeaker ResNet34-LM (CC-BY-4.0, trained on VoxCeleb) turns
-  each window's voice, where it speaks alone, into a 256-number
-  voiceprint from Kaldi filterbank features (`fbank.rs`, equal to
-  `kaldi-native-fbank` to 1e-5). The voiceprints are clustered with
-  centroid linkage at pyannote's threshold (0.7046), clusters of fewer
-  than 12 join the nearest larger one, and the windows are averaged back
-  into who speaks in each frame. A word goes to the voice that speaks
-  through most of it, overlaps weighed by how many windows heard each;
-  below 0.6 of the speaking it keeps no speaker. Speakers are numbered
-  in order of appearance, and attributed after the aligner. Both models
-  come from their own Hugging Face repositories
-  (`onnx-community/pyannote-segmentation-3.0`, 6 MB, and
-  `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; its `config.rs` pins
-  the commits). When they can't be loaded, every word is "Speaker 1"
-  for the session.
-  ONNX Runtime allows one environment per process, so the aligner, the
-  diarizer and the sound models share it (`koo-models/src/onnx.rs`).
-* **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
-  words, clear of both, on a frame boundary when the pause holds one, with
-  a 10 ms audio fade at the join. The transcript panel's word delete and
-  the agent's `cut_words` use it; `blade` and `ripple_delete` move a cut
-  that falls on a word into the nearest pause and say so.
-* **Sounds, music and beats** (behind the default `sounds` feature): after
-  the transcript, the audio is decoded once more at 32 kHz and streamed
-  through the sound tagger (`sound_tagging/efficientat/` in `koo-models`)
+  Qwen's own pipeline exactly before quantization and to within 0.5 points
+  of clean cuts after; dynamic int8 quantization breaks it. The repository
+  carries the Apache-2.0 licence text and states that it is a modified
+  (exported, quantized) Qwen3-ForcedAligner-0.6B.
+* **Speakers** (`speakers/pyannote/`, `diarizer` feature) follow pyannote's
+  speaker-diarization-3.1 on ONNX Runtime. pyannote segmentation-3.0 (MIT)
+  hears 10 s windows 2.5 s apart and says, every 17 ms, which of up to three
+  voices of the window speak. WeSpeaker ResNet34-LM (CC-BY-4.0, trained on
+  VoxCeleb) turns each window's voice, where it speaks alone, into a
+  256-number voiceprint from Kaldi filterbank features (`fbank.rs`, equal to
+  `kaldi-native-fbank` to 1e-5). The voiceprints are clustered with centroid
+  linkage at pyannote's threshold (0.7046), clusters of fewer than 12 join
+  the nearest larger one, and the windows are averaged back into who speaks
+  in each frame. A word goes to the voice that speaks through most of it,
+  overlaps weighed by how many windows heard each; below 0.6 of the
+  speaking it keeps no speaker. Speakers are numbered in order of
+  appearance, and attributed after the aligner. Both models come from their
+  own Hugging Face repositories (`onnx-community/pyannote-segmentation-3.0`,
+  6 MB, and `Wespeaker/wespeaker-voxceleb-resnet34-LM`, 26 MB; its
+  `config.rs` pins the commits). When they can't be loaded, every word is
+  "Speaker 1" for the session.
+
+### Sounds, music and beats
+
+* After the transcript (`sounds` feature), the audio is decoded once more at
+  32 kHz and streamed through the sound tagger (`sound_tagging/efficientat/`)
   and CLAP's audio tower (`sound_search/clap/`) together; then the beat
-  tracker (`beats/beat_this/`) hears each
-  stretch of music the tagger found, with 1 s either side. Runs of tagged
-  windows become `Analysis::sounds` and `music`: a run starts
-  up to 2 s before its sound, so it is shrunk by that much, and a sound
-  under a second long moves onto the loudest stretch of the 10 ms levels
-  around it. Silence alone scores 0.25 as music, so music needs 0.5 to
-  start; bells, claps and other musical sounds inside music are dropped.
-  Music carries tags (genre, mood, vocals, lead instruments), beats and
-  downbeats; its tempo is the mean beat interval near the median. The
-  vectors go to `cache/analysis/<fp>.vectors`. A model that cannot be
-  had leaves the sounds out, and what the others found is kept for the
-  session. On 4 CPU threads the pass takes about 2 minutes per hour of audio
-  for the tagger and 6 for CLAP, plus the beat tracker on music.
-  `koo-core/src/heard.rs` maps sounds, music, beats, level changes and
-  silences onto the timeline, and finds beats, downbeats and onsets (a
-  6 dB rise over the 50 ms before) near a cut.
-* **Sound model files:** our exports, built by `scripts/models/` and
-  hosted (with those scripts and the licence texts) at
+  tracker (`beats/beat_this/`) hears each stretch of music the tagger found,
+  with 1 s either side. Runs of tagged windows become `Analysis::sounds` and
+  `music`: a run starts up to 2 s before its sound, so it is shrunk by that
+  much, and a sound under a second long moves onto the loudest stretch of
+  the 10 ms levels around it. Silence alone scores 0.25 as music, so music
+  needs 0.5 to start; bells, claps and other musical sounds inside music are
+  dropped. Music carries tags (genre, mood, vocals, lead instruments), beats
+  and downbeats; its tempo is the mean beat interval near the median. The
+  vectors go to `cache/analysis/<fp>.vectors`. A model that cannot be had
+  leaves the sounds out, and what the others found is kept for the session.
+  On 4 CPU threads the pass takes about 2 minutes per hour of audio for the
+  tagger and 6 for CLAP, plus the beat tracker on music.
+* `koo-core/src/heard.rs` maps sounds, music, beats, level changes and
+  silences onto the timeline, and finds beats, downbeats and onsets (a 6 dB
+  rise over the 50 ms before) near a cut.
+* **Sound model files:** our exports, built by `scripts/models/` and hosted
+  (with those scripts and the licence texts) at
   [Chris-Kode/efficientat-mn10-as-onnx](https://huggingface.co/Chris-Kode/efficientat-mn10-as-onnx),
   [Chris-Kode/beat-this-final0-onnx](https://huggingface.co/Chris-Kode/beat-this-final0-onnx)
   and [Chris-Kode/larger-clap-general-onnx](https://huggingface.co/Chris-Kode/larger-clap-general-onnx);
   each model's `config.rs` pins their URLs to a commit. JKU's server was
   unreachable, so the Beat This! export was made from the
   `safe-models/beat-this-final0` mirror, whose weights have not been
-  compared with JKU's. Each graph takes 32 kHz mono samples and holds
-  its model's own front end, so analysis decodes once for all three:
+  compared with JKU's. Each graph takes 32 kHz mono samples and holds its
+  model's own front end, so analysis decodes once for all three:
   `efficientat-mn10-as.onnx` (20 MB; windows × samples in, 527
   probabilities out; matches EfficientAT's pipeline to 2e-6),
   `beat-this-final0.onnx` (85 MB; up to 30 s in, beat and downbeat logits
-  per 20 ms frame out; a windowed-sinc resampler to 22.05 kHz stands in
-  for soxr), `larger-clap-general-audio.onnx` (78 MB; 10 s windows in,
-  unit vectors out; resampled to 48 kHz inside; dynamic int8, cosine 0.997
-  to the float model) and `larger-clap-general-text.onnx` (141 MB; RoBERTa
-  token ids in; 8-bit block weights and an int8 embedding table, cosine
-  0.998). The text tower's tokenizer comes from LAION's repository at a
-  pinned commit (`bpe.rs` encodes it). `KOOEDITOR_TAGGER_MODEL`,
-  `KOOEDITOR_BEATS_MODEL`, `KOOEDITOR_CLAP_AUDIO_MODEL` and
-  `KOOEDITOR_CLAP_TEXT_MODEL` point at local copies instead.
-* **Models** (`koo-models`): one folder per task (voice activity,
-  transcription, word timing, speakers, sounds and music, beats, sound
-  search). Its `mod.rs` holds the task's interface, the trait analysis
-  calls (`VoiceActivity`, `Transcriber`, `Aligner`, `Diarizer`, `Tagger`,
-  `BeatTracker`, `SoundSearch`); `MODELS`, the models that can do it, the
-  default first; and `runner`, which builds the runner of one of them. In
-  it, one folder per model: `mod.rs` is the model as the user sees it,
-  `config.rs` its files (pinned to a commit, with their sizes) and the
-  settings it runs with, `runner.rs` the code that loads and runs it
-  (behind its feature) and finds its own files. What models share sits
-  at the crate root: the catalog types, the audio rates, the downloads,
-  ONNX Runtime and the BPE tokenizer. Analysis only orchestrates: it asks
-  each task's runner for the selected model (`Task::model`: the one the
-  user picked, else the default) and never names a model; a new pick of
-  transcription model applies from the next transcript, and results made
-  already stay. A new model is a folder under its task, its `MODEL` in
-  `MODELS` and an arm in `runner`; a model in several sizes (Whisper) has
-  a `MODEL` for each in one folder. Nothing downloads on its own.
-  Settings → Models (the gear in the top bar, or cmd-,) lists each task
-  with its model, picked there when the task has more than one (saved per
-  user in the store), and downloads one or all of them, with progress
-  and cancel, through `<file>.part`; a failed download stays there with
-  Retry. `LocalAnalysis::model_tasks`
-  says which tasks a build runs; "Analyze" stays disabled until each has
-  its picked model downloaded. A runner whose files are missing fails
-  ("… is not downloaded") and its step is left out. While a model is
-  missing, the top bar's warning button
-  lists them; its notices (warnings and errors, such as a failed
-  download) can be dismissed for the session.
-* **Hearing tools:** `view_range` and `view_detail` open with the sound
-  script instead of the bare transcript; `get_audio` returns it for any
-  range, `get_music` lists tempo, downbeats and level changes (every beat
-  with `beats`),
-  `search_sounds` ranks 2 s steps by a description or by an example
-  range, and `view_audio` draws up to 30 s as a spectrogram lane per track
-  (ffmpeg's `showspectrumpic`) with words, sounds and beats marked
-  (`MediaService::audio_picture`). `blade` and `ripple_delete` take
-  `align: beat | downbeat | onset`; a target clear of words wins over a
-  nearer one on a word, and the cut still moves off words after.
-* **Agent:** `claude -p` verified end to end (collage → proposals → one
-  change set → accept); Codex adapter written from its docs, not yet run.
-  The editor binary doubles as the MCP server (`koo-editor mcp`).
-* **Store:** `.koo` project files (New, Open, Save, Save As, recent
-  files, unsaved-changes prompts), autosave and crash recovery, backups,
-  offline media with relink, settings, style profiles, source facts,
-  built-in recipes, chat sessions per project (each resumes its own
-  backend conversation), and the shared library of programs and presets.
-* **Deliver:** FFmpeg render graph, render queue, SRT/ASS, OTIO, FCPXML,
-  frame export.
-* **UI:** all six workspaces, timeline with change-set overlay, track
-  add/delete and cut stepping (Up/Down), viewer with playback, media pool
-  with removal, an inspector that shows the selected clip's properties by
-  kind (video, audio, caption, title), transcript/captions, chat sessions
-  with change-set review, agent settings, project menu.
+  per 20 ms frame out; a windowed-sinc resampler to 22.05 kHz stands in for
+  soxr), `larger-clap-general-audio.onnx` (78 MB; 10 s windows in, unit
+  vectors out; resampled to 48 kHz inside; dynamic int8, cosine 0.997 to the
+  float model) and `larger-clap-general-text.onnx` (141 MB; RoBERTa token
+  ids in; 8-bit block weights and an int8 embedding table, cosine 0.998).
+  The text tower's tokenizer comes from LAION's repository at a pinned
+  commit (`bpe.rs` encodes it). `KOOEDITOR_TAGGER_MODEL`,
+  `KOOEDITOR_BEATS_MODEL`, `KOOEDITOR_CLAP_AUDIO_MODEL`,
+  `KOOEDITOR_CLAP_TEXT_MODEL`, `KOOEDITOR_CLAP_VOCAB` and
+  `KOOEDITOR_CLAP_MERGES` point at local copies instead.
 
-The pro-editing build-out (§8) is merged on top:
+## 8. Agent
 
-* **FX:** GLSL effects, transitions and generators on the GPU (51
-  built-ins) and HTML/CSS/JS motion graphics (15 templates), with typed,
-  keyframeable parameters; programs written by the user or the agent live
-  in the project and are edited in the FX code editor.
-* **Compositor:** one program frame for the viewer, the export and the
-  agent's view tools; exported frames match the viewer at 38–39 dB PSNR
-  (the yuv420p encode is the limit).
-* **Editing:** transitions on cuts and edges, speed, enable/disable, clip
-  names and colors, crop/flip/blend modes, multi-select, copy/paste/
-  duplicate, nudge, a trim mode (slip, ripple, roll), resizable tracks.
-* **Color:** one grade pipeline in core, baked into a 3D LUT for export;
-  wheels, curves, scopes (waveform, parade, vectorscope, histogram), shot
-  matching, LUT list.
-* **Audio:** clip and track effect inserts matched between preview and
-  export, volume automation, crossfades, retimed audio, meters and a
-  mixer.
-* **Agent:** a tool for every command (76), `create_fx`/`update_fx` with
-  line-numbered compile errors, `preview_fx` to look at a program over
-  time, graded scopes, timecode and frame addressing, and an external MCP
-  bridge (below).
-* **Chat:** drag clips (Alt-drag on the timeline), media, effects,
-  transitions and transcript words into the composer, an `@` picker for
-  every object kind, and a resolved `<references>` block sent with each
-  message.
-
-Try it without media: `KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor`
-(`KOOEDITOR_DEMO_WORKSPACE=Captions` opens another workspace). More demo
-states: `KOOEDITOR_DEMO_FX=effects|generator|transition|library|code`,
-`KOOEDITOR_DEMO_SELECTION=clips|transition`, `KOOEDITOR_DEMO_CHAT=1`,
-`KOOEDITOR_DEMO_PLAY=1`, and `KOOEDITOR_DEMO_COMPOSE=<seconds>` (every
-compositor feature on real FFmpeg-made media).
-
-### Known gaps
-
-* Pending change sets are in memory only; they don't survive a restart.
-* Codex backend untested.
-* Inside connected speech (no pause between words) more than half of
-  the cuts still clip the tail or the onset of a word by more than 20 ms
-  (on hand-labelled English; nearly 9 in 10 before the aligner), and may
-  be heard; the agent's results say so. The aligner's 80 ms steps are the
-  limit: `facebook/wav2vec2-base-960h` (Apache-2.0, English only) left
-  4 points more cuts clean. whisper.cpp's DTW timestamps were tried and
-  came out 0.2–0.9 s late on real speech, so they are off.
-* Only English was measured against human labels. Spanish read speech
-  was only compared with another aligner (they agree about as well as on
-  English read speech). Japanese and Korean words are aligned as Whisper
-  splits them, not as Qwen's own word segmenters would.
-* Dutch and every other language outside the 11 keep Whisper's times as
-  measured on the audio.
-* The aligner needs about 600 MB of memory on top of Whisper (1.2 GB
-  peak while it runs on 30 s), a 589 MB download and ~4 s to load; it runs
-  at about 6 s per minute of audio on 4 CPU threads.
-* Speakers were measured on four AMI test meetings (four people each,
-  headset mix; pyannote's word-based reference): 4.1% of the speech of
-  one person at a time went to the wrong voice. On two meetings'
-  Whisper words, 98% of the words said by one person alone got a speaker
-  (98.5% of them right), and 59% of those said over someone else (96%
-  right; weighing overlaps by the windows labelled 8 points more of
-  them than leaving ties unattributed, no less right). Voices are
-  told apart within one item only; across items "Speaker 1" is not the
-  same person. Diarization runs at about 3% of the audio's length on 4
-  CPU threads (10 s for 5 minutes); the clustering fits on at most 2,000
-  voiceprints (about an hour of conversation) and matches the rest to
-  its voices.
-* ONNX Runtime adds about 25 MB to the binary, and the first build
-  downloads it (from pyke's CDN). Its build script unpacks the archive
-  very slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
-  makes the first debug build take minutes instead of hours.
-* The sound models were checked on a 64 s collage of real recordings
-  (speech, ESC-50 effects, a drum loop), not measured against labels:
-  laughter, glass, knocks, a dog, applause, the music and its tempo were
-  found, rain under speech was not. Sounds the tagger is unsure of carry
-  "?" in the script.
-* Silero misses some quiet or short speech. On 5 minutes of an AMI
-  meeting (headset mix), its ranges covered 89% of the labelled speech
-  and left 13 s of it in silences of 0.5 s or more; the energy VAD
-  covered 92% and left 5.5 s, but called 33 s outside the labels speech
-  (Silero 5 s). Where both found speech, Silero's ranges started 10 ms
-  and ended 30 ms later (medians). Whisper may still invent words over
-  sounds Silero takes for speech; the script shows them as speech, marked
-  "?" when unsure.
-* Transcription was measured on LibriSpeech test-other and dev-clean
-  (forced-aligned word times from `gilkeyio/librispeech-alignments`)
-  made into items that start talking at once, run on for minutes with
-  short pauses, fade out at the end of every phrase, or pass between two
-  to four speakers: 5,190 words through the whole pipeline, Whisper small
-  on 4 CPU threads. The word edges measured only where the aligner can't,
-  the silence before a stretch that fits one window, the beam search and
-  the holes heard again took the word error rate from 7.7% to 6.7% and
-  the words left out from 66 to 38: 28 to 12 at the end of a phrase, 12
-  to 7 at its start, and both items that lost their first word kept it.
-  Words heard on the far side of the pause between two phrases fell from
-  26 to 8. It all takes about 15% more time on the CPU, the beam search
-  most of it. Speakers were told apart as before (92% of the words in
-  the conversations). Whisper still now and then skips a short phrase and
-  puts the next one's words in its place, which leaves no hole. Moving
-  the aligner's edges next to a pause took the ends there that came over
-  30 ms early from 40% to 25% and the starts that came over 30 ms late
-  from 40% to 23%, with as many within 50 ms. Silences that keep the
-  words clipped over 50 ms off 8 of 50 fading last words, 15 before.
-* The Beat This! export was verified here from a mirrored copy of the
-  `final0` weights; the hosted file must be built from the official
-  checkpoint (`export_beat_this.py` downloads it from JKU's server).
-* No GPU video surface yet: the viewer paints decoded RGBA frames (the
-  PRD's GPUI video spike is still open), and Windows/macOS builds haven't
-  been run.
-* P1/P2 PRD items not yet built: nested sequences, music playlist UI,
-  voice cleanup, vertical reframing, voice input.
-* Mouse and keyboard interactions (drags, drops, context menus,
-  shortcuts) were checked by code review and screenshots of seeded states
-  only: the cloud containers have no input automation.
-* Preview vs export: noise reduction previews with an expander (export
-  uses `afftdn`); the limiter and time-stretch differ slightly in shape.
-* The FX code editor has no syntax highlighting (gpui-kit's `syntect`
-  feature is not vendored). A shader that never returns can stall the GPU.
-* A program an external agent proposes is usable by its later connections
-  only once the user accepts it.
-* If the editor crashes, its headless browser can keep running.
-* CPU fallbacks (no GPU adapter) are slow in debug builds; use release
-  builds on machines without a GPU.
-
-## 8. Pro editing: FX, shaders and HTML motion graphics
-
-The second build-out takes the editor to Resolve-level tools while keeping
-it agent-first: everything below is a `Command`, so the agent reaches it
-with the same precision as the UI.
-
-### Design
-
-* **One FX format** (`koo-core/src/fx/mod.rs`; its module docs are the
-  authoritative GLSL and HTML conventions). An `FxAsset` is a GLSL program
-  (effect, transition or generator) or an HTML/CSS/JS document (generator:
-  titles, lower thirds, motion graphics, image layouts) plus typed
-  parameters (number, bool, color, point, text, choice, image). Built-ins
-  ship in `fx/shaders.rs` and `fx/templates.rs`; programs the user or the
-  agent writes live in `Project::fx`, and can be saved to the user's
-  library (`koo-core::library`) for other projects, which use a copy. An
-  `FxInstance` uses an asset with parameter values and keyframes: on a
-  clip's effect stack, as a clip's transition, or as a generator clip's
-  content.
-* **GLSL** follows ShaderToy/gl-transitions: authors write
-  `effect(uv)`, `transition(uv)` or `generate(uv)`; the engine adds
-  uniforms and helpers and reports errors against the author's lines.
-* **HTML** renders in headless Chromium with an engine-owned clock (GSAP,
-  CSS animations, Web Animations, rAF and timers all follow clip time), so
-  frames are deterministic and exportable, with alpha. GSAP 3.15 and its
-  motion-graphics plugins are vendored in `koo-html/src/gsap` and preloaded;
-  templates build their animation in `kooTimeline`, which the engine reruns
-  when parameters or the clip length change.
-* **Engines behind traits:** `services::FxService` (`koo-gpu`, wgpu — the
-  same wgpu GPUI uses) and `services::HtmlService` (`koo-html`). Both may be
-  `None` (no GPU adapter, no browser); callers degrade quietly.
-* **Model additions:** clip effects, `transition_in`/`transition_out`
-  (resolved by `fx::transitions`), speed, enabled, name, color; transform
-  crop/flip/blend; grade offset/shadows/highlights/hue/curves; audio
-  effects on clips and tracks (`audiofx.rs`); crop and volume keyframes;
-  `PlaceClips` for paste/duplicate; scope readings and shot matching
-  (`scopes.rs`).
-* **Compositor:** `koo_core::compose::program` draws the program at a
-  time (picture → clip and timeline grade → effect stack in sequence
-  pixels → transform with crop/flip → blend mode; transitions blend each
-  side's own canvas), with `FxService::composite` doing placement and
-  blending (wgpu in `koo-gpu`, CPU reference in core). The viewer (paused
-  and playing), frame export, renders that use FX (piped as raw RGBA into
-  the FFmpeg graph, which keeps captions and audio) and the agent's view
-  and scope tools all use it; ranges without FX still render through the
-  graph. Source pictures come through `compose::Pictures` (single decodes
-  or per-layer streams that honour speed).
+* **Backends** (`koo-agent/src/backend/`): Claude runs as
+  `claude -p --input-format stream-json --output-format stream-json` with
+  only the koo MCP server (`--strict-mcp-config`, `--tools ""`,
+  `--permission-mode dontAsk`, no setting sources or slash commands), the
+  system prompt, `--model`/`--effort`, and `--resume` or `--session-id`.
+  Codex runs as `codex exec --json --sandbox read-only` with the user's
+  config and rules ignored, shell and patch tools off, and the MCP server,
+  developer instructions, model and reasoning effort as `-c` overrides,
+  resuming its thread. Each turn runs in an empty workdir under
+  `agent/work`, so the user's own CLAUDE.md/AGENTS.md are not picked up. A
+  backend that lost its session is retried fresh. `KOOEDITOR_CLAUDE` and
+  `KOOEDITOR_CODEX` point at the CLIs.
+* **Models and thinking:** two pickers next to Send list what the installed
+  CLI offers (Claude's stream-JSON `initialize` request, Codex's
+  `model/list` on `codex app-server`), cached in `agent/models.json` and
+  refreshed in the background; each model brings its thinking levels.
+  Choices are kept per backend in the user settings.
+* **MCP server:** `koo_agent::mcp::run()`, launched by the backend as
+  `$KOOEDITOR_MCP`, else the `koo-mcp` binary next to the editor, else
+  `koo-editor mcp`. It connects to the editor over TCP on 127.0.0.1 with the
+  turn's token (`KOO_BRIDGE`/`KOO_TOKEN`).
+* **Roles and permissions** (`koo-core/src/bus.rs`): `AgentRole::Editor`
+  (default) or `Builder` (read tools, memory and FX authoring only), each
+  with its own prompt and backend session. Permissions are per
+  `ToolCategory`: read and view are always allowed; edit categories are Off
+  or Propose (never auto-applied); project memory (rules, recipes, facts,
+  saving to the library) and deliver (renders, exports) always need the
+  user's approval, asked with Approve/Deny cards above the composer and
+  carried out by `agent_link/approve.rs`; the outcome reaches the agent in
+  the next turn's `<approvals>` block. A "Web" switch (off by default,
+  overridable per project) gives Claude WebSearch/WebFetch and Codex web
+  search.
+* **Tools** (`koo-agent/src/tools/`): 78 in the catalog (76 plus
+  `load_tools` and `run_tool`). Remove, move and detail operations are flags
+  of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
+  Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
+  `transform`, `captions`, `color`, `audio`, `effects`, `overlays`,
+  `memory`, `deliver`) the turn is likely to need, picked from the
+  workspace, the selection and words in the message. A chat keeps the list
+  it started with (`agent/tool_groups.json`) so the backend's prompt cache
+  holds; later groups come through `load_tools` and are called with
+  `run_tool`. External MCP clients see every tool. Each turn's use, with
+  result sizes, is logged to `agent/tool_usage.jsonl`. Results are compact
+  JSON that leave out neutral defaults.
+* **Seeing and hearing:** `view_range` (collages, opening with the sound
+  script), `view_frame` (annotated, with a `zoom` region under a pixel
+  grid), `get_layout`, `get_scopes`, `preview_fx`, `get_audio` (the sound
+  script for any range), `get_music` (tempo, downbeats, level changes; every
+  beat with `beats`), `search_sounds` (2 s steps ranked by a description or
+  an example range) and `view_audio` (up to 30 s of spectrogram lanes).
+  `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
+  target clear of words wins over a nearer one on a word.
+* **Prompt** (`koo-agent/src/prompt.rs`): the system prompt is the tool
+  guidance (with or without web), the shared rules (seeing and hearing,
+  time formats, references, cutting in pauses, protected ranges), the
+  role's part, the FX conventions, the language and the user's standing
+  instructions. Each message carries an `<editor_context>` (project
+  summary, format, workspace, playhead, selection, in/out, selected words),
+  the approved style rules, a recipe line, `<approvals>`, and a
+  `<references>` block when the user referenced objects.
+* **Chat** (`ui/chat*`): sessions per project in
+  `paths::projects()/<project>.chats.json`, each resuming its own backend
+  conversation (`agent/sessions.json`). Tool calls stack into one card per
+  run. The change-set card has Preview, Review (a checklist with ticks),
+  Reject and Accept. `ask_user` shows up to six choices. Recipes run as
+  `/name key=value …` (seven built-ins: rough-cut, dead-time, teaser,
+  captions, zooms, music, feedback); cmd/ctrl-K opens the quick command bar.
+* **References:** the composer's `@` picker and drops (Alt-drag clips,
+  transitions and markers from the timeline; media, effects, audio effects,
+  transitions and transcript words; "Add to chat" menu items) insert chips
+  that are sent as tokens the agent reads: `@clip <id8>`, `@media <id8>`,
+  `@marker <id8 or name>`, `@track <id8 or name>`, `@bin <id8>`,
+  `@effect <clip id8>/<effect id8>`, `@transition <clip id8>/in|out`,
+  `@fx <builtin key or project id8>`, `@audiofx <kind>`,
+  `@range <start>-<end>` (timeline seconds, three decimals) and
+  `@time <secs>`. `<id8>` is the id's `Display`. Clicking a chip reveals
+  the object in the editor.
 
 ### Driving the editor from an external agent
 
@@ -598,60 +533,221 @@ args = ["mcp"]
 External calls act with the agent's current role and permissions. Their
 edits land in an "External agent" change set that goes to review when the
 client disconnects or after 90 s without a call; `ask_user` is not
-available to them. The HTML engine finds Chrome, Chromium, Edge or Brave
-on its own; set `KOOEDITOR_CHROME` to use another build.
+available to them.
 
-### Streams
+## 9. Persistence
 
-Each stream runs in its own cloud session, branched from the foundation on
-`claude/zen-fermat-fzspvz`, and pushes to its own branch. The coordinator
-session merges them.
+* **Project files** (`koo-store/src/project_file.rs`): `.koo` JSON
+  (`format: "koo-project"`, `version: 1`), written atomically; media keeps
+  its absolute path and its path relative to the file, tried in that order;
+  per-project agent setting overrides travel in the file. New, Open, Save,
+  Save As and recent files (cmd/ctrl-N, O, S, shift-S) are in the project
+  menu (`koo-editor/src/projects.rs`), with a dot while there are unsaved
+  changes and a Save / Don't Save / Cancel question before New, Open, Quit
+  or closing the window.
+* **Autosave and backups:** unsaved changes autosave to
+  `paths::autosave()/<id>.koo` (1 s after the last change, at most 5 s after
+  the first) for crash recovery; saved files get a backup in
+  `paths::backups()` at most every 5 minutes, 10 kept.
+* **Offline media** is flagged with a notice and relinked from a folder
+  (`koo-editor/src/relink.rs`): matched by file name, confirmed by
+  fingerprint when it can be.
+* **Database** (`paths::database()`, SQLite in WAL mode,
+  `koo-store/src/schema.rs`): `meta` (agent settings, model picks, recent
+  projects), `style_profiles` (caption styles), `style_rules`,
+  `source_facts`, `media_fingerprints` and `recipes`. Nothing per project.
+  Imported Markdown notes become proposed style rules, one per bullet or
+  paragraph (S5); facts tied to a path are suspended when its media is
+  replaced (F2); the seven built-in recipes are re-added on open.
+* **Caption styles** (`CaptionStyle`, `koo-core/src/memory.rs`): font,
+  weight, spacing, fill, stroke, shadow, background box, position and
+  nudge, a spoken-word highlight (color, box, karaoke, word-by-word reveal)
+  and intro/outro motion (fade, pop, slide), with twelve ready-made looks;
+  sizes are at 1080p, scaled by the frame's short side.
+* **Other user files** under `paths::home()`: `projects/` (chats),
+  `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
+  tool usage, work dirs), `assets/`, `logs/`, `bridge.json`.
 
-| Stream | Branch | Owns |
+## 10. Deliver
+
+* **Render graph** (`koo-deliver/src/graph.rs`): one FFmpeg `filter_complex`
+  per job, sources opened inside it. Cuts, transforms, keyframes as FFmpeg
+  expressions matching the viewer's curves, the grade as a `lut3d`, captions
+  and titles burned in with ASS (libass; the viewer letters them with the
+  same timing code in `captions/motion.rs`), gain, fades, equal-power
+  crossfades, `atempo` retiming, ducking with `sidechaincompress`, audio
+  effects, and two-pass `loudnorm`.
+* **Composited ranges** (`composed.rs`): ranges that need the compositor
+  (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
+  anchor, corner pins, masks, retimed media; `compose::needs_compositor`)
+  are drawn by `compose::program` from the original media and piped into
+  the graph as raw RGBA, which keeps captions and audio.
+* **Queue** (`queue.rs`): jobs run one after another with progress from
+  `-progress pipe:1`, can be cancelled and never overwrite a file.
+* **Presets:** 1080p60, 1080p30 and 4K30 H.264, ProRes 422 HQ, WAV and
+  Custom, sized by the short side so they keep the sequence's shape
+  ("1080p" is 1080 × 1920 for 9:16).
+* **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
+
+## 11. UI
+
+Workspaces (`Workspace::ALL`, rendered in `koo-editor/src/app.rs`): Edit
+(media pool and effects library on the left, viewer, inspector, timeline),
+Captions (transcript and caption style panel), Color (wheels, curves,
+scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
+the right in every workspace. The FX code editor replaces
+the inspector while a program is open. With nothing selected the inspector
+shows the sequence: format, resolution, and Fit/Fill for all footage (whose
+Reframe asks the agent to fill the frame and keep each subject in shot).
+
+The user asked for a clean, minimal UI, and CLAUDE.md says "let the layout
+do the explaining":
+
+* No secondary labels, helper text or descriptions under controls. Use icons
+  with tooltips, placeholders in inputs, and grouping by spacing.
+* Colors come from `cx.theme()` only. Change sets use `theme.green` (added),
+  `theme.red` (removed) and `theme.yellow` (modified), drawn as tints and
+  outlines, never as banners.
+* Dark theme by default, compact density (`text_sm`/`text_xs`, 28 px rows).
+* Empty states are a single muted line or an icon, not a paragraph.
+* Prefer gpui-kit components (`gpui_kit::component::*`: button, input,
+  slider, switch, select, tab, menu, popover, tooltip, scroll) over
+  hand-rolled widgets.
+
+### Looking at the app
+
+`scripts/screenshot.sh out.png [wait]` builds the editor and renders it
+under Xvfb (with `KOOEDITOR_HOME=/tmp/koo-editor-dev` by default). There is
+no input automation in the cloud containers, so seed the states you need to
+see:
+
+| Variable | Values | Seeds |
 | --- | --- | --- |
-| gpu | `claude/fx-gpu` | new `crates/koo-gpu`; `koo-core/src/fx/shaders.rs`; `fx:` in `state.rs` `services()` |
-| html | `claude/fx-html` | new `crates/koo-html`; `koo-core/src/fx/templates.rs`; `html:` in `services()` |
-| timeline | `claude/fx-timeline` | `ui/timeline.rs`, `ui/timeline/*` |
-| library | `claude/fx-library` | `ui/inspector.rs`, `ui/inspector/{clip,edit,param}.rs` + new inspector files; new `ui/library*`, `ui/code_editor.rs`; the Edit arm of `app.rs` |
-| chat | `claude/fx-chat` | `ui/chat.rs`, `ui/chat/*`; `resolve_references` in `koo-core/src/query.rs`; word drag/"Add to chat" in `ui/transcript*` |
-| agent | `claude/fx-agent` | `crates/koo-agent/**`; `agent_link.rs`, `agent_link/` |
-| audio | `claude/fx-audio` | `ui/viewer/audio.rs`, `ui/inspector/audio.rs`, new `ui/mixer*`; audio half of `koo-deliver/src/graph.rs` + new `audio_fx.rs`; `koo-core/src/audiofx.rs`; the Audio arm of `app.rs` |
-| color | `claude/fx-color` | new `koo-core/src/grade.rs`; `koo-core/src/scopes.rs`; `ui/viewer/grade.rs`, `ui/inspector/color*`, new `ui/scopes.rs`; `grade_filters` in `graph.rs` (+ new `koo-deliver/src/grade.rs`); the Color arm of `app.rs` |
+| `KOOEDITOR_DEMO` | `1` | A demo project with stand-in engines |
+| `KOOEDITOR_DEMO_WORKSPACE` | `Edit`, `Captions`, `Color`, `Audio`, `Deliver` | The workspace to open |
+| `KOOEDITOR_DEMO_FX` | `effects`, `generator`, `transition`, `library`, `code` | An effects or library view |
+| `KOOEDITOR_DEMO_SELECTION` | `clips`, `transition` | A selection |
+| `KOOEDITOR_DEMO_CHAT` | any | Chat references |
+| `KOOEDITOR_DEMO_CHAT_PICKER` | `@query` | The composer's `@` list, open |
+| `KOOEDITOR_DEMO_VIEW` | `captions` | The transcript's captions view |
+| `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
+| `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 
-Rules for every stream (in addition to AGENTS.md):
+```sh
+KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor
+```
 
-* **Edit only what you own.** Shared files are additive only:
-  `state.rs` (add fields and methods in one block marked with your stream;
-  don't change existing signatures), `app.rs` (only your arm), `demo.rs`
-  (additive demo seeding for your feature, in its own function). Never
-  change a public type in `koo-core` outside your files; if you need one,
-  work around it and say so in your report.
-* **Shared seams** come from the foundation: the drag payloads in
-  `ui/mod.rs` (`MediaDrag`, `FxDrag`, `AudioFxDrag`, `RefDrag`),
-  `EditorState::select_transition` / `selected_transition`, and
-  `mention` / `take_mentions` (references queued for the chat composer).
-  Leave the foundation's `#[allow(dead_code)]` markers alone; the
-  coordinator removes them when the seams are in use.
-* **Chat reference tokens** (what the agent reads; every stream that
-  produces or parses them uses exactly this): `@clip <id8>`,
-  `@media <id8>`, `@marker <id8>`, `@track <id8>`, `@bin <id8>`,
-  `@effect <clip id8>/<effect id8>`, `@transition <clip id8>/in|out`,
-  `@fx <builtin key or project id8>`, `@range <start>-<end>` (timeline
-  seconds, three decimals) and `@time <secs>`. `<id8>` is the id's
-  `Display`.
-* **Agent parity:** any UI action that changes the project goes through a
-  `Command`.
-* **UI copy:** let the layout explain (§4).
-* **No tests** of any kind; throwaway verification programs live outside
-  the repo. Before every push: `cargo fmt --check`,
-  `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo build --workspace`, `cargo test --workspace` (0 tests).
-* **Looking at the app:** `scripts/screenshot.sh out.png [wait]` renders it
-  under Xvfb; `KOOEDITOR_DEMO=1` seeds a demo project and
-  `KOOEDITOR_DEMO_WORKSPACE=Color|Audio|Captions|Deliver` opens a
-  workspace. There is no input automation in the containers, so seed the
-  states you need to see. Chromium for the HTML engine is under
-  `/opt/pw-browsers/` in the cloud containers.
-* **Report:** end your session with a short report (what you built by
-  file, how you verified it, what is left, integration notes, skipped test
-  items) and make sure everything is pushed.
+`scripts/cloud-session-start.sh` prepares cloud sessions: `cargo fetch`,
+`glslc` and the Vulkan headers for whisper.cpp, and lavapipe so the window
+opens under Xvfb. Chromium for the HTML engine is under `/opt/pw-browsers/`
+there.
+
+## 12. PRD → code map
+
+| PRD | Where |
+| --- | --- |
+| M1 import, bins, search | `ui/media_pool*`, `Command::ImportMedia` |
+| M2 inspector, M4 proxies | `koo-media`, `ui/media_pool*` |
+| M3 analysis | `koo-analysis`, `koo-models` |
+| E1, E2 timeline and tools | `ui/timeline*`, `koo-core/src/edit.rs` |
+| E3 transcript editing | `ui/transcript*`, `koo-core/src/query.rs`, `cuts.rs` |
+| E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
+| E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
+| E8 timecode readout | `Clip::to_source`, viewer |
+| C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
+| K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
+| A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
+| D1 render | `koo-deliver`, `ui/deliver.rs` |
+| AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
+| V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
+| S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
+
+## 13. Known gaps
+
+* Pending change sets and undo history are in memory only; they don't
+  survive a restart.
+* Codex backend written from its docs; not verified end to end the way
+  `claude -p` is.
+* No GPU video surface: the viewer paints read-back frames as images.
+  Windows and macOS builds haven't been run here.
+* P1/P2 PRD items not built: nested sequences, a music playlist UI (the
+  `SetPlaylist` command and agent tool exist), voice cleanup, voice input.
+* Mouse and keyboard interactions (drags, drops, context menus, shortcuts)
+  were checked by code review and screenshots of seeded states only.
+* Preview vs export: noise reduction previews with an expander (export uses
+  `afftdn`); the limiter and time-stretch differ slightly in shape.
+* The FX code editor has no syntax highlighting (gpui-kit's `syntect`
+  feature is not vendored). A shader that never returns can stall the GPU.
+* A program an external agent proposes is usable by its later connections
+  only once the user accepts it.
+* If the editor crashes, its headless browser can keep running.
+* CPU fallbacks (no GPU adapter) are slow in debug builds; use release
+  builds on machines without a GPU.
+* ONNX Runtime adds about 25 MB to the binary, and the first build
+  downloads it (from pyke's CDN). Its build script unpacks the archive very
+  slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
+  makes the first debug build take minutes instead of hours.
+
+### Analysis accuracy
+
+* Inside connected speech (no pause between words) more than half of the
+  cuts still clip the tail or the onset of a word by more than 20 ms (on
+  hand-labelled English; nearly 9 in 10 before the aligner), and may be
+  heard; the agent's results say so. The aligner's 80 ms steps are the
+  limit: `facebook/wav2vec2-base-960h` (Apache-2.0, English only) left 4
+  points more cuts clean. whisper.cpp's DTW timestamps were tried and came
+  out 0.2–0.9 s late on real speech, so they are off.
+* Only English was measured against human labels. Spanish read speech was
+  only compared with another aligner (they agree about as well as on
+  English read speech). Japanese and Korean words are aligned as Whisper
+  splits them, not as Qwen's own word segmenters would. Dutch and every
+  other language outside the 11 keep Whisper's times as measured on the
+  audio.
+* The aligner needs about 600 MB of memory on top of Whisper (1.2 GB peak
+  while it runs on 30 s), a 589 MB download and ~4 s to load; it runs at
+  about 6 s per minute of audio on 4 CPU threads.
+* Speakers were measured on four AMI test meetings (four people each,
+  headset mix; pyannote's word-based reference): 4.1% of the speech of one
+  person at a time went to the wrong voice. On two meetings' Whisper words,
+  98% of the words said by one person alone got a speaker (98.5% of them
+  right), and 59% of those said over someone else (96% right; weighing
+  overlaps by the windows labelled 8 points more of them than leaving ties
+  unattributed, no less right). Voices are told apart within one item
+  only; across items "Speaker 1" is not the same person. Diarization runs
+  at about 3% of the audio's length on 4 CPU threads (10 s for 5 minutes);
+  the clustering fits on at most 2,000 voiceprints (about an hour of
+  conversation) and matches the rest to its voices.
+* The sound models were checked on a 64 s collage of real recordings
+  (speech, ESC-50 effects, a drum loop), not measured against labels:
+  laughter, glass, knocks, a dog, applause, the music and its tempo were
+  found, rain under speech was not. Sounds the tagger is unsure of carry
+  "?" in the script.
+* Silero misses some quiet or short speech. On 5 minutes of an AMI meeting
+  (headset mix), its ranges covered 89% of the labelled speech and left
+  13 s of it in silences of 0.5 s or more; the energy VAD covered 92% and
+  left 5.5 s, but called 33 s outside the labels speech (Silero 5 s). Where
+  both found speech, Silero's ranges started 10 ms and ended 30 ms later
+  (medians). Whisper may still invent words over sounds Silero takes for
+  speech; the script shows them as speech, marked "?" when unsure.
+* Transcription was measured on LibriSpeech test-other and dev-clean
+  (forced-aligned word times from `gilkeyio/librispeech-alignments`) made
+  into items that start talking at once, run on for minutes with short
+  pauses, fade out at the end of every phrase, or pass between two to four
+  speakers: 5,190 words through the whole pipeline, Whisper small on 4 CPU
+  threads. The word edges measured only where the aligner can't, the
+  silence before a stretch that fits one window, the beam search and the
+  holes heard again took the word error rate from 7.7% to 6.7% and the
+  words left out from 66 to 38: 28 to 12 at the end of a phrase, 12 to 7 at
+  its start, and both items that lost their first word kept it. Words heard
+  on the far side of the pause between two phrases fell from 26 to 8. It
+  all takes about 15% more time on the CPU, the beam search most of it.
+  Speakers were told apart as before (92% of the words in the
+  conversations). Whisper still now and then skips a short phrase and puts
+  the next one's words in its place, which leaves no hole. Moving the
+  aligner's edges next to a pause took the ends there that came over 30 ms
+  early from 40% to 25% and the starts that came over 30 ms late from 40%
+  to 23%, with as many within 50 ms. Silences that keep the words clipped
+  over 50 ms off 8 of 50 fading last words, 15 before.
+* The Beat This! export was verified here from a mirrored copy of the
+  `final0` weights; the hosted file must be built from the official
+  checkpoint (`export_beat_this.py` downloads it from JKU's server).
