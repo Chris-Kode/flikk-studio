@@ -35,6 +35,15 @@ impl Default for SoundModels {
     }
 }
 
+/// The parts of a pass besides the tagger.
+#[derive(Clone, Copy, Debug)]
+pub struct Pass {
+    /// Vectors for sound search.
+    pub search: bool,
+    /// Beats in the music found.
+    pub beats: bool,
+}
+
 /// What a pass heard, and what it could not do.
 pub struct Heard {
     pub sounds: Vec<Sound>,
@@ -48,13 +57,15 @@ impl SoundModels {
     /// of the same stream, for the edges of short sounds; `hearing` and
     /// `beating` report the two halves' progress. The tagger is required;
     /// without the sound search model or the beat tracker the pass goes on,
-    /// noting why.
+    /// noting why. `pass` leaves either out.
+    #[allow(clippy::too_many_arguments)]
     pub fn hear(
         &self,
         path: &Path,
         stream: u32,
         duration: Option<Time>,
         levels: Option<&Levels>,
+        pass: Pass,
         hearing: &(dyn Fn(f32) + Sync),
         beating: &(dyn Fn(f32) + Sync),
     ) -> Result<Heard> {
@@ -64,7 +75,9 @@ impl SoundModels {
         let mut clips = Slider::new(searched.len, searched.step);
         let mut scores: Vec<Scores> = Vec::new();
         // Until the sound search model fails.
-        let mut vectors = Some(SoundVectors::new(searched.step_time(), searched.len_time()));
+        let mut vectors = pass
+            .search
+            .then(|| SoundVectors::new(searched.step_time(), searched.len_time()));
         let mut pending_tags = Vec::new();
         let mut pending_clips = Vec::new();
         let mut run = |tags_left: &mut Vec<Vec<f32>>, clips_left: &mut Vec<Vec<f32>>, all: bool| {
@@ -103,7 +116,9 @@ impl SoundModels {
             &mut |samples| {
                 total += samples.len();
                 tags.push(samples, &mut pending_tags);
-                clips.push(samples, &mut pending_clips);
+                if pass.search {
+                    clips.push(samples, &mut pending_clips);
+                }
                 run(&mut pending_tags, &mut pending_clips, false)
             },
         )?;
@@ -116,7 +131,7 @@ impl SoundModels {
         let (sounds, mut music) = self.tagger.read(&scores, end, levels);
         let all: i64 = music.iter().map(|m| m.range.duration().0).sum();
         let mut done = 0;
-        for m in music.iter_mut() {
+        for m in music.iter_mut().filter(|_| pass.beats) {
             beating(done as f32 / all.max(1) as f32);
             done += m.range.duration().0;
             let stretch = TimeRange::new(

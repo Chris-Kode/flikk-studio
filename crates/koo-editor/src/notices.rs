@@ -14,6 +14,8 @@ pub enum Level {
 pub enum NoticeAction {
     /// Open Settings on the Models tab.
     OpenModels,
+    /// Open Settings on the Integrations tab.
+    OpenIntegrations,
     /// Pick a folder to relink offline media from.
     Relink,
 }

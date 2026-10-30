@@ -1,16 +1,18 @@
 //! Carrying out an approved agent request: memory goes to the store,
-//! programs to the user's library, renders and exports to `koo-deliver`. Outputs always get a free name, so
-//! nothing here overwrites a file.
+//! programs to the user's library, renders and exports to `koo-deliver`,
+//! music and sound effects to the provider set for them. Outputs always get
+//! a free name, so nothing here overwrites a file.
 
 use crate::persistence;
 use anyhow::{Context as _, Result, anyhow, bail};
 use koo_agent::tools::ApprovalRequest;
+use koo_agent::tools::generate::{self, Placement};
 use koo_core::agent::AgentSettings;
 use koo_core::memory::{
     CaptionStyle, FactKind, FactStatus, Recipe, RecipeParam, RuleScope, RuleStatus, SourceFact,
     StyleRule,
 };
-use koo_core::model::{Fingerprint, Project};
+use koo_core::model::{Fingerprint, MediaItem, Project};
 use koo_core::services::Services;
 use koo_core::{JobId, RecipeId, RuleId, Time, TimeRange};
 use koo_deliver::{RenderQueue, RenderRequest, RenderSettings};
@@ -25,6 +27,16 @@ pub enum Started {
     Render(JobId, PathBuf),
     /// Runs off the UI thread and yields the line for the card.
     Background(Box<dyn FnOnce() -> Result<String> + Send>),
+    /// Runs off the UI thread and yields a file a provider made, for the
+    /// pool, with where to place it.
+    Generate(Box<dyn FnOnce() -> Result<Generated> + Send>),
+}
+
+/// What an approved generation made.
+pub struct Generated {
+    pub item: MediaItem,
+    pub placement: Option<Placement>,
+    pub summary: String,
 }
 
 pub struct Inputs<'a> {
@@ -55,6 +67,26 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 services: inputs.services.clone(),
             })?;
             Ok(Started::Render(id, output))
+        }
+        "generate_audio" => {
+            let (request, placement) = generate::from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
+            let generation = inputs
+                .services
+                .generation
+                .clone()
+                .ok_or_else(|| anyhow!("generation is not available"))?;
+            let media = inputs.services.media.clone();
+            Ok(Started::Generate(Box::new(move || {
+                let made = generation
+                    .generate(&request, &koo_core::paths::generated())
+                    .map_err(|e| anyhow!(generate::error_text(&e)))?;
+                Ok(Generated {
+                    item: koo_core::cloud::media_item(&made, media.as_deref()),
+                    placement,
+                    summary: request.summary(),
+                })
+            })))
         }
         "export_otio" => {
             let project = inputs.project.clone();

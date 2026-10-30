@@ -38,6 +38,10 @@ pub struct Transcript {
     pub language: String,
     pub words: Vec<Word>,
     pub speakers: Vec<Speaker>,
+    /// What transcribed it: a local model's id ("whisper-small-q8") or a
+    /// provider's model ("elevenlabs/scribe_v2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 impl Transcript {
@@ -241,12 +245,58 @@ impl SoundVectors {
     }
 }
 
+/// The steps analysis runs, as set in Settings → Analysis. Voice activity
+/// and levels always run; a step left out stays empty in the results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalysisSteps {
+    pub transcript: bool,
+    /// Needs `transcript`.
+    pub speakers: bool,
+    /// Sounds and music.
+    pub sounds: bool,
+    /// Needs `sounds`, which finds the music.
+    pub beats: bool,
+    /// Needs `sounds`, which hears the audio for it.
+    pub sound_search: bool,
+    pub shots: bool,
+}
+
+impl Default for AnalysisSteps {
+    fn default() -> Self {
+        Self {
+            transcript: true,
+            speakers: true,
+            sounds: true,
+            beats: true,
+            sound_search: true,
+            shots: true,
+        }
+    }
+}
+
+impl AnalysisSteps {
+    /// Speakers without a transcript, or beats without the music, don't run.
+    pub fn speakers(&self) -> bool {
+        self.transcript && self.speakers
+    }
+
+    pub fn beats(&self) -> bool {
+        self.sounds && self.beats
+    }
+
+    /// Sound vectors are made in the sound pass.
+    pub fn sound_search(&self) -> bool {
+        self.sounds && self.sound_search
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     pub transcript: Option<Transcript>,
     /// Speech regions from voice activity detection: Silero's, which leaves
     /// music out, or in a build without it an energy VAD's, which takes
-    /// music for speech.
+    /// music for speech. When a provider transcribed, where its words are.
     pub speech: Vec<TimeRange>,
     pub shot_changes: Vec<Time>,
     /// Loudness of the analyzed audio stream, for placing cuts in pauses.

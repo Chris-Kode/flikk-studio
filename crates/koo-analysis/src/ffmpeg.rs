@@ -140,6 +140,36 @@ pub fn extract_audio(
         .collect())
 }
 
+/// The `n`th audio stream as lossless mono FLAC in `out`, at its own rate
+/// up to `max_rate`, for a provider to hear: nothing lost, and about half
+/// the size of the same samples as WAV.
+pub fn encode_flac(
+    path: &Path,
+    n: u32,
+    rate: Option<u32>,
+    max_rate: u32,
+    out: &Path,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<()> {
+    let mut args = strs(["-v", "error", "-y"]);
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        format!("0:a:{n}"),
+        "-vn".into(),
+        "-ac".into(),
+        "1".into(),
+    ]));
+    if rate.is_none_or(|r| r > max_rate) {
+        args.extend(strs(["-ar".to_string(), max_rate.to_string()]));
+    }
+    args.extend(strs(["-c:a", "flac", "-compression_level", "5"]));
+    args.push(out.as_os_str().to_owned());
+    run(&args, duration, progress, discard)?;
+    Ok(())
+}
+
 /// The `n`th audio stream as mono `f32` at `rate`, over the source range
 /// `range` when given, handed to `sink` about a second at a time so that a
 /// long file never sits in memory.

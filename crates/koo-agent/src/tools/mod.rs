@@ -11,6 +11,7 @@ mod audio;
 pub mod catalog;
 mod edit;
 mod fx;
+pub mod generate;
 pub mod groups;
 mod layout;
 mod masks;
@@ -122,6 +123,13 @@ pub enum JobDone {
         commands: Vec<Command>,
         reason: String,
         excerpts: Vec<String>,
+    },
+    /// A file a provider made, to add to the pool and place on the UI
+    /// thread.
+    Generated {
+        item: Box<koo_core::model::MediaItem>,
+        placement: Option<generate::Placement>,
+        summary: String,
     },
 }
 
@@ -267,6 +275,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),
         "use_library_fx" => fx::use_library(ctx, &args),
+        "generate_audio" => generate::serve(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }

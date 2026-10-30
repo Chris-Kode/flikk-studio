@@ -2,6 +2,10 @@
 //! its methods instead of touching the bus directly, so every change goes
 //! through the same path whether it came from a button or the agent.
 
+mod cloud;
+
+pub use cloud::{Check, Generating, ProviderStatus};
+
 use crate::agent_link::{AgentLink, approve};
 use crate::notices::{Level, Notice, NoticeAction, Notices};
 use crate::persistence;
@@ -117,6 +121,17 @@ pub struct EditorState {
     pub agent_models: HashMap<Backend, Vec<AgentModel>>,
     /// Backends whose CLI was asked for its models this run, or is being.
     models_asked: HashSet<Backend>,
+    // --- online providers
+    /// Transcription and generation on the providers picked in Settings →
+    /// Integrations; also `services.generation`.
+    pub cloud: Arc<koo_cloud::Cloud>,
+    /// Each provider's key and account, by provider id.
+    providers: HashMap<&'static str, ProviderStatus>,
+    /// The analysis steps set in Settings → Analysis.
+    pub analysis_steps: koo_core::analysis::AnalysisSteps,
+    /// Music and sound effects being made from the media pool.
+    pub generating: Vec<Generating>,
+    next_generation: u64,
 }
 
 impl EditorState {
@@ -153,6 +168,10 @@ impl EditorState {
                 }
             }
         });
+        let cloud = Arc::new(koo_cloud::Cloud::new(
+            persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
+        ));
+        let analysis_steps = persistence::with_store(|s| s.analysis_steps()).unwrap_or_default();
         let model_tasks = koo_analysis::LocalAnalysis::model_tasks();
         let downloaded = model_tasks
             .iter()
@@ -165,7 +184,7 @@ impl EditorState {
             // A recovered project's autosave already holds its changes.
             autosaved: Some(version),
             overrides,
-            services: services(),
+            services: services(&cloud),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
             in_out: None,
@@ -204,7 +223,14 @@ impl EditorState {
             _models_poll: models_poll,
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
+            cloud,
+            providers: HashMap::new(),
+            analysis_steps,
+            generating: Vec::new(),
+            next_generation: 1,
         };
+        this.configure_analysis();
+        this.load_keys(cx);
         this.refresh_model_notices();
         this.check_offline();
         this.load_agent_memory();
@@ -1069,25 +1095,30 @@ impl EditorState {
                     _ => self.push_agent(text, vec![], None),
                 },
                 AgentEvent::Question { text, choices } => self.push_agent(text, choices, None),
-                AgentEvent::ChangeSetReady { change_set } => {
-                    self.bus.close_change_set(change_set);
-                    // A set the chat grew over several turns is reviewed at
-                    // its latest message only.
-                    self.chat.retain(|m| m.change_set != Some(change_set));
-                    let title = self
-                        .bus
-                        .change_set(change_set)
-                        .map(|s| s.title.clone())
-                        .unwrap_or_default();
-                    self.push_agent(title, vec![], Some(change_set));
-                }
+                AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => self.push_tool(entry),
                 AgentEvent::TurnDone => self.save_chat(),
                 AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => self.status = Some(message),
             }
         }
+        // Generated media the agent was allowed to make went into the pool.
+        self.autosave();
         cx.notify();
+    }
+
+    /// Close `change_set` for review and post its card on the newest
+    /// message: a set the chat grew over several turns is reviewed there
+    /// only.
+    fn post_change_set(&mut self, change_set: ChangeSetId) {
+        self.bus.close_change_set(change_set);
+        self.chat.retain(|m| m.change_set != Some(change_set));
+        let title = self
+            .bus
+            .change_set(change_set)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        self.push_agent(title, vec![], Some(change_set));
     }
 
     fn push_agent(&mut self, text: String, choices: Vec<String>, change_set: Option<ChangeSetId>) {
@@ -1120,7 +1151,7 @@ impl EditorState {
 
 /// The engines, wired once per window. Media is optional: without FFmpeg
 /// the editor still opens, and panels degrade quietly.
-fn services() -> Services {
+fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
     let media = match koo_media::FfmpegMedia::new() {
         Ok(m) => Some(Arc::new(m) as Arc<dyn MediaService>),
         Err(e) => {
@@ -1149,6 +1180,7 @@ fn services() -> Services {
         html,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
+        generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
     }
 }
 
@@ -1163,6 +1195,16 @@ impl EditorState {
 
     pub fn cancel_download(&mut self, model: &koo_models::Model, cx: &mut Context<Self>) {
         self.models.cancel(model);
+        cx.notify();
+    }
+
+    /// Delete `model`'s files: the user asked. Analysis that needs it waits
+    /// until it is downloaded again.
+    pub fn delete_model(&mut self, model: &koo_models::Model, cx: &mut Context<Self>) {
+        if let Err(e) = model.delete() {
+            self.status = Some(format!("{e:#}"));
+        }
+        self.poll_models(cx);
         cx.notify();
     }
 
@@ -1184,10 +1226,17 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Every task analysis runs on a model has the model picked for it
-    /// downloaded, so media can be analyzed.
+    /// Media can be analyzed: each task it needs a model for has the one
+    /// picked downloaded, and a provider transcribing has its key.
     pub fn models_ready(&self) -> bool {
-        self.model_tasks.iter().all(|t| t.model().is_downloaded())
+        let online = self
+            .online_transcription()
+            .is_none_or(|p| self.provider_status(p).has_key());
+        online
+            && self
+                .required_tasks()
+                .iter()
+                .all(|t| t.model().is_downloaded())
     }
 
     /// Analyze `media` (again, replacing its results, when `again`): the
@@ -1234,11 +1283,13 @@ impl EditorState {
         }
     }
 
-    /// One notice listing the models not downloaded, and one for each
-    /// download that failed. Whether any changed.
+    /// One notice listing the models analysis needs that are not
+    /// downloaded, one for each download that failed, and one for a
+    /// provider without its key. Whether any changed.
     fn refresh_model_notices(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.refresh_key_notice();
         let mut missing = Vec::new();
+        let required = self.required_tasks();
         for task in &self.model_tasks {
             let model = task.model();
             let key = download_notice(model);
@@ -1259,7 +1310,9 @@ impl EditorState {
                 }
                 koo_models::Status::Missing | koo_models::Status::Downloading(_) => {}
             }
-            missing.push(format!("{} · {}", task.label(), model.name));
+            if required.contains(task) {
+                missing.push(format!("{} · {}", task.label(), model.name));
+            }
         }
         changed |= if missing.is_empty() {
             self.notices.clear(MODELS_NOTICE)
@@ -1550,6 +1603,29 @@ impl EditorState {
                                     .report_outcome(format!("approved: {summary}; wrote {file}"));
                                 ApprovalOutcome::Done(file)
                             }
+                            Err(e) => {
+                                this.agent.report_outcome(format!(
+                                    "approved but failed: {summary}: {e:#}"
+                                ));
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                            entry.1 = outcome;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Ok(approve::Started::Generate(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(made) => this.place_generated(made, cx),
                             Err(e) => {
                                 this.agent.report_outcome(format!(
                                     "approved but failed: {summary}: {e:#}"

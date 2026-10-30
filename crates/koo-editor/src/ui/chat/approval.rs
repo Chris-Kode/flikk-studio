@@ -43,6 +43,7 @@ impl ChatPanel {
         let summary: SharedString = request.summary.clone().into();
         let icon = match request.category {
             ToolCategory::Deliver => IconName::File,
+            ToolCategory::Generate => IconName::Mic,
             _ => IconName::BookOpen,
         };
         let trailing = match outcome {

@@ -2,7 +2,8 @@
 //! with media, bins, captions, a transcript, markers, an agent conversation
 //! with an accepted and a pending change set, and fake engines, so every
 //! panel can be exercised and screenshotted without real media.
-//! `KOOEDITOR_DEMO_WORKSPACE=<label>` opens that workspace.
+//! `KOOEDITOR_DEMO_WORKSPACE=<label>` opens that workspace;
+//! `KOOEDITOR_DEMO_SETTINGS=<page>` opens Settings on that page.
 //! `KOOEDITOR_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
 //! media (see [`compose`]).
 
@@ -35,6 +36,24 @@ pub fn enabled() -> bool {
 pub fn fx_view() -> Option<String> {
     enabled()
         .then(|| std::env::var("KOOEDITOR_DEMO_FX").ok())
+        .flatten()
+        .map(|v| v.to_lowercase())
+}
+
+/// `KOOEDITOR_DEMO_SETTINGS=agent|integrations|analysis|models|storage`:
+/// open Settings on that page.
+pub fn settings_page() -> Option<String> {
+    enabled()
+        .then(|| std::env::var("KOOEDITOR_DEMO_SETTINGS").ok())
+        .flatten()
+        .map(|v| v.to_lowercase())
+}
+
+/// `KOOEDITOR_DEMO_GENERATE=music|sfx`: open the media pool's Generate
+/// form (a provider must be set for it).
+pub fn generate_form() -> Option<String> {
+    enabled()
+        .then(|| std::env::var("KOOEDITOR_DEMO_GENERATE").ok())
         .flatten()
         .map(|v| v.to_lowercase())
 }
@@ -321,6 +340,7 @@ fn project() -> Demo {
         bin: None,
         tags: vec!["brand".into()],
         proxy: None,
+        generated: None,
     };
 
     let mut titles = Track::new(TrackKind::Title, "T1");
@@ -471,6 +491,7 @@ fn interview_analysis(demo: &Demo) -> (Fingerprint, Analysis) {
             language: "en".into(),
             words,
             speakers: vec![maya],
+            engine: None,
         }),
         speech,
         shot_changes: Vec::new(),
@@ -777,6 +798,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
         bin: Some(bin.id),
         tags: tags.iter().map(|t| t.to_string()).collect(),
         proxy: None,
+        generated: None,
     }
 }
 

@@ -1,0 +1,12 @@
+[package]
+name = "koo-cloud"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+koo-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+# The system's credential store: Keychain, Credential Manager, Secret Service.
+keyring = { version = "4.2", default-features = false, features = ["v1"] }

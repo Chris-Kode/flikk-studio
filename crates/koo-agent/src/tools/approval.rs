@@ -1,5 +1,5 @@
 //! Tools that need the user: approval requests (project and memory,
-//! deliver) and clarifying questions.
+//! deliver, generating unless allowed) and clarifying questions.
 
 use super::{ApprovalRequest, Done, ToolCtx};
 use crate::args::{Args, ToolError, media_id, range_json};
@@ -118,6 +118,21 @@ pub fn request(
             (
                 format!("Save “{}” to the library", asset.name),
                 json!({ "fx": asset.id.to_string() }),
+            )
+        }
+        "generate_audio" => {
+            let (request, placement) = super::generate::parse(project, args)?;
+            let available = ctx
+                .services
+                .generation
+                .as_ref()
+                .is_some_and(|g| g.provider_for(request.capability()).is_some());
+            if !available {
+                return Err(ToolError(super::generate::unavailable(&request)));
+            }
+            (
+                super::generate::summary(&request, placement.as_ref()),
+                super::generate::request_json(&request, placement.as_ref()),
             )
         }
         "export_otio" => ("Export OpenTimelineIO".to_owned(), json!({})),

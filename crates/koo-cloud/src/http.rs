@@ -1,0 +1,218 @@
+//! The HTTP client the providers share: one agent, a multipart upload that
+//! streams its file and reports progress, and retries while a server is
+//! busy or failing. What an error reply means is up to each provider.
+
+use koo_core::cloud::CloudError;
+use std::io::{Chain, Cursor, Read};
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
+use ureq::http::Response;
+use ureq::{Agent, Body, SendBody};
+
+/// Waits after a busy or failed attempt, one per retry.
+const BACKOFF: [u64; 4] = [2, 4, 8, 16];
+
+/// Biggest reply read into memory: a long piece of music at a high bit rate.
+const MAX_REPLY: u64 = 512 << 20;
+
+fn agent() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        use ureq::tls::{RootCerts, TlsConfig};
+        Agent::config_builder()
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .user_agent(concat!("koo-editor/", env!("CARGO_PKG_VERSION")))
+            // Errors are read from the reply; a long file is heard for
+            // minutes before the reply starts.
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(60 * 60)))
+            .timeout_recv_body(None)
+            .build()
+            .into()
+    })
+}
+
+/// A reply with its body read.
+pub struct Reply {
+    pub status: u16,
+    headers: ureq::http::HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name)?.to_str().ok()
+    }
+
+    pub fn json(&self) -> Result<serde_json::Value, CloudError> {
+        serde_json::from_slice(&self.body)
+            .map_err(|e| CloudError::Failed(format!("unexpected reply: {e}")))
+    }
+
+    /// Worth trying again: the server was busy, or failed when
+    /// `server_errors` may be retried.
+    fn retryable(&self, server_errors: bool) -> bool {
+        self.status == 429 || (server_errors && self.status >= 500)
+    }
+}
+
+fn read(mut response: Response<Body>) -> Result<Reply, ureq::Error> {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_REPLY)
+        .read_to_vec()?;
+    Ok(Reply {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn network(e: ureq::Error) -> CloudError {
+    CloudError::Failed(format!("could not reach the provider: {e}"))
+}
+
+/// Run `attempt` until it gets a reply that isn't busy (or a server error,
+/// with `server_errors`), or the retries run out; the last reply is
+/// returned either way. Requests that are charged for what they make leave
+/// out `server_errors`: the work may have been done and billed.
+fn with_retries(
+    server_errors: bool,
+    mut attempt: impl FnMut() -> Result<Response<Body>, ureq::Error>,
+) -> Result<Reply, CloudError> {
+    let mut waits = BACKOFF.iter();
+    loop {
+        let outcome = attempt().and_then(read);
+        let wait = match &outcome {
+            Ok(reply) if !reply.retryable(server_errors) => None,
+            Err(_) if !server_errors => None,
+            _ => waits.next(),
+        };
+        match (outcome, wait) {
+            (outcome, Some(secs)) => {
+                drop(outcome);
+                std::thread::sleep(Duration::from_secs(*secs));
+            }
+            (Ok(reply), None) => return Ok(reply),
+            (Err(e), None) => return Err(network(e)),
+        }
+    }
+}
+
+pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
+    with_retries(true, || {
+        let mut request = agent().get(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.call()
+    })
+}
+
+/// A JSON POST; see [`with_retries`] for `server_errors`.
+pub fn post_json(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+    server_errors: bool,
+) -> Result<Reply, CloudError> {
+    let bytes = serde_json::to_vec(body).map_err(|e| CloudError::Failed(e.to_string()))?;
+    with_retries(server_errors, || {
+        let mut request = agent().post(url).header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.send(&bytes[..])
+    })
+}
+
+/// A `multipart/form-data` POST of `fields` and the file at `path` under
+/// `field`, read as it is sent; `progress` gets 0..1 of it. See
+/// [`with_retries`] for `server_errors`.
+pub fn post_file(
+    url: &str,
+    headers: &[(&str, &str)],
+    fields: &[(&str, String)],
+    (field, path, mime): (&str, &Path, &str),
+    progress: &(dyn Fn(f32) + Sync),
+    server_errors: bool,
+) -> Result<Reply, CloudError> {
+    let boundary = format!(
+        "koo-editor-{:x}{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let mut head = String::new();
+    for (name, value) in fields {
+        head.push_str(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "audio".into());
+    head.push_str(&format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{file_name}\"\r\nContent-Type: {mime}\r\n\r\n"
+    ));
+    let tail = format!("\r\n--{boundary}--\r\n");
+    let size = std::fs::metadata(path)
+        .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?
+        .len();
+    let total = head.len() as u64 + size + tail.len() as u64;
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    with_retries(server_errors, || {
+        let file = std::fs::File::open(path)?;
+        let mut body = Counted {
+            inner: Cursor::new(head.clone().into_bytes())
+                .chain(file)
+                .chain(Cursor::new(tail.clone().into_bytes())),
+            sent: 0,
+            total,
+            progress,
+        };
+        let mut request = agent()
+            .post(url)
+            .header("content-type", &content_type)
+            .header("content-length", total.to_string());
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.send(SendBody::from_reader(&mut body))
+    })
+}
+
+type Parts = Chain<Chain<Cursor<Vec<u8>>, std::fs::File>, Cursor<Vec<u8>>>;
+
+/// The body of an upload, counting what has been read of it.
+struct Counted<'a> {
+    inner: Parts,
+    sent: u64,
+    total: u64,
+    progress: &'a (dyn Fn(f32) + Sync),
+}
+
+impl Read for Counted<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.sent += n as u64;
+        (self.progress)(self.sent as f32 / self.total.max(1) as f32);
+        Ok(n)
+    }
+}

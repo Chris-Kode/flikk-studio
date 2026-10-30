@@ -53,7 +53,7 @@ pub const CORE: [&str; 20] = [
 ];
 
 /// The groups `load_tools` takes, in the order it lists them.
-pub const GROUPS: [ToolCategory; 9] = [
+pub const GROUPS: [ToolCategory; 10] = [
     ToolCategory::EditTimeline,
     ToolCategory::Transform,
     ToolCategory::Captions,
@@ -61,6 +61,7 @@ pub const GROUPS: [ToolCategory; 9] = [
     ToolCategory::Audio,
     ToolCategory::Effects,
     ToolCategory::Overlays,
+    ToolCategory::Generate,
     ToolCategory::ProjectMemory,
     ToolCategory::Deliver,
 ];
@@ -76,6 +77,7 @@ pub fn key(group: ToolCategory) -> &'static str {
         ToolCategory::Overlays => "overlays",
         ToolCategory::ProjectMemory => "memory",
         ToolCategory::Deliver => "deliver",
+        ToolCategory::Generate => "generate",
         ToolCategory::ReadProject => "read_project",
         ToolCategory::ReadAnalysis => "analysis",
         ToolCategory::View => "view",
@@ -122,7 +124,7 @@ pub fn index(tools: &[ToolSpec]) -> String {
 /// Words that suggest a group. Matched at the start of a word, so `normaliz`
 /// covers "normalize" and "normalise"; a trailing space asks for the whole
 /// word.
-const KEYWORDS: [(ToolCategory, &[&str]); 9] = [
+const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
     (
         ToolCategory::EditTimeline,
         &[
@@ -278,6 +280,22 @@ const KEYWORDS: [(ToolCategory, &[&str]); 9] = [
             "image",
             "png ",
             "gif ",
+        ],
+    ),
+    (
+        ToolCategory::Generate,
+        &[
+            "generat",
+            "compose",
+            "soundtrack",
+            "score ",
+            "jingle",
+            "royalty",
+            "sound effect",
+            "foley",
+            "whoosh",
+            "riser",
+            "ambience",
         ],
     ),
     (

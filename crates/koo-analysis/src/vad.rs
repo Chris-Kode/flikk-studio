@@ -20,6 +20,10 @@ const ABOVE_NOISE_DB: f32 = 9.0;
 const MIN_HOLE: Time = Time(FLICKS_PER_SECOND * 3 / 5);
 /// …that no word comes within this of (250 ms).
 const HOLE_REACH: Time = Time(FLICKS_PER_SECOND / 4);
+/// Speech from words: pauses shorter than this stay inside it (250 ms)…
+const WORDS_PAUSE: Time = Time(FLICKS_PER_SECOND / 4);
+/// …and it starts this far before its first word, as Silero's do.
+const WORDS_LEAD: Time = Time(FLICKS_PER_SECOND * PAD_MS / 1000);
 
 pub fn speech_ranges(samples: &[f32]) -> Vec<TimeRange> {
     let frames: Vec<(f32, f32)> = samples.chunks(FRAME).map(frame_stats).collect();
@@ -51,6 +55,23 @@ pub(crate) fn frame_stats(frame: &[f32]) -> (f32, f32) {
         .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
         .count();
     (db, crossings as f32 / frame.len() as f32)
+}
+
+/// Where someone talks, from the words a provider heard: words less than a
+/// short pause apart are one range, each starting a little before its
+/// first word, as Silero's ranges are.
+pub fn from_words(words: &[Word]) -> Vec<TimeRange> {
+    let mut ranges: Vec<TimeRange> = Vec::new();
+    for w in words {
+        let start = (w.range.start - WORDS_LEAD).max(Time::ZERO);
+        match ranges.last_mut() {
+            Some(last) if w.range.start <= last.end + WORDS_PAUSE => {
+                last.end = last.end.max(w.range.end)
+            }
+            _ => ranges.push(TimeRange::new(start, w.range.end)),
+        }
+    }
+    ranges
 }
 
 /// Gaps in `[0, end)` not covered by `speech`, at least `min` long.

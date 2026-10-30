@@ -15,6 +15,7 @@ pub mod audiofx;
 pub mod bus;
 pub mod captions;
 pub mod changeset;
+pub mod cloud;
 pub mod command;
 pub mod compose;
 pub mod cuts;

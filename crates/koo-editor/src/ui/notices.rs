@@ -117,6 +117,7 @@ fn list(state: &Entity<EditorState>, on_action: &OnAction, cx: &App) -> Div {
                                     .outline()
                                     .label(match action {
                                         NoticeAction::OpenModels => "Download…",
+                                        NoticeAction::OpenIntegrations => "Settings…",
                                         NoticeAction::Relink => "Relink…",
                                     })
                                     .on_click(move |_, window, cx| on_action(action, window, cx)),

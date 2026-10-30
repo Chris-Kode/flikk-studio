@@ -585,6 +585,27 @@ impl AgentHost {
             }
             let done = match out {
                 JobDone::Done(done) => done,
+                JobDone::Generated {
+                    item,
+                    placement,
+                    summary,
+                } => {
+                    let author = match origin {
+                        Origin::Turn => self
+                            .turn
+                            .as_ref()
+                            .filter(|t| !t.cancelled)
+                            .map(|t| t.author.clone()),
+                        Origin::External(_) => Some(external_author()),
+                    };
+                    tools::generate::finish(
+                        bus,
+                        author.as_ref(),
+                        *item,
+                        placement.as_ref(),
+                        &summary,
+                    )
+                }
                 JobDone::Propose {
                     commands,
                     reason,

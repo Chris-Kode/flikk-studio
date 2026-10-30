@@ -176,5 +176,6 @@ fn build_item(
         bin,
         tags: Vec::new(),
         proxy: None,
+        generated: None,
     })
 }

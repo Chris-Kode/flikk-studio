@@ -32,10 +32,12 @@ pub enum ToolCategory {
     /// Shader effects, transitions, generators (incl. HTML motion graphics)
     /// and the project's FX programs.
     Effects,
+    /// Music and sound effects made by a provider, which cost credits.
+    Generate,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 13] = [
+    pub const ALL: [ToolCategory; 14] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -46,6 +48,7 @@ impl ToolCategory {
         Self::Audio,
         Self::Overlays,
         Self::Effects,
+        Self::Generate,
         Self::ProjectMemory,
         Self::Deliver,
         Self::Media,
@@ -70,6 +73,7 @@ impl ToolCategory {
             Self::Deliver => "Deliver",
             Self::Media => "Media",
             Self::Effects => "Effects and motion graphics",
+            Self::Generate => "Generate media",
         }
     }
 }
