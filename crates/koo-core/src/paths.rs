@@ -63,6 +63,17 @@ pub fn assets() -> PathBuf {
     sub("assets")
 }
 
+/// Music and sound effects providers made, each with a `.json` of how.
+pub fn generated() -> PathBuf {
+    sub("generated")
+}
+
+/// API keys, owner-only, where the system has no credential store.
+pub fn credentials() -> PathBuf {
+    let _ = std::fs::create_dir_all(home());
+    home().join("credentials.json")
+}
+
 pub fn logs() -> PathBuf {
     sub("logs")
 }

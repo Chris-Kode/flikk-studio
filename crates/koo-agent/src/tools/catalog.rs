@@ -1199,6 +1199,40 @@ pub fn catalog() -> Vec<ToolSpec> {
             "Ask the user to approve exporting a still frame.",
             object(json!({ "t": time("Timeline seconds") }), &["t"]),
         ),
+        // ---- generate (credits: approved each time unless allowed)
+        spec(
+            "generate_audio",
+            Some(Generate),
+            "Make music or a sound effect with the provider the user set up. It lands in the pool's Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each one waits for their approval and its media id reaches you in the next turn's approvals. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused.",
+            object(
+                json!({
+                    "kind": one_of(&["music", "sound_effect"], "What to make"),
+                    "prompt": string("In English. Music: genre, mood, instruments, tempo, how it builds. Sound: what is heard, how close, the space around it"),
+                    "range": range("The timeline range it is for: sets its length, and where it is proposed"),
+                    "duration": number("Seconds, when there is no `range`. Music 3–300, sound 0.5–30; left out, the model picks"),
+                    "sections": {
+                        "type": "array",
+                        "description": "Music only: parts with lengths of their own, so it changes on cue (an intro up to the first cut, the drop on the reveal). 3–120 s each, 3–300 s together; replaces `duration`",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": string("\"Intro\", \"Build\", \"Drop\""),
+                                "duration": number("Seconds"),
+                                "styles": strings("Short English descriptors for this part"),
+                                "avoid": strings("Styles to keep out"),
+                                "lyrics": strings("Sung lines, for music with vocals")
+                            },
+                            "required": ["duration", "styles"]
+                        }
+                    },
+                    "instrumental": boolean("Music without vocals (default true)"),
+                    "loop": boolean("A sound effect made to repeat seamlessly (ambience, a hum)"),
+                    "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
+                    "track": string("Audio track to put it on (default: one with nothing there, else a new one)")
+                }),
+                &["kind", "prompt"],
+            ),
+        ),
         // ---- conversation
         spec(
             "ask_user",

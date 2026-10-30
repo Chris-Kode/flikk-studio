@@ -11,21 +11,31 @@ fn path(fp: &Fingerprint) -> PathBuf {
     file(fp, "json")
 }
 
+/// Where an item's audio waits while a provider hears it:
+/// `paths::cache()/upload/<fingerprint>.flac`.
+pub fn upload(fp: &Fingerprint) -> Result<PathBuf> {
+    let dir = paths::cache().join("upload");
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    Ok(dir.join(format!("{}.flac", safe_name(fp))))
+}
+
 fn file(fp: &Fingerprint, extension: &str) -> PathBuf {
-    // Fingerprints are hex; keep anything else out of the file name.
-    let name: String =
-        fp.0.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
     paths::cache()
         .join("analysis")
-        .join(format!("{name}.{extension}"))
+        .join(format!("{}.{extension}", safe_name(fp)))
+}
+
+/// Fingerprints are hex; anything else is kept out of file names.
+fn safe_name(fp: &Fingerprint) -> String {
+    fp.0.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// `None` when missing, unreadable or of another [`ANALYSIS_VERSION`].

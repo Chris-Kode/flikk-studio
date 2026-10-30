@@ -1,5 +1,5 @@
-//! Agent settings (PRD "Agent configuration"), opened from the chat panel.
-//! Every change goes straight to `EditorState::set_settings`.
+//! Settings → Agent (PRD "Agent configuration"), also opened from the chat
+//! panel's gear. Every change goes straight to `EditorState::set_settings`.
 
 use crate::state::EditorState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -170,6 +170,28 @@ impl SettingsPanel {
                         Permission::Propose => "Propose",
                     })
                     .into_any_element()
+            } else if category == ToolCategory::Generate {
+                // It spends the user's credits: asked each time unless allowed.
+                const CHOICES: [(Permission, &str); 3] = [
+                    (Permission::Off, "Off"),
+                    (Permission::NeedsApproval, "Ask"),
+                    (Permission::Allowed, "Allow"),
+                ];
+                TabBar::new(("perm", category as usize))
+                    .segmented()
+                    .xsmall()
+                    .selected_index(
+                        CHOICES
+                            .iter()
+                            .position(|(p, _)| *p == effective)
+                            .unwrap_or(1),
+                    )
+                    .children(CHOICES.iter().map(|(_, label)| Tab::new().label(*label)))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        let permission = CHOICES[*ix].0;
+                        this.update(cx, |s| s.permissions.set(category, permission));
+                    }))
+                    .into_any_element()
             } else {
                 let on = effective == Permission::Propose;
                 TabBar::new(("perm", category as usize))
@@ -251,7 +273,11 @@ impl Render for SettingsPanel {
             .iter()
             .position(|(r, _)| *r == settings.role)
             .unwrap_or(0);
-        let differs = settings.permissions != Permissions::default();
+        // By effect: settings saved before a category existed lack it.
+        let defaults = Permissions::default();
+        let differs = ToolCategory::ALL
+            .iter()
+            .any(|&c| settings.permissions.get(c) != defaults.get(c));
         v_flex()
             .id("agent-settings")
             .size_full()

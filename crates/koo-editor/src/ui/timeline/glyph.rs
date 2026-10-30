@@ -33,6 +33,8 @@ pub enum Glyph {
     MaskRect,
     MaskEllipse,
     Pen,
+    /// Two beamed notes: music.
+    Note,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -207,6 +209,13 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
                 arc((10.5, 5.5), (10.5, 10.5), 3.5, true, window);
                 arc((12.5, 3.5), (12.5, 12.5), 6., true, window);
             }
+        }
+        Glyph::Note => {
+            circle(4.6, 12.2, 2.1, true, window);
+            circle(11.6, 10.7, 2.1, true, window);
+            lines(&[(6.5, 12.2), (6.5, 3.6)], false, window);
+            lines(&[(13.5, 10.7), (13.5, 2.1)], false, window);
+            fill(&[(6.5, 3.), (13.5, 1.5), (13.5, 4.), (6.5, 5.5)], window);
         }
         Glyph::Headphones => {
             arc((2.5, 10.), (13.5, 10.), 5.5, true, window);

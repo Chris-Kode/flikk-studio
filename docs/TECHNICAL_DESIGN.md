@@ -17,6 +17,7 @@ described here, update the section in the same commit.
      koo-media (FFmpeg)   koo-analysis + koo-models (Whisper, ONNX)                  │ TCP 127.0.0.1
      koo-gpu (wgpu FX)    koo-html (headless Chromium)                               │ + token
      koo-store (.koo files, SQLite)   koo-deliver (render, export)                   ▼
+     koo-cloud (online providers: ElevenLabs)
                                  claude -p / codex exec ──stdio──▶ koo-mcp (or `koo-editor mcp`)
                                  external MCP clients  ──stdio──▶ koo-editor mcp ── bridge.json
 ```
@@ -38,19 +39,21 @@ described here, update the section in the same commit.
 * **Engines behind traits.** The UI, the compositor and the agent host call
   the traits in `koo_core::services`: `MediaService` (`koo-media`),
   `AnalysisService` (`koo-analysis`), `FxService` (`koo-gpu`), `HtmlService`
-  (`koo-html`) and `LetteringService` (`koo-deliver`). `EditorState.services`
-  holds each as an `Option<Arc<dyn …>>`; an engine that fails to start (no
-  ffmpeg, no GPU adapter, no browser) is `None` and callers degrade quietly.
+  (`koo-html`), `LetteringService` (`koo-deliver`) and `GenerationService`
+  (`koo-cloud`). `EditorState.services` holds each as an
+  `Option<Arc<dyn …>>`; an engine that fails to start (no ffmpeg, no GPU
+  adapter, no browser) is `None` and callers degrade quietly.
 
 ### Crates
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort |
+| `koo-cloud` | Online providers (ElevenLabs): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
 | `koo-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
@@ -58,7 +61,9 @@ described here, update the section in the same commit.
 | `koo-editor` | GPUI app (gpui-kit): `EditorState`, workspaces and panels, agent link, persistence, playback, wiring of all of the above | all, cpal, image |
 
 Crates other than `koo-editor` depend only on `koo-core`, never on each other,
-except `koo-analysis`, which runs its models through `koo-models`.
+except `koo-analysis`, which runs its models through `koo-models`. Analysis
+reaches an online transcriber only through `koo_core::cloud::SpeechService`,
+which the editor hands it (`AnalysisService::configure`).
 
 ## 2. Key decisions
 
@@ -86,6 +91,8 @@ except `koo-analysis`, which runs its models through `koo-models`.
 | Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.koofx`) and presets (`.koopreset`: effects, audio effects or a grade with their values) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
+| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
 docs before relying on them (PRD note).
@@ -238,8 +245,13 @@ the effect of its earlier calls.
 Analysis starts only when the user asks, from an item's "⋯" menu in the
 media pool (or its right-click menu): "Analyze", or "Analyze again" once it
 has results, which runs every step anew on the models picked now. It is
-disabled while any task's picked model is missing, or while the item is
-queued or analyzing; images are not analyzed. Items are analyzed one at a
+disabled while a model it needs is missing (or the transcription provider
+has no key), or while the item is queued or analyzing; images are not
+analyzed. Settings → Analysis turns steps off (`AnalysisSteps`:
+transcript, speakers, sounds and music, beats, sound search, shot
+changes); a step off stays empty in the results, and its model is not
+needed. Speakers need the transcript; beats and sound search, the sound
+pass. Items are analyzed one at a
 time, in the order asked, on a `JobQueue`. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
 kept for the session and the job fails, naming the steps.
@@ -284,6 +296,33 @@ offline media) can be dismissed for the session.
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
 `aligner`, `diarizer`, `sounds`. Without one, its models stay listed but its
 step falls back as described below.
+
+### Transcription online
+
+With a provider picked for transcription in Settings → Integrations
+(ElevenLabs Scribe v2, or v2 Medical), the speech steps are its and no
+local speech model runs or is needed: voice activity, Whisper, the
+aligner, the holes heard again and the speaker models are skipped, and the
+Models page shows the provider on their rows. The stream is encoded once
+more as lossless mono FLAC at its own rate, up to 48 kHz
+(`cache/upload/<fp>.flac`, deleted after), and sent in one request with
+word times, speakers (`diarize`, when the speakers step is on) and audio
+events; filler words are kept, since cutting dead time needs them. Words
+keep the times the provider aligned (the edges measured on the audio are
+tuned to Whisper's late starts and early ends, and pulled good times off
+the words); confidence is `exp(logprob)`; its voices are numbered by
+`speakers::apply`, so ids stay when an item is analyzed again; a
+three-letter language is turned into ISO 639-1. Speech is where the words
+are: words under 250 ms apart make one range, which starts 60 ms early, as
+Silero's do. The transcript records what made it (`engine`:
+"elevenlabs/scribe_v2", or the Whisper model's id).
+
+The other models become optional: a sound step whose model is missing is
+left out rather than failing, and when the sound pass doesn't run its place
+is taken by the provider's audio events ("laughter" as a sound, anything
+with "music" as music without tags or beats). A provider error (no key,
+out of credits, network) fails the transcript step like any other, and is
+not retried with Whisper.
 
 ### Speech
 
@@ -463,15 +502,17 @@ step falls back as described below.
   saving to the library) and deliver (renders, exports) always need the
   user's approval, asked with Approve/Deny cards above the composer and
   carried out by `agent_link/approve.rs`; the outcome reaches the agent in
-  the next turn's `<approvals>` block. A "Web" switch (off by default,
+  the next turn's `<approvals>` block. Generate media (music and sound
+  effects, which spend the user's credits) is Off, Ask each time (the
+  default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 78 in the catalog (76 plus
+* **Tools** (`koo-agent/src/tools/`): 79 in the catalog (77 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
   `transform`, `captions`, `color`, `audio`, `effects`, `overlays`,
-  `memory`, `deliver`) the turn is likely to need, picked from the
+  `generate`, `memory`, `deliver`) the turn is likely to need, picked from the
   workspace, the selection and words in the message. A chat keeps the list
   it started with (`agent/tool_groups.json`) so the backend's prompt cache
   holds; later groups come through `load_tools` and are called with
@@ -486,6 +527,21 @@ step falls back as described below.
   an example range) and `view_audio` (up to 30 s of spectrogram lanes).
   `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
   target clear of words wins over a nearer one on a word.
+* **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
+  (a prompt and a length, or `sections` with lengths of their own, so it
+  changes on cue) or a sound effect (up to 30 s, optionally looping) with
+  the provider picked for it. The file goes to `paths::generated()` with a
+  `<file>.json` of what was asked, and into the pool's "Generated" bin as
+  the user's edit (`CommandBus::execute_shared`, which also adds it to the
+  drafts waiting for review), so a rejected placement keeps what was paid
+  for; `MediaItem::generated` records the provider, model and prompt. With
+  `at` or `range` it is proposed on an audio track free over its length,
+  else a new one. Asked each time, the approval runs it in the background
+  and proposes the placement into the chat's set, which goes to review
+  again; allowed, it runs as a tool job and answers with the media id. A
+  refused prompt (an artist's name) comes back with the provider's rewrite.
+  The media pool's ♫ menu makes the same from a form (Music runs as long as
+  In/Out).
 * **Prompt** (`koo-agent/src/prompt.rs`): the system prompt is the tool
   guidance (with or without web), the shared rules (seeing and hearing,
   time formats, references, cutting in pauses, protected ranges), the
@@ -553,8 +609,8 @@ available to them.
   (`koo-editor/src/relink.rs`): matched by file name, confirmed by
   fingerprint when it can be.
 * **Database** (`paths::database()`, SQLite in WAL mode,
-  `koo-store/src/schema.rs`): `meta` (agent settings, model picks, recent
-  projects), `style_profiles` (caption styles), `style_rules`,
+  `koo-store/src/schema.rs`): `meta` (agent settings, model picks, analysis
+  steps, the provider per capability, recent projects), `style_profiles` (caption styles), `style_rules`,
   `source_facts`, `media_fingerprints` and `recipes`. Nothing per project.
   Imported Markdown notes become proposed style rules, one per bullet or
   paragraph (S5); facts tied to a path are suspended when its media is
@@ -566,7 +622,9 @@ available to them.
   sizes are at 1080p, scaled by the frame's short side.
 * **Other user files** under `paths::home()`: `projects/` (chats),
   `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
-  tool usage, work dirs), `assets/`, `logs/`, `bridge.json`.
+  tool usage, work dirs), `assets/`, `generated/` (music and sound effects
+  with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
+  (owner-only, only where the system has no credential store).
 
 ## 10. Deliver
 
@@ -595,7 +653,12 @@ Workspaces (`Workspace::ALL`, rendered in `koo-editor/src/app.rs`): Edit
 (media pool and effects library on the left, viewer, inspector, timeline),
 Captions (transcript and caption style panel), Color (wheels, curves,
 scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
-the right in every workspace. The FX code editor replaces
+the right in every workspace. Settings (the gear in the top bar, cmd-,, or
+the chat's gear for its Agent page) has five pages: Agent, Integrations
+(each provider's key and account, and who does each capability on which
+model), Analysis (the steps), Models (download, pick and delete) and
+Storage (what the user-data folder holds, with Clear for previews and
+analysis results). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -632,6 +695,8 @@ see:
 | `KOOEDITOR_DEMO_VIEW` | `captions` | The transcript's captions view |
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
+| `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
+| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx` | The media pool's Generate form |
 
 ```sh
 KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor
@@ -659,6 +724,7 @@ there.
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
 | D1 render | `koo-deliver`, `ui/deliver.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
+| Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
 | S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
 
@@ -681,6 +747,13 @@ there.
 * A program an external agent proposes is usable by its later connections
   only once the user accepts it.
 * If the editor crashes, its headless browser can keep running.
+* ElevenLabs was checked here against the live API with an invalid key
+  only (account, transcription upload, music, sound effects: each answered
+  "invalid key"); no request has run with a working key, so Scribe's word
+  times are unmeasured against the LibriSpeech set above, the music output
+  formats each plan allows are untested (the client steps down from 320
+  kbps MP3 when one is refused), and the music composition plan's
+  instrumental chunks are written from the docs.
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
 * ONNX Runtime adds about 25 MB to the binary, and the first build

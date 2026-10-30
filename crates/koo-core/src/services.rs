@@ -1,7 +1,8 @@
 //! Interfaces implemented by `koo-media` and `koo-analysis`, so the UI and the
 //! agent host can be written against them independently.
 
-use crate::analysis::{Analysis, Loudness, SoundVectors};
+use crate::analysis::{Analysis, AnalysisSteps, Loudness, SoundVectors};
+use crate::cloud::SpeechService;
 use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MediaId};
 use crate::model::{BlendMode, Clip, Fingerprint, MediaInfo, MediaItem, Track};
@@ -169,10 +170,23 @@ pub struct JobStatus {
     pub state: JobState,
 }
 
+/// How analysis runs from the next item on: the steps the user left on,
+/// and who transcribes.
+#[derive(Clone, Default)]
+pub struct AnalysisConfig {
+    pub steps: AnalysisSteps,
+    /// Transcribes, with speakers, in place of the local speech models;
+    /// `None` runs those.
+    pub speech: Option<Arc<dyn SpeechService>>,
+}
+
 pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
     /// item; a no-op if cached for its fingerprint.
     fn analyze(&self, item: &MediaItem) -> JobId;
+    /// Apply `config` to the items analyzed from now on; a job already
+    /// running keeps the one it started with.
+    fn configure(&self, _config: AnalysisConfig) {}
     /// Like [`AnalysisService::analyze`], but replacing the cached
     /// results, on the models picked now.
     fn analyze_again(&self, item: &MediaItem) -> JobId {
@@ -633,6 +647,8 @@ pub struct Services {
     /// Draws captions and titles into the program. Renders leave it out:
     /// they burn lettering in with FFmpeg.
     pub lettering: Option<Arc<dyn LetteringService>>,
+    /// Music and sound effects from the providers picked for them.
+    pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -644,6 +660,7 @@ impl std::fmt::Debug for Services {
             .field("fx", &self.fx.is_some())
             .field("html", &self.html.is_some())
             .field("lettering", &self.lettering.is_some())
+            .field("generation", &self.generation.is_some())
             .finish()
     }
 }

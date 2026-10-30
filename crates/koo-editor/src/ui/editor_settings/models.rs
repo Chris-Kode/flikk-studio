@@ -1,8 +1,10 @@
 //! Settings → Models: each task analysis runs on a model, the model it
 //! runs on (picked here when it has more than one) and whether that is
-//! downloaded. Models are only ever downloaded from here, when the user
-//! asks.
+//! downloaded. Models are only ever downloaded (or deleted) from here, when
+//! the user asks. While a provider transcribes, the speech tasks show its
+//! name: their models are not needed.
 
+use super::size_label;
 use crate::state::EditorState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
@@ -116,10 +118,24 @@ impl ModelsTab {
         let theme = cx.theme();
         let (muted, red, green) = (theme.muted_foreground, theme.red, theme.green);
         match status {
-            Status::Downloaded => div()
-                .id(("model-ready", ix))
-                .child(Icon::new(IconName::Check).small().text_color(green))
-                .tooltip(|window, cx| Tooltip::new("Downloaded").build(window, cx))
+            Status::Downloaded => h_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .id(("model-ready", ix))
+                        .child(Icon::new(IconName::Check).small().text_color(green))
+                        .tooltip(|window, cx| Tooltip::new("Downloaded").build(window, cx)),
+                )
+                .child(
+                    Button::new(("model-delete", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Delete)
+                        .tooltip("Delete")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.delete_model(model, cx))
+                        })),
+                )
                 .into_any_element(),
             Status::Missing => Button::new(("model-download", ix))
                 .small()
@@ -184,6 +200,18 @@ impl ModelsTab {
 impl Render for ModelsTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let downloads = self.state.read(cx).models.clone();
+        // The tasks a provider does instead, and its name.
+        let online = self
+            .state
+            .read(cx)
+            .online_transcription()
+            .map(|p| (koo_analysis::LocalAnalysis::online_tasks(), p.name));
+        let by = |task: &ModelTask| {
+            online
+                .as_ref()
+                .filter(|(tasks, _)| tasks.contains(task))
+                .map(|(_, name)| *name)
+        };
         let rows: Vec<_> = self
             .pickers
             .iter()
@@ -191,9 +219,12 @@ impl Render for ModelsTab {
             .collect();
         let missing: Vec<&'static Model> = rows
             .iter()
-            .filter(|(_, _, status)| matches!(status, Status::Missing | Status::Failed(_)))
+            .filter(|(task, _, status)| {
+                by(task).is_none() && matches!(status, Status::Missing | Status::Failed(_))
+            })
             .map(|(task, _, _)| task.model())
             .collect();
+        let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
         v_flex()
             .size_full()
@@ -224,6 +255,19 @@ impl Render for ModelsTab {
                         rows.into_iter()
                             .enumerate()
                             .map(|(ix, (task, picker, status))| {
+                                let provider = by(&task);
+                                // Its model is not needed: only a copy on
+                                // disk can be deleted.
+                                let status_cell = match (provider, &status) {
+                                    (Some(_), Status::Downloaded) | (None, _) => {
+                                        self.render_status(ix, task.model(), status, cx)
+                                    }
+                                    (Some(name), _) => div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(name)
+                                        .into_any_element(),
+                                };
                                 h_flex()
                                     .flex_none()
                                     .h(px(48.))
@@ -233,35 +277,20 @@ impl Render for ModelsTab {
                                     .child(
                                         div().w(px(130.)).flex_none().text_sm().child(task.label()),
                                     )
-                                    .child(
-                                        div().w(px(240.)).flex_none().child(
-                                            Select::new(&picker)
-                                                .small()
-                                                .disabled(task.models().len() < 2),
+                                    .child(div().w(px(240.)).flex_none().child(
+                                        Select::new(&picker).small().disabled(
+                                            task.models().len() < 2 || provider.is_some(),
                                         ),
-                                    )
+                                    ))
                                     .child(
-                                        h_flex().flex_1().min_w_0().justify_end().child(
-                                            self.render_status(ix, task.model(), status, cx),
-                                        ),
+                                        h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .justify_end()
+                                            .child(status_cell),
                                     )
                             }),
                     ),
             )
-    }
-}
-
-/// "885 KB", "148 MB", "1.1 GB", as the files' hosts count them.
-fn size_label(bytes: u64) -> String {
-    const KB: f64 = 1e3;
-    const MB: f64 = 1e6;
-    const GB: f64 = 1e9;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.0} MB", b / MB)
-    } else {
-        format!("{:.0} KB", (b / KB).max(1.))
     }
 }

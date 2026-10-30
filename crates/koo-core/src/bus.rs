@@ -43,7 +43,7 @@ pub enum Permission {
     Off,
     /// Changes land in a change set for review.
     Propose,
-    /// Read categories only.
+    /// Read categories, and generating media once the user allows it.
     Allowed,
     /// Each call waits for a dialog (memory, deliver).
     NeedsApproval,
@@ -69,7 +69,9 @@ impl Permissions {
     pub fn default_for(category: ToolCategory) -> Permission {
         match category {
             c if c.is_read() => Permission::Allowed,
-            ToolCategory::ProjectMemory | ToolCategory::Deliver => Permission::NeedsApproval,
+            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Generate => {
+                Permission::NeedsApproval
+            }
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
         }
@@ -87,6 +89,10 @@ impl Permissions {
             (_, Permission::Off) => Permission::Off,
             (c, _) if c.is_read() => Permission::Allowed,
             (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
+            // Generating spends the user's credits: asked each time unless
+            // they allow it.
+            (ToolCategory::Generate, Permission::Allowed) => Permission::Allowed,
+            (ToolCategory::Generate, _) => Permission::NeedsApproval,
             _ => Permission::Propose,
         }
     }
@@ -282,6 +288,26 @@ impl CommandBus {
         label: impl Into<String>,
     ) -> Result<Outcome> {
         self.apply_user(commands, label.into())
+    }
+
+    /// Like [`Self::execute_batch`], and the same commands go into the
+    /// drafts of the change sets not yet reviewed, so an agent planning on
+    /// one sees the change. For additions no proposal can conflict with,
+    /// such as media a provider just made.
+    pub fn execute_shared(
+        &mut self,
+        commands: Vec<Command>,
+        label: impl Into<String>,
+    ) -> Result<Outcome> {
+        let outcome = self.apply_user(commands.clone(), label.into())?;
+        for draft in self.change_sets.iter_mut().filter_map(|s| s.draft.as_mut()) {
+            for command in &commands {
+                if let Ok(plan) = command.plan(draft) {
+                    let _ = apply_all(draft, &plan.ops);
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     fn apply_user(&mut self, commands: Vec<Command>, label: String) -> Result<Outcome> {

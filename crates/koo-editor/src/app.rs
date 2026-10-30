@@ -23,7 +23,17 @@ use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 use koo_core::agent::Workspace;
 
-actions!(koo, [Undo, Redo, TogglePlay, OpenSettings, Quit]);
+actions!(
+    koo,
+    [
+        Undo,
+        Redo,
+        TogglePlay,
+        OpenSettings,
+        OpenAgentSettings,
+        Quit
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -82,6 +92,11 @@ impl KooEditor {
         window.on_window_should_close(cx, move |window, cx| {
             projects::should_close(&closing, window, cx)
         });
+        if let Some(page) = crate::demo::settings_page().and_then(|p| SettingsTab::named(&p)) {
+            cx.defer_in(window, move |this: &mut Self, window, cx| {
+                this.open_settings(Some(page), window, cx)
+            });
+        }
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
             viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
@@ -161,7 +176,13 @@ impl KooEditor {
             })
     }
 
-    fn open_settings(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open Settings on `tab`, or on the page shown last.
+    fn open_settings(
+        &mut self,
+        tab: Option<SettingsTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.notices_open = false;
         cx.notify();
         EditorSettings::open(&self.settings, tab, window, cx);
@@ -187,7 +208,12 @@ impl KooEditor {
             },
             move |action, window, cx| {
                 let _ = this.update(cx, |this, cx| match action {
-                    NoticeAction::OpenModels => this.open_settings(SettingsTab::Models, window, cx),
+                    NoticeAction::OpenModels => {
+                        this.open_settings(Some(SettingsTab::Models), window, cx)
+                    }
+                    NoticeAction::OpenIntegrations => {
+                        this.open_settings(Some(SettingsTab::Integrations), window, cx)
+                    }
                     NoticeAction::Relink => crate::relink::relink_folder(&this.state, cx),
                 });
             },
@@ -204,9 +230,9 @@ impl KooEditor {
                     .small()
                     .icon(IconName::Settings)
                     .tooltip("Settings")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(SettingsTab::Models, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
+                    ),
             )
     }
 
@@ -374,7 +400,10 @@ impl Render for KooEditor {
                 cx.listener(|this, _: &Redo, _, cx| this.state.update(cx, |s, cx| s.redo(cx))),
             )
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(SettingsTab::Models, window, cx)
+                this.open_settings(None, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenAgentSettings, window, cx| {
+                this.open_settings(Some(SettingsTab::Agent), window, cx)
             }))
             .on_action(cx.listener(|this, _: &NewProject, window, cx| {
                 projects::new_project(&this.state, window, cx)

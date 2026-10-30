@@ -5,7 +5,9 @@
 use crate::{Store, recipes};
 use anyhow::Result;
 use koo_core::agent::{AgentSettings, VisionSettings};
+use koo_core::analysis::AnalysisSteps;
 use koo_core::bus::Permissions;
+use koo_core::cloud::CloudSettings;
 use koo_core::ids::{RecipeId, RuleId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,10 @@ use serde::{Deserialize, Serialize};
 const USER_SETTINGS: &str = "agent_settings";
 /// The models the user picked over each task's default, by id.
 const MODEL_PICKS: &str = "model_picks";
+/// The analysis steps the user left on.
+const ANALYSIS_STEPS: &str = "analysis_steps";
+/// The provider picked for each capability (never its key).
+const CLOUD_SETTINGS: &str = "cloud_settings";
 
 /// Per-project overrides. `None` inherits the user setting. The backend is
 /// per user only.
@@ -139,6 +145,30 @@ impl Store {
 
     pub fn save_model_picks(&self, ids: &[&str]) -> Result<()> {
         self.set_meta(MODEL_PICKS, ids)
+    }
+
+    /// The analysis steps set in Settings → Analysis, per user.
+    pub fn analysis_steps(&self) -> Result<AnalysisSteps> {
+        Ok(self
+            .meta::<serde_json::Value>(ANALYSIS_STEPS)?
+            .map(lenient)
+            .unwrap_or_default())
+    }
+
+    pub fn save_analysis_steps(&self, steps: &AnalysisSteps) -> Result<()> {
+        self.set_meta(ANALYSIS_STEPS, steps)
+    }
+
+    /// The providers set in Settings → Integrations, per user.
+    pub fn cloud_settings(&self) -> Result<CloudSettings> {
+        Ok(self
+            .meta::<serde_json::Value>(CLOUD_SETTINGS)?
+            .map(lenient)
+            .unwrap_or_default())
+    }
+
+    pub fn save_cloud_settings(&self, settings: &CloudSettings) -> Result<()> {
+        self.set_meta(CLOUD_SETTINGS, settings)
     }
 }
 

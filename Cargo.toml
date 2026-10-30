@@ -18,6 +18,7 @@ koo-core = { path = "crates/koo-core" }
 koo-store = { path = "crates/koo-store" }
 koo-media = { path = "crates/koo-media" }
 koo-analysis = { path = "crates/koo-analysis" }
+koo-cloud = { path = "crates/koo-cloud" }
 koo-agent = { path = "crates/koo-agent" }
 koo-deliver = { path = "crates/koo-deliver" }
 koo-gpu = { path = "crates/koo-gpu" }

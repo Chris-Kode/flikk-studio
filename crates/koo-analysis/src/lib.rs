@@ -11,6 +11,14 @@
 //! → beats → shot changes) and caches the result by fingerprint, so an
 //! item is analyzed once (principle 4) until the user analyzes it again.
 //! Results of another [`ANALYSIS_VERSION`] are not read.
+//!
+//! With a provider set for transcription ([`AnalysisConfig::speech`]) the
+//! speech steps are its: the item's audio goes to it as lossless FLAC and
+//! comes back as words with their times and voices, kept as it aligned
+//! them; speech is where the words are. No local speech model runs, and
+//! the other models are optional: a step whose model is missing is left
+//! out, and the provider's audio events stand in for the sound tagger. The
+//! steps the user turned off ([`AnalysisSteps`]) don't run either way.
 
 mod align;
 mod cache;
@@ -20,11 +28,15 @@ mod sounds;
 pub mod speakers;
 mod vad;
 
-use koo_core::analysis::{ANALYSIS_VERSION, Analysis, Loudness, SoundVectors, Transcript, Word};
+use koo_core::analysis::{
+    ANALYSIS_VERSION, Analysis, AnalysisSteps, Loudness, Music, Sound, SoundVectors, Transcript,
+    Word,
+};
+use koo_core::cloud::{SpeechRequest, SpeechService};
 use koo_core::ids::JobId;
 use koo_core::jobs::{JobProgress, JobQueue};
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
-use koo_core::services::{AnalysisService, JobStatus, ServiceError, ServiceResult};
+use koo_core::services::{AnalysisConfig, AnalysisService, JobStatus, ServiceError, ServiceResult};
 use koo_core::time::{Time, TimeRange};
 use koo_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
@@ -38,6 +50,10 @@ pub use ffmpeg::binary as ffmpeg_binary;
 /// Items analyzed at once. Each already keeps several cores busy, and the
 /// large models a lot of memory.
 const JOBS_AT_ONCE: usize = 1;
+
+/// Highest sample rate of the audio a provider hears; above it, the audio
+/// is resampled. Speech has nothing up there.
+const UPLOAD_MAX_RATE: u32 = 48_000;
 
 /// Engine-wide settings.
 #[derive(Clone, Debug)]
@@ -98,6 +114,8 @@ struct Shared {
     sounds: sounds::SoundModels,
     /// Sound vectors read so far, by fingerprint.
     vectors: Mutex<HashMap<Fingerprint, Arc<SoundVectors>>>,
+    /// The steps, and who transcribes, for jobs that start from now on.
+    config: Mutex<AnalysisConfig>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -166,6 +184,7 @@ impl LocalAnalysis {
             #[cfg(feature = "sounds")]
             sounds: Default::default(),
             vectors: Mutex::default(),
+            config: Mutex::default(),
         });
         Self {
             shared,
@@ -200,6 +219,38 @@ impl LocalAnalysis {
             ]);
         }
         tasks
+    }
+
+    /// The tasks whose models must be downloaded before an item can be
+    /// analyzed with `steps`. None when a provider transcribes (`online`):
+    /// a step whose model is missing is then left out.
+    pub fn required_tasks(steps: &AnalysisSteps, online: bool) -> Vec<ModelTask> {
+        if online {
+            return Vec::new();
+        }
+        Self::model_tasks()
+            .into_iter()
+            .filter(|task| match task {
+                // Voice activity runs with every item that has audio.
+                ModelTask::VoiceActivity => true,
+                ModelTask::Transcription | ModelTask::WordTiming => steps.transcript,
+                ModelTask::Speakers => steps.speakers(),
+                ModelTask::SoundTagging => steps.sounds,
+                ModelTask::Beats => steps.beats(),
+                ModelTask::SoundSearch => steps.sound_search(),
+            })
+            .collect()
+    }
+
+    /// The tasks a provider does in place of a local model when it
+    /// transcribes.
+    pub fn online_tasks() -> [ModelTask; 4] {
+        [
+            ModelTask::VoiceActivity,
+            ModelTask::Transcription,
+            ModelTask::WordTiming,
+            ModelTask::Speakers,
+        ]
     }
 
     /// Like [`AnalysisService::analyze`], choosing the audio stream and
@@ -244,6 +295,10 @@ impl AnalysisService for LocalAnalysis {
             ..AnalyzeOptions::default()
         };
         self.analyze_with(item, options)
+    }
+
+    fn configure(&self, config: AnalysisConfig) {
+        *lock(&self.shared.config) = config;
     }
 
     fn jobs(&self) -> Vec<JobStatus> {
@@ -334,7 +389,8 @@ enum Step {
 }
 
 impl Progress {
-    /// Callback for `step` reporting its own 0..1.
+    /// Callback for `step` reporting its own 0..1; it does nothing for a
+    /// step the job doesn't run.
     fn step(&self, step: Step) -> impl Fn(f32) + Send + Sync + 'static {
         let total = self
             .steps
@@ -346,8 +402,43 @@ impl Progress {
         let before: f32 = self.steps[..at.unwrap_or(0)].iter().map(|s| s.1).sum();
         let span = at.map_or(0.0, |i| self.steps[i].1);
         let (from, span) = (before / total, span / total);
-        let job = self.job.clone();
-        move |f: f32| job.set(from + span * f.clamp(0.0, 1.0))
+        let job = at.map(|_| self.job.clone());
+        move |f: f32| {
+            if let Some(job) = &job {
+                job.set(from + span * f.clamp(0.0, 1.0))
+            }
+        }
+    }
+}
+
+/// What a job runs, fixed when it starts.
+struct Plan {
+    steps: AnalysisSteps,
+    /// Transcribes in place of the local speech models.
+    online: Option<Arc<dyn SpeechService>>,
+    /// A provider is set for transcription, so local models are optional:
+    /// a step whose model is missing is left out.
+    lenient: bool,
+    /// The sound pass runs, with sound search and beats when these say.
+    sounds: bool,
+    search: bool,
+    beats: bool,
+}
+
+impl Plan {
+    fn new(config: &AnalysisConfig) -> Self {
+        let steps = config.steps;
+        let lenient = config.speech.is_some();
+        let have = |task: ModelTask| !lenient || task.model().is_downloaded();
+        let sounds = cfg!(feature = "sounds") && steps.sounds && have(ModelTask::SoundTagging);
+        Self {
+            online: config.speech.clone().filter(|_| steps.transcript),
+            lenient,
+            sounds,
+            search: sounds && steps.sound_search() && have(ModelTask::SoundSearch),
+            beats: sounds && steps.beats() && have(ModelTask::Beats),
+            steps,
+        }
     }
 }
 
@@ -356,33 +447,45 @@ impl Progress {
 /// rest goes on; such a result is kept in memory for this session but only
 /// complete ones are written to disk.
 fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
+    let plan = Plan::new(&lock(&shared.config));
+    let steps = plan.steps;
     let item = &task.item;
     let duration = item.info.as_ref().map(|i| i.duration);
     let audio_wanted = has_audio(item);
-    let video_wanted = has_video(item);
+    let video_wanted = has_video(item) && steps.shots;
     let stream = choose_stream(shared, item, &task.options);
-    let mut steps = Vec::new();
+    let mut weights = Vec::new();
     if audio_wanted {
-        steps.push((Step::Audio, 1.0));
-        if cfg!(feature = "whisper") {
-            steps.push((Step::Speech, 0.5));
+        weights.push((Step::Audio, 1.0));
+        if plan.online.is_some() {
+            weights.push((Step::Transcript, 6.0));
+        } else {
+            if cfg!(feature = "whisper") {
+                weights.push((Step::Speech, 0.5));
+            }
+            if steps.transcript {
+                weights.push((Step::Transcript, 6.0));
+                if cfg!(feature = "aligner") {
+                    weights.push((Step::Words, 3.0));
+                }
+                if steps.speakers() {
+                    weights.push((Step::Speakers, 3.0));
+                }
+            }
         }
-        steps.push((Step::Transcript, 6.0));
-        if cfg!(feature = "aligner") {
-            steps.push((Step::Words, 3.0));
-        }
-        steps.push((Step::Speakers, 3.0));
-        if cfg!(feature = "sounds") {
-            steps.push((Step::Sounds, 4.0));
-            steps.push((Step::Beats, 1.0));
+        if plan.sounds {
+            weights.push((Step::Sounds, 4.0));
+            if plan.beats {
+                weights.push((Step::Beats, 1.0));
+            }
         }
     }
     if video_wanted {
-        steps.push((Step::Shots, 2.0));
+        weights.push((Step::Shots, 2.0));
     }
     let progress = Progress {
         job: job.clone(),
-        steps,
+        steps: weights,
     };
 
     let mut analysis = Analysis::default();
@@ -406,54 +509,94 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
             }
         };
         if let Some(audio) = audio {
-            let Voice { speech, stretches } =
-                listen(shared, &audio, &progress).unwrap_or_else(|e| {
-                    problems.push(format!("voice activity: {e:#}"));
-                    Voice::energy(&audio)
-                });
-            analysis.speech = speech;
             let (levels, sound) = align::measure(&audio);
-            let transcript = transcript(
-                shared,
-                task,
-                stream,
-                &audio,
-                &analysis.speech,
-                stretches.as_deref(),
-                &progress,
-            );
-            match transcript {
-                Ok(Some(mut t)) => {
-                    // Edges measured on the audio only where the aligner
-                    // can't place the words: measured first, they moved
-                    // the last word of a phrase over the pause after it,
-                    // and the aligner followed.
-                    let words = progress.step(Step::Words);
-                    match align_words(shared, &audio, &t.language, &mut t.words, &words) {
-                        Ok(true) => {}
-                        Ok(false) => align::refine(&mut t.words, &levels, &sound),
-                        Err(e) => {
-                            align::refine(&mut t.words, &levels, &sound);
-                            problems.push(format!("word alignment: {e:#}"));
-                        }
+            // What the provider heard besides words, for when the sound
+            // models don't run.
+            let mut events = Vec::new();
+            if let Some(online) = &plan.online {
+                match transcribe_online(
+                    shared,
+                    &**online,
+                    task,
+                    stream,
+                    steps.speakers(),
+                    &progress,
+                ) {
+                    // Its times stay as it aligned them: the edges measured
+                    // on the audio are for Whisper's, which start late and
+                    // end early, and pulled good ones off the words.
+                    Ok((t, heard)) => {
+                        analysis.speech = vad::from_words(&t.words);
+                        events = heard;
+                        analysis.transcript = Some(t);
                     }
-                    // After the aligner, so that a hole is where no word is.
-                    if let Err(e) = fill_holes(shared, &audio, &analysis.speech, &mut t) {
+                    Err(e) => {
                         problems.push(format!("transcript: {e:#}"));
+                        analysis.speech = vad::speech_ranges(&audio);
                     }
-                    // After the aligner, so each word is heard where it is.
-                    if let Err(e) = attribute_speakers(shared, &audio, &mut t, &progress) {
-                        problems.push(format!("speakers: {e:#}"));
-                    }
-                    analysis.transcript = Some(t);
                 }
-                Ok(None) => unpersisted = true,
-                Err(e) => problems.push(format!("transcript: {e:#}")),
+            } else {
+                let Voice { speech, stretches } = listen(shared, &plan, &audio, &progress)
+                    .unwrap_or_else(|e| {
+                        problems.push(format!("voice activity: {e:#}"));
+                        Voice::energy(&audio)
+                    });
+                analysis.speech = speech;
+                if steps.transcript {
+                    let transcript = transcript(
+                        shared,
+                        task,
+                        stream,
+                        &audio,
+                        &analysis.speech,
+                        stretches.as_deref(),
+                        &progress,
+                    );
+                    match transcript {
+                        Ok(Some(mut t)) => {
+                            // Edges measured on the audio only where the
+                            // aligner can't place the words: measured
+                            // first, they moved the last word of a phrase
+                            // over the pause after it, and the aligner
+                            // followed.
+                            let words = progress.step(Step::Words);
+                            match align_words(shared, &audio, &t.language, &mut t.words, &words) {
+                                Ok(true) => {}
+                                Ok(false) => align::refine(&mut t.words, &levels, &sound),
+                                Err(e) => {
+                                    align::refine(&mut t.words, &levels, &sound);
+                                    problems.push(format!("word alignment: {e:#}"));
+                                }
+                            }
+                            // After the aligner, so that a hole is where no
+                            // word is.
+                            if let Err(e) = fill_holes(shared, &audio, &analysis.speech, &mut t) {
+                                problems.push(format!("transcript: {e:#}"));
+                            }
+                            // After the aligner, so each word is heard
+                            // where it is.
+                            if !steps.speakers() {
+                                one_speaker(&mut t);
+                            } else if let Err(e) =
+                                attribute_speakers(shared, &audio, &mut t, &progress)
+                            {
+                                problems.push(format!("speakers: {e:#}"));
+                            }
+                            analysis.transcript = Some(t);
+                        }
+                        Ok(None) => unpersisted = true,
+                        Err(e) => problems.push(format!("transcript: {e:#}")),
+                    }
+                }
             }
             drop(audio);
             analysis.levels = Some(levels);
-            if let Err(e) = hear(shared, task, stream, &mut analysis, &progress) {
-                problems.push(format!("sounds: {e:#}"));
+            if plan.sounds {
+                if let Err(e) = hear(shared, task, stream, &plan, &mut analysis, &progress) {
+                    problems.push(format!("sounds: {e:#}"));
+                }
+            } else if steps.sounds {
+                (analysis.sounds, analysis.music) = from_events(events);
             }
         }
     }
@@ -512,9 +655,18 @@ impl Voice {
 }
 
 /// What the voice activity model hears in `audio`; the energy VAD stands
-/// in for it in a build without it.
+/// in for it in a build without it, or when the model is missing and
+/// `plan` may do without.
 #[cfg(feature = "whisper")]
-fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result<Voice> {
+fn listen(
+    shared: &Shared,
+    plan: &Plan,
+    audio: &[f32],
+    progress: &Progress,
+) -> anyhow::Result<Voice> {
+    if plan.lenient && !ModelTask::VoiceActivity.model().is_downloaded() {
+        return Ok(Voice::energy(audio));
+    }
     let heard = shared.voice.hear(audio, &progress.step(Step::Speech))?;
     Ok(Voice {
         speech: heard.ranges,
@@ -523,7 +675,12 @@ fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result
 }
 
 #[cfg(not(feature = "whisper"))]
-fn listen(_shared: &Shared, audio: &[f32], _progress: &Progress) -> anyhow::Result<Voice> {
+fn listen(
+    _shared: &Shared,
+    _plan: &Plan,
+    audio: &[f32],
+    _progress: &Progress,
+) -> anyhow::Result<Voice> {
     Ok(Voice::energy(audio))
 }
 
@@ -570,25 +727,143 @@ fn transcript(
         language: detected.unwrap_or_else(|| "und".into()),
         words,
         speakers: Vec::new(),
+        engine: Some(ModelTask::Transcription.model().id.to_owned()),
     }))
 }
 
+/// The words a provider heard in `stream` of the item, with its voices
+/// when `voices` (else one speaker for all), and the sounds it noted
+/// between them. The audio goes to it as lossless mono FLAC.
+fn transcribe_online(
+    shared: &Shared,
+    online: &dyn SpeechService,
+    task: &Task,
+    stream: u32,
+    voices: bool,
+    progress: &Progress,
+) -> anyhow::Result<(Transcript, Vec<Sound>)> {
+    let item = &task.item;
+    let step = progress.step(Step::Transcript);
+    let upload = cache::upload(&task.fingerprint)?;
+    let rate = item
+        .info
+        .as_ref()
+        .and_then(|i| i.audio.get(stream as usize))
+        .map(|a| a.sample_rate)
+        .filter(|r| *r > 0);
+    let duration = item.info.as_ref().map(|i| i.duration);
+    let language = task
+        .options
+        .language
+        .as_deref()
+        .and_then(|tag| iso_639_1(shared, tag));
+    let heard = ffmpeg::encode_flac(
+        &item.path,
+        stream,
+        rate,
+        UPLOAD_MAX_RATE,
+        &upload,
+        duration,
+        &|f| step(f * 0.1),
+    )
+    .and_then(|()| {
+        let request = SpeechRequest {
+            audio: &upload,
+            language,
+            speakers: voices,
+        };
+        online
+            .transcribe(&request, &|f| step(0.1 + 0.9 * f))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", online.name()))
+    });
+    let _ = std::fs::remove_file(&upload);
+    let heard = heard?;
+    let mut heard_words: Vec<_> = heard.words.into_iter().collect();
+    heard_words.sort_by_key(|w| w.range.start);
+    let (mut words, labels): (Vec<Word>, Vec<Option<usize>>) = heard_words
+        .into_iter()
+        .map(|w| {
+            let word = Word {
+                range: w.range,
+                text: w.text,
+                confidence: w.confidence,
+                speaker: None,
+            };
+            (word, w.speaker)
+        })
+        .unzip();
+    let mut transcript = Transcript {
+        fingerprint: task.fingerprint.clone(),
+        audio_stream: stream,
+        language: iso_639_1(shared, &heard.language)
+            .map(str::to_owned)
+            .unwrap_or(heard.language),
+        words: Vec::new(),
+        speakers: Vec::new(),
+        engine: Some(heard.engine),
+    };
+    if voices && labels.iter().any(Option::is_some) {
+        let count = labels.iter().flatten().max().map_or(0, |m| m + 1);
+        let labels = labels.into_iter().map(|l| l.map(|i| (i, 1.0))).collect();
+        transcript.speakers = speakers::apply((count, labels), &mut words);
+        transcript.words = words;
+    } else {
+        transcript.words = words;
+        one_speaker(&mut transcript);
+    }
+    Ok((transcript, heard.events))
+}
+
+/// A provider's audio events as the sounds and music of the sound script,
+/// for when the sound models don't run: music without tags or beats.
+fn from_events(events: Vec<Sound>) -> (Vec<Sound>, Vec<Music>) {
+    let mut sounds = Vec::new();
+    let mut music: Vec<Music> = Vec::new();
+    for event in events {
+        if !event.label.contains("music") {
+            sounds.push(event);
+            continue;
+        }
+        match music.last_mut() {
+            Some(m) if event.range.start <= m.range.end => {
+                m.range.end = m.range.end.max(event.range.end)
+            }
+            _ => music.push(Music {
+                range: event.range,
+                tags: Some(event.label)
+                    .filter(|l| l != "music")
+                    .into_iter()
+                    .collect(),
+                beats: Vec::new(),
+                downbeats: Vec::new(),
+            }),
+        }
+    }
+    (sounds, music)
+}
+
 /// Sounds, music, beats and sound vectors for `analysis`, whose levels are
-/// measured. A model that could not be had is an error; what the others
-/// heard is kept.
+/// measured; sound vectors and beats only when `plan` says. A model that
+/// could not be had is an error; what the others heard is kept.
 #[cfg(feature = "sounds")]
 fn hear(
     shared: &Shared,
     task: &Task,
     stream: u32,
+    plan: &Plan,
     analysis: &mut Analysis,
     progress: &Progress,
 ) -> anyhow::Result<()> {
+    let pass = sounds::Pass {
+        search: plan.search,
+        beats: plan.beats,
+    };
     let heard = shared.sounds.hear(
         &task.item.path,
         stream,
         task.item.info.as_ref().map(|i| i.duration),
         analysis.levels.as_ref(),
+        pass,
         &progress.step(Step::Sounds),
         &progress.step(Step::Beats),
     )?;
@@ -612,6 +887,7 @@ fn hear(
     _shared: &Shared,
     _task: &Task,
     _stream: u32,
+    _plan: &Plan,
     _analysis: &mut Analysis,
     _progress: &Progress,
 ) -> anyhow::Result<()> {
@@ -702,6 +978,16 @@ fn fill_holes(
     _transcript: &mut Transcript,
 ) -> anyhow::Result<()> {
     Ok(())
+}
+
+/// One speaker for every word of `transcript`.
+fn one_speaker(transcript: &mut Transcript) {
+    if transcript.words.is_empty() {
+        transcript.speakers.clear();
+        return;
+    }
+    let labels = (1, transcript.words.iter().map(|_| Some((0, 1.0))).collect());
+    transcript.speakers = speakers::apply(labels, &mut transcript.words);
 }
 
 /// Tell the voices in `transcript` apart. When the diarizer can't, its

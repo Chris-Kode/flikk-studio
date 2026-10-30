@@ -13,6 +13,7 @@ uuid.workspace = true
 koo-store.workspace = true
 koo-media.workspace = true
 koo-analysis.workspace = true
+koo-cloud.workspace = true
 koo-agent.workspace = true
 koo-deliver.workspace = true
 koo-gpu.workspace = true

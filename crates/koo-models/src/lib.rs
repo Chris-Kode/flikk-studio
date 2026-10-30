@@ -194,6 +194,29 @@ impl Model {
             .map(|f| f.size)
             .sum()
     }
+
+    /// Delete its files from `paths::models()`. Copies an environment
+    /// variable points at, and files another model also uses, stay.
+    pub fn delete(&self) -> Result<()> {
+        let shared = |file: &ModelFile| {
+            Task::ALL
+                .iter()
+                .flat_map(|t| t.models())
+                .any(|m| m.id != self.id && m.files.iter().any(|f| f.name == file.name))
+        };
+        for file in self.files {
+            if file.overridden().is_some() || shared(file) {
+                continue;
+            }
+            match std::fs::remove_file(file.path()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    bail!("could not delete {}: {e}", file.path().display())
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One file of a model, kept in `paths::models()` under its name.

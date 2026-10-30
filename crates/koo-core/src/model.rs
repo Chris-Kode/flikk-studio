@@ -91,6 +91,9 @@ pub struct MediaItem {
     pub tags: Vec<String>,
     /// Proxy file used for playback when present (PRD M4).
     pub proxy: Option<PathBuf>,
+    /// How a provider made it, when it was generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<Box<crate::cloud::GenerationInfo>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

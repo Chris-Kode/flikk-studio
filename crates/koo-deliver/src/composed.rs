@@ -32,6 +32,7 @@ impl Pictures for Originals {
         // The media engine finds proxies by path or fingerprint.
         let item = MediaItem {
             proxy: None,
+            generated: None,
             fingerprint: None,
             ..item.clone()
         };

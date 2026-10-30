@@ -14,7 +14,6 @@ mod reveal;
 mod tools;
 
 use crate::state::EditorState;
-use crate::ui::settings::SettingsPanel;
 use crate::ui::timeline::glyph::{Glyph, glyph};
 use composer::{Composer, ComposerEvent};
 use gpui_kit::component::bubble::{Bubble, BubbleVariant};
@@ -67,7 +66,6 @@ pub struct ChatPanel {
     state: Entity<EditorState>,
     composer: Entity<Composer>,
     scroller: Entity<MessageScrollerState>,
-    settings: Entity<SettingsPanel>,
     reviews: change_set::Reviews,
     /// Messages whose stack of tool calls is open.
     tools_open: HashSet<usize>,
@@ -93,7 +91,6 @@ impl ChatPanel {
         let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), window, cx));
         quick::register_composer(&composer, cx);
-        let settings = cx.new(|cx| SettingsPanel::new(state.clone(), window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |this, _, cx| {
                 this.sync_rows(cx);
@@ -111,7 +108,6 @@ impl ChatPanel {
             state,
             composer,
             scroller,
-            settings,
             reviews: Default::default(),
             tools_open: HashSet::new(),
             tool_open: HashSet::new(),
@@ -200,10 +196,7 @@ impl ChatPanel {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let panel = self.settings.clone();
-        window.open_sheet(cx, move |sheet, _, _| {
-            sheet.title("Agent").size(px(380.)).child(panel.clone())
-        });
+        window.dispatch_action(Box::new(crate::app::OpenAgentSettings), cx);
     }
 
     /// Ask before deleting a chat: its conversation can't be brought back.
