@@ -38,6 +38,12 @@ impl FrameCache {
         Some(image)
     }
 
+    /// Let every frame go: something they show changed outside the key
+    /// (a subject's matte was made).
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn contains(&self, key: PlayKey, frame: i64) -> bool {
         self.key == Some(key) && self.frames.contains_key(&frame)
     }

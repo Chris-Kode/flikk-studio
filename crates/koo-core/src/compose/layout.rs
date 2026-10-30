@@ -268,7 +268,13 @@ fn picture_shape(
     let [mut x0, mut y0, mut x1, mut y1] = drawn.unwrap_or([0.0, 0.0, 1.0, 1.0]);
     // Masks that only add shapes leave their bounds at most.
     let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
-    if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect) {
+    let mattes = super::subject_mattes(project, services, clip, t);
+    let subjects = crate::mask::SubjectMattes {
+        mattes: &mattes,
+        picture: None,
+    };
+    if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect, &subjects)
+    {
         (x0, y0, x1, y1) = (x0.max(k0), y0.max(l0), x1.min(k1), y1.min(l1));
     }
     let [cl, ct, cr, cb] = place.crop;

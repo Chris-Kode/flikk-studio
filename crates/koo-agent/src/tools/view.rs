@@ -8,7 +8,7 @@
 use super::audio::{script, unheard_note};
 use super::preview::{collage, columns, draw_text};
 use super::{Done, Job, JobDone, Step, ToolCtx};
-use crate::args::{Args, ToolError, range_json};
+use crate::args::{Args, ToolError, range_json, short};
 use crate::bridge::{Content, ToolResult};
 use base64::Engine;
 use koo_core::compose::{self, Stills};
@@ -65,6 +65,44 @@ fn wants_program(project: &Project, range: TimeRange, services: &Services) -> bo
                         c.enabled && c.range().overlaps(&range) && compose::is_lettering(tr, c)
                     })
             }))
+}
+
+/// What `view_frame` with `masks` shows of the masks at `t`, and the
+/// subjects not found yet.
+fn masks_note(project: &Project, t: Time, services: &Services) -> String {
+    let mut masked = 0;
+    let mut waiting = Vec::new();
+    for track in &project.timeline.tracks {
+        let Some(clip) = track.clip_at(t).filter(|c| c.enabled) else {
+            continue;
+        };
+        if !koo_core::mask::any_enabled(&clip.masks) {
+            continue;
+        }
+        masked += 1;
+        let found = compose::subject_mattes(project, services, clip, t);
+        for m in clip
+            .masks
+            .iter()
+            .filter(|m| m.enabled && m.picks().is_some())
+        {
+            if !found.iter().any(|(id, _)| *id == m.id) {
+                waiting.push(format!("{} on {}", short(m.id), short(clip.id)));
+            }
+        }
+    }
+    let mut note = if masked == 0 {
+        " No clip here has masks.".to_string()
+    } else {
+        " Pictures are shown whole: what their masks cut away is tinted red, what they keep is untinted.".to_string()
+    };
+    if !waiting.is_empty() {
+        note.push_str(&format!(
+            " Subject masks still being found (not drawn): {}.",
+            waiting.join(", ")
+        ));
+    }
+    note
 }
 
 /// How the program frames were drawn, for the model.
@@ -339,11 +377,12 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let t = args.time("t")?;
     let annotate = args.opt_bool("annotate")?.unwrap_or(false);
+    let masks = args.opt_bool("masks")?.unwrap_or(false);
     let zoom = zoom_region(project, args)?;
     let rate = project.timeline.settings.rate;
     let t = t.max(Time::ZERO).floor_to_frame(rate);
     let span = TimeRange::new(t, t + rate.frame_duration());
-    if annotate || zoom.is_some() || wants_program(project, span, ctx.services) {
+    if annotate || masks || zoom.is_some() || wants_program(project, span, ctx.services) {
         let project = Arc::new(project.clone());
         let services = ctx.services.clone();
         let job: Job = Box::new(move || {
@@ -357,8 +396,16 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             };
             let size = compose::size_for_width(&project, width);
             let mut stills = Stills::new(services.media.clone(), width);
-            let mut frame = compose::program(&project, t, size, &services, &mut stills);
+            let view = if masks {
+                compose::MaskView::Tinted(None)
+            } else {
+                compose::MaskView::Cut
+            };
+            let mut frame = compose::program_with(&project, t, size, &services, &mut stills, view);
             let mut text = format!("Program frame at {t} ({}).", program_note(&services));
+            if masks {
+                text.push_str(&masks_note(&project, t, &services));
+            }
             if annotate {
                 let shapes = compose::layout(&project, t, size, &services, &mut stills);
                 frame = annotated(&frame, &shapes);

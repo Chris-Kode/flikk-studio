@@ -20,6 +20,10 @@
 //!    so a blur radius means the same in a small viewer and in any render.
 //! 4. **Masks**: the clip's masks, drawn in the picture's own uv
 //!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
+//!    Subject masks are drawn from their mattes at the source time
+//!    ([`subject_mattes`]), refined onto the decoded frame's edges. With
+//!    [`MaskView::Tinted`] the picture stays whole and what the masks cut
+//!    away is tinted over it instead, for editing them.
 //! 5. **Transform** and **blend**: fitted inside the canvas (as the export
 //!    graph does), stretched and scaled, skewed and rotated clockwise about
 //!    its anchor, which lands at the centre plus `position` × canvas size
@@ -62,14 +66,33 @@ pub use pictures::{Pictures, Stills, Streams, overlay_item};
 
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
 use crate::grade;
+use crate::ids::{ClipId, MaskId};
 use crate::model::{
     BlendMode, Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind, Transform,
 };
 use crate::services::{
-    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, Surface,
+    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, SubjectRef,
+    Surface,
 };
+use crate::subject::Matte;
 use crate::time::{Time, TimeRange};
 use batch::CpuBatch;
+use std::sync::Arc;
+
+/// How masks show in a program frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaskView {
+    /// Cut away, as rendered.
+    #[default]
+    Cut,
+    /// The picture whole, what the masks of a clip (or with `None`, of
+    /// every clip) cut away tinted over it.
+    Tinted(Option<ClipId>),
+}
+
+/// Colour and strength of [`MaskView::Tinted`].
+const TINT: [u8; 3] = [255, 40, 72];
+const TINT_ALPHA: f32 = 0.55;
 
 /// The program at timeline time `t`, `size` pixels, on black.
 pub fn program(
@@ -79,13 +102,78 @@ pub fn program(
     services: &Services,
     pictures: &mut dyn Pictures,
 ) -> Frame {
+    program_with(project, t, size, services, pictures, MaskView::Cut)
+}
+
+/// [`program`] with masks shown as `view` says.
+pub fn program_with(
+    project: &Project,
+    t: Time,
+    size: (u32, u32),
+    services: &Services,
+    pictures: &mut dyn Pictures,
+    view: MaskView,
+) -> Frame {
     let size = (size.0.max(1), size.1.max(1));
-    let frame = render(project, services, pictures, size, PixelOrder::Rgba, |ctx| {
-        ctx.program(t)
-    })
+    let frame = render(
+        project,
+        services,
+        pictures,
+        size,
+        PixelOrder::Rgba,
+        view,
+        |ctx| ctx.program(t),
+    )
     .unwrap_or_else(|| black(size));
     pictures.finish();
     frame
+}
+
+/// The subject mask `mask` of `clip`, as [`SubjectService`] sees it: on
+/// media from the pool, and enabled.
+///
+/// [`SubjectService`]: crate::services::SubjectService
+pub fn subject_ref<'a>(
+    project: &'a Project,
+    clip: &'a Clip,
+    mask: &'a crate::mask::Mask,
+) -> Option<SubjectRef<'a>> {
+    let ClipContent::Media { media, .. } = &clip.content else {
+        return None;
+    };
+    let subject = mask.picks()?;
+    let item = project.media(*media)?;
+    let (a, b) = (clip.to_source(clip.start)?, clip.to_source(clip.end())?);
+    Some(SubjectRef {
+        mask: mask.id,
+        item,
+        subject,
+        range: TimeRange::new(a.min(b), a.max(b)),
+    })
+}
+
+/// The mattes of `clip`'s enabled subject masks at timeline time `t`, those
+/// made so far.
+pub fn subject_mattes(
+    project: &Project,
+    services: &Services,
+    clip: &Clip,
+    t: Time,
+) -> Vec<(MaskId, Matte)> {
+    let Some(service) = &services.subjects else {
+        return Vec::new();
+    };
+    let Some(source) = clip.to_source(t) else {
+        return Vec::new();
+    };
+    clip.masks
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let subject = subject_ref(project, clip, m)?;
+            Some((m.id, service.matte(subject, source)?))
+        })
+        .collect()
 }
 
 /// [`program`] in two halves, for playback: pictures are decoded, uploaded
@@ -98,6 +186,7 @@ pub fn submit_program<'a>(
     services: &'a Services,
     pictures: &mut dyn Pictures,
     order: PixelOrder,
+    view: MaskView,
 ) -> Pending<'a> {
     let size = (size.0.max(1), size.1.max(1));
     let draw = |ctx: &mut Ctx<'_, '_>| ctx.program(t);
@@ -109,6 +198,8 @@ pub fn submit_program<'a>(
             size,
             batch: engine.batch(),
             programs: true,
+            view,
+            guide: None,
         };
         let surface = draw(&mut ctx)?;
         ctx.batch
@@ -117,7 +208,7 @@ pub fn submit_program<'a>(
             .ok()
     });
     let frame = submitted.unwrap_or_else(|| {
-        let frame = render_cpu(project, services, pictures, size, order, draw);
+        let frame = render_cpu(project, services, pictures, size, order, view, draw);
         Box::new(frame.unwrap_or_else(|| black(size)))
     });
     pictures.finish();
@@ -155,9 +246,16 @@ pub fn clip_picture(
     effects: Option<usize>,
 ) -> Option<Frame> {
     let size = (size.0.max(1), size.1.max(1));
-    let frame = render(project, services, pictures, size, PixelOrder::Rgba, |ctx| {
-        ctx.picture(clip, t, effects)
-    });
+    let view = MaskView::Cut;
+    let frame = render(
+        project,
+        services,
+        pictures,
+        size,
+        PixelOrder::Rgba,
+        view,
+        |ctx| ctx.picture(clip, t, effects),
+    );
     pictures.finish();
     frame
 }
@@ -170,6 +268,7 @@ fn render(
     pictures: &mut dyn Pictures,
     size: (u32, u32),
     order: PixelOrder,
+    view: MaskView,
     draw: impl Fn(&mut Ctx<'_, '_>) -> Option<Surface>,
 ) -> Option<Frame> {
     if let Some(engine) = &services.fx {
@@ -180,6 +279,8 @@ fn render(
             size,
             batch: engine.batch(),
             programs: true,
+            view,
+            guide: None,
         };
         let surface = draw(&mut ctx)?;
         match ctx.batch.submit(surface, order).and_then(|p| p.wait()) {
@@ -187,7 +288,7 @@ fn render(
             Err(e) => eprintln!("koo-core: GPU frame failed, composing on the CPU: {e}"),
         }
     }
-    render_cpu(project, services, pictures, size, order, draw)
+    render_cpu(project, services, pictures, size, order, view, draw)
 }
 
 /// The picture `draw` makes without the GPU engine.
@@ -197,6 +298,7 @@ fn render_cpu(
     pictures: &mut dyn Pictures,
     size: (u32, u32),
     order: PixelOrder,
+    view: MaskView,
     draw: impl Fn(&mut Ctx<'_, '_>) -> Option<Surface>,
 ) -> Option<Frame> {
     let mut ctx = Ctx {
@@ -206,9 +308,31 @@ fn render_cpu(
         size,
         batch: Box::new(CpuBatch::default()),
         programs: false,
+        view,
+        guide: None,
     };
     let surface = draw(&mut ctx)?;
     ctx.batch.submit(surface, order).and_then(|p| p.wait()).ok()
+}
+
+/// [`TINT`] where `raster` (a mask raster) cuts the picture away, clear
+/// where it keeps it.
+fn cut_tint(raster: &Frame) -> Frame {
+    let rgba: Vec<u8> = raster
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| {
+            let cut = 1.0 - p[3] as f32 / 255.0;
+            let a = (cut * TINT_ALPHA * 255.0).round() as u8;
+            [TINT[0], TINT[1], TINT[2], a]
+        })
+        .collect();
+    Frame {
+        rgba: Arc::from(rgba),
+        ..*raster
+    }
 }
 
 /// A black `size` frame.
@@ -422,6 +546,9 @@ struct Ctx<'a, 'b> {
     /// Whether `batch` runs programs (effects, transitions, GLSL
     /// generators).
     programs: bool,
+    view: MaskView,
+    /// The frame last decoded for a clip whose subjects refine onto it.
+    guide: Option<Frame>,
 }
 
 impl Ctx<'_, '_> {
@@ -460,35 +587,66 @@ impl Ctx<'_, '_> {
         Some((self.batch.upload(&l.frame).ok()?, place))
     }
 
-    /// `clip` at `t`, ready to composite.
-    fn layer(&mut self, clip: &Clip, t: Time) -> Option<(Surface, Placement)> {
+    /// `clip` at `t`, ready to composite: its picture, and with
+    /// [`MaskView::Tinted`] the tint of what its masks cut away over it.
+    fn layer(&mut self, clip: &Clip, t: Time) -> Vec<(Surface, Placement)> {
         let tf = clip.transform_at(t - clip.start);
         if tf.opacity <= 0.0 || tf.scale <= 0.0 || tf.stretch.iter().any(|s| *s <= 0.0) {
-            return None;
+            return Vec::new();
         }
-        let picture = self.picture(clip, t, None)?;
+        let Some(picture) = self.picture(clip, t, None) else {
+            return Vec::new();
+        };
         let size = self.batch.size(picture);
-        let picture = self.masked(clip, picture, t).unwrap_or(picture);
         let place = placement(&tf, size, self.size);
-        Some((picture, place))
+        let raster = self.mask_raster(clip, size, t);
+        self.guide = None;
+        let tinted = match self.view {
+            MaskView::Cut => false,
+            MaskView::Tinted(only) => only.is_none_or(|c| c == clip.id),
+        };
+        let Some(raster) = raster else {
+            return vec![(picture, place)];
+        };
+        if tinted {
+            let tint = Placement {
+                opacity: 1.0,
+                blend: BlendMode::Normal,
+                ..place
+            };
+            let cut = cut_tint(&raster);
+            return match self.batch.upload(&cut) {
+                Ok(cut) => vec![(picture, place), (cut, tint)],
+                Err(_) => vec![(picture, place)],
+            };
+        }
+        let masked = self
+            .batch
+            .upload(&raster)
+            .and_then(|mask| self.batch.mask(picture, mask))
+            .unwrap_or(picture);
+        vec![(masked, place)]
     }
 
-    /// `picture` (of `clip` at `t`) through the clip's masks; `None` when
-    /// it has none.
-    fn masked(&mut self, clip: &Clip, picture: Surface, t: Time) -> Option<Surface> {
+    /// What the masks of `clip` keep of its `size` picture at `t`; `None`
+    /// when it has none.
+    fn mask_raster(&mut self, clip: &Clip, (w, h): (u32, u32), t: Time) -> Option<Frame> {
         if !crate::mask::any_enabled(&clip.masks) {
             return None;
         }
-        let (w, h) = self.batch.size(picture);
         let (mw, mh) = crate::mask::raster_size((w, h));
         let aspect = w.max(1) as f32 / h.max(1) as f32;
-        let raster = crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh)?;
-        let mask = self.batch.upload(&raster).ok()?;
-        self.batch.mask(picture, mask).ok()
+        let mattes = subject_mattes(self.project, self.services, clip, t);
+        let subjects = crate::mask::SubjectMattes {
+            mattes: &mattes,
+            picture: self.guide.as_ref(),
+        };
+        crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh, &subjects)
     }
 
     fn picture(&mut self, clip: &Clip, t: Time, limit: Option<usize>) -> Option<Surface> {
         let project = self.project;
+        self.guide = None;
         let local = t - clip.start;
         let effects: Vec<(&FxInstance, &FxAsset)> = clip
             .effects
@@ -513,6 +671,13 @@ impl Ctx<'_, '_> {
                     return None;
                 }
                 let frame = self.pictures.frame(clip.id, item, clip.to_source(t)?)?;
+                let refines = clip
+                    .masks
+                    .iter()
+                    .any(|m| m.enabled && m.picks().is_some_and(|s| s.refine));
+                if refines {
+                    self.guide = Some(frame.clone());
+                }
                 self.upload(&frame, &grades)?
             }
             ClipContent::Overlay { asset, .. } => {
@@ -648,7 +813,9 @@ impl Ctx<'_, '_> {
     /// `clip`'s layer at `t` alone on a transparent canvas, premultiplied.
     fn side(&mut self, clip: Option<&Clip>, t: Time) -> Option<Surface> {
         let layers: Vec<(Surface, Placement)> = clip
-            .and_then(|c| self.layer(c, t))
+            .map(|c| self.layer(c, t))
+            .unwrap_or_default()
+            .into_iter()
             .map(|(picture, place)| {
                 let place = Placement {
                     blend: BlendMode::Normal,
@@ -656,7 +823,6 @@ impl Ctx<'_, '_> {
                 };
                 (picture, place)
             })
-            .into_iter()
             .collect();
         let (w, h) = self.size;
         let canvas = self.batch.composite(w, h, [0; 4], &layers).ok()?;

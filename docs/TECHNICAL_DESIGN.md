@@ -48,10 +48,10 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache | core, models |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort |
 | `koo-cloud` | Online providers (ElevenLabs): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
@@ -94,6 +94,8 @@ which the editor hands it (`AnalysisService::configure`).
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
+| Subject masks | SAM 2.1 tiny (Apache-2.0) as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint and prompts | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; one export of image and video models with numbers checked against PyTorch |
+
 Confirm CLI flags against the installed `claude --help` and the current Codex
 docs before relying on them (PRD note).
 
@@ -133,6 +135,14 @@ panics fails without stopping the queue.
   opacity and invert, combined in order by add, subtract or intersect, each
   keyframable as a whole. Captions and titles take no masks or corner pins:
   renders burn them in with ASS, which cannot draw them.
+* **Subject masks** (`MaskShape::Subject`, `koo-core/src/subject.rs`): the
+  mask keeps the object its `Subject`'s prompts pick: on some source
+  frames, clicks on the object (or off it) and a box, in picture uv, so
+  trims, splits and speed changes keep them on their frames. With `track`
+  the object is followed over every frame the clip shows; otherwise each
+  frame shows the nearest prompted frame's matte. `refine` eases the edge
+  onto the picture's (hair). Feather, expansion, opacity, invert and mode
+  work as for shapes; the prompts are not keyframed.
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both (40 ms after the earlier, 30 ms before the later), on
   a frame boundary when the pause holds one, with a 10 ms audio fade at the
@@ -199,7 +209,8 @@ the effect of its earlier calls.
 * **Program frame** (`koo_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
   generator) → clip grade, then timeline grade → effect stack → masks (a
-  coverage raster multiplied into alpha) → transform and blend mode;
+  coverage raster multiplied into alpha; a subject's matte at the source
+  time drawn into it, see "Subject masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
   captions are lettered on top by `LetteringService` (cosmic-text
   `koo_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
@@ -227,8 +238,10 @@ the effect of its earlier calls.
   marked). Derived files are written atomically.
 * Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
-  `<fp>.vectors`, `html/` (pages and browser profiles), `render/<job>/`
-  (scratch), `agent/frames/` (images for the activity log).
+  `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
+  frame, `t-<key>.mattes` per tracked subject), `html/` (pages and browser
+  profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
+  activity log).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -238,7 +251,14 @@ the effect of its earlier calls.
   playhead render ahead. Audio plays through cpal. The viewer zooms and pans
   with a safe-area overlay; gizmos move, scale, stretch, rotate, skew and
   corner-pin one or several items with snapping, and a mask mode draws and
-  edits masks.
+  edits masks, the selected picture shown whole with what its masks cut
+  away tinted (`compose::MaskView::Tinted`, a toggle). Its subject tool
+  previews what a click would keep as the mouse moves (off the UI thread,
+  the newest hover winning), keeps it on a click or boxes it on a drag; on
+  the picked subject a click adds a point to the frame's prompt (Alt: off
+  the object, Shift: a new subject), a click on a point takes it away, and
+  points drag. Cached frames are dropped when the subjects' version moves,
+  so mattes show as they are made.
 
 ## 7. Analysis and models
 
@@ -262,9 +282,9 @@ the user analyzes it again.
 ### Models (`koo-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search). Its `mod.rs` holds the task's
-interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`); `MODELS`, the
+sound tagging, beats, sound search, segmentation). Its `mod.rs` holds the
+task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -272,7 +292,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer and the sound models) and the BPE tokenizer
+aligner, the diarizer, the sound models and segmentation) and the BPE tokenizer
 (`bpe.rs`).
 
 Analysis only orchestrates: it asks each task's runner for the selected
@@ -294,8 +314,11 @@ them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
-`aligner`, `diarizer`, `sounds`. Without one, its models stay listed but its
-step falls back as described below.
+`aligner`, `diarizer`, `sounds`, `subjects`. Without one, its models stay
+listed but its step falls back as described below (without `subjects`,
+subject masks keep nothing). Segmentation is listed under Settings → Models
+as "Subject masks" but is not part of analysis: `required_tasks` never asks
+for it.
 
 ### Transcription online
 
@@ -471,6 +494,56 @@ not retried with Whisper.
   `KOOEDITOR_CLAP_TEXT_MODEL`, `KOOEDITOR_CLAP_VOCAB` and
   `KOOEDITOR_CLAP_MERGES` point at local copies instead.
 
+### Subject masks
+
+* **Model** (`koo-models/src/segmentation/sam2/`): SAM 2.1 tiny (Meta,
+  Apache-2.0) as square-zero-labs' ONNX export of `transformers`'
+  `Sam2VideoModel` with the memory modules (190 MB; its authors checked it
+  against `propagate_in_video_iterator`, worst per-frame IoU 0.9967), pinned
+  to a commit: a vision encoder (1024² picture → features at three scales),
+  a decoder (features, labelled points → 256² logits, a score, the object's
+  pointer), a memory encoder, the memory attention and the pointers'
+  temporal positions, plus `constants.json`. Pictures are stretched to the
+  model's square with a triangle filter (PIL's bilinear) and normalized; a
+  box is two corner points labelled 2 and 3 before the clicks. Checked
+  here against a Python reference of the same loop on `transformers`'
+  bedroom clip: per-frame IoU ≥ 0.9988.
+* **Tracking** (`runner.rs`, `Segmenter::track`): each prompted frame is
+  segmented by itself (its memory binarized); the frames after the first
+  prompted one are tracked forward from it and those before it backward,
+  each attending to a fixed bank of 7 frames of memory (the nearest
+  prompted frames before and after, then the latest tracked, padded by
+  repeating the latest) and 16 object pointers (prompted frames passed and
+  the latest tracked, padded the same way), with temporal positions as
+  `transformers` gives them. Occlusion is the model's: a hidden object
+  gives an empty matte and is found again when it comes back.
+* **Service** (`koo-analysis/src/subjects.rs`, `LocalSubjects`): frames come
+  from the media engine (the proxy when there is one), numbered on the
+  media's rate as it decodes them; tracking reads forward with one stream
+  and backward in chunks of 24. Each prompted frame is kept by
+  fingerprint, frame and prompt (a frame previewed in the viewer is not
+  segmented again once the click lands in a subject); a tracked subject by
+  fingerprint and `Subject::key` (all its prompts), over every frame its
+  clip shows and its prompted frames. Mattes are cleaned (islands and holes
+  under 16 cells), kept to 1/16 of a logit up to ±8 and run-length coded
+  (about 6 KB a frame), in memory and under `cache/mattes/` (`store.rs`).
+  Previews run on a model instance of their own and keep the last 3
+  encoded frames, so picking stays quick (the first click on a frame
+  encodes it, about 2–4 s on a laptop CPU; later ones 50–80 ms) while a
+  subject tracks on the other. A tracking job waits 1.2 s before it starts,
+  so a few quick clicks run one; a newer subject of the same mask cancels
+  its older job. Tracking costs about 4 s a frame on 4 CPU cores. A failed
+  frame or job is not tried again until the model is downloaded anew.
+* **Drawing** (`Matte::field`): the logits are upsampled as the model does
+  (bilinear between cell centres) to the mask raster, with an edge one
+  pixel soft from the logits over their slope; `refine` eases it onto the
+  decoded frame's luma with a guided filter (radius a 135th of the height,
+  ε 10⁻³) within three radii of the edge. A feathered or expanded subject
+  is drawn from signed distances instead (the logits near the edge, an
+  exact distance transform further out), like shapes. A subject without
+  its matte yet is left out of the raster; layout bounds a picture by its
+  subjects' mattes.
+
 ## 8. Agent
 
 * **Backends** (`koo-agent/src/backend/`): Claude runs as
@@ -521,12 +594,23 @@ not retried with Whisper.
   JSON that leave out neutral defaults.
 * **Seeing and hearing:** `view_range` (collages, opening with the sound
   script), `view_frame` (annotated, with a `zoom` region under a pixel
-  grid), `get_layout`, `get_scopes`, `preview_fx`, `get_audio` (the sound
+  grid, or with `masks` showing what masks cut away tinted, naming subjects
+  still being found), `get_layout`, `get_scopes`, `preview_fx`, `get_audio` (the sound
   script for any range), `get_music` (tempo, downbeats, level changes; every
   beat with `beats`), `search_sounds` (2 s steps ranked by a description or
   an example range) and `view_audio` (up to 30 s of spectrogram lanes).
   `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
   target clear of words wins over a nearer one on a word.
+* **Subject masks:** `set_mask` with `shape.type: subject` (`tools/masks.rs`)
+  takes `include` and `exclude` points and a `box`, in picture fractions
+  or frame pixels, on the frame at `at`; each list given replaces that
+  frame's own. Before proposing, it runs the model on that frame and says
+  what it kept (its share of the picture, its box in frame pixels, the
+  model's confidence), with advice when it found nothing, took nearly the
+  whole picture or is unsure; with `track` it says how many frames are
+  left and how long that takes here. `get_clip` lists a subject's prompts
+  on the timeline and how far it is tracked. The prompt steers the agent to
+  subjects for people and objects, and to check with `view_frame` `masks`.
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
   changes on cue) or a sound effect (up to 30 s, optionally looping) with
@@ -639,7 +723,10 @@ available to them.
   (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
   anchor, corner pins, masks, retimed media; `compose::needs_compositor`)
   are drawn by `compose::program` from the original media and piped into
-  the graph as raw RGBA, which keeps captions and audio.
+  the graph as raw RGBA, which keeps captions and audio. Subject masks in
+  the range are found (and tracked) first, `SubjectService::complete`
+  taking half the progress; a subject that cannot be found fails the
+  render.
 * **Queue** (`queue.rs`): jobs run one after another with progress from
   `-progress pipe:1`, can be cancelled and never overwrite a file.
 * **Presets:** 1080p60, 1080p30 and 4K30 H.264, ProRes 422 HQ, WAV and
@@ -657,8 +744,8 @@ the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
-Storage (what the user-data folder holds, with Clear for previews and
-analysis results). The FX code editor replaces
+Storage (what the user-data folder holds, with Clear for previews,
+subject mattes among them, and analysis results). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -718,6 +805,7 @@ there.
 | E3 transcript editing | `ui/transcript*`, `koo-core/src/query.rs`, `cuts.rs` |
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
+| Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
@@ -756,6 +844,16 @@ there.
   instrumental chunks are written from the docs.
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
+* Subject tracking runs on the CPU (ONNX Runtime's CPU provider, as every
+  model here): about 4 s a frame on 4 cores, so a minute of 30 fps footage
+  takes hours. GPU providers (CoreML, DirectML, CUDA) were not tried. A
+  changed prompt tracks the whole clip again rather than from that frame.
+* A subject mask follows one object; several objects are several masks.
+  The matte is the model's 256² logits stretched over the picture: fine
+  detail (hair) relies on `refine`, which only eases the edge.
+* The SAM 2.1 graphs come from a third party's Hugging Face repository
+  (pinned to a commit); a mirror under the project's own account would
+  keep them reachable.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`

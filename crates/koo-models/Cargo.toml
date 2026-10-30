@@ -20,6 +20,9 @@ aligner = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
 diarizer = ["dep:ort"]
 # Sound tagging, beats and sound search, run by ONNX Runtime.
 sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+# Subject masks: objects picked by clicks and followed through video, run
+# by ONNX Runtime.
+segment = ["dep:ort", "dep:serde_json"]
 
 [dependencies]
 anyhow.workspace = true

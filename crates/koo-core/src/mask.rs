@@ -11,6 +11,12 @@
 //! the whole picture); [`MaskMode::Add`] unites, [`MaskMode::Subtract`]
 //! cuts away and [`MaskMode::Intersect`] keeps the overlap.
 //!
+//! A subject mask ([`MaskShape::Subject`], [`Mask::subject`]) keeps an
+//! object a segmentation model finds instead of a shape: its [`Matte`] at
+//! the time ([`SubjectMattes`]) is drawn on the raster as coverage, or as
+//! signed distances when it feathers or expands (see
+//! [`crate::subject`]). One without its matte yet is left out.
+//!
 //! The compositor multiplies the picture's alpha by [`raster`] before it
 //! is placed and blended (`FxBatch::mask`), on the GPU and the CPU alike.
 //! Captions and titles take no masks: the render burns them in with ASS,
@@ -19,6 +25,7 @@
 use crate::ids::MaskId;
 use crate::model::Ease;
 use crate::services::Frame;
+use crate::subject::{FieldKind, Matte, Subject};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -84,6 +91,8 @@ pub enum MaskShape {
         #[serde(default)]
         smooth: bool,
     },
+    /// The object [`Mask::subject`] picks, as the model finds it.
+    Subject,
 }
 
 /// Everything about a mask that can be keyframed.
@@ -129,6 +138,10 @@ pub struct Mask {
     /// holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keyframes: Vec<MaskKeyframe>,
+    /// What a [`MaskShape::Subject`] keeps. Not keyframed: the model
+    /// follows the object instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
 }
 
 impl Mask {
@@ -145,7 +158,23 @@ impl Mask {
                 opacity: 1.0,
             },
             keyframes: Vec::new(),
+            subject: None,
         }
+    }
+
+    /// A mask keeping the object `subject` picks.
+    pub fn subject(subject: Subject) -> Self {
+        Self {
+            subject: Some(subject),
+            ..Self::new(MaskShape::Subject)
+        }
+    }
+
+    /// Its subject, when it keeps one.
+    pub fn picks(&self) -> Option<&Subject> {
+        self.subject
+            .as_ref()
+            .filter(|_| self.state.shape == MaskShape::Subject)
     }
 
     /// The state at clip-relative time `t`: [`Mask::state`] without
@@ -325,12 +354,13 @@ impl MaskShape {
                     *p = add(*p);
                 }
             }
+            MaskShape::Subject => {}
         }
         out
     }
 
     /// Its outline as a closed polyline in uv, for a picture `aspect`
-    /// (width / height) wide.
+    /// (width / height) wide; none for a subject (see [`Matte::outlines`]).
     pub fn outline(&self, aspect: f32) -> Vec<[f32; 2]> {
         let aspect = aspect.max(1e-3);
         let to_uv = |p: [f32; 2]| [p[0] / aspect, p[1]];
@@ -392,6 +422,7 @@ impl MaskShape {
                     pts
                 }
             }
+            MaskShape::Subject => Vec::new(),
         }
     }
 }
@@ -452,6 +483,9 @@ enum Distance {
     /// Centre, semi-axes, turn.
     Ellipse([f32; 2], [f32; 2], (f32, f32)),
     Polygon(Vec<[f32; 2]>),
+    /// A subject's matte drawn on the raster, a value per pixel (empty
+    /// when only its bounds are wanted).
+    Field(Vec<f32>, FieldKind),
 }
 
 impl Distance {
@@ -480,6 +514,7 @@ impl Distance {
                 }
             }
             Distance::Polygon(v) => polygon_distance(v, p),
+            Distance::Field(..) => f32::MAX,
         }
     }
 }
@@ -514,9 +549,63 @@ fn polygon_distance(v: &[[f32; 2]], p: [f32; 2]) -> f32 {
     if inside { -d } else { d }
 }
 
-fn prepare(mask: &Mask, t: Time, aspect: f32) -> Prepared {
+/// What subject masks are drawn from at a time: each one's matte, and the
+/// picture whose edges they refine onto.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubjectMattes<'a> {
+    pub mattes: &'a [(MaskId, Matte)],
+    pub picture: Option<&'a Frame>,
+}
+
+impl SubjectMattes<'_> {
+    fn get(&self, mask: MaskId) -> Option<&Matte> {
+        self.mattes
+            .iter()
+            .find(|(id, _)| *id == mask)
+            .map(|(_, m)| m)
+    }
+}
+
+/// `mask` at `t` ready to measure; drawn on a `raster` (width, height)
+/// when given, else only its bounds are wanted. `None` for a subject
+/// without its matte.
+fn prepare(
+    mask: &Mask,
+    t: Time,
+    aspect: f32,
+    mattes: &SubjectMattes,
+    raster: Option<(u32, u32)>,
+) -> Option<Prepared> {
     let state = mask.state_at(t);
     let turn = |deg: f32| deg.to_radians().sin_cos();
+    let feather = state.feather.max(0.0);
+    let reach = state.expansion.max(0.0) + feather;
+    if state.shape == MaskShape::Subject {
+        let subject = mask.subject.as_ref()?;
+        let matte = mattes.get(mask.id)?;
+        let [u0, v0, u1, v1] = matte.bounds().unwrap_or([0.5, 0.5, 0.5, 0.5]);
+        let kind = if feather > 0.0 || state.expansion != 0.0 {
+            FieldKind::Distance
+        } else {
+            FieldKind::Coverage
+        };
+        let picture = mattes.picture.filter(|_| subject.refine);
+        let field = raster.map_or_else(Vec::new, |(w, h)| matte.field(w, h, kind, picture));
+        return Some(Prepared {
+            shape: Distance::Field(field, kind),
+            bounds: [
+                u0 * aspect - reach,
+                v0 - reach,
+                u1 * aspect + reach,
+                v1 + reach,
+            ],
+            expansion: state.expansion,
+            feather,
+            invert: mask.invert,
+            opacity: state.opacity.clamp(0.0, 1.0),
+            mode: mask.mode,
+        });
+    }
     let outline = state.shape.square_outline(aspect);
     let shape = match &state.shape {
         MaskShape::Rectangle {
@@ -543,15 +632,13 @@ fn prepare(mask: &Mask, t: Time, aspect: f32) -> Prepared {
             [size[0].abs() * aspect / 2.0, size[1].abs() / 2.0],
             turn(*rotation_deg),
         ),
-        MaskShape::Path { .. } => Distance::Polygon(outline.clone()),
+        MaskShape::Path { .. } | MaskShape::Subject => Distance::Polygon(outline.clone()),
     };
-    let feather = state.feather.max(0.0);
-    let reach = state.expansion.max(0.0) + feather;
     let bounds = outline.iter().fold(
         [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
         |[x0, y0, x1, y1], p| [x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1])],
     );
-    Prepared {
+    Some(Prepared {
         shape,
         bounds: [
             bounds[0] - reach,
@@ -564,21 +651,25 @@ fn prepare(mask: &Mask, t: Time, aspect: f32) -> Prepared {
         invert: mask.invert,
         opacity: state.opacity.clamp(0.0, 1.0),
         mode: mask.mode,
-    }
+    })
 }
 
 impl Prepared {
-    /// Coverage at square point `p`, softened over at least `pixel`.
-    fn coverage(&self, p: [f32; 2], pixel: f32) -> f32 {
+    /// Coverage at square point `p`, raster pixel `index`, softened over
+    /// at least `pixel`.
+    fn coverage(&self, p: [f32; 2], index: usize, pixel: f32) -> f32 {
         let soft = self.feather.max(pixel);
+        let smooth = |d: f32| {
+            let c = (0.5 - (d - self.expansion) / soft).clamp(0.0, 1.0);
+            c * c * (3.0 - 2.0 * c)
+        };
         let [x0, y0, x1, y1] = self.bounds;
         let outside = p[0] < x0 - soft || p[0] > x1 + soft || p[1] < y0 - soft || p[1] > y1 + soft;
-        let c = if outside {
-            0.0
-        } else {
-            let d = self.shape.at(p) - self.expansion;
-            let c = (0.5 - d / soft).clamp(0.0, 1.0);
-            c * c * (3.0 - 2.0 * c)
+        let c = match &self.shape {
+            Distance::Field(v, FieldKind::Coverage) => v.get(index).copied().unwrap_or(0.0),
+            Distance::Field(v, FieldKind::Distance) => v.get(index).map_or(0.0, |d| smooth(*d)),
+            _ if outside => 0.0,
+            shape => smooth(shape.at(p)),
         };
         let c = if self.invert { 1.0 - c } else { c };
         c * self.opacity
@@ -592,13 +683,22 @@ pub fn any_enabled(masks: &[Mask]) -> bool {
 
 /// How much of the picture `masks` keep at clip-relative time `t`, as a
 /// `width` × `height` straight RGBA8 frame of white with that alpha, for a
-/// picture `aspect` (width / height) wide. `None` when no mask is enabled.
-pub fn raster(masks: &[Mask], t: Time, aspect: f32, width: u32, height: u32) -> Option<Frame> {
+/// picture `aspect` (width / height) wide, subjects drawn from `mattes`.
+/// `None` when no mask is enabled (or has its matte).
+pub fn raster(
+    masks: &[Mask],
+    t: Time,
+    aspect: f32,
+    width: u32,
+    height: u32,
+    mattes: &SubjectMattes,
+) -> Option<Frame> {
     let aspect = aspect.max(1e-3);
+    let (w, h) = (width.max(1), height.max(1));
     let prepared: Vec<Prepared> = masks
         .iter()
         .filter(|m| m.enabled)
-        .map(|m| prepare(m, t, aspect))
+        .filter_map(|m| prepare(m, t, aspect, mattes, Some((w, h))))
         .collect();
     let first = prepared.first()?;
     let start = if first.mode == MaskMode::Add {
@@ -606,18 +706,19 @@ pub fn raster(masks: &[Mask], t: Time, aspect: f32, width: u32, height: u32) -> 
     } else {
         1.0
     };
-    let (w, h) = (width.max(1) as usize, height.max(1) as usize);
+    let (w, h) = (w as usize, h as usize);
     let pixel = 1.0 / h as f32;
     let mut rgba = vec![255u8; w * h * 4];
     let draw = |y0: usize, rows: &mut [u8]| {
         for (i, line) in rows.chunks_mut(w * 4).enumerate() {
             let v = (y0 + i) as f32 / h as f32 + 0.5 / h as f32;
+            let row = (y0 + i) * w;
             for (x, px) in line.chunks_mut(4).enumerate() {
                 let u = (x as f32 + 0.5) / w as f32;
                 let p = [u * aspect, v];
                 let mut acc = start;
                 for m in &prepared {
-                    let c = m.coverage(p, pixel);
+                    let c = m.coverage(p, row + x, pixel);
                     acc = match m.mode {
                         MaskMode::Add => acc + c * (1.0 - acc),
                         MaskMode::Subtract => acc * (1.0 - c),
@@ -661,9 +762,14 @@ pub fn raster_size(picture: (u32, u32)) -> (u32, u32) {
 }
 
 /// The part of the picture `masks` can leave visible at `t`, as `[u0, v0,
-/// u1, v1]`, when they only add uninverted shapes; `None` when they may
-/// leave anything (or there are none).
-pub fn kept_bounds(masks: &[Mask], t: Time, aspect: f32) -> Option<[f32; 4]> {
+/// u1, v1]`, when they only add uninverted shapes (subjects by their
+/// `mattes`); `None` when they may leave anything (or there are none).
+pub fn kept_bounds(
+    masks: &[Mask],
+    t: Time,
+    aspect: f32,
+    mattes: &SubjectMattes,
+) -> Option<[f32; 4]> {
     let aspect = aspect.max(1e-3);
     let enabled: Vec<&Mask> = masks.iter().filter(|m| m.enabled).collect();
     if enabled.is_empty() || enabled.iter().any(|m| m.invert || m.mode != MaskMode::Add) {
@@ -672,9 +778,11 @@ pub fn kept_bounds(masks: &[Mask], t: Time, aspect: f32) -> Option<[f32; 4]> {
     enabled
         .iter()
         .map(|m| {
-            let [x0, y0, x1, y1] = prepare(m, t, aspect).bounds;
-            [x0 / aspect, y0, x1 / aspect, y1]
+            let [x0, y0, x1, y1] = prepare(m, t, aspect, mattes, None)?.bounds;
+            Some([x0 / aspect, y0, x1 / aspect, y1])
         })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
         .reduce(|a, b| {
             [
                 a[0].min(b[0]),

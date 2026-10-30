@@ -2,6 +2,13 @@
 //! changes it (shape, mode, edge, opacity; keyed at a time with `at`), in
 //! the picture's own coordinates or, with `space: frame`, in frame pixels
 //! at that time; `set_mask` with `remove` takes them away. `get_clip` lists them.
+//!
+//! A `subject` shape keeps the object its `include` clicks and `box` pick
+//! (`koo_core::subject`): `at` names the frame they are on, and the model
+//! finds the object's edge there before the change is proposed, so the
+//! result says what it kept (its share of the picture, its box in frame
+//! pixels, the model's confidence) and what to do when that looks wrong.
+//! With `track` it is followed through the clip in the background.
 
 use super::edit::with_notes;
 use super::{Done, Job, JobDone, Step, ToolCtx, propose};
@@ -10,15 +17,18 @@ use koo_core::Time;
 use koo_core::command::Command;
 use koo_core::compose::{self, Shape, Stills};
 use koo_core::mask::{Mask, MaskKeyframe, MaskMode, MaskShape, MaskState};
-use koo_core::model::{Clip, Project, TrackKind};
+use koo_core::model::{Clip, ClipContent, MediaKind, Project, TrackKind};
+use koo_core::services::{Services, SubjectService};
+use koo_core::subject::{Matte, Subject, SubjectPoint, SubjectPrompt};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-pub const SHAPES: [&str; 3] = ["rectangle", "ellipse", "path"];
+pub const SHAPES: [&str; 4] = ["rectangle", "ellipse", "path", "subject"];
 pub const MODES: [&str; 3] = ["add", "subtract", "intersect"];
 
-/// `clip`'s masks as tools show them: short ids, times in timeline seconds.
-pub fn masks_json(clip: &Clip) -> Value {
+/// `clip`'s masks as tools show them: short ids, times in timeline seconds,
+/// a subject's prompts on the timeline and how far it is tracked.
+pub fn masks_json(project: &Project, clip: &Clip, services: &Services) -> Value {
     clip.masks
         .iter()
         .map(|m| {
@@ -29,9 +39,62 @@ pub fn masks_json(clip: &Clip) -> Value {
                     k["at"] = secs(clip.start + key.at);
                 }
             }
+            if let Some(subject) = m.picks() {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("subject");
+                }
+                v["prompts"] = subject
+                    .prompts
+                    .iter()
+                    .map(|p| prompt_json(clip, p))
+                    .collect();
+                v["track"] = json!(subject.track);
+                v["refine"] = json!(subject.refine);
+                let status = compose::subject_ref(project, clip, m)
+                    .zip(services.subjects.as_ref())
+                    .map(|(r, s)| s.status(r));
+                if let Some(status) = status {
+                    v["found"] = json!(status.prompted.0 == status.prompted.1);
+                    if subject.track {
+                        v["tracked"] =
+                            json!(format!("{}/{} frames", status.tracked, status.frames));
+                    }
+                    if let Some(e) = status.error {
+                        v["error"] = json!(e);
+                    }
+                }
+            }
             v
         })
         .collect()
+}
+
+/// A subject's prompt: its frame's timeline time (or source time, when the
+/// clip no longer shows it), clicks and box.
+fn prompt_json(clip: &Clip, p: &SubjectPrompt) -> Value {
+    let mut v = json!({});
+    match clip.to_timeline(p.at) {
+        Some(t) => v["at"] = secs(t),
+        None => v["source_at"] = secs(p.at),
+    }
+    let points = |include: bool| -> Vec<[f32; 2]> {
+        p.points
+            .iter()
+            .filter(|q| q.include == include)
+            .map(|q| q.at)
+            .collect()
+    };
+    let (include, exclude) = (points(true), points(false));
+    if !include.is_empty() {
+        v["include"] = json!(include);
+    }
+    if !exclude.is_empty() {
+        v["exclude"] = json!(exclude);
+    }
+    if let Some(r) = p.rect {
+        v["box"] = json!(r);
+    }
+    v
 }
 
 /// The clip a mask tool works on: a picture, not lettering or sound.
@@ -73,7 +136,8 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
             Some(MaskShape::Rectangle { .. }) => "rectangle",
             Some(MaskShape::Ellipse { .. }) => "ellipse",
             Some(MaskShape::Path { .. }) => "path",
-            None => return fail("`shape.type` is one of rectangle, ellipse, path"),
+            Some(MaskShape::Subject) => "subject",
+            None => return fail("`shape.type` is one of rectangle, ellipse, path, subject"),
         },
     };
     let num = |key: &str| -> ToolResultOf<Option<f32>> {
@@ -111,6 +175,7 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
             size: pair(v, "size")?.unwrap_or(s0),
             rotation_deg: num("rotation")?.unwrap_or(r0),
         },
+        "subject" => MaskShape::Subject,
         _ => {
             let (p0, smooth0) = match current {
                 Some(MaskShape::Path { points, smooth }) => (points.clone(), *smooth),
@@ -203,7 +268,16 @@ fn shape_from_frame(shape: &Shape, s: &MaskShape) -> Option<MaskShape> {
                 .collect::<Option<_>>()?,
             smooth: *smooth,
         },
+        MaskShape::Subject => MaskShape::Subject,
     })
+}
+
+/// Picture uv (before flip) → frame pixels through `shape`'s placement.
+fn uv_to_frame(shape: &Shape, uv: [f32; 2]) -> [f32; 2] {
+    let flip = shape.placement.flip;
+    let u = if flip[0] { 1.0 - uv[0] } else { uv[0] };
+    let v = if flip[1] { 1.0 - uv[1] } else { uv[1] };
+    shape.placement.to_canvas([u, v])
 }
 
 /// `mask` showing `state` from clip time `at`: keyed there, or its static
@@ -239,6 +313,18 @@ pub fn set_mask(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, To
         }
         None => None,
     };
+    let named = args
+        .value("shape")
+        .and_then(|v| v.get("type"))
+        .and_then(Value::as_str);
+    let is_subject = match (named, existing) {
+        (Some(kind), _) => kind == "subject",
+        (None, Some(i)) => clip.masks[i].picks().is_some(),
+        (None, None) => false,
+    };
+    if is_subject {
+        return set_subject(ctx, args, reason, existing);
+    }
     let at = match args.opt_time("at")? {
         Some(t) if !clip.range().contains(t) => {
             return fail(format!(
@@ -357,6 +443,376 @@ pub fn set_mask(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, To
         }
     });
     Ok(Step::Job(job))
+}
+
+/// The parts of a subject prompt `set_mask` was given; `None` leaves the
+/// frame's own.
+struct PromptArgs {
+    include: Option<Vec<[f32; 2]>>,
+    exclude: Option<Vec<[f32; 2]>>,
+    rect: Option<Option<[f32; 4]>>,
+}
+
+impl PromptArgs {
+    fn parse(shape: Option<&Value>) -> ToolResultOf<Self> {
+        let list = |key: &str| -> ToolResultOf<Option<Vec<[f32; 2]>>> {
+            match shape.and_then(|v| v.get(key)) {
+                None => Ok(None),
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .map(|p| {
+                        let p = p.as_array().filter(|p| p.len() == 2)?;
+                        Some([p[0].as_f64()? as f32, p[1].as_f64()? as f32])
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(Some)
+                    .ok_or_else(|| ToolError(format!("`shape.{key}` is a list of [x, y]"))),
+                Some(_) => fail(format!("`shape.{key}` is a list of [x, y]")),
+            }
+        };
+        let rect = match shape.and_then(|v| v.get("box")) {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::Array(a)) if a.len() == 4 && a.iter().all(Value::is_number) => {
+                let n: Vec<f32> = a
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .map(|v| v as f32)
+                    .collect();
+                Some(Some([
+                    n[0].min(n[2]),
+                    n[1].min(n[3]),
+                    n[0].max(n[2]),
+                    n[1].max(n[3]),
+                ]))
+            }
+            Some(_) => return fail("`shape.box` is [left, top, right, bottom], or null"),
+        };
+        Ok(Self {
+            include: list("include")?,
+            exclude: list("exclude")?,
+            rect,
+        })
+    }
+
+    fn given(&self) -> bool {
+        self.include.is_some() || self.exclude.is_some() || self.rect.is_some()
+    }
+
+    /// In picture uv: as given, or from frame pixels through `shape`.
+    fn to_uv(&self, shape: Option<&Shape>) -> Option<Self> {
+        let Some(shape) = shape else {
+            return Some(Self {
+                include: self.include.clone(),
+                exclude: self.exclude.clone(),
+                rect: self.rect,
+            });
+        };
+        let points = |v: &Option<Vec<[f32; 2]>>| -> Option<Option<Vec<[f32; 2]>>> {
+            match v {
+                None => Some(None),
+                Some(v) => v
+                    .iter()
+                    .map(|p| frame_to_uv(shape, *p))
+                    .collect::<Option<_>>()
+                    .map(Some),
+            }
+        };
+        let rect = match self.rect {
+            Some(Some([x0, y0, x1, y1])) => {
+                let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                    .iter()
+                    .map(|p| frame_to_uv(shape, *p))
+                    .collect::<Option<Vec<_>>>()?;
+                let fold = |f: fn(f32, f32) -> f32, i: usize, start: f32| {
+                    corners.iter().map(|c| c[i]).fold(start, f)
+                };
+                Some(Some([
+                    fold(f32::min, 0, f32::MAX),
+                    fold(f32::min, 1, f32::MAX),
+                    fold(f32::max, 0, f32::MIN),
+                    fold(f32::max, 1, f32::MIN),
+                ]))
+            }
+            other => other,
+        };
+        Some(Self {
+            include: points(&self.include)?,
+            exclude: points(&self.exclude)?,
+            rect,
+        })
+    }
+
+    /// `old` (the frame's prompt) with what was given in place of its own.
+    fn applied(&self, old: Option<&SubjectPrompt>, at: Time) -> SubjectPrompt {
+        let old_points = |include: bool| -> Vec<[f32; 2]> {
+            old.map(|p| {
+                p.points
+                    .iter()
+                    .filter(|q| q.include == include)
+                    .map(|q| q.at)
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
+        let include = self.include.clone().unwrap_or_else(|| old_points(true));
+        let exclude = self.exclude.clone().unwrap_or_else(|| old_points(false));
+        let point = |include: bool| {
+            move |at: [f32; 2]| SubjectPoint {
+                at: [at[0].clamp(0.0, 1.0), at[1].clamp(0.0, 1.0)],
+                include,
+            }
+        };
+        let rect = self.rect.unwrap_or_else(|| old.and_then(|p| p.rect));
+        SubjectPrompt {
+            at,
+            points: include
+                .into_iter()
+                .map(point(true))
+                .chain(exclude.into_iter().map(point(false)))
+                .collect(),
+            rect: rect.map(|r| r.map(|v| v.clamp(0.0, 1.0))),
+        }
+    }
+}
+
+/// `set_mask` for a subject: the prompt on the frame at `at` (the clip's
+/// middle by default) found by the model before it is proposed.
+fn set_subject(
+    ctx: &mut ToolCtx,
+    args: &Args,
+    reason: &str,
+    existing: Option<usize>,
+) -> Result<Step, ToolError> {
+    let project = ctx.project();
+    let clip = picture_clip(project, args)?;
+    let ClipContent::Media { media, .. } = &clip.content else {
+        return fail("Subject masks go on video and image clips from the pool.");
+    };
+    let item = project
+        .media(*media)
+        .cloned()
+        .ok_or_else(|| ToolError("media not found".into()))?;
+    if item.kind == MediaKind::Audio {
+        return fail("Masks go on picture clips, not audio.");
+    }
+    let Some(service) = ctx.services.subjects.clone() else {
+        return fail("Subject masks are not available in this build.");
+    };
+    if let Err(e) = service.available() {
+        return fail(format!(
+            "{e} Ask the user to download it; until then use a rectangle, ellipse or path."
+        ));
+    }
+    let t = match args.opt_time("at")? {
+        Some(t) if !clip.range().contains(t) => {
+            return fail(format!(
+                "{t} is outside the clip ({} – {})",
+                clip.start,
+                clip.end()
+            ));
+        }
+        Some(t) => t,
+        None => clip.start + Time(clip.duration.0 / 2),
+    };
+    let rate = item
+        .info
+        .as_ref()
+        .and_then(|i| i.video.as_ref())
+        .map(|v| v.rate)
+        .unwrap_or_default();
+    let source = match item.kind {
+        MediaKind::Image => Time::ZERO,
+        _ => clip
+            .to_source(t)
+            .ok_or_else(|| ToolError("the clip has no source time there".into()))?
+            .max(Time::ZERO)
+            .floor_to_frame(rate),
+    };
+    let given = PromptArgs::parse(args.value("shape"))?;
+    let current = existing.map(|i| clip.masks[i].clone());
+    if current.is_none() && !given.given() {
+        return fail(
+            "A new subject mask needs `shape.include` points on the object, or a `shape.box` around it.",
+        );
+    }
+    let frame = match args.opt_str("space")? {
+        None | Some("picture") => false,
+        Some("frame") => true,
+        Some(s) => return fail(format!("`space` is picture or frame, not `{s}`")),
+    };
+    let mut mask = current.clone().unwrap_or_else(|| {
+        Mask::subject(Subject::new(SubjectPrompt {
+            at: source,
+            ..Default::default()
+        }))
+    });
+    // A shape mask turned into a subject: its shape's keys go with it.
+    if mask.state.shape != MaskShape::Subject {
+        mask.state.shape = MaskShape::Subject;
+        mask.keyframes.clear();
+    }
+    if let Some(v) = args.opt_f64("feather")? {
+        mask.state.feather = (v as f32).max(0.0);
+    }
+    if let Some(v) = args.opt_f64("expansion")? {
+        mask.state.expansion = v as f32;
+    }
+    if let Some(v) = args.opt_f64("opacity")? {
+        mask.state.opacity = (v as f32).clamp(0.0, 1.0);
+    }
+    if let Some(mode) = args.opt_str("mode")? {
+        mask.mode = match mode {
+            "add" => MaskMode::Add,
+            "subtract" => MaskMode::Subtract,
+            "intersect" => MaskMode::Intersect,
+            m => return fail(format!("unknown mode `{m}`")),
+        };
+    }
+    if let Some(v) = args.opt_bool("invert")? {
+        mask.invert = v;
+    }
+    if let Some(v) = args.opt_bool("enabled")? {
+        mask.enabled = v;
+    }
+    let subject = mask.subject.get_or_insert_with(|| Subject {
+        prompts: Vec::new(),
+        track: false,
+        refine: true,
+    });
+    if let Some(v) = args.opt_bool("track")? {
+        subject.track = v && item.kind != MediaKind::Image;
+    }
+    if let Some(v) = args.opt_bool("refine")? {
+        subject.refine = v;
+    }
+    let (clip_id, masks) = (clip.id, clip.masks.clone());
+    let clip = clip.clone();
+    let project = Arc::new(project.clone());
+    let services = ctx.services.clone();
+    let reason = reason.to_owned();
+    let job: Job = Box::new(move || {
+        let s = &project.timeline.settings;
+        let mut stills = Stills::new(services.media.clone(), 640);
+        let shapes = compose::layout(&project, t, (s.width, s.height), &services, &mut stills);
+        let laid = shapes.iter().find(|l| l.clip == clip_id);
+        if frame && laid.is_none() {
+            return JobDone::Done(Done::error(format!(
+                "The clip draws nothing at {t}; pass `at`, or give the points in picture coordinates."
+            )));
+        }
+        let Some(given) = given.to_uv(laid.filter(|_| frame)) else {
+            return JobDone::Done(Done::error("The clip is scaled to nothing there."));
+        };
+        let subject = mask.subject.clone().expect("set above");
+        let old = subject.prompt_on(source.to_frame(rate), rate).cloned();
+        let prompt = if given.given() {
+            given.applied(old.as_ref(), source)
+        } else {
+            old.clone().unwrap_or(SubjectPrompt {
+                at: source,
+                ..Default::default()
+            })
+        };
+        let mut mask = mask;
+        mask.subject = Some(subject.with_prompt(prompt.clone(), rate));
+        if mask.picks().is_some_and(|s| s.prompts.is_empty()) {
+            return JobDone::Done(Done::error(
+                "That leaves the subject with nothing picking it; remove the mask instead.",
+            ));
+        }
+        let mut notes = vec![format!("Subject mask {}.", short(mask.id))];
+        if !prompt.is_empty() {
+            match service.preview(&item, &prompt) {
+                Ok(matte) => notes.extend(found_notes(&matte, laid, t)),
+                Err(e) => return JobDone::Done(Done::error(format!("The model failed: {}", e.0))),
+            }
+        }
+        if let Some(r) = compose::subject_ref(&project, &clip, &mask) {
+            notes.extend(tracking_note(service.as_ref(), r, item.kind));
+        }
+        notes.push(
+            "Check it with view_frame `masks: true`: what the masks cut away is tinted red.".into(),
+        );
+        let mut next = masks.clone();
+        match existing {
+            Some(i) => next[i] = mask,
+            None => next.push(mask),
+        }
+        JobDone::Propose {
+            commands: vec![Command::SetMasks {
+                clip: clip_id,
+                masks: next,
+            }],
+            reason,
+            excerpts: notes,
+        }
+    });
+    Ok(Step::Job(job))
+}
+
+/// What the model found on the prompted frame, and what to do when it
+/// looks wrong.
+fn found_notes(matte: &Matte, shape: Option<&Shape>, t: Time) -> Vec<String> {
+    let area = matte.area();
+    let Some(bounds) = matte.bounds().filter(|_| area > 0.0005) else {
+        return vec![format!(
+            "On the frame at {t} the model found no object: put `include` points on the object itself, or a `box` around it."
+        )];
+    };
+    let mut where_ = String::new();
+    if let Some(shape) = shape {
+        let [u0, v0, u1, v1] = bounds;
+        let corners = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]].map(|c| uv_to_frame(shape, c));
+        let (x0, x1) = corners
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c[0]), b.max(c[0])));
+        let (y0, y1) = corners
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c[1]), b.max(c[1])));
+        where_ = format!(", frame pixels x {x0:.0}–{x1:.0}, y {y0:.0}–{y1:.0}");
+    }
+    let mut notes = vec![format!(
+        "On the frame at {t} it keeps {:.1} % of the picture{where_}; the model's confidence {:.2}.",
+        area * 100.0,
+        matte.score
+    )];
+    if area > 0.8 {
+        notes.push("That is nearly the whole picture: the clicks may be on the background. Put them on the object, or `exclude` the background.".into());
+    } else if matte.score < 0.7 {
+        notes.push("The model is unsure: `exclude` points on parts it took by mistake and `include` points on parts it missed sharpen it.".into());
+    }
+    notes
+}
+
+/// How the subject `r` spans the clip: held from its prompted frames, or
+/// followed (and how long that takes here).
+fn tracking_note(
+    service: &dyn SubjectService,
+    r: koo_core::services::SubjectRef<'_>,
+    kind: MediaKind,
+) -> Option<String> {
+    if kind == MediaKind::Image {
+        return None;
+    }
+    if !r.subject.track {
+        return Some("Each frame shows the nearest prompted frame's shape; pass `track: true` to follow the object as it moves.".into());
+    }
+    let status = service.status(r);
+    let left = status.frames.saturating_sub(status.tracked);
+    if left == 0 {
+        return Some("It is followed through every frame of the clip.".into());
+    }
+    let pace = match status.seconds_per_frame {
+        Some(spf) => format!(
+            "about {:.0} min on this machine",
+            (left as f32 * spf / 60.0).ceil()
+        ),
+        None => "a few seconds a frame".into(),
+    };
+    Some(format!(
+        "It is followed through the clip's {left} frames in the background ({pace}); renders wait for it, and get_clip shows how far it got. Prompts on other frames (`at`) correct it where it drifts."
+    ))
 }
 
 pub fn remove_mask(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {

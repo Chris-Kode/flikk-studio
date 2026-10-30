@@ -26,6 +26,7 @@ mod ffmpeg;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
+mod subjects;
 mod vad;
 
 use koo_core::analysis::{
@@ -46,6 +47,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use ffmpeg::binary as ffmpeg_binary;
+pub use subjects::LocalSubjects;
 
 /// Items analyzed at once. Each already keeps several cores busy, and the
 /// large models a lot of memory.
@@ -218,6 +220,9 @@ impl LocalAnalysis {
                 ModelTask::SoundSearch,
             ]);
         }
+        if cfg!(feature = "subjects") {
+            tasks.push(ModelTask::Segmentation);
+        }
         tasks
     }
 
@@ -238,6 +243,8 @@ impl LocalAnalysis {
                 ModelTask::SoundTagging => steps.sounds,
                 ModelTask::Beats => steps.beats(),
                 ModelTask::SoundSearch => steps.sound_search(),
+                // Subject masks, not analysis.
+                ModelTask::Segmentation => false,
             })
             .collect()
     }

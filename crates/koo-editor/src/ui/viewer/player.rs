@@ -184,6 +184,7 @@ impl Job {
             &self.services,
             streams,
             PixelOrder::Bgra,
+            self.key.masks,
         );
         InFlight::Composing {
             frame,

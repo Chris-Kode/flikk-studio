@@ -17,6 +17,52 @@ use std::io::{Read as _, Write as _};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Make every matte the subject masks over `range` show (tracking them
+/// when they track), before frames are composed; `progress` gets 0..1.
+/// Whether there was any to make. Fails when a subject cannot be found
+/// (the model is missing).
+pub(crate) fn find_subjects(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let Some(service) = &services.subjects else {
+        return Ok(false);
+    };
+    let subjects: Vec<_> = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.range().overlaps(&range))
+        .flat_map(|c| {
+            c.masks
+                .iter()
+                .filter(|m| m.enabled)
+                .filter_map(move |m| compose::subject_ref(project, c, m))
+        })
+        .filter(|r| {
+            let track = r.subject.track;
+            !service.status(*r).complete(track)
+        })
+        .collect();
+    let n = subjects.len() as f32;
+    for (i, r) in subjects.iter().enumerate() {
+        let part = |p: f32| progress((i as f32 + p) / n);
+        service
+            .complete(*r, &part, cancel)
+            .map_err(|e| anyhow!("subject mask {}: {e}", short(r.mask)))?;
+    }
+    Ok(!subjects.is_empty())
+}
+
+fn short(id: impl std::fmt::Display) -> String {
+    id.to_string().chars().take(8).collect()
+}
+
 /// Whether `range` must be composited rather than drawn by the graph, and
 /// can be (the media engine decodes the sources).
 pub(crate) fn wanted(project: &Project, range: TimeRange, services: &Services) -> bool {
