@@ -244,6 +244,12 @@ pub fn secs(t: Time) -> Value {
     json!((t.as_millis() as f64) / 1000.0)
 }
 
+/// An `f32` as its shortest form: 0.2, not 0.20000000298023224 from
+/// widening it to `f64`.
+pub fn num(v: f32) -> Value {
+    json!(v.to_string().parse::<f64>().unwrap_or(v as f64))
+}
+
 pub fn range_json(r: TimeRange) -> Value {
     json!({ "start": secs(r.start), "end": secs(r.end) })
 }

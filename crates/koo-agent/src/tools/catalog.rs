@@ -188,7 +188,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_timeline",
             Some(ReadProject),
-            "Tracks, clips and markers overlapping a range (default: whole timeline), including your pending proposals.",
+            "Tracks, clips and markers overlapping a range (default: whole timeline), including your pending proposals. Media clips give the media id; `media` maps each id to its file name.",
             object(json!({ "range": range("Timeline range") }), &[]),
         ),
         spec(
@@ -206,7 +206,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_clip",
             Some(ReadProject),
-            "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects.",
+            "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects. Values at their neutral default are left out.",
             object(json!({ "clip": string("Clip id") }), &["clip"]),
         ),
         spec(
@@ -252,8 +252,14 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_transcript",
             Some(ReadAnalysis),
-            "Word-level transcript of a timeline range, grouped into lines by speaker and pauses. Each word is `word@seconds`.",
-            object(json!({ "range": range("Timeline range") }), &["range"]),
+            "Transcript of a timeline range, in lines by speaker and pauses. With `word_times`, each word is `word@seconds`.",
+            object(
+                json!({
+                    "range": range("Timeline range"),
+                    "word_times": boolean("Give each word's start time, which `cut_words` takes. Ask for it on the stretch you are about to cut.")
+                }),
+                &["range"],
+            ),
         ),
         spec(
             "get_speakers",
@@ -267,7 +273,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "find_silences",
             Some(ReadAnalysis),
-            "Gaps without speech of at least `min_s` seconds, in timeline time.",
+            "Gaps without speech of at least `min_s` seconds, as [start, end] pairs in timeline seconds.",
             object(
                 json!({ "min_s": number("Shortest gap, seconds (default 0.5)"), "range": range("Timeline range") }),
                 &[],
@@ -288,9 +294,12 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_music",
             Some(ReadAnalysis),
-            "Music in a range: tags, tempo, bar length, beats and downbeats in timeline seconds, and where it gets louder or softer (a drop, a breakdown).",
+            "Music in a range: tags, tempo, bar length, downbeats in timeline seconds, and where it gets louder or softer (a drop, a breakdown).",
             object(
-                json!({ "range": range("Timeline range (default: whole timeline)") }),
+                json!({
+                    "range": range("Timeline range (default: whole timeline)"),
+                    "beats": boolean("Also list every beat. Cuts snap to beats with `align` without it.")
+                }),
                 &[],
             ),
         ),
@@ -344,7 +353,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_layout",
             Some(View),
-            "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform, whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",
+            "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform (values off their neutral default), whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",
             object(
                 json!({ "t": time("Timeline seconds (default: the playhead)") }),
                 &[],
@@ -420,7 +429,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "cut_words",
             Some(EditTimeline),
-            "Propose removing spoken words. Give each run by the `@` times of its first and last word from `get_transcript`. The cuts go in the pauses around the run, clear of the words kept, with a short audio fade; the pause before the run stays, the one after it goes. The result says where a cut has no pause to sit in.",
+            "Propose removing spoken words. Give each run by the `@` times of its first and last word from `get_transcript` with `word_times`. The cuts go in the pauses around the run, clear of the words kept, with a short audio fade; the pause before the run stays, the one after it goes. The result says where a cut has no pause to sit in.",
             object(
                 json!({
                     "runs": {

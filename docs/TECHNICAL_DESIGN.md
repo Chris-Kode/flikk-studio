@@ -381,7 +381,8 @@ All nine streams are merged. What runs today:
   download) can be dismissed for the session.
 * **Hearing tools:** `view_range` and `view_detail` open with the sound
   script instead of the bare transcript; `get_audio` returns it for any
-  range, `get_music` lists tempo, beats, downbeats and level changes,
+  range, `get_music` lists tempo, downbeats and level changes (every beat
+  with `beats`),
   `search_sounds` ranks 2 s steps by a description or by an example
   range, and `view_audio` draws up to 30 s as a spectrogram lane per track
   (ffmpeg's `showspectrumpic`) with words, sounds and beats marked

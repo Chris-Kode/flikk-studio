@@ -1,11 +1,14 @@
 //! Read-project tools. Results carry only the slice asked for.
 
 use super::fx::{asset_json, fx_asset, instance_json, kind_name as fx_kind, param_spec_json};
+use super::layout::without_neutral;
 use super::{Done, Step, ToolCtx};
-use crate::args::{Args, ToolError, clip_id, kind_name, range_json, secs, short};
+use crate::args::{Args, ToolError, clip_id, kind_name, num, range_json, secs, short};
 use koo_core::audiofx::{AudioFx, AudioFxKind};
 use koo_core::fx::{self, FxKind, FxLanguage};
-use koo_core::model::{Clip, ClipContent, Curves, Grade, MarkerKind, Project, Track, Transform};
+use koo_core::model::{
+    Clip, ClipAudio, ClipContent, Curves, Grade, MarkerKind, Project, Track, Transform,
+};
 use koo_core::{Time, TimeRange};
 use serde_json::{Value, json};
 
@@ -56,7 +59,7 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
         }
     }
     if clip.audio.gain_db != 0.0 {
-        v["gain_db"] = json!(clip.audio.gain_db);
+        v["gain_db"] = num(clip.audio.gain_db);
     }
     if clip.audio.fade_in > Time::ZERO {
         v["fade_in"] = secs(clip.audio.fade_in);
@@ -105,17 +108,27 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
 }
 
 fn curves_json(c: &Curves) -> Value {
-    json!({ "master": c.master, "red": c.red, "green": c.green, "blue": c.blue })
+    let points = |c: &[[f32; 2]]| -> Vec<Value> { c.iter().map(|p| json!(p.map(num))).collect() };
+    json!({
+        "master": points(&c.master), "red": points(&c.red),
+        "green": points(&c.green), "blue": points(&c.blue),
+    })
 }
 
+/// The grade's values, leaving out those at their neutral value.
 fn grade_json(g: &Grade) -> Value {
-    let mut v = json!({
-        "exposure": g.exposure, "contrast": g.contrast, "saturation": g.saturation,
-        "gamma": g.gamma, "temperature": g.temperature, "tint": g.tint,
-        "lift": g.lift, "gamma_rgb": g.gamma_rgb, "gain": g.gain,
-        "offset": g.offset, "shadows": g.shadows, "highlights": g.highlights, "hue": g.hue,
-        "lut": g.lut.as_ref().map(|p| p.display().to_string()),
-    });
+    let all = |g: &Grade| {
+        json!({
+            "exposure": num(g.exposure), "contrast": num(g.contrast),
+            "saturation": num(g.saturation), "gamma": num(g.gamma),
+            "temperature": num(g.temperature), "tint": num(g.tint),
+            "lift": g.lift.map(num), "gamma_rgb": g.gamma_rgb.map(num), "gain": g.gain.map(num),
+            "offset": g.offset.map(num), "shadows": num(g.shadows),
+            "highlights": num(g.highlights), "hue": num(g.hue),
+            "lut": g.lut.as_ref().map(|p| p.display().to_string()),
+        })
+    };
+    let mut v = without_neutral(all(g), &all(&Grade::default()));
     if !g.curves.is_identity() {
         v["curves"] = curves_json(&g.curves);
     }
@@ -171,7 +184,7 @@ fn track_json(t: &Track) -> Value {
         v["muted"] = json!(true);
     }
     if t.mix.volume_db != 0.0 {
-        v["volume_db"] = json!(t.mix.volume_db);
+        v["volume_db"] = num(t.mix.volume_db);
     }
     if !t.mix.effects.is_empty() {
         v["audio_effects"] = audio_fx_json(&t.mix.effects);
@@ -185,6 +198,8 @@ pub fn get_timeline(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let tl = &project.timeline;
     let mut listed = 0;
     let mut truncated = false;
+    // Media names once, by id, instead of on every clip that uses them.
+    let mut media = serde_json::Map::new();
     let tracks: Vec<_> = tl
         .tracks
         .iter()
@@ -199,7 +214,16 @@ pub fn get_timeline(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     truncated |= listed > MAX_CLIPS;
                     listed <= MAX_CLIPS
                 })
-                .map(|c| clip_brief(project, c))
+                .map(|c| {
+                    let mut v = clip_brief(project, c);
+                    if let Some(brief) = v.as_object_mut()
+                        && let Some(Value::String(id)) = brief.get("media").cloned()
+                        && let Some(name) = brief.remove("name")
+                    {
+                        media.insert(id, name);
+                    }
+                    v
+                })
                 .collect();
             v["clips"] = json!(clips);
             v
@@ -217,11 +241,12 @@ pub fn get_timeline(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         "fps": tl.settings.rate.fps(),
         "tracks": tracks,
         "markers": markers,
+        "media": media,
     });
     if let Some(d) = &tl.ducking {
         out["ducking"] = json!({
             "music_track": tl.track(d.music_track).map(|t| t.name.clone()),
-            "reduction_db": d.reduction_db,
+            "reduction_db": num(d.reduction_db),
         });
     }
     if tl.grade != Grade::default() {
@@ -333,7 +358,23 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .timeline
         .clip(id)
         .ok_or_else(|| ToolError("clip not found".into()))?;
+    // The brief already leaves out what is at its default (speed, enabled…);
+    // its counts and flags give way to the full values below, which do too.
     let mut v = clip_brief(project, clip);
+    if let Some(brief) = v.as_object_mut() {
+        for key in [
+            "transformed",
+            "graded",
+            "keyframes",
+            "effects",
+            "gain_db",
+            "fade_in",
+            "fade_out",
+            "audio_effects",
+        ] {
+            brief.remove(key);
+        }
+    }
     v["track"] = json!(track.name);
     v["track_kind"] = json!(kind_name(track.kind));
     if let ClipContent::Media {
@@ -343,17 +384,19 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     {
         v["audio_stream"] = json!(s);
     }
-    v["transform"] = super::layout::transform_json(&clip.transform);
+    if clip.transform != Transform::default() {
+        v["transform"] = super::layout::transform_json(&clip.transform);
+    }
     if !clip.masks.is_empty() {
         v["masks"] = super::masks::masks_json(clip);
     }
-    v["speed"] = json!(clip.speed);
-    v["enabled"] = json!(clip.enabled);
-    v["effects"] = clip
-        .effects
-        .iter()
-        .map(|e| instance_json(project, e, clip.start))
-        .collect();
+    if !clip.effects.is_empty() {
+        v["effects"] = clip
+            .effects
+            .iter()
+            .map(|e| instance_json(project, e, clip.start))
+            .collect();
+    }
     let track_ref = project.timeline.track(track.id);
     for (key, edge, t) in [
         ("transition_in", "in", &clip.transition_in),
@@ -393,25 +436,34 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         j["values_at_start"] = Value::Object(values);
         v["generator"] = j;
     }
-    v["keyframes"] = clip
-        .keyframes
-        .iter()
-        .map(|k| {
-            json!({
-                "property": k.property,
-                "at": secs(clip.start + k.at),
-                "value": k.value,
-                "ease": k.ease,
+    if !clip.keyframes.is_empty() {
+        v["keyframes"] = clip
+            .keyframes
+            .iter()
+            .map(|k| {
+                json!({
+                    "property": k.property,
+                    "at": secs(clip.start + k.at),
+                    "value": num(k.value),
+                    "ease": k.ease,
+                })
             })
-        })
-        .collect();
-    v["grade"] = grade_json(&clip.grade);
-    v["audio"] = json!({
-        "gain_db": clip.audio.gain_db,
-        "fade_in": secs(clip.audio.fade_in),
-        "fade_out": secs(clip.audio.fade_out),
-        "effects": audio_fx_json(&clip.audio.effects),
-    });
+            .collect();
+    }
+    if clip.grade != Grade::default() {
+        v["grade"] = grade_json(&clip.grade);
+    }
+    if clip.audio != ClipAudio::default() {
+        let all = |a: &ClipAudio| {
+            json!({
+                "gain_db": num(a.gain_db),
+                "fade_in": secs(a.fade_in),
+                "fade_out": secs(a.fade_out),
+                "effects": audio_fx_json(&a.effects),
+            })
+        };
+        v["audio"] = without_neutral(all(&clip.audio), &all(&ClipAudio::default()));
+    }
     Ok(Done::json(format!("clip {id}"), &v).into())
 }
 

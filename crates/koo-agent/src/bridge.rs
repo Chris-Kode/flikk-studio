@@ -120,8 +120,9 @@ impl ToolResult {
         }
     }
 
+    /// Compact: indentation costs the model tokens and tells it nothing.
     pub fn json(value: &Value) -> Self {
-        Self::text(serde_json::to_string_pretty(value).unwrap_or_default())
+        Self::text(serde_json::to_string(value).unwrap_or_default())
     }
 }
 
