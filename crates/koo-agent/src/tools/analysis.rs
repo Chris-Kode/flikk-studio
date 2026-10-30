@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 /// Words returned by one `get_transcript` call before it is cut short.
 const MAX_WORDS: usize = 4000;
+/// Silences or shot changes listed by one call before it is cut short.
+const MAX_LISTED: usize = 500;
 /// A pause this long starts a new transcript line.
 const LINE_PAUSE: Time = Time(705_600_000);
 
@@ -201,10 +203,12 @@ pub fn facts_for(project: &Project, facts: &[SourceFact], range: TimeRange) -> V
 pub fn get_transcript(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let range = args.range("range")?;
+    // Times on every word cost more than the words; only cuts need them.
+    let word_times = args.opt_bool("word_times")?.unwrap_or(false);
     let (mut words, speakers) = timeline_words(project, ctx.services, range)?;
     let truncated = words.len() > MAX_WORDS;
     words.truncate(MAX_WORDS);
-    let lines = transcript_lines(&words, &speakers, true);
+    let lines = transcript_lines(&words, &speakers, word_times);
     let mut text = if lines.is_empty() {
         format!("No transcribed speech in {range}.")
     } else {
@@ -358,16 +362,22 @@ pub fn find_silences(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> 
     let total = gaps.iter().fold(Time::ZERO, |acc, g| acc + g.duration());
     let list: Vec<_> = gaps
         .iter()
-        .take(500)
-        .map(|g| json!({ "start": secs(g.start), "end": secs(g.end), "duration": secs(g.duration()) }))
+        .take(MAX_LISTED)
+        .map(|g| json!([secs(g.start), secs(g.end)]))
         .collect();
+    let mut out = json!({ "silences": list, "count": gaps.len(), "total": secs(total) });
+    if gaps.len() > MAX_LISTED {
+        out["truncated"] = json!(format!(
+            "first {MAX_LISTED}; ask for a smaller range or a longer `min_s`"
+        ));
+    }
     Ok(Done::json(
         format!(
             "{} silences ≥ {:.2} s in {range}",
             gaps.len(),
             min.as_secs_f64()
         ),
-        &json!({ "silences": list, "count": gaps.len(), "total": secs(total) }),
+        &out,
     )
     .into())
 }
@@ -398,10 +408,13 @@ pub fn find_shot_changes(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolErr
     }
     cuts.sort();
     cuts.dedup_by_key(|t| t.as_millis() / 40);
-    let list: Vec<_> = cuts.iter().map(|t| secs(*t)).collect();
-    Ok(Done::json(
-        format!("{} shot changes in {range}", cuts.len()),
-        &json!({ "shot_changes": list }),
-    )
-    .into())
+    let list: Vec<_> = cuts.iter().take(MAX_LISTED).map(|t| secs(*t)).collect();
+    let mut out = json!({ "shot_changes": list });
+    if cuts.len() > MAX_LISTED {
+        out["truncated"] = json!(format!(
+            "first {MAX_LISTED} of {}; ask for a smaller range",
+            cuts.len()
+        ));
+    }
+    Ok(Done::json(format!("{} shot changes in {range}", cuts.len()), &out).into())
 }

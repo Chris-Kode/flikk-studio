@@ -514,7 +514,7 @@ impl AgentHost {
                             &mut turn.usage.loaded,
                             &args,
                         );
-                        self.finish_call(reply, tool, args, done);
+                        self.finish_call(origin, reply, tool, args, done);
                         continue;
                     }
                     let mut ctx = ToolCtx {
@@ -528,7 +528,7 @@ impl AgentHost {
                         memory: &self.memory,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
-                        Step::Done(done) => self.finish_call(reply, tool, args, *done),
+                        Step::Done(done) => self.finish_call(origin, reply, tool, args, *done),
                         Step::Job(job) => {
                             turn.jobs += 1;
                             self.spawn_job(origin, reply, tool, args, job);
@@ -550,7 +550,7 @@ impl AgentHost {
                         memory: &self.memory,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
-                        Step::Done(done) => self.finish_call(reply, tool, args, *done),
+                        Step::Done(done) => self.finish_call(origin, reply, tool, args, *done),
                         Step::Job(job) => {
                             self.external.jobs += 1;
                             self.spawn_job(origin, reply, tool, args, job);
@@ -634,7 +634,7 @@ impl AgentHost {
                     }
                 }
             };
-            self.finish_call(reply, tool, args, done);
+            self.finish_call(origin, reply, tool, args, done);
         }
     }
 
@@ -651,8 +651,13 @@ impl AgentHost {
         close_open_sets(bus, &external_author(), None, &mut self.events);
     }
 
-    fn finish_call(&mut self, reply: Reply, tool: String, args: Value, done: Done) {
+    fn finish_call(&mut self, origin: Origin, reply: Reply, tool: String, args: Value, done: Done) {
         let ok = !done.result.is_error;
+        if origin == Origin::Turn
+            && let Some(turn) = self.turn.as_mut()
+        {
+            turn.usage.record(&tool, &done.result);
+        }
         reply.result(done.result);
         self.events.push(AgentEvent::Activity {
             entry: ActivityEntry {

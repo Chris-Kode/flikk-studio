@@ -209,6 +209,8 @@ pub fn get_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 pub fn get_music(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let range = args.range_or_all("range", project)?;
+    // Every beat is long and rarely needed: cuts snap to them with `align`.
+    let with_beats = args.opt_bool("beats")?.unwrap_or(false);
     let service = analysis(ctx.services)?;
     let get = |fp: &Fingerprint| service.analysis(fp);
     let music = heard::music_in_range(project, range, get);
@@ -242,13 +244,20 @@ pub fn get_music(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 "bpm": m.music.bpm().map(|b| round(b as f64, 1)),
                 "bar": m.music.bar().map(secs),
                 "downbeats": times(&m.downbeats),
-                "beats": times(&m.beats),
                 "changes": changes,
             });
-            if m.beats.len() > MAX_BEATS {
+            if with_beats {
+                v["beats"] = json!(times(&m.beats));
+            }
+            let (listed, name) = if with_beats {
+                (&m.beats, "beats")
+            } else {
+                (&m.downbeats, "downbeats")
+            };
+            if listed.len() > MAX_BEATS {
                 v["truncated"] = json!(format!(
-                    "first {MAX_BEATS} of {} beats; ask for a smaller range",
-                    m.beats.len()
+                    "first {MAX_BEATS} of {} {name}; ask for a smaller range",
+                    listed.len()
                 ));
             }
             v

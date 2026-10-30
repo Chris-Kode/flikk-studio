@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 /// Longest span `view_range` with `detail` accepts.
 const DETAIL_MAX: f64 = 20.0;
+/// Sound script lines `view_range` opens with; `get_audio` has the rest.
+const SCRIPT_MAX: usize = 60;
 const FRAME_WIDTH: u32 = 1280;
 /// Longest side of a zoomed view.
 const ZOOM_SIDE: u32 = 1280;
@@ -167,6 +169,11 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
 
     // The sound script is cheap; build it here so the job only decodes.
     let transcript = match script(project, ctx.services, range) {
+        Ok(lines) if lines.len() > SCRIPT_MAX => format!(
+            "{}\n(… {} more lines; get_audio gives them all)",
+            lines[..SCRIPT_MAX].join("\n"),
+            lines.len() - SCRIPT_MAX
+        ),
         Ok(lines) if !lines.is_empty() => lines.join("\n"),
         Ok(_) => "(nothing heard)".to_owned(),
         Err(ToolError(e)) => format!("({e})"),
