@@ -15,6 +15,7 @@
 
 use super::catalog::{ToolSpec, catalog};
 use super::{Done, visible};
+use crate::bridge::{Content, ToolResult};
 use koo_core::agent::{AgentSettings, EditorContext, Workspace};
 use koo_core::bus::{AgentRole, CommandBus};
 use koo_core::command::ToolCategory;
@@ -471,7 +472,8 @@ pub fn load(
 }
 
 /// One line per turn in `agent/tool_usage.jsonl`: which tools were listed,
-/// loaded and called, to tune [`CORE`] and [`KEYWORDS`] from real use.
+/// loaded and called, and how much each result sent back, to tune [`CORE`],
+/// [`KEYWORDS`] and the results themselves from real use.
 pub struct Usage {
     pub picked: BTreeSet<ToolCategory>,
     pub start: BTreeSet<ToolCategory>,
@@ -480,6 +482,9 @@ pub struct Usage {
     pub listed_bytes: usize,
     /// Tool name and whether it went through `run_tool`.
     pub calls: Vec<(String, bool)>,
+    /// Tool name, text bytes and images of each result, in the order they
+    /// finished (jobs finish out of order).
+    pub results: Vec<(String, usize, usize)>,
 }
 
 impl Usage {
@@ -491,7 +496,21 @@ impl Usage {
             listed: 0,
             listed_bytes: 0,
             calls: Vec::new(),
+            results: Vec::new(),
         }
+    }
+
+    /// Note what a finished call sends back. Images are counted, not
+    /// measured: what they cost the model goes by their size in pixels.
+    pub fn record(&mut self, tool: &str, result: &ToolResult) {
+        let (mut bytes, mut images) = (0, 0);
+        for c in &result.content {
+            match c {
+                Content::Text { text } => bytes += text.len(),
+                Content::Image { .. } => images += 1,
+            }
+        }
+        self.results.push((tool.to_owned(), bytes, images));
     }
 
     pub fn log(&self, settings: &AgentSettings, role: AgentRole, ctx: &EditorContext, at: i64) {
@@ -515,6 +534,12 @@ impl Usage {
                 .iter()
                 .map(|(name, via_run)| if *via_run { format!("{name} (run_tool)") } else { name.clone() })
                 .collect::<Vec<_>>(),
+            "results": self
+                .results
+                .iter()
+                .map(|(tool, bytes, images)| json!({ "tool": tool, "bytes": bytes, "images": images }))
+                .collect::<Vec<_>>(),
+            "result_bytes": self.results.iter().map(|r| r.1).sum::<usize>(),
         });
         let path = crate::session::agent_dir().join("tool_usage.jsonl");
         if let Ok(mut file) = std::fs::OpenOptions::new()

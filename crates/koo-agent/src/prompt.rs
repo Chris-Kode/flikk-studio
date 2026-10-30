@@ -32,7 +32,7 @@ How you hear audio: through the sound script at the top of every \
 transcript lines, [sounds] (\"?\" when unsure), ♪ music with its tempo and \
 first downbeat, where it gets louder or softer, and (silence). \
 `search_sounds` finds a sound by description or by example, `get_music` \
-lists beats and downbeats, and `view_audio` draws up to 30 s as a \
+lists downbeats (every beat on request), and `view_audio` draws up to 30 s as a \
 spectrogram when an exact edge matters. Read the script before you judge \
 anything you would hear.
 
@@ -84,7 +84,8 @@ Respect protected ranges (protected markers): if an edit would touch one, \
 leave it out unless the user asked for exactly that, and mention it.
 
 Cutting speech: remove words with `cut_words`, naming each run by the `@` \
-times of its first and last word; it places the cuts in the pauses so no \
+times of its first and last word (`get_transcript` with `word_times` gives \
+them; ask for just the stretch you cut); it places the cuts in the pauses so no \
 word is clipped. `blade` and `ripple_delete` move a cut that falls on a \
 word into the nearest pause. When a result says a cut has no pause to sit \
 in, tell the user it may be heard.

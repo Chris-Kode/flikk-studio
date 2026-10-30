@@ -120,14 +120,16 @@ pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
                 "name": clip.display_name(project),
                 "bounds": b.map(round),
                 "bounds_fraction": [norm(b[0] / w), norm(b[1] / h), norm(b[2] / w), norm(b[3] / h)],
-                "center": [round((b[0] + b[2]) / 2.0), round((b[1] + b[3]) / 2.0)],
                 "frame_fraction": norm(overlap(b, [0.0, 0.0, w, h]) / (w * h)),
                 "inside_title_safe": b[0] >= title[0] - 0.5
                     && b[1] >= title[1] - 0.5
                     && b[2] <= title[2] + 0.5
                     && b[3] <= title[3] + 0.5,
-                "transform": transform_json(&tf),
             });
+            let tf = transform_json(&tf);
+            if tf.as_object().is_some_and(|o| !o.is_empty()) {
+                v["transform"] = tf;
+            }
             let turned = shape.placement.rotation_deg.rem_euclid(90.0).abs() > 0.01
                 || shape.placement.skew_deg.iter().any(|v| v.abs() > 0.01)
                 || shape.placement.is_pinned();
@@ -162,23 +164,38 @@ pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
     })
 }
 
-/// The transform's values as tools name them.
+/// The transform's values as tools name them, leaving out those at their
+/// neutral value (`{}` for an untouched transform).
 pub fn transform_json(tf: &Transform) -> Value {
-    let n = |v: f32| (v as f64 * 10_000.0).round() / 10_000.0;
-    json!({
-        "position": tf.position.map(n),
-        "scale": n(tf.scale),
-        "stretch": tf.stretch.map(n),
-        "rotation": n(tf.rotation_deg),
-        "skew": tf.skew_deg.map(n),
-        "anchor": tf.anchor.map(n),
-        "opacity": n(tf.opacity),
-        "crop": tf.crop.map(n),
-        "flip": tf.flip,
-        "blend": super::edit::blend_name(tf.blend),
-        "fit": tf.fit.name(),
-        "corner_pin": tf.corner_pin.map(|c| c.map(n)),
-    })
+    let all = |tf: &Transform| {
+        let n = |v: f32| (v as f64 * 10_000.0).round() / 10_000.0;
+        json!({
+            "position": tf.position.map(n),
+            "scale": n(tf.scale),
+            "stretch": tf.stretch.map(n),
+            "rotation": n(tf.rotation_deg),
+            "skew": tf.skew_deg.map(n),
+            "anchor": tf.anchor.map(n),
+            "opacity": n(tf.opacity),
+            "crop": tf.crop.map(n),
+            "flip": tf.flip,
+            "blend": super::edit::blend_name(tf.blend),
+            "fit": tf.fit.name(),
+            "corner_pin": tf.corner_pin.map(|c| c.map(n)),
+        })
+    };
+    without_neutral(all(tf), &all(&Transform::default()))
+}
+
+/// `value`'s fields that differ from `neutral`'s.
+pub fn without_neutral(value: Value, neutral: &Value) -> Value {
+    match value {
+        Value::Object(mut fields) => {
+            fields.retain(|k, v| neutral.get(k) != Some(v));
+            Value::Object(fields)
+        }
+        other => other,
+    }
 }
 
 pub fn get_layout(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
