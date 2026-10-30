@@ -81,6 +81,10 @@ pub enum Op {
         before: Grade,
         after: Grade,
     },
+    SetSequence {
+        before: SequenceSettings,
+        after: SequenceSettings,
+    },
     AddMedia {
         media: MediaItem,
     },
@@ -170,6 +174,10 @@ impl Op {
                 after: before,
             },
             Op::SetTimelineGrade { before, after } => Op::SetTimelineGrade {
+                before: after,
+                after: before,
+            },
+            Op::SetSequence { before, after } => Op::SetSequence {
                 before: after,
                 after: before,
             },
@@ -297,6 +305,12 @@ impl Op {
                     return Err(CoreError::Conflict);
                 }
                 timeline.grade = after.clone();
+            }
+            Op::SetSequence { before, after } => {
+                if timeline.settings != *before {
+                    return Err(CoreError::Conflict);
+                }
+                timeline.settings = after.clone();
             }
             Op::AddMedia { media } => {
                 if project.media(media.id).is_some() {

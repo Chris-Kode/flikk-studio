@@ -215,6 +215,7 @@ pub fn get_timeline(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         "range": range_json(range),
         "duration": secs(tl.duration()),
         "fps": tl.settings.rate.fps(),
+        "size": [tl.settings.width, tl.settings.height],
         "tracks": tracks,
         "markers": markers,
     });

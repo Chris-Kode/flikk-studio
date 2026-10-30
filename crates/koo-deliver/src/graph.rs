@@ -58,9 +58,10 @@ pub struct GraphSpec {
 impl GraphSpec {
     pub fn new(project: &Project, settings: &RenderSettings, styles: &[CaptionStyle]) -> Self {
         let seq = &project.timeline.settings;
+        let (width, height) = settings.size(seq);
         Self {
-            width: settings.width.unwrap_or(seq.width),
-            height: settings.height.unwrap_or(seq.height),
+            width,
+            height,
             rate: settings.rate.unwrap_or(seq.rate),
             sample_rate: seq.sample_rate.max(8000),
             range: settings

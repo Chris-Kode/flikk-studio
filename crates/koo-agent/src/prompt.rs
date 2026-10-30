@@ -212,6 +212,7 @@ pub fn project_summary(project: &Project) -> Value {
         "duration": secs(tl.duration()),
         "fps": tl.settings.rate.fps(),
         "size": [tl.settings.width, tl.settings.height],
+        "format": tl.settings.format().map(|f| f.name()),
         "media_items": project.media.len(),
         "tracks": tracks,
         "markers": tl.markers.len(),

@@ -211,7 +211,7 @@ impl Default for CaptionMotion {
     }
 }
 
-/// Sizes are in pixels at 1080p and scale with the frame.
+/// Sizes are in pixels at 1080p and scale with the frame's short side.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptionStyle {

@@ -12,7 +12,7 @@ use koo_core::fx::ParamKind;
 use koo_core::heard::{self, Target};
 use koo_core::memory::Presets;
 use koo_core::model::{
-    BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Grade, MarkerKind, Property,
+    BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Format, Grade, MarkerKind, Property,
     TrackKind, Transform,
 };
 use koo_core::query;
@@ -166,6 +166,26 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 .filter(|n| !n.is_empty())
                 .map(str::to_owned),
         }],
+        "set_format" => {
+            let s = &ctx.project().timeline.settings;
+            let short = match args.opt_f64("resolution")? {
+                Some(r) => r.round().clamp(16.0, 8192.0) as u32,
+                None => s.short_side(),
+            };
+            let (width, height) = match (args.opt_f64("width")?, args.opt_f64("height")?) {
+                (Some(w), Some(h)) => (w.round() as u32 & !1, h.round() as u32 & !1),
+                (None, None) => match args.opt_str("format")?.map(str::trim) {
+                    Some(name) => Format::ALL
+                        .into_iter()
+                        .find(|f| f.name() == name)
+                        .ok_or_else(|| ToolError(format!("unknown format `{name}`")))?
+                        .size(short),
+                    None => s.scaled(short),
+                },
+                _ => return Err(ToolError("give both `width` and `height`".into())),
+            };
+            vec![Command::SetFormat { width, height }]
+        }
         "set_clip_color" => {
             let color = match args.opt_str("color")?.map(str::trim) {
                 None | Some("none") | Some("") => None,

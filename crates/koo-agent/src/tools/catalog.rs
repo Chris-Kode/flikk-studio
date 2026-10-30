@@ -5,7 +5,7 @@
 use super::{groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::ToolCategory;
-use koo_core::model::{BlendMode, ClipColor, Property};
+use koo_core::model::{BlendMode, ClipColor, Format, Property};
 use serde_json::{Value, json};
 
 pub struct ToolSpec {
@@ -535,6 +535,25 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({ "clips": strings("Clip ids"), "color": one_of(&colors, "Color, or none"), "reason": reason() }),
                 &["clips", "color"],
+            ),
+        ),
+        spec(
+            "set_format",
+            Some(EditTimeline),
+            "Propose the sequence's frame size: a format, a resolution, or both (the other stays), or an exact `width` and `height`. Clip transforms are relative to the frame, so pictures of another shape fit inside it with bars; fill or reframe them with `set_transform`.",
+            object(
+                json!({
+                    "format": {
+                        "type": "string",
+                        "enum": Format::ALL.map(|f| f.name()),
+                        "description": Format::ALL.map(|f| format!("{}: {}", f.name(), f.uses)).join("; ")
+                    },
+                    "resolution": number("Pixels on the short side: 720, 1080, 1440 or 2160"),
+                    "width": number("Exact width, even"),
+                    "height": number("Exact height, even"),
+                    "reason": reason()
+                }),
+                &[],
             ),
         ),
         spec(
