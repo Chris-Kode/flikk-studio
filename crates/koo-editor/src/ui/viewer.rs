@@ -15,7 +15,10 @@
 //! fixed size, scroll with Ctrl/Cmd) and pans (scroll or middle-drag), so
 //! handles outside the frame stay in reach. The corner-pin toggle makes a
 //! picture's corners move one by one; mask mode shows and edits the
-//! selected picture's masks ([`masks`]).
+//! selected picture's masks ([`masks`]), its picture whole with what they
+//! cut away tinted (unless that is turned off). With the subject tool,
+//! hovering finds what a click would keep off the UI thread, the newest
+//! hover winning; frames are composed again as subjects' mattes are made.
 
 mod audio;
 mod cache;
@@ -37,10 +40,11 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use koo_core::compose::{self, Stills};
-use koo_core::model::{Project, TrackKind};
+use koo_core::compose::{self, MaskView, Stills};
+use koo_core::model::{ClipContent, MediaItem, MediaKind, Project, TrackKind};
 use koo_core::query::topmost_video_clip;
 use koo_core::services::{PixelOrder, Services};
+use koo_core::subject::SubjectPrompt;
 use koo_core::{ChangeSetId, Time};
 use player::Player;
 use std::cell::Cell;
@@ -116,6 +120,8 @@ struct PlayKey {
     /// The caption styles lettering is drawn in.
     lettering: u64,
     width: u32,
+    /// How masks show: tinted while they are edited.
+    masks: MaskView,
 }
 
 /// A paused frame: what it shows and the sequence frame index.
@@ -133,6 +139,13 @@ struct Press {
     alt: bool,
     /// Shift on a selected item: a click takes it out of the selection.
     deselect: Option<koo_core::ClipId>,
+}
+
+/// A subject preview to find: the clip, its media and the prompt.
+struct PreviewAsk {
+    clip: koo_core::ClipId,
+    item: MediaItem,
+    prompt: SubjectPrompt,
 }
 
 /// A paused frame to compose off the UI thread.
@@ -181,6 +194,15 @@ pub struct ViewerPanel {
     gizmo: Gizmo,
     /// Drawing and editing the selected picture's masks.
     masks: masks::MaskEditor,
+    /// The subjects' version the cached frames were composed at.
+    subjects_seen: u64,
+    /// A subject preview is being found.
+    previewing: bool,
+    /// The newest one asked for meanwhile.
+    next_preview: Option<PreviewAsk>,
+    /// The mouse is over a picture with the subject tool, so a preview
+    /// that arrives is shown.
+    hovering: bool,
     /// A layout is being made for this frame.
     laying_out: Option<Request>,
     /// Device pixels per sequence pixel; `None` fits the frame to the panel.
@@ -220,6 +242,10 @@ impl ViewerPanel {
             ahead: None,
             gizmo: Gizmo::default(),
             masks: masks::MaskEditor::default(),
+            subjects_seen: 0,
+            previewing: false,
+            next_preview: None,
+            hovering: false,
             laying_out: None,
             zoom: None,
             pan: Point::default(),
@@ -251,6 +277,186 @@ impl ViewerPanel {
             live: state.live_version,
             lettering: state.lettering_version,
             width: self.frame_width.get(),
+            masks: match state.selection.clips.first() {
+                Some(clip) if self.masks.on && self.masks.tinted && !state.playing => {
+                    MaskView::Tinted(Some(*clip))
+                }
+                _ => MaskView::Cut,
+            },
+        }
+    }
+
+    /// Frames composed before subjects' mattes were made go, so the
+    /// paused frame is composed again with them.
+    fn sync_subjects(&mut self, cx: &App) {
+        let version = self.state.read(cx).subjects_version;
+        if version == self.subjects_seen {
+            return;
+        }
+        self.subjects_seen = version;
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
+        self.requested = None;
+        self.ahead = None;
+    }
+
+    /// What subject editing needs for `shape`'s clip at the playhead.
+    fn subjects(&self, shape: &compose::Shape, cx: &App) -> masks::Subjects {
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let Some((_, clip)) = project.timeline.clip(shape.clip) else {
+            return masks::Subjects::default();
+        };
+        let frame = self.subject_media(shape.clip, cx).and_then(|item| {
+            let rate = item
+                .info
+                .as_ref()
+                .and_then(|i| i.video.as_ref())
+                .map(|v| v.rate)
+                .unwrap_or_default();
+            let at = match item.kind {
+                MediaKind::Image => Time::ZERO,
+                _ => clip
+                    .to_source(state.playhead)?
+                    .max(Time::ZERO)
+                    .floor_to_frame(rate),
+            };
+            Some((at, rate))
+        });
+        masks::Subjects {
+            frame,
+            mattes: compose::subject_mattes(project, &state.services, clip, state.playhead),
+        }
+    }
+
+    /// The media under `clip` when it is a picture from the pool: what a
+    /// subject mask can pick in.
+    fn subject_media(&self, clip: koo_core::ClipId, cx: &App) -> Option<MediaItem> {
+        let project = self.state.read(cx).bus.project();
+        let (_, clip) = project.timeline.clip(clip)?;
+        let ClipContent::Media { media, .. } = &clip.content else {
+            return None;
+        };
+        project
+            .media(*media)
+            .filter(|m| m.kind != MediaKind::Audio)
+            .cloned()
+    }
+
+    /// Show what the subject tool would keep for `ask`, found off the UI
+    /// thread; the newest ask wins.
+    fn preview_subject(&mut self, ask: PreviewAsk, cx: &mut Context<Self>) {
+        let shown = self
+            .masks
+            .hover
+            .as_ref()
+            .is_some_and(|h| h.clip == ask.clip && h.prompt == ask.prompt);
+        if shown {
+            return;
+        }
+        if self.previewing {
+            self.next_preview = Some(ask);
+            return;
+        }
+        let Some(service) = self.state.read(cx).services.subjects.clone() else {
+            return;
+        };
+        self.previewing = true;
+        cx.spawn(async move |this, cx| {
+            let PreviewAsk { clip, item, prompt } = ask;
+            let asked = prompt.clone();
+            let outlines = cx
+                .background_executor()
+                .spawn(async move {
+                    if prompt.is_empty() {
+                        // Only to encode the frame for the clicks to come.
+                        let _ = service.preview(&item, &prompt);
+                        return None;
+                    }
+                    service.preview(&item, &prompt).ok().map(|m| m.outlines())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.previewing = false;
+                let wanted = this.hovering && this.masks.tool == Some(masks::Tool::Subject);
+                if let Some(outlines) = outlines.filter(|_| wanted) {
+                    this.masks.hover = Some(masks::Hover {
+                        clip,
+                        prompt: asked,
+                        outlines,
+                    });
+                }
+                if let Some(next) = this.next_preview.take() {
+                    this.preview_subject(next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// With the subject tool over the selected picture: preview what a
+    /// click at `p` would keep.
+    fn hover_subject(&mut self, p: Point<Pixels>, modifiers: Modifiers, cx: &mut Context<Self>) {
+        if self.masks.tool != Some(masks::Tool::Subject) {
+            return;
+        }
+        let screen = self.screen(cx);
+        let state = self.state.read(cx);
+        let shape = (!state.playing && state.preview.is_none())
+            .then(|| self.gizmo.active(&state.selection.clips, self.requested))
+            .flatten()
+            .filter(|s| !s.lettering);
+        let ask = shape.and_then(|shape| {
+            let subjects = self.subjects(&shape, cx);
+            let project = self.state.read(cx).bus.project();
+            let prompt = self
+                .masks
+                .hover_prompt(p, modifiers, &screen, project, &shape, &subjects)?;
+            Some(PreviewAsk {
+                clip: shape.clip,
+                item: self.subject_media(shape.clip, cx)?,
+                prompt,
+            })
+        });
+        self.hovering = ask.is_some();
+        match ask {
+            Some(ask) => self.preview_subject(ask, cx),
+            None => {
+                self.next_preview = None;
+                if self.masks.hover.take().is_some() {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Pick the subject tool, when its model is here; start encoding the
+    /// frame under the playhead for the first click.
+    fn pick_subject_tool(&mut self, cx: &mut Context<Self>) {
+        if !self.state.update(cx, |s, cx| s.subjects_ready(cx)) {
+            return;
+        }
+        self.masks.tool = Some(masks::Tool::Subject);
+        let state = self.state.read(cx);
+        let shape = self
+            .gizmo
+            .active(&state.selection.clips, self.requested)
+            .filter(|s| !s.lettering);
+        let warm = shape.and_then(|shape| {
+            let (at, _) = self.subjects(&shape, cx).frame?;
+            Some(PreviewAsk {
+                clip: shape.clip,
+                item: self.subject_media(shape.clip, cx)?,
+                prompt: SubjectPrompt {
+                    at,
+                    ..Default::default()
+                },
+            })
+        });
+        if let Some(ask) = warm {
+            self.preview_subject(ask, cx);
         }
     }
 
@@ -373,6 +579,7 @@ impl ViewerPanel {
                         &job.services,
                         &mut stills,
                         PixelOrder::Bgra,
+                        job.request.key.masks,
                     )
                     .wait();
                     let image = player::bgra_image(&frame)?;
@@ -619,9 +826,17 @@ impl ViewerPanel {
             .active(&selected, request)
             .filter(|s| !s.lettering && editable);
         let commands = shape.and_then(|shape| {
+            let subjects = self.subjects(&shape, cx);
             let project = self.state.read(cx).bus.project();
-            self.masks
-                .press(ev.position, ev.modifiers, screen, project, &shape, playhead)
+            self.masks.press(
+                ev.position,
+                ev.modifiers,
+                screen,
+                project,
+                &shape,
+                playhead,
+                &subjects,
+            )
         });
         match commands {
             Some(commands) if !commands.is_empty() => {
@@ -667,10 +882,10 @@ impl ViewerPanel {
         }
         let screen = self.screen(cx);
         if self.masks.dragging() {
-            if ev.dragging()
-                && let Some(commands) = self.masks.drag_to(ev.position, ev.modifiers, &screen)
-            {
-                self.state.update(cx, |s, cx| s.show_live(&commands, cx));
+            if ev.dragging() {
+                if let Some(commands) = self.masks.drag_to(ev.position, ev.modifiers, &screen) {
+                    self.state.update(cx, |s, cx| s.show_live(&commands, cx));
+                }
                 cx.notify();
             }
             return;
@@ -679,6 +894,7 @@ impl ViewerPanel {
             if self.gizmo.hover.take().is_some() {
                 cx.notify();
             }
+            self.hover_subject(ev.position, ev.modifiers, cx);
             return;
         }
         let state = self.state.read(cx);
@@ -993,32 +1209,62 @@ impl ViewerPanel {
             });
         let tools = masking.then(|| {
             let tool = self.masks.tool;
+            let tinted = self.masks.tinted;
             let viewer = cx.entity();
-            h_flex().gap_1().children(
-                [
-                    (masks::Tool::Rectangle, Glyph::MaskRect, "Rectangle"),
-                    (masks::Tool::Ellipse, Glyph::MaskEllipse, "Ellipse"),
-                    (masks::Tool::Pen, Glyph::Pen, "Pen"),
-                ]
-                .into_iter()
-                .map(|(t, g, tip)| {
-                    let on = tool == Some(t);
-                    let viewer = viewer.clone();
-                    Button::new(SharedString::from(format!("viewer-mask-{tip}")))
-                        .ghost()
-                        .xsmall()
-                        .toggled(on)
-                        .tooltip(tip)
-                        .child(glyph(g, px(13.), if on { fg } else { muted }))
-                        .on_click(move |_, _, cx| {
-                            viewer.update(cx, |this, cx| {
-                                this.masks.cancel();
-                                this.masks.tool = (this.masks.tool != Some(t)).then_some(t);
-                                cx.notify();
-                            })
+            let tint = {
+                let viewer = viewer.clone();
+                Button::new("viewer-mask-tint")
+                    .ghost()
+                    .xsmall()
+                    .toggled(tinted)
+                    .tooltip("Show what masks cut away")
+                    .child(glyph(
+                        Glyph::MaskOverlay,
+                        px(13.),
+                        if tinted { fg } else { muted },
+                    ))
+                    .on_click(move |_, _, cx| {
+                        viewer.update(cx, |this, cx| {
+                            this.masks.tinted = !this.masks.tinted;
+                            cx.notify();
                         })
-                }),
-            )
+                    })
+            };
+            h_flex()
+                .gap_1()
+                .children(
+                    [
+                        (masks::Tool::Subject, Glyph::Subject, "Subject"),
+                        (masks::Tool::Rectangle, Glyph::MaskRect, "Rectangle"),
+                        (masks::Tool::Ellipse, Glyph::MaskEllipse, "Ellipse"),
+                        (masks::Tool::Pen, Glyph::Pen, "Pen"),
+                    ]
+                    .into_iter()
+                    .map(|(t, g, tip)| {
+                        let on = tool == Some(t);
+                        let viewer = viewer.clone();
+                        Button::new(SharedString::from(format!("viewer-mask-{tip}")))
+                            .ghost()
+                            .xsmall()
+                            .toggled(on)
+                            .tooltip(tip)
+                            .child(glyph(g, px(13.), if on { fg } else { muted }))
+                            .on_click(move |_, _, cx| {
+                                viewer.update(cx, |this, cx| {
+                                    this.masks.cancel();
+                                    if this.masks.tool == Some(t) {
+                                        this.masks.tool = None;
+                                    } else if t == masks::Tool::Subject {
+                                        this.pick_subject_tool(cx);
+                                    } else {
+                                        this.masks.tool = Some(t);
+                                    }
+                                    cx.notify();
+                                })
+                            })
+                    }),
+                )
+                .child(tint)
         });
         let viewer = cx.entity();
         let pin = self.gizmo.corner_pin;
@@ -1101,6 +1347,7 @@ impl Render for ViewerPanel {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        self.sync_subjects(cx);
         self.sync_playback(cx);
         if self.playback.is_none() {
             self.request_frame(cx);
@@ -1132,10 +1379,14 @@ impl Render for ViewerPanel {
                     frame: self.frame_rect.get(),
                     sequence,
                 };
-                Some(
-                    self.masks
-                        .overlay(state.bus.project(), &shape, state.playhead, &screen),
-                )
+                let subjects = self.subjects(&shape, cx);
+                Some(self.masks.overlay(
+                    state.bus.project(),
+                    &shape,
+                    state.playhead,
+                    &screen,
+                    &subjects,
+                ))
             })
             .flatten();
         let theme = cx.theme();

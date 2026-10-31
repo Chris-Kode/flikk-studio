@@ -25,8 +25,14 @@ pub mod beats;
 #[cfg(any(feature = "aligner", feature = "sounds"))]
 mod bpe;
 mod download;
-#[cfg(any(feature = "aligner", feature = "diarizer", feature = "sounds"))]
+#[cfg(any(
+    feature = "aligner",
+    feature = "diarizer",
+    feature = "sounds",
+    feature = "segment"
+))]
 mod onnx;
+pub mod segmentation;
 pub mod sound_search;
 pub mod sound_tagging;
 pub mod speakers;
@@ -82,11 +88,13 @@ pub enum Task {
     SoundTagging,
     Beats,
     SoundSearch,
+    /// Subject masks: not part of analysis.
+    Segmentation,
 }
 
 impl Task {
-    /// In the order analysis runs them.
-    pub const ALL: [Task; 7] = [
+    /// In the order analysis runs them, then subject masks.
+    pub const ALL: [Task; 8] = [
         Task::VoiceActivity,
         Task::Transcription,
         Task::WordTiming,
@@ -94,6 +102,7 @@ impl Task {
         Task::SoundTagging,
         Task::Beats,
         Task::SoundSearch,
+        Task::Segmentation,
     ];
 
     pub fn label(self) -> &'static str {
@@ -105,6 +114,7 @@ impl Task {
             Task::SoundTagging => "Sounds and music",
             Task::Beats => "Beats",
             Task::SoundSearch => "Sound search",
+            Task::Segmentation => "Subject masks",
         }
     }
 
@@ -118,6 +128,7 @@ impl Task {
             Task::SoundTagging => sound_tagging::MODELS,
             Task::Beats => beats::MODELS,
             Task::SoundSearch => sound_search::MODELS,
+            Task::Segmentation => segmentation::MODELS,
         }
     }
 

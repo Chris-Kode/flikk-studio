@@ -16,7 +16,7 @@ use koo_core::bus::{AcceptReport, Author, CommandBus, Outcome};
 use koo_core::changeset::ChangeItem;
 use koo_core::command::{Command, Warning};
 use koo_core::model::Project;
-use koo_core::services::{AnalysisService, MediaService, Services};
+use koo_core::services::{AnalysisService, MediaService, Services, SubjectService};
 use koo_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
 use koo_store::SettingsOverrides;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +30,11 @@ const AGENT_PUMP: Duration = Duration::from_millis(33);
 const MODELS_POLL: Duration = Duration::from_secs(1);
 /// Key of the notice listing the models not downloaded.
 const MODELS_NOTICE: &str = "models-missing";
+/// How often subject mattes are looked for, so views draw them as they
+/// are made.
+const SUBJECTS_POLL: Duration = Duration::from_millis(250);
+/// Key of the notice that subject masks need their model.
+const SUBJECTS_NOTICE: &str = "subjects-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -77,6 +82,9 @@ pub struct EditorState {
     lettering_styles: Vec<koo_core::memory::CaptionStyle>,
     /// Counts changes to `services.lettering`, so the viewer knows to redraw.
     pub lettering_version: u64,
+    /// `services.subjects`' version when last looked at: mattes made since
+    /// show on the next draw.
+    pub subjects_version: u64,
     // --- timeline/viewer
     /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
     pub play_speed: f64,
@@ -116,6 +124,7 @@ pub struct EditorState {
     /// the notices were last brought up to date.
     models_seen: (Vec<bool>, u64),
     _models_poll: Task<()>,
+    _subjects_poll: Task<()>,
     /// Models each backend's CLI offers: the list it gave last time until
     /// it answers again.
     pub agent_models: HashMap<Backend, Vec<AgentModel>>,
@@ -168,6 +177,14 @@ impl EditorState {
                 }
             }
         });
+        let subjects_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SUBJECTS_POLL).await;
+                if this.update(cx, |this, cx| this.poll_subjects(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let cloud = Arc::new(koo_cloud::Cloud::new(
             persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
         ));
@@ -203,6 +220,7 @@ impl EditorState {
             caption_live: None,
             lettering_styles: Vec::new(),
             lettering_version: 0,
+            subjects_version: 0,
             play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
@@ -221,6 +239,7 @@ impl EditorState {
             offline: HashSet::new(),
             media_paths: Vec::new(),
             _models_poll: models_poll,
+            _subjects_poll: subjects_poll,
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
             cloud,
@@ -1173,11 +1192,15 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
             None
         }
     };
+    let subjects = media
+        .clone()
+        .map(|m| Arc::new(koo_analysis::LocalSubjects::new(m)) as Arc<dyn SubjectService>);
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
         html,
+        subjects,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
@@ -1253,6 +1276,43 @@ impl EditorState {
             analysis.analyze(item);
         }
         cx.notify();
+    }
+
+    /// Whether subject masks can be made; when not (their model is
+    /// missing), a notice that leads to Settings → Models.
+    pub fn subjects_ready(&mut self, cx: &mut Context<Self>) -> bool {
+        let ready = match &self.services.subjects {
+            Some(s) => s.available(),
+            None => Err("Subject masks need the media engine (FFmpeg).".into()),
+        };
+        let changed = match &ready {
+            Ok(()) => self.notices.clear(SUBJECTS_NOTICE),
+            Err(e) => {
+                // Asked for just now: shown even if closed before.
+                self.notices.clear(SUBJECTS_NOTICE);
+                self.notices.set(Notice {
+                    key: SUBJECTS_NOTICE.into(),
+                    level: Level::Warning,
+                    title: "Subject masks need their model".into(),
+                    items: Vec::new(),
+                    detail: Some(e.clone()),
+                    action: Some(NoticeAction::OpenModels),
+                })
+            }
+        };
+        if changed {
+            cx.notify();
+        }
+        ready.is_ok()
+    }
+
+    /// Mattes were made: draw again.
+    fn poll_subjects(&mut self, cx: &mut Context<Self>) {
+        let version = self.services.subjects.as_ref().map_or(0, |s| s.version());
+        if version != self.subjects_version {
+            self.subjects_version = version;
+            cx.notify();
+        }
     }
 
     pub fn dismiss_notice(&mut self, key: &str, cx: &mut Context<Self>) {

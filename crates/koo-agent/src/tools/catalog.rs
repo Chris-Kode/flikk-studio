@@ -333,20 +333,22 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "view_frame",
             Some(View),
-            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip. With `zoom`, only that region, magnified at full resolution under a grid labelled in frame pixels: look closely before you set a mask, pin a picture or check an edge.",
+            "One full frame of the program at a timeline time, captions and titles included. With `annotate`, every visible item gets a numbered box, listed with its clip. With `zoom`, only that region, magnified at full resolution under a grid labelled in frame pixels: look closely before you set a mask, pin a picture or check an edge. With `masks`, masked pictures are shown whole with what their masks cut away tinted red: check a mask's edge with it (zoom in too).",
             examples(
                 object(
                     json!({
                         "t": time("Timeline seconds"),
                         "annotate": boolean("Box and number each visible item"),
-                        "zoom": numbers(4, "[left, top, width, height] in frame pixels")
+                        "zoom": numbers(4, "[left, top, width, height] in frame pixels"),
+                        "masks": boolean("Show what masks cut away, tinted, instead of hiding it")
                     }),
                     &["t"],
                 ),
                 json!([
                     { "t": 12.0, "annotate": true },
                     { "t": 12.0, "zoom": [760, 180, 420, 420] },
-                    { "t": "0:08.000", "zoom": [780, 260, 520, 340] }
+                    { "t": "0:08.000", "zoom": [780, 260, 520, 340] },
+                    { "t": 12.0, "masks": true, "zoom": [600, 100, 700, 700] }
                 ]),
             ),
         ),
@@ -689,7 +691,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.",
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for people and objects. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
             examples(
                 object(
                     json!({
@@ -697,7 +699,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
                         "shape": {
                             "type": "object",
-                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
                             "properties": {
                                 "type": { "type": "string", "enum": masks::SHAPES },
                                 "center": numbers(2, "[x, y]"),
@@ -705,7 +707,10 @@ pub fn catalog() -> Vec<ToolSpec> {
                                 "rotation": number("Degrees clockwise"),
                                 "roundness": number("Rectangle corners, 0..1"),
                                 "points": { "type": "array", "items": numbers(2, "[x, y]") },
-                                "smooth": boolean("A curve through the points instead of straight lines (default false)")
+                                "smooth": boolean("A curve through the points instead of straight lines (default false)"),
+                                "include": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points on the object" },
+                                "exclude": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points not on it" },
+                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" }
                             }
                         },
                         "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
@@ -715,7 +720,9 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height"),
                         "opacity": number("0..1"),
                         "enabled": boolean("Off keeps the mask but ignores it"),
-                        "at": time("Timeline time to keyframe the shape at"),
+                        "at": time("Timeline time to keyframe the shape at; for a subject, the frame its points are on"),
+                        "track": boolean("Subject: follow it through the clip"),
+                        "refine": boolean("Subject: ease its edge onto the picture's (hair); default on"),
                         "remove": boolean("Remove `mask` instead"),
                         "all": boolean("With `remove`: every mask on the clip"),
                         "reason": reason()
@@ -727,6 +734,9 @@ pub fn catalog() -> Vec<ToolSpec> {
                     { "clip": "3f9a1c2e", "mask": "a71c09d4", "shape": { "center": [0.62, 0.42] }, "at": "0:08.000", "reason": "Follow the face as she moves" },
                     { "clip": "3f9a1c2e", "shape": { "type": "rectangle", "center": [960, 540], "size": [1920, 140] }, "space": "frame", "invert": true, "reason": "Hide the ticker" },
                     { "clip": "3f9a1c2e", "shape": { "type": "path", "points": [[1210, 180], [1330, 205], [1350, 420], [1240, 470], [1150, 330]], "smooth": true }, "space": "frame", "reason": "Cut out her head" },
+                    { "clip": "3f9a1c2e", "shape": { "type": "subject", "include": [[1240, 520]] }, "space": "frame", "at": "0:04.000", "track": true, "reason": "Keep the speaker, cut the background" },
+                    { "clip": "3f9a1c2e", "mask": "c41e7a02", "shape": { "exclude": [[1420, 610]] }, "space": "frame", "at": "0:04.000", "reason": "Leave out the chair it took" },
+                    { "clip": "3f9a1c2e", "shape": { "type": "subject", "box": [880, 120, 1460, 1080] }, "space": "frame", "invert": true, "track": true, "reason": "Everything but the dancer, for a background effect" },
                     { "clip": "3f9a1c2e", "remove": true, "all": true, "reason": "Back to the full picture" }
                 ]),
             ),

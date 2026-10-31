@@ -8,6 +8,14 @@
 //! commits once, keyframing the shape at the playhead when the mask
 //! already has keyframes. Captions and titles take no masks (see
 //! `koo_core::mask`).
+//!
+//! The subject tool picks an object in a clip from the pool: hovering shows
+//! what a click would keep (the model's answer, found off the UI thread by
+//! the viewer), a click keeps it, a drag boxes it. On the picked subject a
+//! click adds a point to the frame's prompt (Alt: a point off the object;
+//! Shift starts a new subject instead), and a click on one of the frame's
+//! points takes it away; the points can be dragged. A subject is outlined
+//! by its matte at the playhead ([`Subjects`]).
 
 use super::gizmo::{CLICK_SLOP, HANDLE, REACH, Screen, clip_time, near};
 use gpui_kit::*;
@@ -15,10 +23,13 @@ use koo_core::command::Command;
 use koo_core::compose::Shape;
 use koo_core::mask::{Mask, MaskShape, MaskState};
 use koo_core::model::Project;
-use koo_core::{ClipId, MaskId, Time};
+use koo_core::subject::{Matte, Subject, SubjectPoint, SubjectPrompt};
+use koo_core::{ClipId, MaskId, Rate, Time};
 
 /// Screen distance of the feather knob above the mask at no feather.
 const KNOB_OFFSET: f32 = 16.0;
+/// Radius of a subject's points on screen.
+const DOT: f32 = 4.5;
 
 /// What a click or drag on the frame makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +37,7 @@ pub(super) enum Tool {
     Rectangle,
     Ellipse,
     Pen,
+    Subject,
 }
 
 /// What a drag changes.
@@ -40,6 +52,12 @@ enum Edit {
     Feather,
     /// A new rectangle or ellipse, from where the drag began.
     Create(Tool),
+    /// One of the picked subject's points on this frame.
+    SubjectPoint(usize),
+    /// A click (a point) or a drag (a box) with the subject tool.
+    Pick,
+    /// A press on a subject's body: picks it, moves nothing.
+    Select,
 }
 
 struct Drag {
@@ -58,20 +76,74 @@ struct Drag {
     /// Where the drag began, in picture uv and on screen.
     from: [f32; 2],
     from_screen: Point<Pixels>,
+    /// Where the mouse is now, in picture uv.
+    to: [f32; 2],
     moved: bool,
+    /// Alt held at the press: a subject click rules the point out.
+    alt: bool,
+    /// The source frame under the playhead and the media's rate, for
+    /// subject edits.
+    frame: Option<(Time, Rate)>,
     /// The masks at the last mouse move.
     now: Vec<Mask>,
 }
 
-#[derive(Default)]
+/// What editing subjects needs from the viewer at the playhead.
+#[derive(Clone, Default)]
+pub(super) struct Subjects {
+    /// The source frame under the playhead and the media's rate; `None`
+    /// when the clip is not media from the pool.
+    pub frame: Option<(Time, Rate)>,
+    /// The mattes of the clip's subject masks there, those made.
+    pub mattes: Vec<(MaskId, Matte)>,
+}
+
+impl Subjects {
+    fn matte(&self, id: MaskId) -> Option<&Matte> {
+        self.mattes.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
+    }
+
+    /// `mask`'s prompt on this frame.
+    fn prompt<'a>(&self, mask: &'a Mask) -> Option<&'a SubjectPrompt> {
+        let (at, rate) = self.frame?;
+        mask.picks()?.prompt_on(at.to_frame(rate), rate)
+    }
+}
+
+/// What a click with the subject tool would keep.
+pub(super) struct Hover {
+    pub clip: ClipId,
+    pub prompt: SubjectPrompt,
+    /// In picture uv.
+    pub outlines: Vec<Vec<[f32; 2]>>,
+}
+
 pub(super) struct MaskEditor {
     /// Mask mode: the selected picture's masks are shown and edited.
     pub on: bool,
     pub tool: Option<Tool>,
     pub selected: Option<MaskId>,
+    /// What the masks cut away is tinted over the whole picture, instead
+    /// of hidden.
+    pub tinted: bool,
     /// The path being drawn with the pen, in picture uv.
     pen: Vec<[f32; 2]>,
     drag: Option<Drag>,
+    pub hover: Option<Hover>,
+}
+
+impl Default for MaskEditor {
+    fn default() -> Self {
+        Self {
+            on: false,
+            tool: None,
+            selected: None,
+            tinted: true,
+            pen: Vec::new(),
+            drag: None,
+            hover: None,
+        }
+    }
 }
 
 /// Everything painted for masks, in sequence pixels.
@@ -84,6 +156,13 @@ pub(super) struct MaskOverlay {
     /// The feather knob and the outline point it hangs from.
     pub knob: Option<([f32; 2], Point<Pixels>)>,
     pub pen: Vec<[f32; 2]>,
+    /// The picked subject's points on this frame, and whether each is on
+    /// the object.
+    pub points: Vec<([f32; 2], bool)>,
+    /// Its box on this frame, or one being drawn: corners.
+    pub boxes: Vec<[[f32; 2]; 4]>,
+    /// What a click would keep.
+    pub preview: Vec<Vec<[f32; 2]>>,
 }
 
 /// The picture's width over its height.
@@ -123,7 +202,7 @@ fn box_corners(state: &MaskState, aspect: f32) -> Option<[[f32; 2]; 4]> {
             size,
             rotation_deg,
         } => (center, size, rotation_deg),
-        MaskShape::Path { .. } => return None,
+        MaskShape::Path { .. } | MaskShape::Subject => return None,
     };
     let (s, c) = rotation.to_radians().sin_cos();
     let (hw, hh) = (size[0] * aspect / 2.0, size[1] / 2.0);
@@ -144,6 +223,28 @@ fn handles(state: &MaskState, aspect: f32) -> Vec<[f32; 2]> {
     }
 }
 
+/// `mask`'s outlines in uv at the playhead: its shape's, or its subject's
+/// matte's.
+fn outlines(
+    mask: &Mask,
+    state: &MaskState,
+    aspect: f32,
+    subjects: &Subjects,
+) -> Vec<Vec<[f32; 2]>> {
+    match state.shape {
+        MaskShape::Subject => subjects
+            .matte(mask.id)
+            .map(Matte::outlines)
+            .unwrap_or_default(),
+        _ => vec![state.shape.outline(aspect)],
+    }
+}
+
+/// Corners of a box in uv, from two opposite ones.
+fn rect_corners(a: [f32; 2], b: [f32; 2]) -> [[f32; 2]; 4] {
+    [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]
+}
+
 /// Screen pixels per picture height around `uv`.
 fn screen_unit(shape: &Shape, uv: [f32; 2], screen: &Screen) -> f32 {
     let a = screen.to_screen(to_seq(shape, uv));
@@ -151,20 +252,22 @@ fn screen_unit(shape: &Shape, uv: [f32; 2], screen: &Screen) -> f32 {
     (f32::from(b.x - a.x).hypot(f32::from(b.y - a.y)) / 0.1).max(1e-3)
 }
 
-/// The feather knob of `state`: its screen position and the outline point
-/// (sequence pixels) it hangs from.
-fn knob(shape: &Shape, state: &MaskState, screen: &Screen) -> Option<(Point<Pixels>, [f32; 2])> {
-    let outline = state.shape.outline(aspect(shape));
-    let top = outline
+/// The feather knob of a mask outlined by `outlines` with `feather`: its
+/// screen position and the outline point (sequence pixels) it hangs from.
+fn knob(
+    shape: &Shape,
+    outlines: &[Vec<[f32; 2]>],
+    feather: f32,
+    screen: &Screen,
+) -> Option<(Point<Pixels>, [f32; 2])> {
+    let top = outlines
         .iter()
+        .flatten()
         .map(|uv| (to_seq(shape, *uv), *uv))
         .min_by(|a, b| a.0[1].total_cmp(&b.0[1]))?;
     let unit = screen_unit(shape, top.1, screen);
     let at = screen.to_screen(top.0);
-    Some((
-        point(at.x, at.y - px(KNOB_OFFSET + state.feather * unit)),
-        top.0,
-    ))
+    Some((point(at.x, at.y - px(KNOB_OFFSET + feather * unit)), top.0))
 }
 
 /// Whether `p` is inside the screen polygon `poly` (even-odd).
@@ -198,10 +301,11 @@ impl MaskEditor {
         !self.pen.is_empty()
     }
 
-    /// Drop the pen's points and any drag.
+    /// Drop the pen's points, any drag and the subject preview.
     pub fn cancel(&mut self) {
         self.pen.clear();
         self.drag = None;
+        self.hover = None;
     }
 
     /// `clip`'s masks: as being dragged, else as in `project`.
@@ -216,6 +320,13 @@ impl MaskEditor {
             .unwrap_or_default()
     }
 
+    /// The picked mask, when it keeps a subject.
+    fn picked_subject(&self, masks: &[Mask]) -> Option<usize> {
+        masks
+            .iter()
+            .position(|m| Some(m.id) == self.selected && m.picks().is_some())
+    }
+
     /// What to paint for `shape`'s clip at the playhead.
     pub fn overlay(
         &self,
@@ -223,6 +334,7 @@ impl MaskEditor {
         shape: &Shape,
         playhead: Time,
         screen: &Screen,
+        subjects: &Subjects,
     ) -> MaskOverlay {
         let mut out = MaskOverlay::default();
         let Some((_, clip)) = project.timeline.clip(shape.clip) else {
@@ -230,31 +342,100 @@ impl MaskEditor {
         };
         let at = clip_time(clip, playhead);
         let aspect = aspect(shape);
+        let seq = |line: &Vec<[f32; 2]>| line.iter().map(|uv| to_seq(shape, *uv)).collect();
         for mask in self.masks(project, shape.clip) {
             let state = mask.state_at(at);
             let picked = self.selected == Some(mask.id);
-            let outline = state
-                .shape
-                .outline(aspect)
+            let lines = outlines(&mask, &state, aspect, subjects);
+            out.outlines
+                .extend(lines.iter().map(|line| (seq(line), picked)));
+            if !picked {
+                continue;
+            }
+            out.handles = handles(&state, aspect)
                 .into_iter()
                 .map(|uv| to_seq(shape, uv))
                 .collect();
-            out.outlines.push((outline, picked));
-            if picked {
-                out.handles = handles(&state, aspect)
-                    .into_iter()
-                    .map(|uv| to_seq(shape, uv))
+            out.knob = knob(shape, &lines, state.feather, screen).map(|(k, top)| (top, k));
+            if let Some(prompt) = subjects.prompt(&mask) {
+                let dragged = self.drag.as_ref().and_then(|d| match d.edit {
+                    Edit::SubjectPoint(k) if d.moved => Some((k, d.to)),
+                    _ => None,
+                });
+                out.points = prompt
+                    .points
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| {
+                        let uv = match dragged {
+                            Some((j, to)) if j == k => to,
+                            _ => p.at,
+                        };
+                        (to_seq(shape, uv), p.include)
+                    })
                     .collect();
-                out.knob = knob(shape, &state, screen).map(|(k, top)| (top, k));
+                if let Some([u0, v0, u1, v1]) = prompt.rect {
+                    out.boxes
+                        .push(rect_corners([u0, v0], [u1, v1]).map(|uv| to_seq(shape, uv)));
+                }
             }
+        }
+        if let Some(d) = self
+            .drag
+            .as_ref()
+            .filter(|d| d.edit == Edit::Pick && d.moved)
+        {
+            out.boxes
+                .push(rect_corners(d.from, d.to).map(|uv| to_seq(shape, uv)));
+        }
+        if let Some(h) = self.hover.as_ref().filter(|h| h.clip == shape.clip) {
+            out.preview = h.outlines.iter().map(seq).collect();
         }
         out.pen = self.pen.iter().map(|uv| to_seq(shape, *uv)).collect();
         out
     }
 
+    /// The prompt a click at `p` would make with the subject tool: the
+    /// picked subject's on this frame plus the point (Alt: off the object;
+    /// Shift: a new subject). `None` off the picture, while dragging, or
+    /// when the clip is not media.
+    pub fn hover_prompt(
+        &self,
+        p: Point<Pixels>,
+        modifiers: Modifiers,
+        screen: &Screen,
+        project: &Project,
+        shape: &Shape,
+        subjects: &Subjects,
+    ) -> Option<SubjectPrompt> {
+        if self.tool != Some(Tool::Subject) || self.drag.is_some() {
+            return None;
+        }
+        let (at, _) = subjects.frame?;
+        let uv = to_uv(shape, screen.to_sequence(p))?;
+        if !(0.0..=1.0).contains(&uv[0]) || !(0.0..=1.0).contains(&uv[1]) {
+            return None;
+        }
+        let masks = self.masks(project, shape.clip);
+        let base = self
+            .picked_subject(&masks)
+            .filter(|_| !modifiers.shift)
+            .and_then(|i| subjects.prompt(&masks[i]).cloned());
+        let mut prompt = base.unwrap_or(SubjectPrompt {
+            at,
+            ..Default::default()
+        });
+        prompt.points.push(SubjectPoint {
+            at: uv,
+            include: !modifiers.alt,
+        });
+        Some(prompt)
+    }
+
     /// Press at `p` on `shape`'s clip: start a drag, add a pen point, or
     /// pick a mask. The commands to commit when the pen closes a path;
     /// `None` when nothing here takes the press.
+    #[allow(clippy::too_many_arguments)]
     pub fn press(
         &mut self,
         p: Point<Pixels>,
@@ -263,6 +444,7 @@ impl MaskEditor {
         project: &Project,
         shape: &Shape,
         playhead: Time,
+        subjects: &Subjects,
     ) -> Option<Vec<Command>> {
         let (track, clip) = project.timeline.clip(shape.clip)?;
         if track.locked {
@@ -273,6 +455,7 @@ impl MaskEditor {
         let seq = screen.to_sequence(p);
         let uv = to_uv(shape, seq)?;
         let masks = clip.masks.clone();
+        let frame = subjects.frame;
         let begin = |index: usize, start: MaskState, edit: Edit| Drag {
             clip: clip.id,
             shape: shape.clone(),
@@ -283,10 +466,43 @@ impl MaskEditor {
             edit,
             from: uv,
             from_screen: p,
+            to: uv,
             moved: false,
+            alt: modifiers.alt,
+            frame,
             now: masks.clone(),
         };
+        // The picked subject's points on this frame come first.
+        if let Some(i) = self.picked_subject(&masks)
+            && let Some(prompt) = subjects.prompt(&masks[i])
+            && let Some(k) = prompt
+                .points
+                .iter()
+                .position(|q| near(screen.to_screen(to_seq(shape, q.at)), p, REACH))
+        {
+            let state = masks[i].state_at(at);
+            self.drag = Some(begin(i, state, Edit::SubjectPoint(k)));
+            return Some(Vec::new());
+        }
         match self.tool {
+            Some(Tool::Subject) => {
+                frame?;
+                let index = self
+                    .picked_subject(&masks)
+                    .filter(|_| !modifiers.shift)
+                    .unwrap_or(masks.len());
+                let state = masks
+                    .get(index)
+                    .map(|m| m.state_at(at))
+                    .unwrap_or(MaskState {
+                        shape: MaskShape::Subject,
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    });
+                self.drag = Some(begin(index, state, Edit::Pick));
+                return Some(Vec::new());
+            }
             Some(Tool::Pen) => {
                 let closes = self.pen.len() >= 3
                     && near(screen.to_screen(to_seq(shape, self.pen[0])), p, REACH);
@@ -325,7 +541,8 @@ impl MaskEditor {
         // The picked mask's handles, then any mask's body, topmost first.
         if let Some(i) = masks.iter().position(|m| Some(m.id) == self.selected) {
             let state = masks[i].state_at(at);
-            if let Some((k, _)) = knob(shape, &state, screen)
+            let lines = outlines(&masks[i], &state, aspect, subjects);
+            if let Some((k, _)) = knob(shape, &lines, state.feather, screen)
                 && near(k, p, REACH)
             {
                 self.drag = Some(begin(i, state, Edit::Feather));
@@ -346,15 +563,26 @@ impl MaskEditor {
         }
         for (i, mask) in masks.iter().enumerate().rev() {
             let state = mask.state_at(at);
-            let poly: Vec<Point<Pixels>> = state
-                .shape
-                .outline(aspect)
-                .into_iter()
-                .map(|uv| screen.to_screen(to_seq(shape, uv)))
-                .collect();
-            if inside(&poly, p) {
+            let hit = match state.shape {
+                MaskShape::Subject => subjects.matte(mask.id).is_some_and(|m| m.contains(uv)),
+                _ => {
+                    let poly: Vec<Point<Pixels>> = state
+                        .shape
+                        .outline(aspect)
+                        .into_iter()
+                        .map(|uv| screen.to_screen(to_seq(shape, uv)))
+                        .collect();
+                    inside(&poly, p)
+                }
+            };
+            if hit {
                 self.selected = Some(mask.id);
-                self.drag = Some(begin(i, state, Edit::Move));
+                let edit = if state.shape == MaskShape::Subject {
+                    Edit::Select
+                } else {
+                    Edit::Move
+                };
+                self.drag = Some(begin(i, state, edit));
                 return Some(Vec::new());
             }
         }
@@ -362,7 +590,9 @@ impl MaskEditor {
         None
     }
 
-    /// Follow the mouse; the commands that show the edit live, if it moved.
+    /// Follow the mouse; the commands that show the edit live, if it moved
+    /// and shows live (subject edits show their points and box until they
+    /// commit).
     pub fn drag_to(
         &mut self,
         p: Point<Pixels>,
@@ -379,8 +609,10 @@ impl MaskEditor {
         let shape = &d.shape;
         let aspect = aspect(shape);
         let m = to_uv(shape, screen.to_sequence(p))?;
+        d.to = [m[0].clamp(0.0, 1.0), m[1].clamp(0.0, 1.0)];
         let mut state = d.start.clone();
         match d.edit {
+            Edit::SubjectPoint(_) | Edit::Pick | Edit::Select => return None,
             Edit::Move => {
                 state.shape = d.start.shape.moved([m[0] - d.from[0], m[1] - d.from[1]]);
             }
@@ -414,7 +646,7 @@ impl MaskEditor {
                         *center = [(m[0] + o[0]) / 2.0, (m[1] + o[1]) / 2.0];
                         *size = [local[0].abs() / aspect, local[1].abs()];
                     }
-                    MaskShape::Path { .. } => {}
+                    MaskShape::Path { .. } | MaskShape::Subject => {}
                 }
             }
             Edit::Feather => {
@@ -469,6 +701,12 @@ impl MaskEditor {
         let Some(d) = self.drag.take() else {
             return Vec::new();
         };
+        match d.edit {
+            Edit::SubjectPoint(k) => return self.end_point(&d, k),
+            Edit::Pick => return self.end_pick(&d),
+            Edit::Select => return Vec::new(),
+            _ => {}
+        }
         if !d.moved {
             return Vec::new();
         }
@@ -479,6 +717,111 @@ impl MaskEditor {
         vec![Command::SetMasks {
             clip: d.clip,
             masks: d.now,
+        }]
+    }
+
+    /// A subject point dragged (moved there) or, with the subject tool,
+    /// clicked (taken away).
+    fn end_point(&mut self, d: &Drag, k: usize) -> Vec<Command> {
+        let Some((at, rate)) = d.frame else {
+            return Vec::new();
+        };
+        let Some(mut prompt) = d
+            .masks
+            .get(d.index)
+            .and_then(|m| m.picks())
+            .and_then(|s| s.prompt_on(at.to_frame(rate), rate))
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        if k >= prompt.points.len() {
+            return Vec::new();
+        }
+        if d.moved {
+            prompt.points[k].at = d.to;
+        } else if self.tool == Some(Tool::Subject) {
+            prompt.points.remove(k);
+        } else {
+            return Vec::new();
+        }
+        self.commit_prompt(d, prompt)
+    }
+
+    /// A subject tool click (a point) or drag (a box), into the picked
+    /// subject's prompt on this frame or a new subject.
+    fn end_pick(&mut self, d: &Drag) -> Vec<Command> {
+        let Some((at, rate)) = d.frame else {
+            return Vec::new();
+        };
+        let old = d
+            .masks
+            .get(d.index)
+            .and_then(|m| m.picks())
+            .and_then(|s| s.prompt_on(at.to_frame(rate), rate))
+            .cloned();
+        let mut prompt = old.unwrap_or(SubjectPrompt {
+            at,
+            ..Default::default()
+        });
+        if d.moved {
+            let (a, b) = (d.from, d.to);
+            let rect = [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[0].max(b[0]),
+                a[1].max(b[1]),
+            ];
+            if rect[2] - rect[0] < 1e-3 || rect[3] - rect[1] < 1e-3 {
+                return Vec::new();
+            }
+            prompt.rect = Some(rect);
+        } else {
+            if !(0.0..=1.0).contains(&d.from[0]) || !(0.0..=1.0).contains(&d.from[1]) {
+                return Vec::new();
+            }
+            prompt.points.push(SubjectPoint {
+                at: d.from,
+                include: !d.alt,
+            });
+        }
+        self.commit_prompt(d, prompt)
+    }
+
+    /// The masks with `prompt` on its frame of the subject being edited,
+    /// or of a new one (picked); a subject left with no prompt goes.
+    fn commit_prompt(&mut self, d: &Drag, prompt: SubjectPrompt) -> Vec<Command> {
+        let Some((_, rate)) = d.frame else {
+            return Vec::new();
+        };
+        let mut masks = d.masks.clone();
+        match masks.get_mut(d.index).filter(|m| m.picks().is_some()) {
+            Some(mask) => {
+                let subject = mask
+                    .subject
+                    .take()
+                    .expect("picks a subject")
+                    .with_prompt(prompt, rate);
+                if subject.prompts.is_empty() {
+                    masks.remove(d.index);
+                    self.selected = None;
+                } else {
+                    mask.subject = Some(subject);
+                }
+            }
+            None => {
+                if prompt.is_empty() {
+                    return Vec::new();
+                }
+                let mask = Mask::subject(Subject::new(prompt));
+                self.selected = Some(mask.id);
+                masks.push(mask);
+            }
+        }
+        self.hover = None;
+        vec![Command::SetMasks {
+            clip: d.clip,
+            masks,
         }]
     }
 
@@ -500,31 +843,46 @@ impl MaskEditor {
 
 /// Paint `overlay` at `screen`.
 pub(super) fn paint(overlay: &MaskOverlay, screen: &Screen, color: Hsla, window: &mut Window) {
+    let trace = |pts: &[Point<Pixels>], close: bool, mut b: PathBuilder| {
+        for (i, p) in pts.iter().enumerate() {
+            if i == 0 {
+                b.move_to(*p);
+            } else {
+                b.line_to(*p);
+            }
+        }
+        if close {
+            b.close();
+        }
+        b.build().ok()
+    };
     let stroke =
         |pts: &[Point<Pixels>], close: bool, width: f32, color: Hsla, window: &mut Window| {
-            let mut b = PathBuilder::stroke(px(width));
-            for (i, p) in pts.iter().enumerate() {
-                if i == 0 {
-                    b.move_to(*p);
-                } else {
-                    b.line_to(*p);
-                }
-            }
-            if close {
-                b.close();
-            }
-            if let Ok(path) = b.build() {
+            if let Some(path) = trace(pts, close, PathBuilder::stroke(px(width))) {
                 window.paint_path(path, color);
             }
         };
+    let on_screen = |line: &[[f32; 2]]| -> Vec<Point<Pixels>> {
+        line.iter().map(|p| screen.to_screen(*p)).collect()
+    };
+    for line in &overlay.preview {
+        let pts = on_screen(line);
+        if let Some(path) = trace(&pts, true, PathBuilder::fill()) {
+            window.paint_path(path, color.opacity(0.22));
+        }
+        stroke(&pts, true, 1.5, color, window);
+    }
     for (outline, picked) in &overlay.outlines {
-        let pts: Vec<Point<Pixels>> = outline.iter().map(|p| screen.to_screen(*p)).collect();
+        let pts = on_screen(outline);
         let (width, color) = if *picked {
             (1.5, color)
         } else {
             (1.0, color.opacity(0.6))
         };
         stroke(&pts, true, width, color, window);
+    }
+    for corners in &overlay.boxes {
+        stroke(&on_screen(corners), true, 1.0, color, window);
     }
     let half = px(HANDLE / 2.0);
     let square = |at: Point<Pixels>, window: &mut Window| {
@@ -534,31 +892,46 @@ pub(super) fn paint(overlay: &MaskOverlay, screen: &Screen, color: Hsla, window:
     for h in &overlay.handles {
         square(screen.to_screen(*h), window);
     }
+    let disc = |at: Point<Pixels>, r: Pixels| {
+        let mut b = PathBuilder::fill();
+        b.move_to(point(at.x + r, at.y));
+        b.arc_to(point(r, r), px(0.), false, true, point(at.x - r, at.y));
+        b.arc_to(point(r, r), px(0.), false, true, point(at.x + r, at.y));
+        b.close();
+        b.build().ok()
+    };
+    for (at, include) in &overlay.points {
+        let at = screen.to_screen(*at);
+        let (outer, inner) = if *include {
+            (white(), color)
+        } else {
+            (color, white())
+        };
+        if let Some(path) = disc(at, px(DOT + 1.5)) {
+            window.paint_path(path, outer);
+        }
+        if let Some(path) = disc(at, px(DOT)) {
+            window.paint_path(path, inner);
+        }
+        if !include {
+            let r = px(DOT * 0.55);
+            stroke(
+                &[point(at.x - r, at.y), point(at.x + r, at.y)],
+                false,
+                1.5,
+                color,
+                window,
+            );
+        }
+    }
     if let Some((top, k)) = overlay.knob {
         stroke(&[screen.to_screen(top), k], false, 1.0, color, window);
-        let mut b = PathBuilder::fill();
-        b.move_to(point(k.x + half, k.y));
-        b.arc_to(
-            point(half, half),
-            px(0.),
-            false,
-            true,
-            point(k.x - half, k.y),
-        );
-        b.arc_to(
-            point(half, half),
-            px(0.),
-            false,
-            true,
-            point(k.x + half, k.y),
-        );
-        b.close();
-        if let Ok(path) = b.build() {
+        if let Some(path) = disc(k, half) {
             window.paint_path(path, color);
         }
     }
     if !overlay.pen.is_empty() {
-        let pts: Vec<Point<Pixels>> = overlay.pen.iter().map(|p| screen.to_screen(*p)).collect();
+        let pts = on_screen(&overlay.pen);
         stroke(&pts, false, 1.5, color, window);
         for p in pts {
             square(p, window);

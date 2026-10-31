@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner", "diarizer", "sounds"]
+default = ["whisper", "aligner", "diarizer", "sounds", "subjects"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["koo-models/whisper"]
@@ -17,6 +17,9 @@ diarizer = ["koo-models/diarizer"]
 # Sounds, music and beats, and vectors for finding a sound by description;
 # without it analysis stops at speech.
 sounds = ["koo-models/sounds"]
+# Subject masks: objects picked by clicks, found and followed through
+# video by SAM 2.1; without it subject masks keep nothing.
+subjects = ["koo-models/segment"]
 
 [dependencies]
 anyhow.workspace = true

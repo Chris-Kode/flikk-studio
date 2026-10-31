@@ -33,6 +33,14 @@ pub enum Glyph {
     MaskRect,
     MaskEllipse,
     Pen,
+    /// A figure with a spark: a mask the model finds.
+    Subject,
+    /// A target with motion lines: follow through the clip.
+    Track,
+    /// A disc with hairs at its edge: edges eased onto the picture's.
+    Refine,
+    /// A frame half hatched: show what masks cut away.
+    MaskOverlay,
     /// Two beamed notes: music.
     Note,
 }
@@ -277,6 +285,66 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
             );
         }
         Glyph::MaskEllipse => circle(8., 8., 5.5, false, window),
+        Glyph::Subject => {
+            circle(6.5, 5.5, 2.6, true, window);
+            fill(
+                &[
+                    (1.5, 14.5),
+                    (2.3, 11.),
+                    (4.3, 9.4),
+                    (8.7, 9.4),
+                    (10.7, 11.),
+                    (11.5, 14.5),
+                ],
+                window,
+            );
+            fill(
+                &[
+                    (13.2, 0.8),
+                    (13.9, 2.6),
+                    (15.5, 3.3),
+                    (13.9, 4.0),
+                    (13.2, 5.8),
+                    (12.5, 4.0),
+                    (10.9, 3.3),
+                    (12.5, 2.6),
+                ],
+                window,
+            );
+        }
+        Glyph::Track => {
+            circle(9.5, 8., 4.5, false, window);
+            circle(9.5, 8., 1.4, true, window);
+            lines(&[(0.8, 5.5), (3.6, 5.5)], false, window);
+            lines(&[(0.8, 10.5), (3.6, 10.5)], false, window);
+        }
+        Glyph::Refine => {
+            circle(6.5, 8., 4.5, true, window);
+            for (a, b) in [
+                ((11.5, 4.5), (14., 2.5)),
+                ((12.2, 7.), (15., 6.)),
+                ((12.2, 9.5), (15., 10.5)),
+                ((11.5, 12.), (14., 14.)),
+            ] {
+                lines(&[a, b], false, window);
+            }
+        }
+        Glyph::MaskOverlay => {
+            lines(
+                &[(1.5, 3.), (14.5, 3.), (14.5, 13.), (1.5, 13.)],
+                true,
+                window,
+            );
+            for (a, b) in [
+                ((8., 13.), (14.5, 6.5)),
+                ((8., 8.5), (13.5, 3.)),
+                ((11.5, 13.), (14.5, 10.)),
+                ((8., 4.5), (9.5, 3.)),
+            ] {
+                lines(&[a, b], false, window);
+            }
+            lines(&[(8., 3.), (8., 13.)], false, window);
+        }
         Glyph::Pen => {
             lines(
                 &[

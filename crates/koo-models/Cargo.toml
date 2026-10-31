@@ -8,10 +8,10 @@ edition.workspace = true
 [features]
 # Voice activity and transcription, run by whisper.cpp.
 whisper = ["dep:whisper-rs"]
-# whisper.cpp on the GPU, with the CPU when the machine has none. Each one
-# needs its SDK at build time: Metal (Xcode), Vulkan (the Vulkan SDK, or
-# `glslc` and the Vulkan headers).
-metal = ["whisper-rs?/metal"]
+# whisper.cpp (and with `mlx`, MLX) on the GPU, with the CPU when the
+# machine has none. Each one needs its SDK at build time: Metal (Xcode),
+# Vulkan (the Vulkan SDK, or `glslc` and the Vulkan headers).
+metal = ["whisper-rs?/metal", "mlx-rs?/metal", "mlx-rs?/accelerate"]
 vulkan = ["whisper-rs?/vulkan"]
 # Word timing, run by ONNX Runtime, which is downloaded and linked
 # statically at build time.
@@ -20,6 +20,13 @@ aligner = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
 diarizer = ["dep:ort"]
 # Sound tagging, beats and sound search, run by ONNX Runtime.
 sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+# Subject masks: objects picked by clicks and followed through video, run
+# by ONNX Runtime.
+segment = ["dep:ort", "dep:serde_json"]
+# The same subject masks on MLX, Apple's array framework: on the Mac's GPU
+# with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
+# only.
+mlx = ["dep:mlx-rs"]
 
 [dependencies]
 anyhow.workspace = true
@@ -29,3 +36,4 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "
 serde_json = { workspace = true, optional = true }
 unicode-normalization = { version = "0.1", optional = true }
 whisper-rs = { version = "0.16", optional = true }
+mlx-rs = { version = "0.33", default-features = false, optional = true }

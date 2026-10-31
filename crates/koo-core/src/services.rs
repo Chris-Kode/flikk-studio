@@ -4,13 +4,15 @@
 use crate::analysis::{Analysis, AnalysisSteps, Loudness, SoundVectors};
 use crate::cloud::SpeechService;
 use crate::fx::{FxAsset, ParamValue};
-use crate::ids::{JobId, MediaId};
+use crate::ids::{JobId, MaskId, MediaId};
 use crate::model::{BlendMode, Clip, Fingerprint, MediaInfo, MediaItem, Track};
+use crate::subject::{Matte, Subject, SubjectPrompt};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub type ServiceResult<T> = std::result::Result<T, ServiceError>;
 
@@ -211,6 +213,72 @@ pub trait AnalysisService: Send + Sync {
             "Sound search is not available in this build.".into(),
         ))
     }
+}
+
+/// A subject mask as [`SubjectService`] sees it: the media under it, and
+/// the part of it its clip shows.
+#[derive(Clone, Copy, Debug)]
+pub struct SubjectRef<'a> {
+    /// Its tracking is replaced, not added to, when the subject changes.
+    pub mask: MaskId,
+    pub item: &'a MediaItem,
+    pub subject: &'a Subject,
+    /// Source range.
+    pub range: TimeRange,
+}
+
+/// How far a subject's mattes are made.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubjectStatus {
+    /// Prompted frames made, of all.
+    pub prompted: (usize, usize),
+    /// Frames to track over the clip (with the prompted ones), and how
+    /// many are.
+    pub frames: usize,
+    pub tracked: usize,
+    /// Tracking is running (or waiting its turn).
+    pub tracking: bool,
+    /// Seconds a frame took to track lately on this machine.
+    pub seconds_per_frame: Option<f32>,
+    /// Why making them failed.
+    pub error: Option<String>,
+}
+
+impl SubjectStatus {
+    /// Every matte the subject shows is made.
+    pub fn complete(&self, track: bool) -> bool {
+        self.prompted.0 == self.prompted.1 && (!track || self.tracked >= self.frames)
+    }
+}
+
+/// Subject masks (`koo-analysis`): the object a subject picks, as a
+/// segmentation model finds it on the prompted frames and follows it
+/// through its clip. Mattes are kept by fingerprint and prompts, so a
+/// subject is found once.
+pub trait SubjectService: Send + Sync {
+    /// Whether the model is here; why not otherwise.
+    fn available(&self) -> Result<(), String>;
+    /// The subject's matte at source time `t`: that frame's when it is
+    /// made, else the nearest made one (a prompted frame without
+    /// tracking). Starts making what is missing (the prompted frames, and
+    /// with `track` every frame of the range), so a later call may find
+    /// more. `None` until one is made.
+    fn matte(&self, subject: SubjectRef<'_>, t: Time) -> Option<Matte>;
+    fn status(&self, subject: SubjectRef<'_>) -> SubjectStatus;
+    /// Make everything [`SubjectService::matte`] shows for the subject,
+    /// waiting for it (renders). `progress` gets 0..1.
+    fn complete(
+        &self,
+        subject: SubjectRef<'_>,
+        progress: &dyn Fn(f32),
+        cancel: &AtomicBool,
+    ) -> ServiceResult<()>;
+    /// The object `prompt` picks on its frame of `item`, by itself (what
+    /// the subject shows there once the prompt is in it). Slow the first
+    /// time a frame is asked about, which is encoded; fast after.
+    fn preview(&self, item: &MediaItem, prompt: &SubjectPrompt) -> ServiceResult<Matte>;
+    /// Counts mattes made, so views know to draw again.
+    fn version(&self) -> u64;
 }
 
 /// One evaluated FX program: what to run, its parameter values and clock.
@@ -649,6 +717,8 @@ pub struct Services {
     pub lettering: Option<Arc<dyn LetteringService>>,
     /// Music and sound effects from the providers picked for them.
     pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
+    /// Finds and follows the objects subject masks keep.
+    pub subjects: Option<Arc<dyn SubjectService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -661,6 +731,7 @@ impl std::fmt::Debug for Services {
             .field("html", &self.html.is_some())
             .field("lettering", &self.lettering.is_some())
             .field("generation", &self.generation.is_some())
+            .field("subjects", &self.subjects.is_some())
             .finish()
     }
 }

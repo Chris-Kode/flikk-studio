@@ -225,6 +225,10 @@ pub(crate) fn write_script(dir: &Path, name: &str, script: &str) -> Result<PathB
     Ok(path)
 }
 
+/// The part of a render's progress spent finding subject masks, when it
+/// has any to find (tracking dwarfs the encode).
+const SUBJECTS_SHARE: f32 = 0.5;
+
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
     request: &RenderRequest,
@@ -236,9 +240,23 @@ pub fn render_blocking(
     let work = WorkDir::new()?;
     let settings = &request.settings;
     let mut spec = GraphSpec::new(&request.project, settings, &request.caption_styles);
+    let mut share = 0.0;
+
+    // Subject masks: found (and followed) before any frame is composed.
+    if spec.video && composed::wanted(&request.project, spec.range, &request.services) {
+        let found = composed::find_subjects(
+            &request.project,
+            spec.range,
+            &request.services,
+            &|p| progress(p * SUBJECTS_SHARE),
+            cancel,
+        )?;
+        if found {
+            share = SUBJECTS_SHARE;
+        }
+    }
 
     // Pass 1 of 2: measure loudness of the final mix.
-    let mut share = 0.0;
     if let Some(target) = settings.loudness {
         let mut measure = spec.clone();
         measure.video = false;
@@ -248,8 +266,14 @@ pub fn render_blocking(
         let mut args: Vec<OsString> = vec!["-loglevel".into(), "info".into()];
         args.extend(filter_script_args(&script));
         args.extend(["-map", "[aout]", "-f", "null", "-"].map(OsString::from));
-        share = 0.2;
-        let stderr = ffmpeg::run(&args, g.seconds, &|p| progress(p * share), cancel)?;
+        let from = share;
+        share += 0.2;
+        let stderr = ffmpeg::run(
+            &args,
+            g.seconds,
+            &|p| progress(from + p * (share - from)),
+            cancel,
+        )?;
         let measured = Measured::parse(&stderr)
             .ok_or_else(|| anyhow!("could not measure loudness (silent mix?)"))?;
         spec.loudnorm = Some(Loudnorm::Apply(target, measured));

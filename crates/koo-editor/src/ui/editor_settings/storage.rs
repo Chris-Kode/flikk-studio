@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
-    /// Proxies, waveforms, collages and the like: remade when needed.
+    /// Proxies, waveforms, collages, subject mattes and the like: remade
+    /// when needed.
     Previews,
     /// Analysis results: remade only by analyzing again, which can cost.
     Analysis,
@@ -69,7 +70,7 @@ impl Place {
     /// and renders in progress stay.
     fn clear(self) {
         let dirs: Vec<PathBuf> = match self {
-            Place::Previews => ["proxies", "waveforms", "collages", "upload"]
+            Place::Previews => ["proxies", "waveforms", "collages", "upload", "mattes"]
                 .iter()
                 .map(|d| paths::cache().join(d))
                 .collect(),
