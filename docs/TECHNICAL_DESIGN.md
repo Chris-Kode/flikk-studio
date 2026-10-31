@@ -52,7 +52,7 @@ described here, update the section in the same commit.
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache | core, models |
-| `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort |
+| `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `koo-cloud` | Online providers (ElevenLabs): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
 | `koo-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
@@ -94,7 +94,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
-| Subject masks | SAM 2.1 tiny (Apache-2.0) as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint and prompts | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; one export of image and video models with numbers checked against PyTorch |
+| Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
 docs before relying on them (PRD note).
@@ -316,7 +316,10 @@ offline media) can be dismissed for the session.
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
 `aligner`, `diarizer`, `sounds`, `subjects`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
-subject masks keep nothing). Segmentation is listed under Settings → Models
+subject masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
+Apple's frameworks) adds the MLX subject mask model and makes it the
+default; `koo-editor` turns it on with `metal` on macOS. mlx-sys builds
+MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
 as "Subject masks" but is not part of analysis: `required_tasks` never asks
 for it.
 
@@ -508,6 +511,24 @@ not retried with Whisper.
   box is two corner points labelled 2 and 3 before the clicks. Checked
   here against a Python reference of the same loop on `transformers`'
   bedroom clip: per-frame IoU ≥ 0.9988.
+* **On MLX** (`koo-models/src/segmentation/sam2_mlx/`, feature `mlx`, the
+  default model on macOS): the same network written over `mlx-rs` from
+  SAM 2's modules (Hiera with windowed and pooled attention, the FPN neck,
+  the prompt encoder and two-way decoder, the memory encoder and the memory
+  attention with axial rotary positions), on the GPU in unified memory, with
+  the MLX conversion of Meta's checkpoint in half precision (90 MB, from
+  avbiswas' `sam2-mlx`, pinned; computed in f32). Pictures go through the
+  same `plan::square`. Its decoder chooses as SAM 2 does: best of the three
+  multimask answers for one click or none, else the single answer unless it
+  is unstable; the ONNX decoder always takes the best of three, so a box or
+  several clicks can differ slightly (IoU 0.95 on the bedroom clip's box;
+  forcing the same choice gives 1.0000). One click: IoU 1.0000 and the same
+  scores. Tracking attends to the memory there is, as SAM 2 does: every
+  prompted frame (`plan::bank` without a cap) and the tracked ones, without
+  the padding the ONNX graphs' fixed bank needs (per-frame IoU 0.97–1.0
+  against the ONNX runner over 8 frames; padded the same way, 1.0000 on 7
+  of them and 0.9977 on the other). Checked on Linux, MLX on the CPU (a
+  local build of mlx-sys linking OpenBLAS); not yet run on a Mac.
 * **Tracking** (`runner.rs`, `Segmenter::track`): each prompted frame is
   segmented by itself (its memory binarized); the frames after the first
   prompted one are tracked forward from it and those before it backward,
@@ -524,7 +545,10 @@ not retried with Whisper.
   fingerprint, frame and prompt (a frame previewed in the viewer is not
   segmented again once the click lands in a subject); a tracked subject by
   fingerprint and `Subject::key` (all its prompts), over every frame its
-  clip shows and its prompted frames. Mattes are cleaned (islands and holes
+  clip shows and its prompted frames. Both keys hold the model's id, so
+  picking the other model in Settings → Models makes them anew, and the
+  runners are made again for it (an `Encoded` frame is only read by its
+  own model's runner). Mattes are cleaned (islands and holes
   under 16 cells), kept to 1/16 of a logit up to ±8 and run-length coded
   (about 6 KB a frame), in memory and under `cache/mattes/` (`store.rs`).
   Previews run on a model instance of their own and keep the last 3
@@ -844,10 +868,17 @@ there.
   instrumental chunks are written from the docs.
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
-* Subject tracking runs on the CPU (ONNX Runtime's CPU provider, as every
-  model here): about 4 s a frame on 4 cores, so a minute of 30 fps footage
-  takes hours. GPU providers (CoreML, DirectML, CUDA) were not tried. A
-  changed prompt tracks the whole clip again rather than from that frame.
+* Off macOS, subject tracking runs on the CPU (ONNX Runtime's CPU
+  provider, as every model here): about 4 s a frame on 4 cores, so a minute
+  of 30 fps footage takes hours. GPU providers (DirectML, CUDA) were not
+  tried. A changed prompt tracks the whole clip again rather than from that
+  frame.
+* The MLX runner has not run on a Mac: its numbers were checked on Linux
+  with MLX on the CPU, so its speed on Apple GPUs is unmeasured. MLX loads
+  its Metal kernels from `mlx.metallib`, which mlx-sys builds under
+  `~/.mlx/lib/` (or `MLX_RS_METAL_PATH`) with Xcode's Metal compiler; a
+  packaged app has to ship it next to the binary, where MLX looks first.
+  Its weights come from a third party's repository too (pinned).
 * A subject mask follows one object; several objects are several masks.
   The matte is the model's 256² logits stretched over the picture: fine
   detail (hair) relies on `refine`, which only eases the edge.

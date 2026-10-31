@@ -23,9 +23,10 @@ cpal = "0.16"
 image = { version = "0.25", default-features = false }
 
 # Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
-# vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU.
+# vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU. On
+# macOS subject masks run on MLX, on the GPU too.
 [target.'cfg(target_os = "macos")'.dependencies]
-koo-models = { workspace = true, features = ["metal"] }
+koo-models = { workspace = true, features = ["metal", "mlx"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 koo-models = { workspace = true, features = ["vulkan"] }

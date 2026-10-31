@@ -1,13 +1,20 @@
 //! Segmentation: the object that clicks and a box pick in a picture, and
 //! the same object followed through the frames around it.
 
+#[cfg(any(feature = "segment", feature = "mlx"))]
+pub(crate) mod plan;
 pub mod sam2;
+pub mod sam2_mlx;
 
 use crate::Model;
 use anyhow::Result;
 use koo_core::services::Frame;
 
-/// The models that can do it, the default first.
+/// The models that can do it, the default first: on MLX where the build
+/// has it (the Mac), else on ONNX Runtime.
+#[cfg(feature = "mlx")]
+pub const MODELS: &[&Model] = &[&sam2_mlx::MODEL, &sam2::MODEL];
+#[cfg(not(feature = "mlx"))]
 pub const MODELS: &[&Model] = &[&sam2::MODEL];
 
 /// What picks the object in one frame, in the picture's uv (0..1 across
@@ -40,9 +47,22 @@ pub struct Segment {
 }
 
 /// A frame as the model sees it: the slow part of segmenting, kept to
-/// answer several prompts on the same frame.
+/// answer several prompts on the same frame. Only a runner of the model
+/// that encoded it reads it.
 pub struct Encoded {
+    pub(crate) model: &'static str,
     pub(crate) features: Vec<Vec<f32>>,
+}
+
+#[cfg(any(feature = "segment", feature = "mlx"))]
+impl Encoded {
+    /// The features, when `model` encoded them.
+    pub(crate) fn of(&self, model: &str) -> Result<&[Vec<f32>]> {
+        if self.model != model {
+            anyhow::bail!("the frame was encoded by another model");
+        }
+        Ok(&self.features)
+    }
 }
 
 /// Finds and follows objects in pictures.
@@ -71,10 +91,13 @@ pub trait Segmenter: Send + Sync {
 }
 
 /// The runner of `model`, one of [`MODELS`].
-#[cfg(feature = "segment")]
+#[cfg(any(feature = "segment", feature = "mlx"))]
 pub fn runner(model: &Model) -> Box<dyn Segmenter> {
     match model.id {
+        #[cfg(feature = "segment")]
         sam2::ID => Box::<sam2::Sam2>::default(),
-        id => unreachable!("{id} is not a segmentation model"),
+        #[cfg(feature = "mlx")]
+        sam2_mlx::ID => Box::<sam2_mlx::Sam2Mlx>::default(),
+        id => unreachable!("{id} is not a segmentation model this build runs"),
     }
 }

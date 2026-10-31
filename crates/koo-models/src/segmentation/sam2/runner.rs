@@ -6,16 +6,17 @@
 
 use super::config::{
     CONSTANTS, DECODER, ENCODER, FINE, GRID, HIDDEN, INPUT, LABEL_BOX, LABEL_OFF, LABEL_ON,
-    LABEL_PAD, MEMORY, MEMORY_ATTENTION, MEMORY_ENCODER, MEMORY_FRAMES, POINTER_POSITIONS,
-    POINTERS, PROMPTED_FRAMES, TOKENS,
+    LABEL_PAD, MEMORY, MEMORY_ATTENTION, MEMORY_ENCODER, POINTER_POSITIONS, PROMPTED_FRAMES,
+    TOKENS,
 };
 use crate::onnx;
+use crate::segmentation::plan::{self, MEMORY_FRAMES, POINTERS};
 use crate::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use anyhow::{Result, anyhow, bail};
 use koo_core::services::Frame;
 use ort::session::Session;
 use ort::value::Tensor;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
 
 /// Where each of the encoder's outputs sits in [`Encoded::features`].
@@ -59,8 +60,6 @@ struct Constants {
     /// The temporal position of a memory frame by its distance (row
     /// `distance - 1`); the last row is a prompted frame's.
     temporal: Vec<f32>,
-    mean: [f32; 3],
-    std: [f32; 3],
 }
 
 /// What a decoder run gives besides the [`Segment`]: what the memory
@@ -112,7 +111,7 @@ impl Segmenter for Sam2 {
     fn segment(&self, frame: &Encoded, prompt: &Prompt) -> Result<Segment> {
         let mut graphs = self.graphs(false)?;
         let g = graphs.as_mut().expect("loaded");
-        let cond = &frame.features[FEATS2_NO_MEMORY];
+        let cond = &frame.of(super::ID)?[FEATS2_NO_MEMORY];
         Ok(decode(g, frame, cond, &points(prompt))?.segment)
     }
 
@@ -188,19 +187,10 @@ impl Constants {
             .as_array()
             .map(|rows| rows.iter().flat_map(numbers).collect())
             .unwrap_or_default();
-        let three = |key: &str| -> Result<[f32; 3]> {
-            numbers(&json[key])
-                .try_into()
-                .map_err(|_| anyhow!("{} has no {key}", path.display()))
-        };
         if temporal.len() != MEMORY_FRAMES * MEMORY {
             bail!("{} has no temporal position table", path.display());
         }
-        Ok(Self {
-            temporal,
-            mean: three("image_mean")?,
-            std: three("image_std")?,
-        })
+        Ok(Self { temporal })
     }
 
     fn temporal(&self, row: usize) -> &[f32] {
@@ -216,7 +206,7 @@ fn tensor<T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + Clone + 
 }
 
 fn encode(g: &mut Graphs, picture: &Frame) -> Result<Encoded> {
-    let input = tensor(&[1, 3, INPUT, INPUT], pixels(picture, &g.constants)?)?;
+    let input = tensor(&[1, 3, INPUT, INPUT], plan::square(picture, INPUT)?)?;
     let outputs = g
         .encoder
         .run(ort::inputs!["pixel_values" => input])
@@ -238,7 +228,10 @@ fn encode(g: &mut Graphs, picture: &Frame) -> Result<Encoded> {
     if features.iter().map(Vec::len).ne(expect) {
         bail!("subject mask encoder gave features of unexpected sizes");
     }
-    Ok(Encoded { features })
+    Ok(Encoded {
+        model: super::ID,
+        features,
+    })
 }
 
 /// `prompt` as the decoder's labelled points in its square's pixels: a
@@ -340,11 +333,10 @@ fn memorize(g: &mut Graphs, frame: &Encoded, d: &Decoded, prompted: bool) -> Res
     })
 }
 
-/// The memory frame `i` attends to, tracking forward (or `reverse`) through
-/// `count` frames, and the positions of its tokens: the nearest prompted
-/// frames, the latest tracked frames within reach, then the object
-/// pointers of the prompted frames already passed and the latest tracked
-/// frames, each split into tokens.
+/// The memory frame `i` attends to (`plan::bank`, the nearest two prompted
+/// frames at most) and the positions of its tokens, padded to the fixed
+/// sizes the attention takes by repeating the latest frame and the last
+/// pointer, each pointer split into tokens.
 fn bank(
     g: &mut Graphs,
     prompted: &BTreeMap<usize, Memory>,
@@ -353,58 +345,43 @@ fn bank(
     count: usize,
     reverse: bool,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
-    let step = |d: usize| -> Option<usize> {
-        if reverse {
-            i.checked_add(d).filter(|j| *j < count)
-        } else {
-            i.checked_sub(d)
-        }
+    let keys: BTreeSet<usize> = prompted.keys().copied().collect();
+    let bank = plan::bank(
+        &keys,
+        |j| tracked.contains_key(&j),
+        i,
+        count,
+        reverse,
+        Some(PROMPTED_FRAMES),
+    );
+    let memory_of = |j: &usize| {
+        tracked
+            .get(j)
+            .or_else(|| prompted.get(j))
+            .expect("in the bank")
     };
-    let chosen: Vec<usize> = if prompted.len() > PROMPTED_FRAMES {
-        let before = prompted.range(..i).next_back().map(|(k, _)| *k);
-        let after = prompted.range(i..).next().map(|(k, _)| *k);
-        before.into_iter().chain(after).collect()
-    } else {
-        prompted.keys().copied().collect()
-    };
-    // (memory, row of its temporal position)
-    let mut frames: Vec<(&Memory, usize)> = chosen
+    let mut frames: Vec<(&Memory, usize)> = bank
+        .frames
         .iter()
-        .map(|k| (&prompted[k], MEMORY_FRAMES - 1))
+        .map(|(j, row)| (memory_of(j), *row))
         .collect();
-    let mut latest = Vec::new();
-    for d in (1..MEMORY_FRAMES).rev() {
-        let Some(j) = step(d) else { continue };
-        let memory = tracked
-            .get(&j)
-            .or_else(|| prompted.get(&j).filter(|_| !chosen.contains(&j)));
-        if let Some(m) = memory {
-            latest.push((m, d - 1));
-        }
-    }
-    let room = MEMORY_FRAMES.saturating_sub(frames.len());
-    let skip = latest.len().saturating_sub(room);
-    frames.extend(latest.into_iter().skip(skip));
+    // The latest are last: when the bank is full, the farthest go.
+    let extra = frames.len().saturating_sub(MEMORY_FRAMES);
+    let chosen = frames
+        .iter()
+        .filter(|(_, row)| *row == MEMORY_FRAMES - 1)
+        .count();
+    frames.drain(chosen..chosen + extra);
     while frames.len() < MEMORY_FRAMES {
         let last = *frames.last().expect("a prompted frame");
         frames.push(last);
     }
-
-    let most = count.clamp(1, POINTERS);
-    let mut pointers: Vec<(&[f32], f32)> = prompted
+    let pointers: Vec<(&[f32], f32)> = bank
+        .pointers
         .iter()
-        .filter(|(k, _)| if reverse { **k >= i } else { **k <= i })
-        .map(|(k, m)| (m.pointer.as_slice(), k.abs_diff(i) as f32))
+        .map(|(j, d)| (memory_of(j).pointer.as_slice(), *d))
         .collect();
-    for d in 1..most {
-        let Some(j) = step(d) else { break };
-        if let Some(m) = tracked.get(&j) {
-            pointers.push((m.pointer.as_slice(), d as f32));
-        }
-    }
-    pointers.truncate(POINTERS);
-    let scale = (most - 1).max(1) as f32;
-    let distances: Vec<f32> = pointers.iter().map(|(_, d)| d / scale).collect();
+    let distances: Vec<f32> = pointers.iter().map(|(_, d)| *d).collect();
     let n = distances.len();
     let m = g.memory.as_mut().expect("memory graphs loaded");
     let outputs = m
@@ -480,76 +457,4 @@ fn tokens(map: &[f32], channels: usize) -> Vec<f32> {
         }
     }
     out
-}
-
-/// `picture` stretched onto the model's square and normalized, channels
-/// first. Resampled with a triangle filter at least a source pixel wide
-/// (PIL's bilinear, which the model's own preprocessing uses), so a large
-/// picture is averaged down rather than skipped through.
-fn pixels(picture: &Frame, c: &Constants) -> Result<Vec<f32>> {
-    let (w, h) = (picture.width as usize, picture.height as usize);
-    if w == 0 || h == 0 || picture.rgba.len() < w * h * 4 {
-        bail!("the picture to segment is empty");
-    }
-    let (cols, rows) = (taps(w, INPUT), taps(h, INPUT));
-    let mut across = vec![0f32; h * INPUT * 3];
-    for y in 0..h {
-        let src = &picture.rgba[y * w * 4..(y + 1) * w * 4];
-        let dst = &mut across[y * INPUT * 3..(y + 1) * INPUT * 3];
-        for (x, (start, weights)) in cols.iter().enumerate() {
-            let mut acc = [0f32; 3];
-            for (k, wt) in weights.iter().enumerate() {
-                let p = &src[(start + k) * 4..(start + k) * 4 + 3];
-                for ch in 0..3 {
-                    acc[ch] += p[ch] as f32 * wt;
-                }
-            }
-            dst[x * 3..x * 3 + 3].copy_from_slice(&acc);
-        }
-    }
-    let plane = INPUT * INPUT;
-    let mut out = vec![0f32; 3 * plane];
-    let mut row = vec![0f32; INPUT * 3];
-    for (y, (start, weights)) in rows.iter().enumerate() {
-        row.fill(0.0);
-        for (k, wt) in weights.iter().enumerate() {
-            let src = &across[(start + k) * INPUT * 3..(start + k + 1) * INPUT * 3];
-            for (a, s) in row.iter_mut().zip(src) {
-                *a += s * wt;
-            }
-        }
-        for x in 0..INPUT {
-            for ch in 0..3 {
-                let v = row[x * 3 + ch] / 255.0;
-                out[ch * plane + y * INPUT + x] = (v - c.mean[ch]) / c.std[ch];
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// For each of `dst` samples across `src` pixels: the first source pixel
-/// it reads and the weights from there on, summing to one.
-fn taps(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
-    let scale = src as f32 / dst as f32;
-    let support = scale.max(1.0);
-    (0..dst)
-        .map(|i| {
-            let center = (i as f32 + 0.5) * scale;
-            let lo = (center - support).floor().max(0.0) as usize;
-            let hi = ((center + support).ceil() as usize).clamp(lo + 1, src);
-            let mut weights: Vec<f32> = (lo..hi)
-                .map(|j| (1.0 - ((j as f32 + 0.5 - center) / support).abs()).max(0.0))
-                .collect();
-            let sum: f32 = weights.iter().sum();
-            if sum > 0.0 {
-                weights.iter_mut().for_each(|w| *w /= sum);
-            } else {
-                weights = vec![0.0; hi - lo];
-                let nearest = (center.floor() as usize).clamp(lo, hi - 1) - lo;
-                weights[nearest] = 1.0;
-            }
-            (lo, weights)
-        })
-        .collect()
 }

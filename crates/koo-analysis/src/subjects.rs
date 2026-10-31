@@ -4,12 +4,13 @@
 //! on the media's rate.
 //!
 //! Each prompted frame is segmented by itself and kept by the media's
-//! fingerprint, its frame and its prompt, so a frame picked in the viewer
-//! is not segmented again once the click lands in a subject. A subject
-//! that tracks is followed over every frame its clip shows (and its
-//! prompted frames, wherever they are) by one job, its frames kept by
-//! fingerprint and [`Subject::key`]. Both are kept in memory and under
-//! `paths::cache()/mattes/` ([`store`]).
+//! fingerprint, its frame, its prompt and the model, so a frame picked in
+//! the viewer is not segmented again once the click lands in a subject. A
+//! subject that tracks is followed over every frame its clip shows (and
+//! its prompted frames, wherever they are) by one job, its frames kept by
+//! fingerprint, [`Subject::key`] and model. Both are kept in memory and
+//! under `paths::cache()/mattes/` ([`store`]). Picking another model makes
+//! them anew with it.
 //!
 //! Previews run on a model of their own, so picking stays quick while a
 //! subject is tracked, and keep the last frames they encoded for the next
@@ -31,8 +32,8 @@ use koo_core::services::{
 };
 use koo_core::subject::{Fnv, Matte, SubjectPrompt};
 use koo_core::time::{Rate, Time};
-use koo_models::Task as ModelTask;
 use koo_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
+use koo_models::{Model, Task as ModelTask};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -80,8 +81,8 @@ pub struct LocalSubjects {
 struct Shared {
     media: Arc<dyn MediaService>,
     picker: Mutex<Picker>,
-    /// Loaded on first use.
-    tracker: Option<Box<dyn Segmenter>>,
+    /// The model tracking runs on, loaded on first use.
+    tracker: Mutex<Option<(&'static str, Arc<dyn Segmenter>)>>,
     prompted: Mutex<Prompted>,
     tracks: Mutex<HashMap<TrackKey, Frames>>,
     /// Keys already looked for on disk.
@@ -92,12 +93,13 @@ struct Shared {
     failed: Mutex<HashMap<u64, (String, bool)>>,
     unpacked: Mutex<VecDeque<(u64, Matte)>>,
     version: AtomicU64,
-    seconds_per_frame: Mutex<Option<f32>>,
+    /// How long the last tracked frame took, and on which model.
+    seconds_per_frame: Mutex<Option<(&'static str, f32)>>,
 }
 
 /// Segments single frames, keeping the last few encoded.
 struct Picker {
-    runner: Option<Box<dyn Segmenter>>,
+    runner: Option<(&'static str, Box<dyn Segmenter>)>,
     encoded: VecDeque<((Fingerprint, i64), Arc<Encoded>)>,
 }
 
@@ -114,15 +116,14 @@ struct Slot {
     cancel: Arc<AtomicBool>,
 }
 
-fn runner() -> Option<Box<dyn Segmenter>> {
+fn runner(model: &'static Model) -> Option<Box<dyn Segmenter>> {
     #[cfg(feature = "subjects")]
     {
-        Some(koo_models::segmentation::runner(
-            ModelTask::Segmentation.model(),
-        ))
+        Some(koo_models::segmentation::runner(model))
     }
     #[cfg(not(feature = "subjects"))]
     {
+        let _ = model;
         None
     }
 }
@@ -133,10 +134,10 @@ impl LocalSubjects {
             shared: Arc::new(Shared {
                 media,
                 picker: Mutex::new(Picker {
-                    runner: runner(),
+                    runner: None,
                     encoded: VecDeque::new(),
                 }),
-                tracker: runner(),
+                tracker: Mutex::default(),
                 prompted: Mutex::default(),
                 tracks: Mutex::default(),
                 looked: Mutex::default(),
@@ -185,9 +186,10 @@ fn last_frame(item: &MediaItem) -> Option<i64> {
     (duration > Time::ZERO).then(|| ((duration - Time(1)).to_frame(rate(item))).max(0))
 }
 
-/// What `prompt` asks on its frame, as a number.
-fn prompt_hash(prompt: &SubjectPrompt) -> u64 {
+/// What `prompt` asks of `model` on its frame, as a number.
+fn prompt_hash(model: &Model, prompt: &SubjectPrompt) -> u64 {
     let mut h = Fnv::default();
+    h.write(model.id.as_bytes());
     for p in &prompt.points {
         h.write(&p.at[0].to_bits().to_le_bytes());
         h.write(&p.at[1].to_bits().to_le_bytes());
@@ -242,8 +244,10 @@ fn track_id(key: &TrackKey) -> u64 {
     hash(&[b"t", key.0.0.as_bytes(), &key.1.to_le_bytes()])
 }
 
-/// What one subject asks for: its prompted frames, and the frames to track.
+/// What one subject asks of `model`: its prompted frames, and the frames
+/// to track.
 struct Plan {
+    model: &'static Model,
     prompts: Vec<(PromptKey, SubjectPrompt)>,
     /// With tracking: the subject, and the first and last frame.
     track: Option<(TrackKey, i64, i64)>,
@@ -252,6 +256,7 @@ struct Plan {
 fn plan(subject: &SubjectRef<'_>) -> Option<Plan> {
     let item = subject.item;
     let fp = item.fingerprint.clone()?;
+    let model = ModelTask::Segmentation.model();
     let prompts: Vec<(PromptKey, SubjectPrompt)> = subject
         .subject
         .prompts
@@ -259,7 +264,7 @@ fn plan(subject: &SubjectRef<'_>) -> Option<Plan> {
         .filter(|p| !p.is_empty())
         .map(|p| {
             let frame = frame_of(item, p.at);
-            ((fp.clone(), frame, prompt_hash(p)), p.clone())
+            ((fp.clone(), frame, prompt_hash(model, p)), p.clone())
         })
         .collect();
     let track = (subject.subject.track && is_video(item) && !prompts.is_empty()).then(|| {
@@ -273,14 +278,28 @@ fn plan(subject: &SubjectRef<'_>) -> Option<Plan> {
             lo = lo.min(*f);
             hi = hi.max(*f);
         }
-        ((fp.clone(), subject.subject.key()), lo, hi)
+        let key = hash(&[model.id.as_bytes(), &subject.subject.key().to_le_bytes()]);
+        ((fp.clone(), key), lo, hi)
     });
-    Some(Plan { prompts, track })
+    Some(Plan {
+        model,
+        prompts,
+        track,
+    })
 }
 
 impl Shared {
     fn bump(&self) {
         self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The tracker of `model`, made anew when another model was picked.
+    fn tracker(&self, model: &'static Model) -> Option<Arc<dyn Segmenter>> {
+        let mut tracker = lock(&self.tracker);
+        if tracker.as_ref().is_none_or(|(id, _)| *id != model.id) {
+            *tracker = runner(model).map(|r| (model.id, Arc::from(r)));
+        }
+        tracker.as_ref().map(|(_, r)| r.clone())
     }
 
     fn model_here() -> bool {
@@ -368,16 +387,26 @@ impl Shared {
         read(tracks.get(key))
     }
 
-    /// `item`'s frame `frame` segmented by `prompt`, encoding it unless it
-    /// was one of the last few.
-    fn segment(&self, item: &MediaItem, frame: i64, prompt: &Prompt) -> ServiceResult<Matte> {
+    /// `item`'s frame `frame` segmented by `prompt` on `model`, encoding it
+    /// unless it was one of the last few.
+    fn segment(
+        &self,
+        model: &'static Model,
+        item: &MediaItem,
+        frame: i64,
+        prompt: &Prompt,
+    ) -> ServiceResult<Matte> {
         let fp = item
             .fingerprint
             .clone()
             .ok_or_else(|| ServiceError("The media has no fingerprint yet.".into()))?;
         let mut picker = lock(&self.picker);
         let picker = &mut *picker;
-        let runner = picker
+        if picker.runner.as_ref().is_none_or(|(id, _)| *id != model.id) {
+            picker.runner = runner(model).map(|r| (model.id, r));
+            picker.encoded.clear();
+        }
+        let (_, runner) = picker
             .runner
             .as_ref()
             .ok_or_else(|| ServiceError("Subject masks are not in this build.".into()))?;
@@ -450,8 +479,9 @@ impl LocalSubjects {
                 }
                 continue;
             }
-            let (s, item, key, prompt) = (
+            let (s, model, item, key, prompt) = (
                 shared.clone(),
+                plan.model,
                 subject.item.clone(),
                 key.clone(),
                 model_prompt(prompt),
@@ -459,7 +489,7 @@ impl LocalSubjects {
             self.picks.clear_finished();
             self.picks
                 .push(key.clone(), "Find subject", Some(item.id), move |_| match s
-                    .segment(&item, key.1, &prompt)
+                    .segment(model, &item, key.1, &prompt)
                 {
                     Ok(m) => {
                         s.keep_prompted(&key, Packed::pack(&m), true);
@@ -511,14 +541,19 @@ impl LocalSubjects {
             .iter()
             .map(|((_, f, _), p)| (*f, model_prompt(p)))
             .collect();
-        let (s, item, mask) = (shared.clone(), subject.item.clone(), subject.mask);
+        let (s, model, item, mask) = (
+            shared.clone(),
+            plan.model,
+            subject.item.clone(),
+            subject.mask,
+        );
         self.tracks.clear_finished();
         self.tracks.push(
             job.clone(),
             "Track subject",
             Some(item.id),
             move |progress| {
-                let result = track(&s, &item, &job, &prompts, &cancel, progress);
+                let result = track(&s, model, &item, &job, &prompts, &cancel, progress);
                 let mut slots = lock(&s.slots);
                 if slots
                     .get(&mask)
@@ -534,9 +569,11 @@ impl LocalSubjects {
     }
 }
 
-/// Follow the subject of `job` over its frames, keeping each as it comes.
+/// Follow the subject of `job` over its frames on `model`, keeping each as
+/// it comes.
 fn track(
     s: &Shared,
+    model: &'static Model,
     item: &MediaItem,
     job: &TrackJob,
     prompts: &[(i64, Prompt)],
@@ -550,7 +587,7 @@ fn track(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let Some(tracker) = &s.tracker else {
+    let Some(tracker) = s.tracker(model) else {
         return Err("Subject masks are not in this build.".into());
     };
     let (key, lo, hi) = job;
@@ -582,7 +619,7 @@ fn track(
             let _ = store::store(&store::track_path(&key.0, key.1), frames);
         }
         drop(tracks);
-        *lock(&s.seconds_per_frame) = Some(last.elapsed().as_secs_f32());
+        *lock(&s.seconds_per_frame) = Some((model.id, last.elapsed().as_secs_f32()));
         last = Instant::now();
         progress.set(made as f32 / count as f32);
         s.bump();
@@ -757,7 +794,9 @@ impl SubjectService for LocalSubjects {
             frames,
             tracked,
             tracking,
-            seconds_per_frame: *lock(&shared.seconds_per_frame),
+            seconds_per_frame: lock(&shared.seconds_per_frame)
+                .filter(|(id, _)| *id == plan.model.id)
+                .map(|(_, s)| s),
             error,
         }
     }
@@ -802,15 +841,18 @@ impl SubjectService for LocalSubjects {
             .fingerprint
             .clone()
             .ok_or_else(|| ServiceError("The media has no fingerprint yet.".into()))?;
+        let model = ModelTask::Segmentation.model();
         let frame = frame_of(item, prompt.at);
-        let key = (fp, frame, prompt_hash(prompt));
+        let key = (fp, frame, prompt_hash(model, prompt));
         if let Some(packed) = self.shared.prompted(&key) {
             return self
                 .shared
                 .unpack(prompt_id(&key), &packed)
                 .ok_or_else(|| ServiceError("A kept matte could not be read.".into()));
         }
-        let m = self.shared.segment(item, frame, &model_prompt(prompt))?;
+        let m = self
+            .shared
+            .segment(model, item, frame, &model_prompt(prompt))?;
         self.shared.keep_prompted(&key, Packed::pack(&m), false);
         Ok(m)
     }
