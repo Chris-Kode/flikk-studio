@@ -63,7 +63,8 @@ pub fn assets() -> PathBuf {
     sub("assets")
 }
 
-/// Music and sound effects providers made, each with a `.json` of how.
+/// Music, sound effects and voiceovers providers made, each with a `.json`
+/// of how.
 pub fn generated() -> PathBuf {
     sub("generated")
 }

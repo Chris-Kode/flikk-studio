@@ -1,6 +1,6 @@
 //! Work an online provider does instead of this machine: transcription (in
-//! place of the local speech models), music and sound effects. What can be
-//! done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
+//! place of the local speech models), music, sound effects and voiceovers.
+//! What can be done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
 //! and the interfaces the editor calls ([`SpeechService`],
 //! [`GenerationService`]). `koo-cloud` implements them for each provider it
 //! knows; nothing here names one.
@@ -22,16 +22,23 @@ pub enum Capability {
     Transcription,
     Music,
     SoundEffects,
+    Voiceover,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 3] = [Self::Transcription, Self::Music, Self::SoundEffects];
+    pub const ALL: [Capability; 4] = [
+        Self::Transcription,
+        Self::Music,
+        Self::SoundEffects,
+        Self::Voiceover,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Transcription => "Transcription",
             Self::Music => "Music",
             Self::SoundEffects => "Sound effects",
+            Self::Voiceover => "Voiceover",
         }
     }
 
@@ -57,6 +64,8 @@ pub struct ProviderChoice {
 #[serde(default)]
 pub struct CloudSettings {
     pub choices: BTreeMap<Capability, ProviderChoice>,
+    /// Id of the voice that last read a voiceover.
+    pub voice: Option<String>,
 }
 
 impl CloudSettings {
@@ -166,7 +175,7 @@ pub trait SpeechService: Send + Sync {
 
 // --------------------------------------------------------------- generation
 
-/// Music or a sound effect to make.
+/// Music, a sound effect or a voiceover to make.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GenerateRequest {
@@ -189,7 +198,32 @@ pub enum GenerateRequest {
         #[serde(default)]
         looping: bool,
     },
+    Voiceover {
+        /// What is said, with its delivery written in.
+        text: String,
+        reading: Reading,
+    },
 }
+
+/// Who reads a voiceover, and how.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Reading {
+    /// The provider's id for the voice.
+    pub voice: String,
+    pub voice_name: String,
+    /// 0..1; lower reads with a wider emotional range.
+    pub stability: f32,
+    /// 0..1; how closely it keeps to the original voice.
+    pub similarity: f32,
+}
+
+impl Reading {
+    pub const STABILITY: f32 = 0.5;
+    pub const SIMILARITY: f32 = 0.75;
+}
+
+/// The most one voiceover can say, about 10 minutes of speech.
+pub const SCRIPT_CHARS: usize = 10_000;
 
 /// One part of a piece of music.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,12 +246,21 @@ impl GenerateRequest {
         match self {
             Self::Music { .. } => Capability::Music,
             Self::SoundEffect { .. } => Capability::SoundEffects,
+            Self::Voiceover { .. } => Capability::Voiceover,
         }
     }
 
     pub fn prompt(&self) -> &str {
         match self {
             Self::Music { prompt, .. } | Self::SoundEffect { prompt, .. } => prompt,
+            Self::Voiceover { text, .. } => text,
+        }
+    }
+
+    pub fn reading(&self) -> Option<&Reading> {
+        match self {
+            Self::Voiceover { reading, .. } => Some(reading),
+            _ => None,
         }
     }
 
@@ -228,19 +271,90 @@ impl GenerateRequest {
                 Some(sections.iter().fold(Time::ZERO, |t, s| t + s.length))
             }
             Self::Music { length, .. } | Self::SoundEffect { length, .. } => *length,
+            Self::Voiceover { .. } => None,
         }
     }
 
     /// One line for cards and logs: "Music, 30 s: calm lo-fi beat".
     pub fn summary(&self) -> String {
+        if let Self::Voiceover { text, reading } = self {
+            let start: String = text.chars().take(SUMMARY_CHARS).collect();
+            let more = if start.len() < text.len() { "…" } else { "" };
+            return format!("Voiceover, {}: {start}{more}", reading.voice_name);
+        }
         let what = match self {
             Self::Music { .. } => "Music",
             Self::SoundEffect { .. } => "Sound effect",
+            Self::Voiceover { .. } => "Voiceover",
         };
         match self.length() {
             Some(t) => format!("{what}, {:.0} s: {}", t.as_secs_f64(), self.prompt()),
             None => format!("{what}: {}", self.prompt()),
         }
+    }
+}
+
+/// How much of a voiceover's script a one-line summary shows.
+const SUMMARY_CHARS: usize = 80;
+
+/// Why `text` can't be read as a voiceover; the rewrite that can, when
+/// there is one.
+pub fn check_script(text: &str) -> CloudResult<()> {
+    let refuse = |message: String, suggestion| {
+        Err(CloudError::BadPrompt {
+            message,
+            suggestion,
+        })
+    };
+    let chars = text.chars().count();
+    if chars > SCRIPT_CHARS {
+        return refuse(
+            format!("A voiceover says at most {SCRIPT_CHARS} characters; this has {chars}"),
+            None,
+        );
+    }
+    match without_breaks(text) {
+        Some(fixed) => refuse("<break> tags aren't read; use pauses".into(), Some(fixed)),
+        None => Ok(()),
+    }
+}
+
+/// `text` with its SSML `<break/>` tags as the pauses a voice reads; `None`
+/// when it has none.
+pub fn without_breaks(text: &str) -> Option<String> {
+    // Lower case keeps every byte where it is.
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<break").map(|i| at + i) {
+        let Some(end) = lower[start..].find('>').map(|i| start + i + 1) else {
+            break;
+        };
+        out.push_str(&text[at..start]);
+        out.push_str(if break_seconds(&lower[start..end]) >= 1.0 {
+            "[long pause]"
+        } else {
+            "[short pause]"
+        });
+        at = end;
+    }
+    (at > 0).then(|| out + &text[at..])
+}
+
+/// Seconds in a lower-case `<break time="1.5s"/>`; 0 without a time.
+fn break_seconds(tag: &str) -> f64 {
+    let Some(time) = tag.split("time=").nth(1) else {
+        return 0.0;
+    };
+    let time = time.trim_start_matches(['"', '\'']);
+    let digits = time
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(time.len());
+    let value: f64 = time[..digits].parse().unwrap_or(0.0);
+    if time[digits..].starts_with("ms") {
+        value / 1000.0
+    } else {
+        value
     }
 }
 
@@ -252,6 +366,9 @@ pub struct GenerationInfo {
     pub provider: String,
     pub model: String,
     pub prompt: String,
+    /// Who read it, for a voiceover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading: Option<Reading>,
 }
 
 /// A file a provider made.
@@ -263,16 +380,39 @@ pub struct Generated {
     pub cost: Option<u64>,
 }
 
+/// A voice a provider can read with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Voice {
+    pub id: String,
+    pub name: String,
+    /// "premade", "cloned"…, as the provider names them.
+    pub category: String,
+    /// What it is like: "calm", "american", "narration".
+    pub traits: Vec<String>,
+    /// Where a sample of it can be heard.
+    pub sample: Option<String>,
+}
+
 pub trait GenerationService: Send + Sync {
     /// The provider doing `capability`, as the user knows it, when one is
     /// picked and has what it needs.
     fn provider_for(&self, capability: Capability) -> Option<String>;
     /// Make `request` into a new file in `dir`. Slow: minutes for music.
     fn generate(&self, request: &GenerateRequest, dir: &Path) -> CloudResult<Generated>;
+    /// The voices of the provider doing voiceovers. Slow: a request.
+    fn voices(&self) -> CloudResult<Vec<Voice>>;
+    /// A sample of `voice` on disk, fetched the first time. Slow: a request.
+    fn voice_sample(&self, voice: &Voice) -> CloudResult<PathBuf>;
 }
 
-/// Name of the bin generated media goes into.
-pub const GENERATED_BIN: &str = "Generated";
+/// Name of the bin generated `item` goes into.
+pub fn generated_bin(item: &MediaItem) -> &'static str {
+    match item.generated.as_deref().map(|g| g.capability) {
+        Some(Capability::SoundEffects) => "Sound Effects Generated",
+        Some(Capability::Voiceover) => "Voiceover Generated",
+        _ => "Music Generated",
+    }
+}
 
 /// The media item for `generated`, probed and fingerprinted by `media`
 /// when there is one; not in a bin yet ([`pool_commands`] puts it in one).
@@ -290,6 +430,21 @@ pub fn media_item(
         tags: Vec::new(),
         proxy: None,
         generated: Some(Box::new(generated.info.clone())),
+    }
+}
+
+/// `path`, a sample of a voice, as an item to listen to: not in any pool.
+pub fn sample_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
+    MediaItem {
+        id: MediaId::new(),
+        kind: MediaKind::Audio,
+        fingerprint: None,
+        info: media.and_then(|m| m.probe(&path).ok()),
+        path,
+        bin: None,
+        tags: Vec::new(),
+        proxy: None,
+        generated: None,
     }
 }
 

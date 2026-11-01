@@ -1,7 +1,7 @@
 //! Carrying out an approved agent request: memory goes to the store,
 //! programs and sounds to the user's library, renders and exports to `koo-deliver`,
-//! music and sound effects to the provider set for them. Outputs always get
-//! a free name, so nothing here overwrites a file.
+//! music, sound effects and voiceovers to the provider set for them. Outputs
+//! always get a free name, so nothing here overwrites a file.
 
 use crate::persistence;
 use anyhow::{Context as _, Result, anyhow, bail};

@@ -279,6 +279,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "find_sounds" => sounds::find(ctx, &args),
         "use_library_sound" => sounds::use_sound(ctx, &args),
         "generate_audio" => generate::serve(ctx, &args),
+        "find_voices" => generate::find_voices(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }

@@ -49,7 +49,7 @@ pub fn settings_page() -> Option<String> {
         .map(|v| v.to_lowercase())
 }
 
-/// `KOOEDITOR_DEMO_GENERATE=music|sfx`: open the media pool's Generate
+/// `KOOEDITOR_DEMO_GENERATE=music|sfx|voiceover`: open the media pool's Generate
 /// form (a provider must be set for it).
 pub fn generate_form() -> Option<String> {
     enabled()

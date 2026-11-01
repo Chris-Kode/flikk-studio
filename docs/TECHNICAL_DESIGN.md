@@ -91,7 +91,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) and sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
-| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
@@ -601,12 +601,12 @@ not retried with Whisper.
   saving to the library) and deliver (renders, exports) always need the
   user's approval, asked with Approve/Deny cards above the composer and
   carried out by `agent_link/approve.rs`; the outcome reaches the agent in
-  the next turn's `<approvals>` block. Generate media (music and sound
-  effects, which spend the user's credits) is Off, Ask each time (the
+  the next turn's `<approvals>` block. Generate media (music, sound
+  effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 79 in the catalog (77 plus
+* **Tools** (`koo-agent/src/tools/`): 80 in the catalog (78 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -639,17 +639,29 @@ not retried with Whisper.
   subjects for people and objects, and to check with `view_frame` `masks`.
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
-  changes on cue) or a sound effect (up to 30 s, optionally looping) with
-  the provider picked for it. The file goes to `paths::generated()` with a
-  `<file>.json` of what was asked, and into the pool's "Generated" bin as
-  the user's edit (`CommandBus::execute_shared`, which also adds it to the
+  changes on cue), a sound effect (up to 30 s, optionally looping) or a
+  voiceover (a script of up to 10,000 characters, one voice from
+  `find_voices`, its stability and similarity) with the provider picked
+  for it. The file goes to `paths::generated()` with a `<file>.json` of
+  what was asked, and into the pool's "Music Generated", "Sound Effects
+  Generated" or "Voiceover Generated" bin as the user's edit (`CommandBus::execute_shared`, which also adds it to the
   drafts waiting for review), so a rejected placement keeps what was paid
-  for; `MediaItem::generated` records the provider, model and prompt. With
+  for; `MediaItem::generated` records the provider, model and prompt, and
+  for a voiceover who read it, so the pool can regenerate it. With
   `at` or `range` it is proposed on an audio track free over its length,
   else a new one. Asked each time, the approval runs it in the background
   and proposes the placement into the chat's set, which goes to review
   again; allowed, it runs as a tool job and answers with the media id. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
+* **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
+  the script: audio tags, ellipses and capitals, with no SSML, so
+  `cloud::check_script` refuses a `<break>` before any credits are spent and
+  offers the script with pauses in its place. Only stability and similarity
+  are sent; speed is left to retiming the clip. The media pool's form picks
+  the voice (`/v2/voices`, samples cached under `paths::cache()`) and puts
+  tags in at the cursor, and the system prompt teaches the agent the same
+  rules. A script runs to one request, about 10 minutes; longer ones are
+  several clips, one voice each.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
   provider was asked) and, where analysis left vectors, by how they sound;
@@ -738,8 +750,8 @@ available to them.
   sizes are at 1080p, scaled by the frame's short side.
 * **Other user files** under `paths::home()`: `projects/` (chats),
   `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
-  tool usage, work dirs), `assets/` (the library's audio), `generated/` (music and sound effects
-  with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
+  tool usage, work dirs), `assets/` (the library's audio), `generated/` (music, sound effects and
+  voiceovers with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
   (owner-only, only where the system has no credential store).
 
 ## 10. Deliver
@@ -821,7 +833,7 @@ see:
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
-| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx` | The media pool's Generate form |
+| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover` | The media pool's Generate form |
 
 ```sh
 KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor
@@ -874,12 +886,13 @@ there.
   only once the user accepts it.
 * If the editor crashes, its headless browser can keep running.
 * ElevenLabs was checked here against the live API with an invalid key
-  only (account, transcription upload, music, sound effects: each answered
-  "invalid key"); no request has run with a working key, so Scribe's word
+  only (account, transcription upload, music, sound effects, voiceovers,
+  the voice list: each answered "invalid key"); no request has run with a working key, so Scribe's word
   times are unmeasured against the LibriSpeech set above, the music output
   formats each plan allows are untested (the client steps down from 320
-  kbps MP3 when one is refused), and the music composition plan's
-  instrumental chunks are written from the docs.
+  kbps MP3 when one is refused), the music composition plan's instrumental
+  chunks are written from the docs, and whether Eleven v4 ever reads an
+  audio tag aloud is unheard.
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
 * Off macOS, subject tracking runs on the CPU (ONNX Runtime's CPU
