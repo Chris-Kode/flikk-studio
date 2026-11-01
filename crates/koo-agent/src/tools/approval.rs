@@ -5,6 +5,7 @@ use super::{ApprovalRequest, Done, ToolCtx};
 use crate::args::{Args, ToolError, media_id, range_json};
 use koo_core::agent::AgentEvent;
 use koo_core::command::ToolCategory;
+use koo_core::model::MediaKind;
 use serde_json::{Value, json};
 
 pub fn ask_user(args: &Args) -> Result<Done, ToolError> {
@@ -118,6 +119,18 @@ pub fn request(
             (
                 format!("Save “{}” to the library", asset.name),
                 json!({ "fx": asset.id.to_string() }),
+            )
+        }
+        "save_sound_to_library" => {
+            let id = media_id(project, args.str("media")?)?;
+            let item = project.media(id);
+            let Some(item) = item.filter(|m| m.kind == MediaKind::Audio) else {
+                return Err(ToolError("only audio goes to the library".into()));
+            };
+            let name = item.path.file_name().unwrap_or_default().to_string_lossy();
+            (
+                format!("Save “{name}” to the library"),
+                json!({ "media": id.0.to_string() }),
             )
         }
         "generate_audio" => {

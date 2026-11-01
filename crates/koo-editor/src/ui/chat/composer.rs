@@ -6,7 +6,7 @@
 use super::recipes;
 use super::refs::{self, RefKind, Reference};
 use crate::state::EditorState;
-use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag};
+use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InlineToken, InputEvent, InputToken, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -555,11 +555,22 @@ impl Render for Composer {
                     .drag_over::<MediaDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
                     .drag_over::<FxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
                     .drag_over::<AudioFxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
+                    .drag_over::<SoundDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
                     .on_drop(cx.listener(|this, drag: &RefDrag, window, cx| {
                         this.insert_refs(drag.refs.clone(), window, cx)
                     }))
                     .on_drop(cx.listener(|this, drag: &MediaDrag, window, cx| {
                         let token = format!("@media {}", drag.media);
+                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+                    }))
+                    .on_drop(cx.listener(|this, drag: &SoundDrag, window, cx| {
+                        let media = this.state.update(cx, |s, cx| {
+                            crate::ui::library::shared::use_sound(s, drag.sound, cx)
+                        });
+                        let Some(media) = media else {
+                            return;
+                        };
+                        let token = format!("@media {media}");
                         this.insert_refs(vec![(token, drag.name.clone())], window, cx)
                     }))
                     .on_drop(cx.listener(|this, drag: &FxDrag, window, cx| {

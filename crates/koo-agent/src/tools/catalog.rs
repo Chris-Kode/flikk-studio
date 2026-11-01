@@ -204,6 +204,19 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(json!({ "bin": string("Bin name") }), &[]),
         ),
         spec(
+            "find_sounds",
+            Some(ReadProject),
+            "Find music and sound effects to use, in the user's library (shared by every project) and this project's pool. `text` matches names, tags and what generated audio was asked to be, and how the audio sounds where it has been analysed; without it, lists them. search_sounds looks inside what is on the timeline instead.",
+            object(
+                json!({
+                    "text": string("What it is or sounds like, in a few words"),
+                    "scope": one_of(&["all", "library", "project"], "Where to look (default all)"),
+                    "limit": number("Most sounds (default 12)")
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "get_clip",
             Some(ReadProject),
             "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects. Values at their neutral default are left out.",
@@ -1165,6 +1178,12 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "save_sound_to_library",
+            Some(ProjectMemory),
+            "Ask the user to approve saving audio from the pool to their library, so other projects can use it.",
+            object(json!({ "media": string("Media id") }), &["media"]),
+        ),
+        spec(
             "save_fx_to_library",
             Some(ProjectMemory),
             "Ask the user to approve saving one of this project's FX programs to their library, so other projects can use it.",
@@ -1208,6 +1227,20 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Deliver),
             "Ask the user to approve exporting a still frame.",
             object(json!({ "t": time("Timeline seconds") }), &["t"]),
+        ),
+        spec(
+            "use_library_sound",
+            Some(Audio),
+            "Add a sound from the user's library (find_sounds) to the pool's Library bin, and propose it on an audio track with `at`. A sound the project has is reused.",
+            object(
+                json!({
+                    "sound": string("Library id or name"),
+                    "at": time("Propose it on the timeline from here; leave out to only add it to the pool"),
+                    "track": string("Audio track id (default: one free over its length, else a new one)"),
+                    "reason": reason()
+                }),
+                &["sound"],
+            ),
         ),
         // ---- generate (credits: approved each time unless allowed)
         spec(

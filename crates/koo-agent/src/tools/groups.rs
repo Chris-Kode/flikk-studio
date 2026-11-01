@@ -95,7 +95,9 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
         "list_fx" | "get_fx" | "preview_fx" => ToolCategory::Effects,
         "get_layout" => ToolCategory::Transform,
         "get_scopes" => ToolCategory::Color,
-        "view_audio" | "measure_loudness" | "get_music" | "search_sounds" => ToolCategory::Audio,
+        "view_audio" | "measure_loudness" | "get_music" | "search_sounds" | "find_sounds" => {
+            ToolCategory::Audio
+        }
         _ => spec.category?,
     })
 }

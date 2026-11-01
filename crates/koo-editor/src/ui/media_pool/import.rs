@@ -138,6 +138,10 @@ fn expand(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
+pub(crate) fn is_audio(path: &Path) -> bool {
+    kind_of(path) == Some(MediaKind::Audio)
+}
+
 fn kind_of(path: &Path) -> Option<MediaKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let ext = ext.as_str();
@@ -152,7 +156,7 @@ fn kind_of(path: &Path) -> Option<MediaKind> {
     }
 }
 
-fn build_item(
+pub(crate) fn build_item(
     path: PathBuf,
     bin: Option<BinId>,
     media: Option<&dyn MediaService>,

@@ -1,8 +1,9 @@
 //! Effects library (Resolve-style): video effects, transitions, shader
 //! generators, HTML titles and motion graphics, audio effects, the
-//! project's own programs and the user's library of programs and presets
-//! shared by every project, grouped by category and searchable. Items drag
-//! onto the timeline and the chat; double-click applies to the selection.
+//! project's own programs and the user's library of programs, presets and
+//! sounds shared by every project, grouped by category and searchable. Items
+//! drag onto the timeline and the chat; double-click applies to the
+//! selection, or places a sound at the playhead.
 
 mod apply;
 mod glyphs;
@@ -12,7 +13,8 @@ pub use apply::{apply_fx, duplicate, fx_mention};
 pub use glyphs::{FxGlyph, fx_glyph};
 
 use crate::state::EditorState;
-use crate::ui::{AudioFxDrag, FxDrag};
+use crate::ui::media_pool::import::is_audio;
+use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
 use apply::Starter;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -25,7 +27,7 @@ use gpui_kit::*;
 use koo_core::LibraryId;
 use koo_core::audiofx::AudioFxKind;
 use koo_core::fx::{self, FxAsset, FxKind, FxLanguage, FxRef};
-use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset};
+use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, Sound};
 use koo_core::model::Project;
 use shared::Link;
 use std::collections::HashSet;
@@ -40,10 +42,11 @@ enum Section {
     Project,
     Library,
     Presets,
+    Sounds,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Self::Video,
         Self::Transitions,
         Self::Generators,
@@ -52,6 +55,7 @@ impl Section {
         Self::Project,
         Self::Library,
         Self::Presets,
+        Self::Sounds,
     ];
 
     fn label(self) -> &'static str {
@@ -64,6 +68,7 @@ impl Section {
             Self::Project => "Project",
             Self::Library => "Library",
             Self::Presets => "Presets",
+            Self::Sounds => "Sounds",
         }
     }
 
@@ -85,6 +90,7 @@ enum Item {
     /// A program in the user's library.
     Program(LibraryId),
     Preset(LibraryId),
+    Sound(LibraryId),
 }
 
 struct Entry {
@@ -159,6 +165,22 @@ fn preset_entry(p: &Preset) -> Entry {
     }
 }
 
+/// What a provider was asked for shows on hover.
+fn sound_entry(s: &Sound) -> Entry {
+    Entry {
+        item: Item::Sound(s.id),
+        name: s.name.clone().into(),
+        category: s.category().into(),
+        description: s
+            .generated
+            .as_ref()
+            .map(|g| g.prompt.clone().into())
+            .unwrap_or_default(),
+        glyph: FxGlyph::Audio,
+        kind: None,
+    }
+}
+
 fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
     let fx_entry = |a: &FxAsset| Entry {
         item: Item::Fx(a.id.clone()),
@@ -200,6 +222,7 @@ fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
             })
             .collect(),
         Section::Presets => lib.presets.iter().map(preset_entry).collect(),
+        Section::Sounds => lib.sounds.iter().map(sound_entry).collect(),
         _ => fx::builtins()
             .iter()
             .filter(|a| Section::of(a) == section)
@@ -263,6 +286,7 @@ impl LibraryPanel {
             Item::Audio(kind) => apply::apply_audio(s, *kind, cx),
             Item::Program(id) => shared::apply_program(s, *id, cx),
             Item::Preset(id) => shared::apply_preset(s, *id, cx),
+            Item::Sound(id) => shared::place_sound(s, *id, cx),
         });
     }
 
@@ -272,6 +296,7 @@ impl LibraryPanel {
             .program(id)
             .map(|p| p.asset.name.clone())
             .or_else(|| lib.preset(id).map(|p| p.name.clone()))
+            .or_else(|| lib.sound(id).map(|s| s.name.clone()))
         else {
             return;
         };
@@ -308,6 +333,7 @@ impl LibraryPanel {
                     .filter(|p| {
                         p.extension()
                             .is_some_and(|e| e == PROGRAM_EXT || e == PRESET_EXT)
+                            || is_audio(p)
                     })
                     .collect();
                 state.update(cx, |s, cx| shared::import(s, &paths, cx));
@@ -431,9 +457,10 @@ impl LibraryPanel {
             Item::Audio(k) => format!("afx-{}", k.name()),
             Item::Program(id) => format!("lib-{}", id.0),
             Item::Preset(id) => format!("preset-{}", id.0),
+            Item::Sound(id) => format!("sound-{}", id.0),
         };
         let renaming = match &e.item {
-            Item::Program(id) | Item::Preset(id) => self.renaming == Some(*id),
+            Item::Program(id) | Item::Preset(id) | Item::Sound(id) => self.renaming == Some(*id),
             _ => false,
         };
         if renaming {
@@ -499,6 +526,13 @@ impl LibraryPanel {
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
+            (Item::Sound(id), _) => row.on_drag(
+                SoundDrag {
+                    sound: *id,
+                    name: e.name.clone(),
+                },
+                |drag, _, _, cx| cx.new(|_| drag.clone()),
+            ),
             _ => row,
         };
         let (panel, state, item) = (cx.entity(), self.state.clone(), e.item.clone());
@@ -515,8 +549,9 @@ fn item_menu(
     cx: &App,
 ) -> gpui_kit::component::menu::PopupMenu {
     let (p, it) = (panel.clone(), item.clone());
+    let sound = matches!(item, Item::Sound(_));
     let menu = menu.item(
-        PopupMenuItem::new("Apply")
+        PopupMenuItem::new(if sound { "Add to Timeline" } else { "Apply" })
             .on_click(move |_, _, cx| p.update(cx, |this, cx| this.apply(&it, cx))),
     );
     let r = match item {
@@ -524,6 +559,23 @@ fn item_menu(
         Item::Audio(_) => return menu,
         Item::Program(id) => return library_menu(menu, panel, state, *id, true),
         Item::Preset(id) => return library_menu(menu, panel, state, *id, false),
+        Item::Sound(id) => {
+            let (id, s1, s2) = (*id, state.clone(), state.clone());
+            let menu = menu
+                .item(
+                    PopupMenuItem::new("Add to Project").on_click(move |_, _, cx| {
+                        s1.update(cx, |s, cx| {
+                            shared::use_sound(s, id, cx);
+                        })
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Open in Viewer").on_click(move |_, _, cx| {
+                        s2.update(cx, |s, cx| shared::open_sound(s, id, cx))
+                    }),
+                );
+            return library_menu(menu, panel, state, id, false);
+        }
     };
     let state = state.clone();
     let (s1, r1) = (state.clone(), r.clone());
@@ -580,7 +632,7 @@ fn item_menu(
     )
 }
 
-/// What a library program or preset offers besides Apply.
+/// What a library item offers besides using it.
 fn library_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     panel: &Entity<LibraryPanel>,
@@ -609,7 +661,9 @@ fn library_menu(
     )
     .item(
         PopupMenuItem::new("Show in Folder").on_click(move |_, _, cx| {
-            if let Some(path) = shared::file_of(s3.read(cx), id) {
+            let s = s3.read(cx);
+            let audio = s.library.sound(id).map(Sound::audio);
+            if let Some(path) = audio.or_else(|| shared::file_of(s, id)) {
                 cx.reveal_path(&path);
             }
         }),

@@ -17,6 +17,7 @@ mod layout;
 mod masks;
 mod preview;
 mod read;
+mod sounds;
 mod view;
 
 pub use catalog::{ToolSpec, catalog};
@@ -275,6 +276,8 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),
         "use_library_fx" => fx::use_library(ctx, &args),
+        "find_sounds" => sounds::find(ctx, &args),
+        "use_library_sound" => sounds::use_sound(ctx, &args),
         "generate_audio" => generate::serve(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),

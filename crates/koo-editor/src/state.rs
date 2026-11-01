@@ -249,6 +249,7 @@ impl EditorState {
             next_generation: 1,
         };
         this.configure_analysis();
+        this.analyze_sounds(cx);
         this.load_keys(cx);
         this.refresh_model_notices();
         this.check_offline();
@@ -1338,6 +1339,7 @@ impl EditorState {
             return;
         }
         self.models_seen = seen;
+        self.analyze_sounds(cx);
         if self.refresh_model_notices() {
             cx.notify();
         }
@@ -1640,6 +1642,9 @@ impl EditorState {
                         crate::ui::library::shared::link_to_library(self, fx, cx);
                     }
                 }
+                if pending.request.tool == "save_sound_to_library" {
+                    self.reload_library(cx);
+                }
                 ApprovalOutcome::Done(line)
             }
             Ok(approve::Started::Render(job, path)) => {
@@ -1728,7 +1733,20 @@ impl EditorState {
     /// Read the library again after it changed.
     pub fn reload_library(&mut self, cx: &mut Context<Self>) {
         self.library = koo_core::library::Library::load();
+        self.analyze_sounds(cx);
         cx.notify();
+    }
+
+    /// Analyze the library's sounds that have no results, so they can be
+    /// found by how they sound. Without speech: it costs nothing.
+    fn analyze_sounds(&self, cx: &mut Context<Self>) {
+        let Some(analysis) = self.services.analysis.clone() else {
+            return;
+        };
+        let items: Vec<_> = self.library.sounds.iter().map(|s| s.item()).collect();
+        cx.background_executor()
+            .spawn(async move { items.iter().for_each(|i| analysis.analyze_sound(i)) })
+            .detach();
     }
 
     /// Open `fx` in the code editor, or close it with `None`.

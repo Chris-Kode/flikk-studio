@@ -89,7 +89,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Agent ↔ editor | The backend CLI launches an MCP server over stdio; it connects to the editor over `127.0.0.1:<port>` with a token, and the editor serves calls in `AgentLink::pump` on the UI thread | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments are seconds, `"M:SS.mmm"`, `"H:MM:SS.s"`, timecode `"HH:MM:SS:FF"`, frames `"f:1234"` or `@time`/`@range`; results are seconds to the millisecond | What models read and write reliably |
 | Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
-| Library | FX programs (`.koofx`) and presets (`.koopreset`: effects, audio effects or a grade with their values) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated |
+| Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) and sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
@@ -264,7 +264,9 @@ the effect of its earlier calls.
 
 Analysis starts only when the user asks, from an item's "⋯" menu in the
 media pool (or its right-click menu): "Analyze", or "Analyze again" once it
-has results, which runs every step anew on the models picked now. It is
+has results, which runs every step anew on the models picked now. The
+exception is the library's sounds, analyzed on their own without speech or
+shots, on local models only, so that it costs nothing. "Analyze" is
 disabled while a model it needs is missing (or the transcription provider
 has no key), or while the item is queued or analyzing; images are not
 analyzed. Settings → Analysis turns steps off (`AnalysisSteps`:
@@ -648,6 +650,12 @@ not retried with Whisper.
   and proposes the placement into the chat's set, which goes to review
   again; allowed, it runs as a tool job and answers with the media id. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
+* **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
+  library and the project's audio by words (name, category, tags, what a
+  provider was asked) and, where analysis left vectors, by how they sound;
+  it says how many had none. `use_library_sound` adds a sound to the pool's
+  "Library" bin as the user's edit, like generated audio, and with `at`
+  proposes it the same way. `save_sound_to_library` waits for approval.
   The media pool's ♫ menu makes the same from a form (Music runs as long as
   In/Out).
 * **Prompt** (`koo-agent/src/prompt.rs`): the system prompt is the tool
@@ -730,7 +738,7 @@ available to them.
   sizes are at 1080p, scaled by the frame's short side.
 * **Other user files** under `paths::home()`: `projects/` (chats),
   `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
-  tool usage, work dirs), `assets/`, `generated/` (music and sound effects
+  tool usage, work dirs), `assets/` (the library's audio), `generated/` (music and sound effects
   with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
   (owner-only, only where the system has no credential store).
 

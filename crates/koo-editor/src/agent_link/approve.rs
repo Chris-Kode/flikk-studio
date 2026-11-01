@@ -1,5 +1,5 @@
 //! Carrying out an approved agent request: memory goes to the store,
-//! programs to the user's library, renders and exports to `koo-deliver`,
+//! programs and sounds to the user's library, renders and exports to `koo-deliver`,
 //! music and sound effects to the provider set for them. Outputs always get
 //! a free name, so nothing here overwrites a file.
 
@@ -55,6 +55,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         "add_source_fact" => save_fact(args),
         "save_recipe" => save_recipe(args),
         "save_fx_to_library" => save_fx(args, inputs.project),
+        "save_sound_to_library" => save_sound(args, inputs.project),
         "queue_render" => {
             let mut settings = preset(str_arg(args, "preset")?);
             settings.range = args.get("range").and_then(range);
@@ -214,6 +215,18 @@ fn save_fx(args: &Value, project: &Project) -> Result<Started> {
         .ok_or_else(|| anyhow!("program {text} is no longer in the project"))?;
     let lib = koo_core::library::Library::load();
     koo_core::library::save_program(&lib, asset).map_err(|e| anyhow!(e))?;
+    Ok(Started::Done("Saved to the library".into()))
+}
+
+/// Save audio from the pool to the user's library.
+fn save_sound(args: &Value, project: &Project) -> Result<Started> {
+    let text = str_arg(args, "media")?;
+    let item = uuid::Uuid::parse_str(text)
+        .ok()
+        .and_then(|id| project.media(koo_core::MediaId(id)))
+        .ok_or_else(|| anyhow!("media {text} is no longer in the project"))?;
+    let lib = koo_core::library::Library::load();
+    koo_core::library::save_sound(&lib, item).map_err(|e| anyhow!(e))?;
     Ok(Started::Done("Saved to the library".into()))
 }
 

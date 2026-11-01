@@ -35,6 +35,20 @@ impl Render for MediaDrag {
     }
 }
 
+/// Drag payload for a sound from the library, added to the pool when
+/// dropped on the timeline or the chat.
+#[derive(Clone, Debug)]
+pub struct SoundDrag {
+    pub sound: koo_core::LibraryId,
+    pub name: SharedString,
+}
+
+impl Render for SoundDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        drag_chip(self.name.clone(), cx)
+    }
+}
+
 /// Drag payload for an FX library item: an effect dropped on a clip, a
 /// transition on a cut or clip edge, a generator on a track. The chat takes
 /// any of them as a reference.
