@@ -20,6 +20,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// How long the backend lets a `koo` tool call run. A call that needs the
+/// user's approval stays open until they decide, and a generated voiceover
+/// takes a while after that.
+pub(crate) const TOOL_TIMEOUT_SECS: u64 = 60 * 60;
+
 /// How the backend should start `koo-mcp`.
 #[derive(Clone, Debug)]
 pub struct McpLaunch {

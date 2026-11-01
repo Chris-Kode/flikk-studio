@@ -31,7 +31,7 @@ use koo_core::command::ToolCategory;
 use koo_core::memory::{Recipe, SourceFact, StyleRule};
 use koo_core::services::Services;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -57,9 +57,9 @@ struct External {
     settings: AgentSettings,
 }
 
-/// A memory or deliver request waiting for the user. Approving it is the
-/// UI's job (through the store or deliver crate); the agent was already
-/// told it is pending.
+/// A memory, deliver or generate request waiting for the user. Approving
+/// it is the UI's job (through the store, deliver crate or a provider); the
+/// call that asked waits for it, see [`AgentHost::report_outcome`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingApproval {
     pub id: u64,
@@ -114,7 +114,12 @@ pub struct AgentHost {
     jobs_rx: Receiver<JobResult>,
     approvals: Vec<PendingApproval>,
     next_approval: u64,
-    /// What became of approval requests, told to the agent on its next turn.
+    /// Replies of the calls waiting on an approval, by its id: the call
+    /// stays open until the user decides, so the turn carries on with what
+    /// came of it.
+    held: HashMap<u64, (Origin, Reply)>,
+    /// What became of approval requests whose call was no longer waiting
+    /// (the turn ended), told to the agent on its next turn.
     outcomes: Vec<String>,
     external: External,
 }
@@ -140,6 +145,7 @@ impl AgentHost {
             jobs_rx,
             approvals: Vec::new(),
             next_approval: 1,
+            held: HashMap::new(),
             outcomes: Vec::new(),
             external: External::default(),
         }
@@ -231,10 +237,21 @@ impl AgentHost {
         Some(self.approvals.remove(ix))
     }
 
-    /// Tell the agent, at the start of its next turn, what became of an
-    /// approval request (`"approved: Style rule: …"`).
-    pub fn report_outcome(&mut self, outcome: String) {
-        self.outcomes.push(outcome);
+    /// Tell the agent what became of approval request `id` (`"approved:
+    /// Style rule: …"`): as the result of the call that asked, which is
+    /// still waiting, else at the start of its next turn.
+    pub fn report_outcome(&mut self, id: u64, outcome: String, failed: bool) {
+        match self.held.remove(&id) {
+            Some((_, reply)) if failed => reply.result(bridge::ToolResult::error(outcome)),
+            Some((_, reply)) => reply.result(bridge::ToolResult::text(outcome)),
+            None => self.outcomes.push(outcome),
+        }
+    }
+
+    /// Stop holding the calls from `origin`: nobody waits for them any more,
+    /// so their outcomes go to the next turn.
+    fn release_held(&mut self, origin: Origin) {
+        self.held.retain(|_, (o, _)| *o != origin);
     }
 
     pub fn pump(&mut self, bus: &mut CommandBus, services: &Services) -> Vec<AgentEvent> {
@@ -451,6 +468,7 @@ impl AgentHost {
             return;
         }
         let turn = self.turn.take().unwrap();
+        self.release_held(Origin::Turn);
         if turn.cancelled {
             if let Some(r) = &turn.running {
                 r.kill();
@@ -483,6 +501,7 @@ impl AgentHost {
                 (_, IncomingKind::Closed) => {
                     if let Origin::External(id) = origin {
                         self.external.connections.remove(&id);
+                        self.release_held(origin);
                     }
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
@@ -679,7 +698,20 @@ impl AgentHost {
         {
             turn.usage.record(&tool, &done.result);
         }
-        reply.result(done.result);
+        // A request for approval keeps its call waiting for the user.
+        match done.approval {
+            Some(request) => {
+                let id = self.next_approval;
+                self.next_approval += 1;
+                self.approvals.push(PendingApproval {
+                    id,
+                    request,
+                    at: now(),
+                });
+                self.held.insert(id, (origin, reply));
+            }
+            None => reply.result(done.result),
+        }
         self.events.push(AgentEvent::Activity {
             entry: ActivityEntry {
                 at: now(),
@@ -692,14 +724,6 @@ impl AgentHost {
             },
         });
         self.events.extend(done.events);
-        if let Some(request) = done.approval {
-            self.approvals.push(PendingApproval {
-                id: self.next_approval,
-                request,
-                at: now(),
-            });
-            self.next_approval += 1;
-        }
     }
 }
 

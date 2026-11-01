@@ -77,7 +77,10 @@ impl Adapter for Codex {
             ),
             format!("mcp_servers.koo.env={{{}}}", env.join(",")),
             "mcp_servers.koo.startup_timeout_sec=20".into(),
-            "mcp_servers.koo.tool_timeout_sec=300".into(),
+            format!(
+                "mcp_servers.koo.tool_timeout_sec={}",
+                super::TOOL_TIMEOUT_SECS
+            ),
             format!("developer_instructions={}", toml_str(&turn.system_prompt)),
             "approval_policy=\"never\"".into(),
             if turn.web {

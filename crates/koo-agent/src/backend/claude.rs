@@ -69,6 +69,10 @@ impl Adapter for Claude {
             "--disable-slash-commands",
         ]);
         c.arg("--mcp-config").arg(&config_path);
+        c.env(
+            "MCP_TOOL_TIMEOUT",
+            (super::TOOL_TIMEOUT_SECS * 1000).to_string(),
+        );
         c.arg("--system-prompt").arg(&turn.system_prompt);
         if let Some(model) = &turn.model.model {
             c.arg("--model").arg(model);

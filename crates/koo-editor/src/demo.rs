@@ -557,7 +557,6 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
             "Added a lower third on **T1** at 0:11, in your default title style.",
             now - 880,
         ));
-        chat.push(card(set, now - 880));
     }
 
     chat.push(msg(
@@ -644,7 +643,6 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
              One pause sits inside the protected sponsor read.",
             now - 400,
         ));
-        chat.push(card(set, now - 400));
     }
     chat.push(ChatMessage {
         choices: vec![
@@ -733,13 +731,6 @@ fn msg(role: ChatRole, text: &str, at: i64) -> ChatMessage {
         change_set: None,
         tools: vec![],
         at,
-    }
-}
-
-fn card(set: ChangeSetId, at: i64) -> ChatMessage {
-    ChatMessage {
-        change_set: Some(set),
-        ..msg(ChatRole::Agent, "", at)
     }
 }
 

@@ -1,6 +1,6 @@
 //! Agent chat, docked in every workspace (PRD AG1–AG10): the thread with
-//! streaming replies, tool calls, choice chips and change-set cards, the
-//! composer and the quick-command bar.
+//! streaming replies, tool calls and choice chips, the change-set and
+//! approval cards fixed above the composer, and the quick-command bar.
 
 mod approval;
 mod change_set;
@@ -67,6 +67,9 @@ pub struct ChatPanel {
     composer: Entity<Composer>,
     scroller: Entity<MessageScrollerState>,
     reviews: change_set::Reviews,
+    /// Change sets whose card is up: a resolved one stays, with what came of
+    /// it, until the user's next message.
+    shown: HashSet<ChangeSetId>,
     /// Messages whose stack of tool calls is open.
     tools_open: HashSet<usize>,
     /// Tool calls (message, call) showing their details.
@@ -109,6 +112,7 @@ impl ChatPanel {
             composer,
             scroller,
             reviews: Default::default(),
+            shown: HashSet::new(),
             tools_open: HashSet::new(),
             tool_open: HashSet::new(),
             signature,
@@ -122,6 +126,7 @@ impl ChatPanel {
 
     /// Send a message; the agent also gets its references resolved.
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        self.shown.clear();
         self.state.update(cx, |s, cx| {
             let block =
                 context::references_block(s.bus.project(), s.services.analysis.as_deref(), &text);
@@ -144,6 +149,7 @@ impl ChatPanel {
         if switched {
             self.tools_open.clear();
             self.tool_open.clear();
+            self.shown.clear();
         }
         self.scroller.update(cx, |list, cx| {
             let n = list.item_count();
@@ -160,8 +166,8 @@ impl ChatPanel {
         });
     }
 
-    /// The timeline picked a change item: scroll to its card, open the
-    /// review list and highlight the item there.
+    /// The timeline picked a change item: open its card's review list and
+    /// highlight the item there.
     fn reveal_focused(&mut self, cx: &mut Context<Self>) {
         let focused = self.state.read(cx).focused_change_item();
         if focused == self.revealed {
@@ -172,22 +178,9 @@ impl ChatPanel {
         else {
             return;
         };
-        let Some(ix) = self
-            .state
-            .read(cx)
-            .chat
-            .iter()
-            .rposition(|m| m.change_set == Some(set))
-        else {
-            return;
-        };
         let review = self.reviews.entry(set).or_default();
         review.open = true;
         review.reveal = Some(item);
-        self.scroller.update(cx, |list, cx| {
-            list.remeasure(cx);
-            list.scroll_to_item(ix, cx);
-        });
     }
 
     fn remeasure(&mut self, cx: &mut Context<Self>) {
@@ -451,22 +444,21 @@ impl ChatPanel {
                 if !msg.tools.is_empty() {
                     content = content.child(self.render_tools(ix, &msg.tools, cx));
                 }
-                if let Some(set) = msg.change_set {
-                    content = content.child(self.render_change_set(set, cx));
-                }
                 Message::new().content(content).into_any_element()
             }
         }
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let changes = self.render_change_sets(cx);
+        let approvals = self.render_approvals(cx);
         let state = self.state.read(cx);
         let busy = state.agent_busy();
         let status = state.status.clone();
-        let approvals = self.render_approvals(cx);
         let theme = cx.theme();
         v_flex()
             .flex_none()
+            .children(changes)
             .children(approvals)
             .when(busy, |el| {
                 el.child(

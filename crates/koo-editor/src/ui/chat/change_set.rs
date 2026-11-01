@@ -1,5 +1,6 @@
-//! Change-set card (PRD AG4–AG6): summary, Preview / Accept all / Review /
-//! Reject, the review list with per-item selection, and the outcome.
+//! Change-set card (PRD AG4–AG6), fixed above the composer, one per set:
+//! summary, Preview / Accept all / Review / Reject, the review list with
+//! per-item selection, and the outcome.
 
 use super::ChatPanel;
 use super::refs::clock;
@@ -33,11 +34,31 @@ pub struct Review {
 pub type Reviews = HashMap<ChangeSetId, Review>;
 
 impl ChatPanel {
-    pub(super) fn render_change_set(
-        &mut self,
-        id: ChangeSetId,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The chat's change sets with proposals in them, each once however
+    /// many turns grew it; a resolved one until the user's next message.
+    pub(super) fn render_change_sets(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let sets: Vec<ChangeSetId> = self
+            .state
+            .read(cx)
+            .bus
+            .chat_change_sets()
+            .filter(|s| !s.items.is_empty())
+            .filter(|s| s.state != ChangeSetState::Resolved || self.shown.contains(&s.id))
+            .map(|s| s.id)
+            .collect();
+        self.shown.extend(sets.iter().copied());
+        sets.into_iter()
+            .map(|id| {
+                div()
+                    .mx_2()
+                    .mt_1()
+                    .child(self.render_change_set(id, cx))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn render_change_set(&mut self, id: ChangeSetId, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
         let Some(set) = state.bus.change_set(id).cloned() else {
             return div().into_any_element();

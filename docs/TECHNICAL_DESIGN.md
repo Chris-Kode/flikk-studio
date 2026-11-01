@@ -613,8 +613,12 @@ not retried with Whisper.
   or Propose (never auto-applied); project memory (rules, recipes, facts,
   saving to the library) and deliver (renders, exports) always need the
   user's approval, asked with Approve/Deny cards above the composer and
-  carried out by `agent_link/approve.rs`; the outcome reaches the agent in
-  the next turn's `<approvals>` block. Generate media (music, sound
+  carried out by `agent_link/approve.rs`. The call waits: the host holds
+  its MCP reply until the user decides and answers it with the outcome
+  (a generated voiceover's media id, for one), so the turn carries on; an
+  outcome whose call is gone (the turn ended or was cancelled) reaches the
+  agent in the next turn's `<approvals>` block. Backends allow a tool call
+  an hour for this. Generate media (music, sound
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
@@ -662,9 +666,9 @@ not retried with Whisper.
   for; `MediaItem::generated` records the provider, model and prompt, and
   for a voiceover who read it, so the pool can regenerate it. With
   `at` or `range` it is proposed on an audio track free over its length,
-  else a new one. Asked each time, the approval runs it in the background
-  and proposes the placement into the chat's set, which goes to review
-  again; allowed, it runs as a tool job and answers with the media id. A
+  else a new one. Asked each time, the approval runs it in the background,
+  proposes the placement into the chat's set and answers the waiting call
+  with the media id; allowed, it runs as a tool job and answers the same. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
@@ -727,8 +731,9 @@ not retried with Whisper.
 * **Chat** (`ui/chat*`): sessions per project in
   `paths::projects()/<project>.chats.json`, each resuming its own backend
   conversation (`agent/sessions.json`). Tool calls stack into one card per
-  run. The change-set card has Preview, Review (a checklist with ticks),
-  Reject and Accept. `ask_user` shows up to six choices. Recipes run as
+  run. The change-set card sits above the composer, once per set however
+  many turns grew it, and stays with its outcome until the next message;
+  it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Recipes run as
   `/name key=value …` (seven built-ins: rough-cut, dead-time, teaser,
   captions, zooms, music, feedback); cmd/ctrl-K opens the quick command bar.
 * **References:** the composer's `@` picker and drops (Alt-drag clips,
