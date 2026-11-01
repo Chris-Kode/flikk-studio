@@ -1117,9 +1117,9 @@ impl EditorState {
                     {
                         m.text.push_str(&text)
                     }
-                    _ => self.push_agent(text, vec![], None),
+                    _ => self.push_agent(text, vec![]),
                 },
-                AgentEvent::Question { text, choices } => self.push_agent(text, choices, None),
+                AgentEvent::Question { text, choices } => self.push_agent(text, choices),
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => {
                     // A voice the agent was allowed to add or design went
@@ -1140,26 +1140,20 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Close `change_set` for review and post its card on the newest
-    /// message: a set the chat grew over several turns is reviewed there
-    /// only.
+    /// Close `change_set` for review. Its card sits above the composer
+    /// rather than in the thread, so a set the chat grew over several turns
+    /// shows once.
     fn post_change_set(&mut self, change_set: ChangeSetId) {
         self.bus.close_change_set(change_set);
         self.chat.retain(|m| m.change_set != Some(change_set));
-        let title = self
-            .bus
-            .change_set(change_set)
-            .map(|s| s.title.clone())
-            .unwrap_or_default();
-        self.push_agent(title, vec![], Some(change_set));
     }
 
-    fn push_agent(&mut self, text: String, choices: Vec<String>, change_set: Option<ChangeSetId>) {
+    fn push_agent(&mut self, text: String, choices: Vec<String>) {
         self.chat.push(ChatMessage {
             role: ChatRole::Agent,
             text,
             choices,
-            change_set,
+            change_set: None,
             tools: vec![],
             at: now(),
         });
@@ -1622,8 +1616,10 @@ impl EditorState {
         let Some(pending) = self.agent.resolve_approval(id) else {
             return;
         };
-        self.agent
-            .report_outcome(format!("denied: {}", pending.request.summary));
+        self.agent.report_failure(
+            id,
+            format!("denied by the user: {}", pending.request.summary),
+        );
         self.settled.push((pending, ApprovalOutcome::Denied));
         cx.notify();
     }
@@ -1653,7 +1649,8 @@ impl EditorState {
         }
         let outcome = match started {
             Ok(approve::Started::Done(line)) => {
-                self.agent.report_outcome(format!("approved: {summary}"));
+                self.agent
+                    .report_outcome(id, format!("approved: {summary}"));
                 if pending.request.tool == "save_fx_to_library" {
                     self.reload_library(cx);
                     if let Some(fx) = pending.request.args.get("fx").and_then(|v| v.as_str()) {
@@ -1666,10 +1663,10 @@ impl EditorState {
                 ApprovalOutcome::Done(line)
             }
             Ok(approve::Started::Render(job, path)) => {
-                self.agent.report_outcome(format!(
-                    "approved: {summary}; rendering to {}",
-                    path.display()
-                ));
+                self.agent.report_outcome(
+                    id,
+                    format!("approved: {summary}; rendering to {}", path.display()),
+                );
                 ApprovalOutcome::Rendering {
                     job,
                     file: approve::file_name(&path),
@@ -1682,14 +1679,17 @@ impl EditorState {
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
                             Ok(file) => {
-                                this.agent
-                                    .report_outcome(format!("approved: {summary}; wrote {file}"));
+                                this.agent.report_outcome(
+                                    id,
+                                    format!("approved: {summary}; wrote {file}"),
+                                );
                                 ApprovalOutcome::Done(file)
                             }
                             Err(e) => {
-                                this.agent.report_outcome(format!(
-                                    "approved but failed: {summary}: {e:#}"
-                                ));
+                                this.agent.report_failure(
+                                    id,
+                                    format!("approved but failed: {summary}: {e:#}"),
+                                );
                                 ApprovalOutcome::Failed(format!("{e:#}"))
                             }
                         };
@@ -1710,15 +1710,16 @@ impl EditorState {
                         let outcome = match result {
                             Ok(line) => {
                                 this.agent
-                                    .report_outcome(format!("approved: {summary}; {line}"));
+                                    .report_outcome(id, format!("approved: {summary}; {line}"));
                                 this.reload_library(cx);
                                 this.refresh_voices(cx);
                                 ApprovalOutcome::Done("Voice kept in the library".into())
                             }
                             Err(e) => {
-                                this.agent.report_outcome(format!(
-                                    "approved but failed: {summary}: {e:#}"
-                                ));
+                                this.agent.report_failure(
+                                    id,
+                                    format!("approved but failed: {summary}: {e:#}"),
+                                );
                                 ApprovalOutcome::Failed(format!("{e:#}"))
                             }
                         };
@@ -1737,11 +1738,12 @@ impl EditorState {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
-                            Ok(made) => this.place_generated(made, cx),
+                            Ok(made) => this.place_generated(id, made, cx),
                             Err(e) => {
-                                this.agent.report_outcome(format!(
-                                    "approved but failed: {summary}: {e:#}"
-                                ));
+                                this.agent.report_failure(
+                                    id,
+                                    format!("approved but failed: {summary}: {e:#}"),
+                                );
                                 ApprovalOutcome::Failed(format!("{e:#}"))
                             }
                         };
@@ -1756,7 +1758,7 @@ impl EditorState {
             }
             Err(e) => {
                 self.agent
-                    .report_outcome(format!("approved but failed: {summary}: {e:#}"));
+                    .report_failure(id, format!("approved but failed: {summary}: {e:#}"));
                 ApprovalOutcome::Failed(format!("{e:#}"))
             }
         };

@@ -176,7 +176,7 @@ pub fn request(
     };
     let mut done = Done::text(
         format!("awaiting approval: {summary}"),
-        "Queued for the user's approval. It is not done yet; don't wait for it, and mention it in your reply.",
+        "Waiting for the user's approval.",
     );
     done.approval = Some(ApprovalRequest {
         tool: tool.to_owned(),

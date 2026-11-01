@@ -1247,7 +1247,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_audio",
             Some(Generate),
-            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each one waits for their approval and its media id reaches you in the next turn's approvals. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
+            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect", "voiceover"], "What to make"),
@@ -1301,7 +1301,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "add_voice",
             Some(Generate),
-            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: unless they allowed generating, it waits for their approval and the voice id reaches you in the next turn's approvals.",
+            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: unless they allowed generating, it waits for their approval and then returns the voice id.",
             object(
                 json!({
                     "voice": string("The shared voice's id from find_voices"),
@@ -1314,7 +1314,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "design_voice",
             Some(Generate),
-            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits for their approval and the voice id reaches you in the next turn's approvals.",
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits for their approval and then returns the voice id.",
             object(
                 json!({
                     "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),

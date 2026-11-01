@@ -82,9 +82,16 @@ impl AgentLink {
         self.host.resolve_approval(id)
     }
 
-    /// What the user decided, told to the agent at the start of its next turn.
-    pub fn report_outcome(&mut self, outcome: String) {
-        self.host.report_outcome(outcome);
+    /// What came of request `id`: the result of the call still waiting for
+    /// it, else told to the agent at the start of its next turn.
+    pub fn report_outcome(&mut self, id: u64, outcome: String) {
+        self.host.report_outcome(id, outcome, false);
+    }
+
+    /// Request `id` was denied or failed; reported like
+    /// [`report_outcome`](Self::report_outcome), as an error.
+    pub fn report_failure(&mut self, id: u64, outcome: String) {
+        self.host.report_outcome(id, outcome, true);
     }
 }
 

@@ -377,6 +377,7 @@ impl EditorState {
     /// turn.
     pub(super) fn place_generated(
         &mut self,
+        id: u64,
         made: approve::Generated,
         cx: &mut Context<Self>,
     ) -> ApprovalOutcome {
@@ -389,9 +390,10 @@ impl EditorState {
         let bin = koo_core::cloud::generated_bin(&item);
         let Some(media) = self.add_generated(item, cx) else {
             let e = self.status.clone().unwrap_or_default();
-            self.agent.report_outcome(format!(
-                "approved: {summary}; made {name}, but could not add it to the pool: {e}"
-            ));
+            self.agent.report_failure(
+                id,
+                format!("approved: {summary}; made {name}, but could not add it to the pool: {e}"),
+            );
             return ApprovalOutcome::Failed(e);
         };
         let mut outcome =
@@ -406,7 +408,7 @@ impl EditorState {
                 Err(e) => outcome.push_str(&format!("; could not place it: {e}")),
             }
         }
-        self.agent.report_outcome(outcome);
+        self.agent.report_outcome(id, outcome);
         ApprovalOutcome::Done(name)
     }
 
