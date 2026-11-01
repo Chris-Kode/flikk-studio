@@ -768,6 +768,12 @@ available to them.
 
 ## 11. UI
 
+Pool items and library sounds play on their own (`state/source.rs`): the
+item is the one clip of a scratch project, so it goes through the program's
+compositor and audio mixer while the timeline and playhead stay put. Sounds
+play from the pool and the library; pictures open in the viewer, with a bar
+to seek on, until the user goes back to Program or moves the timeline.
+
 Workspaces (`Workspace::ALL`, rendered in `koo-editor/src/app.rs`): Edit
 (media pool and effects library on the left, viewer, inspector, timeline),
 Captions (transcript and caption style panel), Color (wheels, curves,

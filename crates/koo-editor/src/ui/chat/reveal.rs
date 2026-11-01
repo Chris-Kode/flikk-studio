@@ -35,7 +35,7 @@ pub fn reveal(state: &Entity<EditorState>, token: &str, cx: &mut App) {
                 (Some(vec![clip]), at)
             }
             Reference::Media { media } => {
-                s.set_source_media(Some(media), cx);
+                s.open_source(media, cx);
                 return;
             }
             Reference::Marker { marker } => (None, tl.marker(marker).map(|m| m.range.start)),
