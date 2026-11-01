@@ -38,6 +38,8 @@ pub mod speakers;
 mod subjects;
 mod vad;
 
+#[cfg(feature = "aligner")]
+use koo_core::analysis::Levels;
 use koo_core::analysis::{
     ANALYSIS_VERSION, Analysis, AnalysisSteps, Loudness, Music, Sound, SoundVectors, Transcript,
     Word,
@@ -601,7 +603,14 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                     let mut t = written(task, stream, script);
                     align::spread(&mut t.words, &analysis.speech, Time::ZERO, end);
                     let words = progress.step(Step::Words);
-                    match follow_script(shared, &audio, &analysis.speech, &mut t.words, &words) {
+                    match follow_script(
+                        shared,
+                        &audio,
+                        &analysis.speech,
+                        &sound,
+                        &mut t.words,
+                        &words,
+                    ) {
                         Ok(true) => {}
                         Ok(false) => align::refine(&mut t.words, &levels, &sound),
                         Err(e) => {
@@ -1011,55 +1020,78 @@ fn align_words(
     Ok(false)
 }
 
+/// A stretch the aligner hears of a voiceover, with the words expected in
+/// its first [`EXPECTED`]. Words it puts after [`KEPT`] go again with the
+/// next stretch, so a word the model ran out of audio for is heard again.
+#[cfg(feature = "aligner")]
+const HEARD: Time = Time(FLICKS_PER_SECOND * 30);
+#[cfg(feature = "aligner")]
+const EXPECTED: Time = Time(FLICKS_PER_SECOND * 25);
+#[cfg(feature = "aligner")]
+const KEPT: Time = Time(FLICKS_PER_SECOND * 27);
+/// A stretch with more of its words squeezed into one step than this, apart
+/// from its longest run of them, doesn't follow the audio. Well heard it is
+/// a tenth at most; a passage of the script that isn't said, squeezed where
+/// it is, makes one run.
+#[cfg(feature = "aligner")]
+const LOST: f32 = 0.15;
+
 /// Fit a script's `words` to the audio with the alignment model, a stretch
 /// at a time, each from where the last word placed ended; whether it did.
 /// How long a script takes is only known roughly, and that adds up over
-/// minutes: an error at one stretch doesn't reach the next. The words left
-/// where the model ran out of audio are heard again with the next stretch.
+/// minutes: an error at one stretch doesn't reach the next.
+///
+/// A stretch can't hear past a long pause, so pauses are shortened first
+/// ([`Shortened`]). A passage of the script that isn't said leaves the
+/// words after it late, and a stretch never hears before where the last
+/// one ended; such a stretch squeezes its words, and the words whose audio
+/// is behind it are left where it starts ([`catch_up`]).
 #[cfg(feature = "aligner")]
 fn follow_script(
     shared: &Shared,
     audio: &[f32],
     speech: &[TimeRange],
+    sound: &[bool],
     words: &mut [Word],
     progress: &dyn Fn(f32),
 ) -> anyhow::Result<bool> {
-    const HEARD: Time = Time(FLICKS_PER_SECOND * 30);
-    const EXPECTED: Time = Time(FLICKS_PER_SECOND * 25);
-    const KEPT: Time = Time(FLICKS_PER_SECOND * 27);
     if !ModelTask::WordTiming.model().is_downloaded() {
         return Ok(false);
     }
-    let sample =
-        |t: Time| ((t.as_secs_f64() * ffmpeg::SAMPLE_RATE as f64) as usize).min(audio.len());
-    let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
+    let read = Shortened::new(audio, speech, sound);
+    let speech: Vec<TimeRange> = speech.iter().map(|r| read.shorten(*r)).collect();
+    let hear = |audio: &[f32], run: &mut [Word]| shared.aligner.align(audio, run, &|_| {});
+    let end = read.end();
     let (mut from, mut done) = (Time::ZERO, 0);
+    // Where the stretch before started.
+    let mut before = (Time::ZERO, 0);
     while done < words.len() {
         progress(done as f32 / words.len() as f32);
-        align::spread(&mut words[done..], speech, from, end);
-        let start = words[done].range.start;
-        let stop = (start + HEARD).min(end);
-        let last = stop == end;
-        let expected = |w: &&Word| last || w.range.end <= start + EXPECTED;
-        let taken = words[done..].iter().take_while(expected).count().max(1);
-        let mut run = words[done..done + taken].to_vec();
-        for word in &mut run {
-            word.range = word.range.shift(-start);
+        let mut heard = Stretch::hear(&read.audio, &speech, &mut words[done..], from, &hear)?;
+        if heard.lost() {
+            let skip = catch_up(&read.audio, &speech, &mut words[done..], from, &hear)?;
+            if skip > 0 {
+                for word in &mut words[done..done + skip] {
+                    word.range = TimeRange::new(from, from);
+                }
+                // The passage not said is likely in the stretch before:
+                // heard again up to here, the model has to squeeze it.
+                let (lo, back) = before;
+                let again = &mut words[back..done + skip];
+                hear_between(&read.audio, &speech, again, lo, from, &hear)?;
+                done += skip;
+                heard = Stretch::hear(&read.audio, &speech, &mut words[done..], from, &hear)?;
+            }
         }
-        shared
-            .aligner
-            .align(&audio[sample(start)..sample(stop)], &mut run, &|_| {})?;
-        let kept = if last {
-            taken
-        } else {
-            let placed = run.iter().take_while(|w| w.range.end <= KEPT).count();
-            placed.max(taken.div_ceil(2))
-        };
-        for (word, placed) in words[done..].iter_mut().zip(&run[..kept]) {
-            word.range = placed.range.shift(start);
+        for (word, placed) in words[done..].iter_mut().zip(&heard.run[..heard.kept]) {
+            word.range = placed.range.shift(heard.start);
         }
-        done += kept;
-        from = words[done - 1].range.end;
+        before = (from, done);
+        done += heard.kept;
+        from = words[done - 1].range.end.min(end);
+    }
+    for word in words.iter_mut() {
+        word.range = read.restore(read.one_side(word.range, &speech));
     }
     progress(1.0);
     Ok(true)
@@ -1070,10 +1102,296 @@ fn follow_script(
     _shared: &Shared,
     _audio: &[f32],
     _speech: &[TimeRange],
+    _sound: &[bool],
     _words: &mut [Word],
     _progress: &dyn Fn(f32),
 ) -> anyhow::Result<bool> {
     Ok(false)
+}
+
+/// The aligner hearing `audio` with a run of words timed in it.
+#[cfg(feature = "aligner")]
+type Hear<'a> = dyn Fn(&[f32], &mut [Word]) -> anyhow::Result<()> + 'a;
+
+/// The sample of 16 kHz `audio` at `t`.
+#[cfg(feature = "aligner")]
+fn at(audio: &[f32], t: Time) -> usize {
+    ((t.as_secs_f64() * ffmpeg::SAMPLE_RATE as f64) as usize).min(audio.len())
+}
+
+/// How long 16 kHz `audio` lasts.
+#[cfg(feature = "aligner")]
+fn length(audio: &[f32]) -> Time {
+    Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64)
+}
+
+/// One stretch of [`follow_script`]: the words heard, times from `start`.
+#[cfg(feature = "aligner")]
+struct Stretch {
+    start: Time,
+    run: Vec<Word>,
+    /// How many of `run` to keep; the rest go again with the next one.
+    kept: usize,
+}
+
+#[cfg(feature = "aligner")]
+impl Stretch {
+    /// [`HEARD`] from where the speech goes on after `from`, with the
+    /// `words` expected in its first [`EXPECTED`]; `words` get rough times.
+    fn hear(
+        audio: &[f32],
+        speech: &[TimeRange],
+        words: &mut [Word],
+        from: Time,
+        hear: &Hear,
+    ) -> anyhow::Result<Self> {
+        Self::hear_for(audio, speech, words, from, hear, (HEARD, EXPECTED, KEPT))
+    }
+
+    fn hear_for(
+        audio: &[f32],
+        speech: &[TimeRange],
+        words: &mut [Word],
+        from: Time,
+        hear: &Hear,
+        (heard, expected, kept): (Time, Time, Time),
+    ) -> anyhow::Result<Self> {
+        let end = length(audio);
+        align::spread(words, speech, from, end);
+        let start = words[0].range.start;
+        let stop = (start + heard).min(end);
+        let last = stop == end;
+        let within = |w: &&Word| last || w.range.end <= start + expected;
+        let taken = words.iter().take_while(within).count().max(1);
+        let mut run = words[..taken].to_vec();
+        for word in &mut run {
+            word.range = word.range.shift(-start);
+        }
+        hear(&audio[at(audio, start)..at(audio, stop)], &mut run)?;
+        let kept = if last {
+            taken
+        } else {
+            let placed = run.iter().take_while(|w| w.range.end <= kept).count();
+            placed.max(taken.div_ceil(2))
+        };
+        Ok(Self { start, run, kept })
+    }
+
+    fn squeezed(&self) -> (f32, f32) {
+        squeezed(&self.run[..self.kept])
+    }
+
+    /// Whether this stretch doesn't follow the audio.
+    fn lost(&self) -> bool {
+        self.kept >= 8 && self.squeezed().1 > LOST
+    }
+}
+
+/// The share of `words` the model squeezed into one step, as it does words
+/// it has no audio for, and of those apart from their longest run.
+#[cfg(feature = "aligner")]
+fn squeezed(words: &[Word]) -> (f32, f32) {
+    let (mut all, mut run, mut longest) = (0, 0, 0);
+    for word in words {
+        if word.range.duration() <= Time::from_millis(30) {
+            all += 1;
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let share = |n: usize| n as f32 / words.len().max(1) as f32;
+    (share(all), share(all - longest))
+}
+
+/// Hear `words` again between `from` and `to`, where the words around them
+/// are; kept when the model follows the audio there but for one run of
+/// words squeezed, the passage not said.
+#[cfg(feature = "aligner")]
+fn hear_between(
+    audio: &[f32],
+    speech: &[TimeRange],
+    words: &mut [Word],
+    from: Time,
+    to: Time,
+    hear: &Hear,
+) -> anyhow::Result<()> {
+    if words.is_empty() || to <= from {
+        return Ok(());
+    }
+    let mut run = words.to_vec();
+    align::spread(&mut run, speech, from, to);
+    let start = run[0].range.start.min(to);
+    for word in &mut run {
+        word.range = word.range.shift(-start);
+    }
+    hear(&audio[at(audio, start)..at(audio, to)], &mut run)?;
+    if squeezed(&run).1 <= LOST / 2.0 {
+        for (word, placed) in words.iter_mut().zip(&run) {
+            word.range = placed.range.shift(start);
+        }
+    }
+    Ok(())
+}
+
+/// How many of `words` were said before `from`, when a stretch from there
+/// is [lost](Stretch::lost): a passage of the script before them wasn't
+/// said, so their audio went to it. Short stretches are heard from words
+/// further on, and the first that follows the audio says: one too far
+/// starts with speech that isn't its words, which the model doesn't
+/// squeeze, and leaves words out, so the fewest. None (0) when a short one
+/// from the first word follows the audio too.
+#[cfg(feature = "aligner")]
+fn catch_up(
+    audio: &[f32],
+    speech: &[TimeRange],
+    words: &mut [Word],
+    from: Time,
+    hear: &Hear,
+) -> anyhow::Result<usize> {
+    /// Words tried further on, by this step, up to this many.
+    const STEP: usize = 3;
+    const FURTHEST: usize = 60;
+    /// Followed: fewer words squeezed than this.
+    const FOLLOWED: f32 = 0.08;
+    let short = (
+        Time(FLICKS_PER_SECOND * 12),
+        Time(FLICKS_PER_SECOND * 10),
+        Time(FLICKS_PER_SECOND * 11),
+    );
+    let furthest = FURTHEST.min(words.len().saturating_sub(8));
+    let mut follows = |skip: usize| -> anyhow::Result<Option<bool>> {
+        let words = &mut words[skip..];
+        let heard = Stretch::hear_for(audio, speech, words, from, hear, short)?;
+        Ok((heard.kept >= 5).then(|| heard.squeezed().0 <= FOLLOWED))
+    };
+    if follows(0)? != Some(false) {
+        return Ok(0);
+    }
+    for skip in (STEP..=furthest).step_by(STEP) {
+        if follows(skip)? == Some(true) {
+            return Ok(skip);
+        }
+    }
+    Ok(0)
+}
+
+/// A voiceover's audio with each long silence, where neither the voice
+/// activity nor the levels hear anything, shortened to [`Shortened::LEFT`]
+/// either side of its middle: a stretch hears 30 s of the read, not of the
+/// pause, and so hears the words after it too.
+#[cfg(feature = "aligner")]
+struct Shortened<'a> {
+    audio: std::borrow::Cow<'a, [f32]>,
+    /// The silences taken out, and where each was in the shortened audio.
+    cuts: Vec<(TimeRange, Time)>,
+}
+
+#[cfg(feature = "aligner")]
+impl<'a> Shortened<'a> {
+    /// Silences longer than this are shortened…
+    const LONG: Time = Time(FLICKS_PER_SECOND * 10);
+    /// …to this much at each end.
+    const LEFT: Time = Time(FLICKS_PER_SECOND * 3);
+
+    /// `sound` comes from [`align::measure`] on `audio`.
+    fn new(audio: &'a [f32], speech: &[TimeRange], sound: &[bool]) -> Self {
+        let frame = |t: Time| (t.0 / Levels::FRAME.0).clamp(0, sound.len() as i64) as usize;
+        let mut quiet: Vec<bool> = sound.iter().map(|s| !s).collect();
+        for r in speech {
+            let to = frame(r.end + Levels::FRAME).max(frame(r.start));
+            quiet[frame(r.start)..to].fill(false);
+        }
+        let (long, left) = (frame(Self::LONG), frame(Self::LEFT));
+        // Only between sounds: a silence at either end holds up nothing.
+        let first = quiet.iter().position(|q| !q).unwrap_or(quiet.len());
+        let last = quiet.iter().rposition(|q| !q).map_or(0, |i| i + 1);
+        let mut silences = Vec::new();
+        let mut i = first;
+        while i < last {
+            let run = quiet[i..last].iter().take_while(|q| **q).count();
+            if run > long {
+                silences.push((i + left)..(i + run - left));
+            }
+            i += run.max(1);
+        }
+        if silences.is_empty() {
+            return Self {
+                audio: audio.into(),
+                cuts: Vec::new(),
+            };
+        }
+        let samples = |f: usize| (f * (ffmpeg::SAMPLE_RATE as usize / 100)).min(audio.len());
+        let time = |s: usize| Time::from_secs_f64(s as f64 / ffmpeg::SAMPLE_RATE as f64);
+        let mut kept = Vec::with_capacity(audio.len());
+        let mut cuts = Vec::new();
+        let mut at = 0;
+        for cut in silences {
+            let (from, to) = (samples(cut.start), samples(cut.end));
+            kept.extend_from_slice(&audio[at..from]);
+            cuts.push((TimeRange::new(time(from), time(to)), time(kept.len())));
+            at = to;
+        }
+        kept.extend_from_slice(&audio[at..]);
+        Self {
+            audio: kept.into(),
+            cuts,
+        }
+    }
+
+    fn end(&self) -> Time {
+        length(&self.audio)
+    }
+
+    /// `range` of the audio, in the shortened audio; it holds no silence
+    /// taken out.
+    fn shorten(&self, range: TimeRange) -> TimeRange {
+        let before = |t: Time| {
+            let cut = self.cuts.iter().filter(|(c, _)| c.end <= t);
+            Time(cut.map(|(c, _)| c.duration().0).sum())
+        };
+        TimeRange::new(
+            range.start - before(range.start),
+            range.end - before(range.end),
+        )
+    }
+
+    /// A word placed over where a silence was taken out, which no word is,
+    /// cut back to the side of it with more `speech`.
+    fn one_side(&self, range: TimeRange, speech: &[TimeRange]) -> TimeRange {
+        let Some(&(_, at)) = self
+            .cuts
+            .iter()
+            .find(|(_, at)| range.start < *at && *at < range.end)
+        else {
+            return range;
+        };
+        let heard = |side: TimeRange| -> i64 {
+            let heard = speech.iter().filter_map(|r| r.intersect(&side));
+            heard.map(|r| r.duration().0).sum()
+        };
+        let (before, after) = (
+            TimeRange::new(range.start, at),
+            TimeRange::new(at, range.end),
+        );
+        if heard(after) >= heard(before) {
+            let resumes = speech.iter().map(|r| r.start).find(|s| *s >= at);
+            TimeRange::new(resumes.unwrap_or(at).min(range.end), range.end)
+        } else {
+            let stops = speech.iter().rev().map(|r| r.end).find(|e| *e <= at);
+            TimeRange::new(range.start, stops.unwrap_or(at).max(range.start))
+        }
+    }
+
+    /// `range` of the shortened audio, in the audio.
+    fn restore(&self, range: TimeRange) -> TimeRange {
+        let after = |t: Time| {
+            let cut = self.cuts.iter().filter(|(_, at)| *at < t);
+            t + Time(cut.map(|(c, _)| c.duration().0).sum())
+        };
+        TimeRange::new(after(range.start), after(range.end))
+    }
 }
 
 /// Hear again, on its own, the `speech` no word of `transcript` was heard
