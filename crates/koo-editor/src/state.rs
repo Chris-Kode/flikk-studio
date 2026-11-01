@@ -3,8 +3,10 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod source;
 
 pub use cloud::{Check, Generating, ProviderStatus};
+pub use source::Source;
 
 use crate::agent_link::{AgentLink, approve};
 use crate::notices::{Level, Notice, NoticeAction, Notices};
@@ -69,7 +71,8 @@ pub struct EditorState {
     pub status: Option<String>,
     // --- panels
     /// Pool item loaded in the viewer as source (double-click in the pool).
-    pub source_media: Option<koo_core::MediaId>,
+    /// The item playing on its own, or showing in the viewer.
+    pub source: Option<Source>,
     /// Caption styles, loudness and ducking defaults of the selected style
     /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: koo_core::memory::Presets,
@@ -214,7 +217,7 @@ impl EditorState {
             live: None,
             live_version: 0,
             status: persistence::take_notice(),
-            source_media: None,
+            source: None,
             presets: koo_core::memory::Presets::default(),
             caption_style: 0,
             caption_live: None,
@@ -450,6 +453,9 @@ impl EditorState {
 
     pub fn seek(&mut self, t: Time, cx: &mut Context<Self>) {
         self.playhead = t.max(Time::ZERO);
+        if self.source_picture().is_some() {
+            self.source = None;
+        }
         cx.notify();
     }
 
@@ -481,11 +487,6 @@ impl EditorState {
 
     // --- panels
 
-    pub fn set_source_media(&mut self, media: Option<koo_core::MediaId>, cx: &mut Context<Self>) {
-        self.source_media = media;
-        cx.notify();
-    }
-
     /// Clips on the timeline that use `media`.
     pub fn clips_using(&self, media: koo_core::MediaId) -> Vec<koo_core::ClipId> {
         self.bus
@@ -512,8 +513,8 @@ impl EditorState {
         commands.push(Command::RemoveMedia { media });
         if self.execute_batch(commands, "remove_media", cx).is_some() {
             self.selection.clips.retain(|c| !clips.contains(c));
-            if self.source_media == Some(media) {
-                self.source_media = None;
+            if self.source.as_ref().is_some_and(|s| s.item().id == media) {
+                self.source = None;
             }
         }
     }
@@ -980,7 +981,7 @@ impl EditorState {
         self.in_out = None;
         self.selection = Selection::default();
         self.selected_transition = None;
-        self.source_media = None;
+        self.source = None;
         self.preview = None;
         self.focused_change = None;
         self.editing_fx = None;
@@ -1479,6 +1480,10 @@ impl EditorState {
     }
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = self.source_picture().map(|s| s.item().clone()) {
+            self.toggle_source(&item, cx);
+            return;
+        }
         let playing = !self.playing;
         self.play_speed = 1.0;
         self.set_playing(playing, cx);
@@ -1502,6 +1507,7 @@ impl EditorState {
             cx.notify();
             return;
         }
+        self.close_source(cx);
         let end = self.display_project().timeline.duration();
         if self.play_speed > 0.0 && self.playhead >= end {
             self.playhead = Time::ZERO;

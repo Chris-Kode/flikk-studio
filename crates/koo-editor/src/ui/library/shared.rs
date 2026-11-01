@@ -259,13 +259,6 @@ pub fn use_sound(
     s.execute_batch(commands, "Add sound", cx).map(|_| media)
 }
 
-/// Open library sound `id` in the viewer to listen to it.
-pub fn open_sound(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
-    if let Some(media) = use_sound(s, id, cx) {
-        s.set_source_media(Some(media), cx);
-    }
-}
-
 /// Place library sound `id` at the playhead, on an audio track with nothing
 /// over its length, else on a new one.
 pub fn place_sound(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {

@@ -9,6 +9,10 @@
 //! into them. Captions and titles are part of the frame, lettered as the
 //! render burns them in (`koo_deliver::Letterer`).
 //!
+//! A pool item opened here ([`EditorState::source_picture`]) shows in place
+//! of the program, through the same path, with its own position and no
+//! editing on the frame.
+//!
 //! Paused, the frame's layout ([`compose::layout`]) lets the user pick an
 //! item and transform it on screen ([`gizmo`]); Shift-click adds or
 //! removes items, and several move, scale and turn as one. The view zooms (Fit or a
@@ -20,7 +24,7 @@
 //! hovering finds what a click would keep off the UI thread, the newest
 //! hover winning; frames are composed again as subjects' mattes are made.
 
-mod audio;
+pub(crate) mod audio;
 mod cache;
 mod gizmo;
 mod masks;
@@ -31,7 +35,8 @@ use super::timeline::{
     NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
 };
 use crate::app::TogglePlay;
-use crate::state::EditorState;
+use crate::state::{EditorState, Source};
+use crate::ui::media_pool::{item_name, seek_bar};
 use audio::AudioOut;
 use cache::{FrameCache, SharedCache};
 use gizmo::{Gizmo, Screen};
@@ -122,6 +127,8 @@ struct PlayKey {
     width: u32,
     /// How masks show: tinted while they are edited.
     masks: MaskView,
+    /// The pool item shown in place of the program.
+    source: Option<koo_core::MediaId>,
 }
 
 /// A paused frame: what it shows and the sequence frame index.
@@ -159,7 +166,7 @@ struct Job {
 struct Playback {
     key: PlayKey,
     player: Player,
-    audio: AudioOut,
+    audio: Option<AudioOut>,
     project: Arc<Project>,
     /// Playhead at the previous render, to tell seeks from playback.
     last: Time,
@@ -264,6 +271,11 @@ impl ViewerPanel {
         }
     }
 
+    /// Whether the frame can be edited: the program, paused.
+    fn editable(&self, state: &EditorState) -> bool {
+        !state.playing && state.source_picture().is_none()
+    }
+
     /// What the picture depends on besides the playhead.
     fn key(&self, cx: &App) -> PlayKey {
         let state = self.state.read(cx);
@@ -278,11 +290,12 @@ impl ViewerPanel {
             lettering: state.lettering_version,
             width: self.frame_width.get(),
             masks: match state.selection.clips.first() {
-                Some(clip) if self.masks.on && self.masks.tinted && !state.playing => {
+                Some(clip) if self.masks.on && self.masks.tinted && self.editable(state) => {
                     MaskView::Tinted(Some(*clip))
                 }
                 _ => MaskView::Cut,
             },
+            source: state.source_picture().map(|s| s.item().id),
         }
     }
 
@@ -404,7 +417,7 @@ impl ViewerPanel {
         }
         let screen = self.screen(cx);
         let state = self.state.read(cx);
-        let shape = (!state.playing && state.preview.is_none())
+        let shape = (self.editable(state) && state.preview.is_none())
             .then(|| self.gizmo.active(&state.selection.clips, self.requested))
             .flatten()
             .filter(|s| !s.lettering);
@@ -465,13 +478,14 @@ impl ViewerPanel {
         let key = self.key(cx);
         let state = self.state.read(cx);
         let media = state.services.media.clone();
-        let realtime = state.playing && state.play_speed == 1.0;
+        let source = state.source_picture().is_some();
+        let realtime = state.monitor_playing() && (source || state.play_speed == 1.0);
         let (Some(media), true) = (media, realtime) else {
             self.playback = None;
             return;
         };
         self.ahead = None;
-        let playhead = state.playhead;
+        let playhead = state.monitor_time();
         // A seek while playing restarts the audio at the new position; video
         // follows the playhead on its own.
         let jumped = self
@@ -479,7 +493,7 @@ impl ViewerPanel {
             .as_ref()
             .is_some_and(|p| (playhead - p.last).0.abs() > Time::from_secs_f64(SEEK_JUMP).0);
         if self.playback.as_ref().is_none_or(|p| p.key != key) {
-            let project = Arc::new(state.display_project().clone());
+            let project = Arc::new(state.monitor_project().clone());
             let player = Player::start(
                 state.services.clone(),
                 project.clone(),
@@ -488,7 +502,8 @@ impl ViewerPanel {
                 self.cache.clone(),
                 self.shift.clone(),
             );
-            let audio = AudioOut::start(media, project.clone(), playhead);
+            // A source plays its own sound.
+            let audio = (!source).then(|| AudioOut::start(media, project.clone(), playhead));
             self.playback = Some(Playback {
                 key,
                 player,
@@ -496,8 +511,8 @@ impl ViewerPanel {
                 project,
                 last: playhead,
             });
-        } else if let (Some(p), true) = (self.playback.as_mut(), jumped) {
-            p.audio = AudioOut::start(media, p.project.clone(), playhead);
+        } else if let (Some(p), true, false) = (self.playback.as_mut(), jumped, source) {
+            p.audio = Some(AudioOut::start(media, p.project.clone(), playhead));
         }
         let picture = self.playback.as_mut().and_then(|p| {
             p.last = playhead;
@@ -514,8 +529,8 @@ impl ViewerPanel {
     fn request_frame(&mut self, cx: &mut Context<Self>) {
         let key = self.key(cx);
         let state = self.state.read(cx);
-        let t = state.playhead;
-        let rate = state.display_project().timeline.settings.rate;
+        let t = state.monitor_time();
+        let rate = state.monitor_project().timeline.settings.rate;
         let request = Request {
             key,
             frame: t.to_frame(rate),
@@ -530,7 +545,7 @@ impl ViewerPanel {
         let project = match &self.snapshot {
             Some((k, project)) if *k == key => project.clone(),
             _ => {
-                let project = Arc::new(state.display_project().clone());
+                let project = Arc::new(state.monitor_project().clone());
                 self.snapshot = Some((key, project.clone()));
                 project
             }
@@ -671,7 +686,7 @@ impl ViewerPanel {
         window.focus(&self.focus, cx);
         let screen = self.screen(cx);
         let state = self.state.read(cx);
-        if state.playing {
+        if !self.editable(state) {
             return;
         }
         let project = state.bus.project();
@@ -917,7 +932,7 @@ impl ViewerPanel {
             return;
         }
         let selected = &state.selection.clips;
-        let handle = (!state.playing && state.preview.is_none())
+        let handle = (self.editable(state) && state.preview.is_none())
             .then(|| {
                 self.gizmo.handle_at(
                     ev.position,
@@ -1077,7 +1092,7 @@ impl ViewerPanel {
     /// a picture or lettering under the playhead.
     fn picked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        !state.playing
+        self.editable(state)
             && !picked_clips(&state.selection.clips, state.bus.project(), state.playhead).is_empty()
     }
 
@@ -1116,13 +1131,54 @@ impl ViewerPanel {
         .detach();
     }
 
+    /// The opened item's controls: its name, a bar to seek on and the way
+    /// back to the program.
+    fn opened(&self, source: &Source, cx: &App) -> AnyElement {
+        let item = source.item().clone();
+        let (state, back) = (self.state.clone(), self.state.clone());
+        let name = item_name(&item);
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(name),
+            )
+            .map(|d| {
+                if source.can_play() {
+                    d.child(seek_bar(
+                        source.fraction(),
+                        move |f, cx| state.update(cx, |s, cx| s.seek_source(&item, f, cx)),
+                        cx,
+                    ))
+                } else {
+                    d.child(div().flex_1())
+                }
+            })
+            .child(
+                Button::new("viewer-program")
+                    .ghost()
+                    .xsmall()
+                    .label("Program")
+                    .on_click(move |_, _, cx| back.update(cx, |s, cx| s.close_source(cx))),
+            )
+            .into_any_element()
+    }
+
     fn controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let project = state.display_project();
+        let project = state.monitor_project();
         let rate = project.timeline.settings.rate;
-        let t = state.playhead;
+        let t = state.monitor_time();
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
+        let opened = state.source_picture().map(|s| self.opened(s, cx));
+        let program = opened.is_none();
         let source = topmost_video_clip(&project.timeline, t).and_then(|(_, clip)| {
             let at = clip.to_source(t)?;
             let item = project.media(clip.media()?)?;
@@ -1135,7 +1191,7 @@ impl ViewerPanel {
             let name = item.path.file_name()?.to_string_lossy().into_owned();
             Some((at.timecode(rate), name))
         });
-        let playing = state.playing;
+        let playing = state.monitor_playing();
         let entity = self.state.clone();
         let viewer = cx.entity();
         let zoom = self.zoom;
@@ -1313,24 +1369,27 @@ impl ViewerPanel {
                     .on_click(move |_, _, cx| entity.update(cx, |s, cx| s.toggle_play(cx))),
             )
             .child(div().text_color(fg).child(t.timecode(rate)))
-            .child(div().flex_1())
-            .children(source.map(|(tc, name)| {
-                h_flex()
-                    .gap_2()
-                    .min_w_0()
-                    .text_color(muted)
-                    .child(
-                        div()
+            .children(opened)
+            .when(program, |d| {
+                d.child(div().flex_1())
+                    .children(source.map(|(tc, name)| {
+                        h_flex()
+                            .gap_2()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(name),
-                    )
-                    .child(div().flex_none().child(tc))
-            }))
-            .children(tools)
-            .child(mask_toggle)
-            .child(pin_toggle)
+                            .text_color(muted)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(name),
+                            )
+                            .child(div().flex_none().child(tc))
+                    }))
+                    .children(tools)
+                    .child(mask_toggle)
+                    .child(pin_toggle)
+            })
             .child(safe_toggle)
             .child(zoom_menu)
     }
@@ -1355,12 +1414,12 @@ impl Render for ViewerPanel {
 
         let picked = self.picked(cx);
         let state = self.state.read(cx);
-        let project = state.display_project();
+        let project = state.monitor_project();
         let settings = project.timeline.settings.clone();
         let sequence = (settings.width.max(1), settings.height.max(1));
         let aspect = sequence.0 as f32 / sequence.1 as f32;
         let picture = self.picture.clone();
-        let overlay = (!state.playing).then(|| {
+        let overlay = self.editable(state).then(|| {
             self.gizmo.overlay(
                 state.bus.project(),
                 &state.selection.clips,
@@ -1369,7 +1428,7 @@ impl Render for ViewerPanel {
                 state.preview.is_none() && !self.masks.on,
             )
         });
-        let mask_overlay = (!state.playing && self.masks.on)
+        let mask_overlay = (self.editable(state) && self.masks.on)
             .then(|| {
                 let shape = self
                     .gizmo

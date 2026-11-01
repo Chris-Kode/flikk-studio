@@ -14,6 +14,7 @@ pub use glyphs::{FxGlyph, fx_glyph};
 
 use crate::state::EditorState;
 use crate::ui::media_pool::import::is_audio;
+use crate::ui::media_pool::listen_button;
 use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
 use apply::Starter;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -471,6 +472,13 @@ impl LibraryPanel {
                 .child(Input::new(&self.name).xsmall())
                 .into_any_element();
         }
+        let listen = match &e.item {
+            Item::Sound(id) => {
+                let sound = self.state.read(cx).library.sound(*id).map(Sound::item);
+                sound.map(|s| listen_button(format!("listen-{}", id.0), &self.state, &s, cx))
+            }
+            _ => None,
+        };
         let item = e.item.clone();
         let description = e.description.clone();
         let row = h_flex()
@@ -490,6 +498,7 @@ impl LibraryPanel {
                 if selected { fg } else { muted },
             ))
             .child(div().flex_1().min_w_0().truncate().child(e.name.clone()))
+            .children(listen)
             .when(!description.is_empty(), |d| {
                 d.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
             })
@@ -561,6 +570,12 @@ fn item_menu(
         Item::Preset(id) => return library_menu(menu, panel, state, *id, false),
         Item::Sound(id) => {
             let (id, s1, s2) = (*id, state.clone(), state.clone());
+            let s = state.read(cx);
+            let sound = s.library.sound(id).map(Sound::item);
+            let preview = s.source.as_ref();
+            let playing = sound
+                .zip(preview)
+                .is_some_and(|(sound, p)| p.is(&sound) && p.is_playing());
             let menu = menu
                 .item(
                     PopupMenuItem::new("Add to Project").on_click(move |_, _, cx| {
@@ -570,9 +585,15 @@ fn item_menu(
                     }),
                 )
                 .item(
-                    PopupMenuItem::new("Open in Viewer").on_click(move |_, _, cx| {
-                        s2.update(cx, |s, cx| shared::open_sound(s, id, cx))
-                    }),
+                    PopupMenuItem::new(if playing { "Pause" } else { "Play" }).on_click(
+                        move |_, _, cx| {
+                            s2.update(cx, |s, cx| {
+                                if let Some(sound) = s.library.sound(id).map(Sound::item) {
+                                    s.toggle_source(&sound, cx);
+                                }
+                            })
+                        },
+                    ),
                 );
             return library_menu(menu, panel, state, id, false);
         }
