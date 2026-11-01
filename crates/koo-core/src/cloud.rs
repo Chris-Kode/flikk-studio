@@ -341,6 +341,43 @@ pub fn without_breaks(text: &str) -> Option<String> {
     (at > 0).then(|| out + &text[at..])
 }
 
+/// The words a voiceover's `script` says, punctuation on the word before
+/// it. Audio tags are not said, and a dash, an ellipsis or a full stop in
+/// Chinese or Japanese ends a word without a space; so does each character
+/// that is a word or close to one there.
+pub fn spoken_words(script: &str) -> Vec<String> {
+    let ends_word = |c: char| {
+        matches!(c, '—' | '–' | '…' | '、' | '。' | '，' | '！' | '？')
+            || matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+    };
+    let mut words: Vec<String> = Vec::new();
+    let text = without_tags(script);
+    for part in text
+        .split_whitespace()
+        .flat_map(|token| token.split_inclusive(ends_word))
+    {
+        let said = part.chars().any(char::is_alphanumeric);
+        match words.last_mut() {
+            Some(word) if !said => word.push_str(part),
+            _ if said => words.push(part.to_owned()),
+            _ => {}
+        }
+    }
+    words
+}
+
+/// `script` with a space for each `[audio tag]`.
+fn without_tags(script: &str) -> String {
+    let mut out = String::new();
+    let mut rest = script;
+    while let Some((said, tag)) = rest.split_once('[') {
+        out.push_str(said);
+        out.push(' ');
+        rest = tag.split_once(']').map_or(tag, |(_, after)| after);
+    }
+    out + rest
+}
+
 /// Seconds in a lower-case `<break time="1.5s"/>`; 0 without a time.
 fn break_seconds(tag: &str) -> f64 {
     let Some(time) = tag.split("time=").nth(1) else {
@@ -369,6 +406,13 @@ pub struct GenerationInfo {
     /// Who read it, for a voiceover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<Reading>,
+}
+
+impl GenerationInfo {
+    /// What a voiceover reads, with its delivery written in.
+    pub fn script(&self) -> Option<&str> {
+        (self.capability == Capability::Voiceover).then_some(self.prompt.as_str())
+    }
 }
 
 /// A file a provider made.

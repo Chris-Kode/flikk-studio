@@ -417,6 +417,19 @@ not retried with Whisper.
   error rate there went from 5.9% to 7.1%), and run after it, it made cuts
   worse. The aligner's times never pass the audio it was given, so words
   stay in order.
+* **Voiceover words:** a voiceover is analyzed as soon as it is made, when
+  the transcript step is on, and its words are its script
+  (`cloud::spoken_words`: no audio tags, punctuation on the word before),
+  so neither Whisper nor a provider hears it and it costs no credits. The
+  rest of the script is shared out over the speech left by written length
+  (`align::spread`), the aligner hears 30 s from where the last word placed
+  ended with the words expected in the first 25 s, and words it puts in the
+  last 3 s go again with the next stretch (`follow_script`), so an error in
+  how long the script takes doesn't add up over a long read. The language
+  isn't known ("und"), so the aligner runs on any script. Its models are
+  optional: without the aligner the words keep edges measured on the audio
+  levels, and "Analyze again" aligns them once it is there. Analyzing a
+  voiceover always takes this path.
 * **Alignment model file:** Qwen publishes PyTorch weights only, so
   `qwen3-forced-aligner-0.6b-q4.onnx` is our export, hosted at
   [Chris-Kode/qwen3-forced-aligner-0.6b-onnx](https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx)

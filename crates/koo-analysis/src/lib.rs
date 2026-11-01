@@ -23,6 +23,11 @@
 //! Library sounds are analyzed without being asked, so
 //! [`AnalyzeOptions::sound_only`] leaves speech and shots out: nothing goes
 //! to a provider, and "Analyze again" adds the rest.
+//!
+//! A voiceover's words are its script ([`GenerationInfo::script`]), so
+//! nothing transcribes it and nothing goes to a provider: the aligner
+//! follows the script through the audio. It is analyzed as soon as it is
+//! made, so its models are optional too.
 
 mod align;
 mod cache;
@@ -37,11 +42,13 @@ use koo_core::analysis::{
     ANALYSIS_VERSION, Analysis, AnalysisSteps, Loudness, Music, Sound, SoundVectors, Transcript,
     Word,
 };
-use koo_core::cloud::{SpeechRequest, SpeechService};
+use koo_core::cloud::{self, GenerationInfo, SpeechRequest, SpeechService};
 use koo_core::ids::JobId;
 use koo_core::jobs::{JobProgress, JobQueue};
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
 use koo_core::services::{AnalysisConfig, AnalysisService, JobStatus, ServiceError, ServiceResult};
+#[cfg(feature = "aligner")]
+use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::time::{Time, TimeRange};
 use koo_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
@@ -444,8 +451,9 @@ struct Plan {
     steps: AnalysisSteps,
     /// Transcribes in place of the local speech models.
     online: Option<Arc<dyn SpeechService>>,
-    /// A provider is set for transcription or this is only a sound, so
-    /// local models are optional: a step whose model is missing is left out.
+    /// A provider is set for transcription, or this is only a sound or a
+    /// voiceover, so local models are optional: a step whose model is
+    /// missing is left out.
     lenient: bool,
     /// The sound pass runs, with sound search and beats when these say.
     sounds: bool,
@@ -454,18 +462,21 @@ struct Plan {
 }
 
 impl Plan {
-    fn new(config: &AnalysisConfig, sound_only: bool) -> Self {
+    fn new(config: &AnalysisConfig, sound_only: bool, script: bool) -> Self {
         let mut steps = config.steps;
         if sound_only {
             steps.transcript = false;
             steps.speakers = false;
             steps.shots = false;
         }
-        let lenient = sound_only || config.speech.is_some();
+        let lenient = sound_only || script || config.speech.is_some();
         let have = |task: ModelTask| !lenient || task.model().is_downloaded();
         let sounds = cfg!(feature = "sounds") && steps.sounds && have(ModelTask::SoundTagging);
         Self {
-            online: config.speech.clone().filter(|_| steps.transcript),
+            online: config
+                .speech
+                .clone()
+                .filter(|_| steps.transcript && !script),
             lenient,
             sounds,
             search: sounds && steps.sound_search() && have(ModelTask::SoundSearch),
@@ -480,9 +491,17 @@ impl Plan {
 /// rest goes on; such a result is kept in memory for this session but only
 /// complete ones are written to disk.
 fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
-    let plan = Plan::new(&lock(&shared.config), task.options.sound_only);
-    let steps = plan.steps;
     let item = &task.item;
+    let generated = item.generated.as_deref();
+    let script = generated.and_then(GenerationInfo::script);
+    let script = script.filter(|_| !task.options.sound_only);
+    let plan = Plan::new(
+        &lock(&shared.config),
+        task.options.sound_only,
+        script.is_some(),
+    );
+    let steps = plan.steps;
+    let script = script.filter(|_| steps.transcript);
     let duration = item.info.as_ref().map(|i| i.duration);
     let audio_wanted = has_audio(item);
     let video_wanted = has_video(item) && steps.shots;
@@ -497,11 +516,13 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                 weights.push((Step::Speech, 0.5));
             }
             if steps.transcript {
-                weights.push((Step::Transcript, 6.0));
+                if script.is_none() {
+                    weights.push((Step::Transcript, 6.0));
+                }
                 if cfg!(feature = "aligner") {
                     weights.push((Step::Words, 3.0));
                 }
-                if steps.speakers() {
+                if steps.speakers() && script.is_none() {
                     weights.push((Step::Speakers, 3.0));
                 }
             }
@@ -575,7 +596,22 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                         Voice::energy(&audio)
                     });
                 analysis.speech = speech;
-                if steps.transcript {
+                if let Some(script) = script {
+                    let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
+                    let mut t = written(task, stream, script);
+                    align::spread(&mut t.words, &analysis.speech, Time::ZERO, end);
+                    let words = progress.step(Step::Words);
+                    match follow_script(shared, &audio, &analysis.speech, &mut t.words, &words) {
+                        Ok(true) => {}
+                        Ok(false) => align::refine(&mut t.words, &levels, &sound),
+                        Err(e) => {
+                            align::refine(&mut t.words, &levels, &sound);
+                            problems.push(format!("word alignment: {e:#}"));
+                        }
+                    }
+                    one_speaker(&mut t);
+                    analysis.transcript = Some(t);
+                } else if steps.transcript {
                     let transcript = transcript(
                         shared,
                         task,
@@ -764,6 +800,25 @@ fn transcript(
     }))
 }
 
+/// The transcript of a voiceover, as `script` is written: no times yet, and
+/// no language, which nothing here hears.
+fn written(task: &Task, stream: u32, script: &str) -> Transcript {
+    let words = cloud::spoken_words(script).into_iter().map(|text| Word {
+        range: TimeRange::new(Time::ZERO, Time::ZERO),
+        text,
+        confidence: 1.0,
+        speaker: None,
+    });
+    Transcript {
+        fingerprint: task.fingerprint.clone(),
+        audio_stream: stream,
+        language: "und".into(),
+        words: words.collect(),
+        speakers: Vec::new(),
+        engine: Some("script".into()),
+    }
+}
+
 /// The words a provider heard in `stream` of the item, with its voices
 /// when `voices` (else one speaker for all), and the sounds it noted
 /// between them. The audio goes to it as lossless mono FLAC.
@@ -950,6 +1005,71 @@ fn align_words(
     _shared: &Shared,
     _audio: &[f32],
     _language: &str,
+    _words: &mut [Word],
+    _progress: &dyn Fn(f32),
+) -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+/// Fit a script's `words` to the audio with the alignment model, a stretch
+/// at a time, each from where the last word placed ended; whether it did.
+/// How long a script takes is only known roughly, and that adds up over
+/// minutes: an error at one stretch doesn't reach the next. The words left
+/// where the model ran out of audio are heard again with the next stretch.
+#[cfg(feature = "aligner")]
+fn follow_script(
+    shared: &Shared,
+    audio: &[f32],
+    speech: &[TimeRange],
+    words: &mut [Word],
+    progress: &dyn Fn(f32),
+) -> anyhow::Result<bool> {
+    const HEARD: Time = Time(FLICKS_PER_SECOND * 30);
+    const EXPECTED: Time = Time(FLICKS_PER_SECOND * 25);
+    const KEPT: Time = Time(FLICKS_PER_SECOND * 27);
+    if !ModelTask::WordTiming.model().is_downloaded() {
+        return Ok(false);
+    }
+    let sample =
+        |t: Time| ((t.as_secs_f64() * ffmpeg::SAMPLE_RATE as f64) as usize).min(audio.len());
+    let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
+    let (mut from, mut done) = (Time::ZERO, 0);
+    while done < words.len() {
+        progress(done as f32 / words.len() as f32);
+        align::spread(&mut words[done..], speech, from, end);
+        let start = words[done].range.start;
+        let stop = (start + HEARD).min(end);
+        let last = stop == end;
+        let expected = |w: &&Word| last || w.range.end <= start + EXPECTED;
+        let taken = words[done..].iter().take_while(expected).count().max(1);
+        let mut run = words[done..done + taken].to_vec();
+        for word in &mut run {
+            word.range = word.range.shift(-start);
+        }
+        shared
+            .aligner
+            .align(&audio[sample(start)..sample(stop)], &mut run, &|_| {})?;
+        let kept = if last {
+            taken
+        } else {
+            let placed = run.iter().take_while(|w| w.range.end <= KEPT).count();
+            placed.max(taken.div_ceil(2))
+        };
+        for (word, placed) in words[done..].iter_mut().zip(&run[..kept]) {
+            word.range = placed.range.shift(start);
+        }
+        done += kept;
+        from = words[done - 1].range.end;
+    }
+    progress(1.0);
+    Ok(true)
+}
+
+#[cfg(not(feature = "aligner"))]
+fn follow_script(
+    _shared: &Shared,
+    _audio: &[f32],
+    _speech: &[TimeRange],
     _words: &mut [Word],
     _progress: &dyn Fn(f32),
 ) -> anyhow::Result<bool> {

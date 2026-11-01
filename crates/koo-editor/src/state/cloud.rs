@@ -347,7 +347,8 @@ impl EditorState {
 
     /// Add `item`, which a provider made, to the pool's Generated bin as
     /// one undo step, and to the drafts waiting for review so a proposal
-    /// can place it. Its id when added.
+    /// can place it. A voiceover is analyzed right away: its words are its
+    /// script, so that costs no credits. Its id when added.
     pub(crate) fn add_generated(
         &mut self,
         item: MediaItem,
@@ -359,10 +360,16 @@ impl EditorState {
             Some(Capability::Voiceover) => "Generate voiceover",
             _ => "Generate music",
         };
+        let script = item.generated.as_deref().and_then(|g| g.script());
+        let analyze = script.is_some() && item.fingerprint.is_some();
         let bin = koo_core::cloud::generated_bin(&item);
         let commands = koo_core::cloud::pool_commands(self.bus.project(), item, bin);
         let result = self.bus.execute_shared(commands, label);
-        self.finish(result, cx).map(|_| id)
+        self.finish(result, cx)?;
+        if analyze && self.analysis_steps.transcript {
+            self.analyze(id, false, cx);
+        }
+        Some(id)
     }
 
     /// Add what an approved generation made to the pool and, where the

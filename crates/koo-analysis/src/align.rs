@@ -35,6 +35,41 @@ const REACH: usize = 50;
 /// the quietest frame: 60 ms.
 const TIGHT_REACH: usize = 6;
 
+/// Rough times for `words`, read in order from `from` to `end`: the
+/// `speech` in there shared out by how long each word is written. Enough
+/// for the aligner or [`refine`] to find them around.
+pub fn spread(words: &mut [Word], speech: &[TimeRange], from: Time, end: Time) {
+    let rest = TimeRange::new(from.min(end), end);
+    let mut heard: Vec<TimeRange> = speech
+        .iter()
+        .filter_map(|r| r.intersect(&rest))
+        .filter(|r| !r.is_empty())
+        .collect();
+    if heard.is_empty() {
+        heard.push(rest);
+    }
+    let length = |w: &Word| w.text.chars().count() as f64;
+    let letters: f64 = words.iter().map(length).sum();
+    let talk: f64 = heard.iter().map(|r| r.duration().as_secs_f64()).sum();
+    // Where talking has gone on for `at` seconds.
+    let place = |mut at: f64| {
+        for r in &heard {
+            let long = r.duration().as_secs_f64();
+            if at <= long {
+                return r.start + Time::from_secs_f64(at);
+            }
+            at -= long;
+        }
+        end
+    };
+    let mut said = 0.0;
+    for word in words {
+        let start = place(said / letters * talk);
+        said += length(word);
+        word.range = TimeRange::new(start, place(said / letters * talk));
+    }
+}
+
 /// Levels of 16 kHz mono `samples`, and which of their frames hold sound.
 pub fn measure(samples: &[f32]) -> (Levels, Vec<bool>) {
     let stats: Vec<(f32, f32)> = samples.chunks(FRAME).map(frame_stats).collect();

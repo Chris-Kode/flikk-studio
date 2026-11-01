@@ -178,8 +178,8 @@ impl MediaPoolPanel {
     }
 
     /// The item's "Analyze" entry; `None` for images, which are not
-    /// analyzed. Disabled while a task's picked model is missing, or the
-    /// item is queued or analyzing.
+    /// analyzed. Disabled while a task's picked model is missing, unless a
+    /// voiceover can do without, or the item is queued or analyzing.
     fn analyze_entry(&self, id: MediaId, cx: &App) -> Option<AnalyzeEntry> {
         let state = self.state.read(cx);
         let item = state.bus.project().media(id)?;
@@ -194,9 +194,10 @@ impl MediaPoolPanel {
             .find(|j| j.media == Some(id))
             .is_some_and(|j| matches!(j.state, JobState::Queued | JobState::Running { .. }));
         let fp = item.fingerprint.as_ref();
+        let script = item.generated.as_deref().and_then(|g| g.script());
         Some(AnalyzeEntry {
             again: fp.and_then(|fp| analysis.analysis(fp)).is_some(),
-            enabled: fp.is_some() && state.models_ready() && !busy,
+            enabled: fp.is_some() && (script.is_some() || state.models_ready()) && !busy,
         })
     }
 
