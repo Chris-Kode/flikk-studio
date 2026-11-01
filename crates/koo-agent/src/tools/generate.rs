@@ -1,8 +1,8 @@
 //! `generate_audio`: music or a sound effect made by the provider the user
 //! set for it (the Generate category). Each one spends the user's credits,
 //! so it waits for their approval unless they allowed it. The file goes to
-//! the pool's Generated bin; with `at` (or `range`) it is also proposed on
-//! an audio track.
+//! the pool's Music Generated or Sound Effects Generated bin; with `at` (or
+//! `range`) it is also proposed on an audio track.
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
@@ -196,12 +196,13 @@ pub fn finish(
     summary: &str,
 ) -> Done {
     let length = item.info.as_ref().map_or(0.0, |i| i.duration.as_secs_f64());
+    let bin = cloud::generated_bin(&item);
     let media = match add_to_pool(bus, item) {
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };
     let mut text = format!(
-        "Made it: media {} ({length:.1} s) in the Generated bin.",
+        "Made it: media {} ({length:.1} s) in the {bin} bin.",
         short(media)
     );
     match (placement, author) {
@@ -220,12 +221,13 @@ pub fn finish(
     Done::text(format!("generated {summary}"), text)
 }
 
-/// Add `item` to the pool's Generated bin as the user's edit (it is paid
-/// for: rejecting a placement keeps it), and to the drafts waiting for
+/// Add `item` to the pool's bin for what it is as the user's edit (it is
+/// paid for: rejecting a placement keeps it), and to the drafts waiting for
 /// review so a proposal can use it.
 pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, String> {
     let id = item.id;
-    let commands = cloud::pool_commands(bus.project(), item, cloud::GENERATED_BIN);
+    let bin = cloud::generated_bin(&item);
+    let commands = cloud::pool_commands(bus.project(), item, bin);
     bus.execute_shared(commands, "Generate audio")
         .map(|_| id)
         .map_err(|e| e.to_string())

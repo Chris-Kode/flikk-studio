@@ -271,8 +271,13 @@ pub trait GenerationService: Send + Sync {
     fn generate(&self, request: &GenerateRequest, dir: &Path) -> CloudResult<Generated>;
 }
 
-/// Name of the bin generated media goes into.
-pub const GENERATED_BIN: &str = "Generated";
+/// Name of the bin generated `item` goes into.
+pub fn generated_bin(item: &MediaItem) -> &'static str {
+    match item.generated.as_deref().map(|g| g.capability) {
+        Some(Capability::SoundEffects) => "Sound Effects Generated",
+        _ => "Music Generated",
+    }
+}
 
 /// The media item for `generated`, probed and fingerprinted by `media`
 /// when there is one; not in a bin yet ([`pool_commands`] puts it in one).

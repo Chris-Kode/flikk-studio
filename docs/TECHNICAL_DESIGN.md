@@ -641,8 +641,8 @@ not retried with Whisper.
   (a prompt and a length, or `sections` with lengths of their own, so it
   changes on cue) or a sound effect (up to 30 s, optionally looping) with
   the provider picked for it. The file goes to `paths::generated()` with a
-  `<file>.json` of what was asked, and into the pool's "Generated" bin as
-  the user's edit (`CommandBus::execute_shared`, which also adds it to the
+  `<file>.json` of what was asked, and into the pool's "Music Generated" or
+  "Sound Effects Generated" bin as the user's edit (`CommandBus::execute_shared`, which also adds it to the
   drafts waiting for review), so a rejected placement keeps what was paid
   for; `MediaItem::generated` records the provider, model and prompt. With
   `at` or `range` it is proposed on an audio track free over its length,

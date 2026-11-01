@@ -104,8 +104,9 @@ other projects, offer `save_sound_to_library`; it waits for the user's \
 approval.
 
 Making music and sound effects: `generate_audio` (generate group) has the \
-provider the user set up make one, into the pool's Generated bin; with \
-`range` or `at` it is proposed on an audio track. It costs the user \
+provider the user set up make one, into the pool's Music Generated or Sound \
+Effects Generated bin; with `range` or `at` it is proposed on an audio \
+track. It costs the user \
 credits, so make one only when they asked for new audio, or nothing in the \
 pool will do, and say what it is for. Unless they allowed it, each call \
 waits for their approval like a render. Score to the picture: look at the \

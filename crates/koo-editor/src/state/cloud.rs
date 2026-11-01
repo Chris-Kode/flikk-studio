@@ -338,7 +338,7 @@ impl EditorState {
             Some(Capability::SoundEffects) => "Generate sound effect",
             _ => "Generate music",
         };
-        let bin = koo_core::cloud::GENERATED_BIN;
+        let bin = koo_core::cloud::generated_bin(&item);
         let commands = koo_core::cloud::pool_commands(self.bus.project(), item, bin);
         let result = self.bus.execute_shared(commands, label);
         self.finish(result, cx).map(|_| id)
@@ -358,6 +358,7 @@ impl EditorState {
             summary,
         } = made;
         let name = approve::file_name(&item.path);
+        let bin = koo_core::cloud::generated_bin(&item);
         let Some(media) = self.add_generated(item, cx) else {
             let e = self.status.clone().unwrap_or_default();
             self.agent.report_outcome(format!(
@@ -366,7 +367,7 @@ impl EditorState {
             return ApprovalOutcome::Failed(e);
         };
         let mut outcome =
-            format!("approved: {summary}; made media {media} ({name}) in the Generated bin");
+            format!("approved: {summary}; made media {media} ({name}) in the {bin} bin");
         if let Some(placement) = placement {
             match self.with_agent_set(cx, |bus, author| {
                 koo_agent::tools::generate::propose_placement(

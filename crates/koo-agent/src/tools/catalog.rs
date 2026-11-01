@@ -1246,7 +1246,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_audio",
             Some(Generate),
-            "Make music or a sound effect with the provider the user set up. It lands in the pool's Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each one waits for their approval and its media id reaches you in the next turn's approvals. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused.",
+            "Make music or a sound effect with the provider the user set up. It lands in the pool's Music Generated or Sound Effects Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each one waits for their approval and its media id reaches you in the next turn's approvals. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused.",
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect"], "What to make"),
