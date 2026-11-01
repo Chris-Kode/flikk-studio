@@ -4,6 +4,7 @@
 
 mod cloud;
 mod source;
+pub mod voices;
 
 pub use cloud::{Check, Generating, ProviderStatus};
 pub use source::Source;
@@ -144,6 +145,8 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
+    /// The voices of the provider doing voiceovers, as last read.
+    pub account_voices: voices::AccountVoices,
 }
 
 impl EditorState {
@@ -250,6 +253,7 @@ impl EditorState {
             analysis_steps,
             generating: Vec::new(),
             next_generation: 1,
+            account_voices: Default::default(),
         };
         this.configure_analysis();
         this.analyze_sounds(cx);
@@ -1117,7 +1121,15 @@ impl EditorState {
                 },
                 AgentEvent::Question { text, choices } => self.push_agent(text, choices, None),
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
-                AgentEvent::Activity { entry } => self.push_tool(entry),
+                AgentEvent::Activity { entry } => {
+                    // A voice the agent was allowed to add or design went
+                    // to the library.
+                    if entry.ok && matches!(entry.tool.as_str(), "add_voice" | "design_voice") {
+                        self.reload_library(cx);
+                        self.refresh_voices(cx);
+                    }
+                    self.push_tool(entry)
+                }
                 AgentEvent::TurnDone => self.save_chat(),
                 AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => self.status = Some(message),
@@ -1673,6 +1685,35 @@ impl EditorState {
                                 this.agent
                                     .report_outcome(format!("approved: {summary}; wrote {file}"));
                                 ApprovalOutcome::Done(file)
+                            }
+                            Err(e) => {
+                                this.agent.report_outcome(format!(
+                                    "approved but failed: {summary}: {e:#}"
+                                ));
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                            entry.1 = outcome;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Ok(approve::Started::Voice(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(line) => {
+                                this.agent
+                                    .report_outcome(format!("approved: {summary}; {line}"));
+                                this.reload_library(cx);
+                                this.refresh_voices(cx);
+                                ApprovalOutcome::Done("Voice kept in the library".into())
                             }
                             Err(e) => {
                                 this.agent.report_outcome(format!(

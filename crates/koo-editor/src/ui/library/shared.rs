@@ -142,6 +142,8 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
         library::rename_preset(&preset, name).map(|_| ())
     } else if let Some(sound) = s.library.sound(id).cloned() {
         library::rename_sound(&sound, name).map(|_| ())
+    } else if s.library.voice(id).is_some() {
+        return s.rename_saved_voice(id, name, cx);
     } else {
         return;
     };
@@ -151,9 +153,12 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
     }
 }
 
-/// Remove a program, preset or sound from the library. Projects keep their
-/// copies, and sounds their audio.
+/// Remove a program, preset, sound or voice from the library. Projects keep
+/// their copies, sounds their audio, and voices stay on the account.
 pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
+    if s.library.voice(id).is_some() {
+        return s.forget_voice(id, cx);
+    }
     let Some(path) = file_of(s, id) else {
         return;
     };
@@ -163,13 +168,14 @@ pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>)
     }
 }
 
-/// The file of a program, preset or sound.
+/// The file of a program, preset, sound or voice.
 pub fn file_of(s: &EditorState, id: LibraryId) -> Option<PathBuf> {
     s.library
         .program(id)
         .map(|p| p.path.clone())
         .or_else(|| s.library.preset(id).map(|p| p.path.clone()))
         .or_else(|| s.library.sound(id).map(|p| p.path.clone()))
+        .or_else(|| s.library.voice(id).map(|v| v.path.clone()))
 }
 
 /// Copy `.koofx` and `.koopreset` files into the library, and audio files

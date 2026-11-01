@@ -89,7 +89,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Agent ↔ editor | The backend CLI launches an MCP server over stdio; it connects to the editor over `127.0.0.1:<port>` with a token, and the editor serves calls in `AgentLink::pump` on the UI thread | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments are seconds, `"M:SS.mmm"`, `"H:MM:SS.s"`, timecode `"HH:MM:SS:FF"`, frames `"f:1234"` or `@time`/`@range`; results are seconds to the millisecond | What models read and write reliably |
 | Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
-| Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) and sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) under `paths::library()`, shared by every project (`koo-core::library`). Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
+| Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) and voices (`.koovoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`koo-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
@@ -606,7 +606,7 @@ not retried with Whisper.
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 80 in the catalog (78 plus
+* **Tools** (`koo-agent/src/tools/`): 82 in the catalog (80 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -661,7 +661,40 @@ not retried with Whisper.
   the voice (`/v2/voices`, samples cached under `paths::cache()`) and puts
   tags in at the cursor, and the system prompt teaches the agent the same
   rules. A script runs to one request, about 10 minutes; longer ones are
-  several clips, one voice each.
+  several clips, one voice each. The form lists the user's own voices
+  first, starts a library voice on the stability and similarity it last read
+  with (`EditorState::keep_reading` keeps them), and its + button opens the
+  Voices dialog over it.
+* **Voices** (`ui/voices.rs`, `state/voices.rs`, `elevenlabs/voices.rs`,
+  `elevenlabs/design.rs`): one dialog, from the pool's Generate menu, the
+  voiceover form and the transcript. *Find* lists the account's voices
+  (`/v2/voices`, read once per session into `EditorState::account_voices`)
+  or searches the shared Voice Library (`/v1/shared-voices`, by words,
+  gender, age, language and use, 30 a page), each with its sample; a shared
+  one is added to the account (`/v1/voices/add/{owner}/{voice}`, a voice
+  slot), and one with a custom rate shows it. *Describe* designs voices from
+  a description (`/v1/text-to-voice/design` on `eleven_ttv_v3`, 20–1,000
+  characters, checked before credits are spent), plays each and keeps the
+  one picked (`/v1/text-to-voice`). *From audio* clones a voice
+  (`/v1/voices/add`, multipart) from files or pool items, sent as their
+  sound when they are video, with background-noise removal and a consent
+  box it needs. In the transcript, a speaker's words open the dialog as one
+  WAV of where they speak (`state::voices::speaker_spans`, padded and
+  joined stretches of the source they say most in, up to 3 minutes,
+  `koo_analysis::cut_speech`): to clone it, or to find shared voices that
+  sound like the first 30 s (`/v1/similar-voices`). Whatever is picked,
+  added or made is kept in the library (`library::save_voice`) and the next
+  voiceover starts on it. The library's Voices section reads a voiceover on
+  a voice, plays its sample, renames it (on the account too, for voices the
+  user made), removes it, or deletes it from the account after asking;
+  one the account no longer has is dimmed, and a designed one can be
+  designed again from its description. A voiceover in the pool can save
+  the voice that read it. The agent's `find_voices` lists the user's
+  library first, with how each reads, or searches the Voice Library with
+  `library` and filters; `add_voice` and `design_voice` (Generate media,
+  so approved unless allowed) add or design one and keep it in the library.
+  Cloning is not a tool: it needs the speaker's consent, so the prompt
+  sends the user to the dialog.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
   provider was asked) and, where analysis left vectors, by how they sound;
@@ -750,7 +783,7 @@ available to them.
   sizes are at 1080p, scaled by the frame's short side.
 * **Other user files** under `paths::home()`: `projects/` (chats),
   `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
-  tool usage, work dirs), `assets/` (the library's audio), `generated/` (music, sound effects and
+  tool usage, work dirs), `assets/` (the library's audio and voice samples), `generated/` (music, sound effects and
   voiceovers with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
   (owner-only, only where the system has no credential store).
 
@@ -833,7 +866,7 @@ see:
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
-| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover` | The media pool's Generate form |
+| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
 KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor
@@ -892,7 +925,12 @@ there.
   formats each plan allows are untested (the client steps down from 320
   kbps MP3 when one is refused), the music composition plan's instrumental
   chunks are written from the docs, and whether Eleven v4 ever reads an
-  audio tag aloud is unheard.
+  audio tag aloud is unheard. The voice calls (shared library search,
+  adding, similar voices, design, cloning, renaming, deleting) are written
+  from the API reference and have run against no account; the shared
+  library's query and reply fields are from memory where its reference
+  pages would not load, and whether Eleven v4 reads designed and instantly
+  cloned voices as well as the provider's own is unheard.
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
 * Off macOS, subject tracking runs on the CPU (ONNX Runtime's CPU

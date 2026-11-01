@@ -18,6 +18,7 @@ pub mod settings;
 pub mod timeline;
 pub mod transcript;
 pub mod viewer;
+pub mod voices;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;

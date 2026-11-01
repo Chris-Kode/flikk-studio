@@ -2,8 +2,8 @@
 //! provider the user set for it (the Generate category). Each one spends the
 //! user's credits, so it waits for their approval unless they allowed it.
 //! The file goes to the pool's bin for what it is; with `at` (or `range`) it
-//! is also proposed on an audio track. `find_voices` lists who can read a
-//! voiceover.
+//! is also proposed on an audio track. Voices are found and made in
+//! `voices`.
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
@@ -188,56 +188,12 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     Ok(Step::Job(job))
 }
 
-/// The voices that can read a voiceover, filtered by `text`, in a job: the
-/// list is a request.
-pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let words: Vec<String> = args
-        .opt_str("text")?
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .collect();
-    let limit = args.opt_f64("limit")?.map_or(20, |n| n.max(1.0) as usize);
-    let Some(generation) = ctx.services.generation.clone() else {
-        return fail("Generation is not available in this build.");
-    };
-    if generation.provider_for(Capability::Voiceover).is_none() {
-        return fail(unavailable_for(Capability::Voiceover));
-    }
-    let job: Job = Box::new(move || {
-        let voices = match generation.voices() {
-            Ok(voices) => voices,
-            Err(e) => return JobDone::Done(Done::error(error_text(&e))),
-        };
-        let found: Vec<Value> = voices
-            .iter()
-            .filter(|v| {
-                let about = format!("{} {} {}", v.name, v.category, v.traits.join(" "));
-                let about = about.to_lowercase();
-                words.iter().all(|w| about.contains(w))
-            })
-            .take(limit)
-            .map(|v| {
-                json!({
-                    "voice": v.id,
-                    "name": v.name,
-                    "category": v.category,
-                    "traits": v.traits,
-                })
-            })
-            .collect();
-        let summary = format!("found {} voices", found.len());
-        JobDone::Done(Done::json(summary, &json!({ "voices": found })))
-    });
-    Ok(Step::Job(job))
-}
-
 /// Why the user's settings stop it.
 pub fn unavailable(request: &GenerateRequest) -> String {
     unavailable_for(request.capability())
 }
 
-fn unavailable_for(capability: Capability) -> String {
+pub(crate) fn unavailable_for(capability: Capability) -> String {
     format!(
         "No provider with an API key is set for {} in Settings → Integrations. Tell the user; don't retry.",
         capability.label().to_lowercase()

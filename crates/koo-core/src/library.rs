@@ -1,6 +1,6 @@
-//! The user's library: FX programs, presets and sounds shared by every
-//! project, one file each under `paths::library()` (`.koofx`, `.koopreset`,
-//! `.koosound`).
+//! The user's library: FX programs, presets, sounds and voices shared by
+//! every project, one file each under `paths::library()` (`.koofx`,
+//! `.koopreset`, `.koosound`, `.koovoice`).
 //!
 //! Projects never point into the library. Using a program copies it into
 //! the project ([`Project::fx`]) with [`FxAsset::origin`] naming the
@@ -13,10 +13,14 @@
 //! a media item on that file, as it does for any source. Removing a sound
 //! leaves the file, so projects using it stay online.
 //!
+//! A voice lives on the provider's account; its file here remembers how it
+//! was made, how it reads best and a sample of it, so it is listed, heard
+//! and made again without a request.
+//!
 //! Errors are messages for the user.
 
 use crate::audiofx::AudioFx;
-use crate::cloud::{self, Capability, GenerationInfo};
+use crate::cloud::{self, Capability, GenerationInfo, Reading, VoiceOrigin};
 use crate::command::Command;
 use crate::fx::{FxAsset, FxInstance, FxRef};
 use crate::ids::{ClipId, EffectId, FxId, LibraryId, MediaId};
@@ -29,9 +33,11 @@ use std::path::{Path, PathBuf};
 pub const PROGRAM_EXT: &str = "koofx";
 pub const PRESET_EXT: &str = "koopreset";
 pub const SOUND_EXT: &str = "koosound";
+pub const VOICE_EXT: &str = "koovoice";
 const PROGRAM_FORMAT: &str = "koo-fx";
 const PRESET_FORMAT: &str = "koo-preset";
 const SOUND_FORMAT: &str = "koo-sound";
+const VOICE_FORMAT: &str = "koo-voice";
 /// Name of the bin sounds from the library go into.
 pub const LIBRARY_BIN: &str = "Library";
 /// Bumped when an older file needs an upgrade step on load.
@@ -86,6 +92,42 @@ pub struct Sound {
     pub path: PathBuf,
 }
 
+/// A provider's voice the user made, added or keeps, to read voiceovers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedVoice {
+    pub id: LibraryId,
+    pub name: String,
+    /// Provider id: "elevenlabs".
+    pub provider: String,
+    /// The provider's id for it.
+    pub voice: String,
+    pub origin: VoiceOrigin,
+    /// What it is like: "calm", "british", "narration".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traits: Vec<String>,
+    /// How it reads unless told otherwise.
+    #[serde(default = "default_stability")]
+    pub stability: f32,
+    #[serde(default = "default_similarity")]
+    pub similarity: f32,
+    /// A sample of it, relative to `paths::assets()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+    /// The sample's length and format, to play it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_info: Option<MediaInfo>,
+    #[serde(skip)]
+    pub path: PathBuf,
+}
+
+fn default_stability() -> f32 {
+    Reading::STABILITY
+}
+
+fn default_similarity() -> f32 {
+    Reading::SIMILARITY
+}
+
 #[derive(Serialize, Deserialize)]
 struct ProgramFile {
     format: String,
@@ -110,12 +152,21 @@ struct SoundFile {
     sound: Sound,
 }
 
+#[derive(Serialize, Deserialize)]
+struct VoiceFile {
+    format: String,
+    version: u32,
+    #[serde(flatten)]
+    voice: SavedVoice,
+}
+
 /// Everything in the library, by name.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub programs: Vec<Program>,
     pub presets: Vec<Preset>,
     pub sounds: Vec<Sound>,
+    pub voices: Vec<SavedVoice>,
 }
 
 impl Library {
@@ -133,6 +184,7 @@ impl Library {
                 Some(PROGRAM_EXT) => read_program(&path).map(|p| lib.programs.push(p)),
                 Some(PRESET_EXT) => read_preset(&path).map(|p| lib.presets.push(p)),
                 Some(SOUND_EXT) => read_sound(&path).map(|s| lib.sounds.push(s)),
+                Some(VOICE_EXT) => read_voice(&path).map(|v| lib.voices.push(v)),
                 _ => Ok(()),
             };
             if let Err(e) = read {
@@ -142,6 +194,7 @@ impl Library {
         lib.programs.sort_by_key(|p| p.asset.name.to_lowercase());
         lib.presets.sort_by_key(|p| p.name.to_lowercase());
         lib.sounds.sort_by_key(|s| s.name.to_lowercase());
+        lib.voices.sort_by_key(|v| v.name.to_lowercase());
         lib
     }
 
@@ -155,6 +208,17 @@ impl Library {
 
     pub fn sound(&self, id: LibraryId) -> Option<&Sound> {
         self.sounds.iter().find(|s| s.id == id)
+    }
+
+    pub fn voice(&self, id: LibraryId) -> Option<&SavedVoice> {
+        self.voices.iter().find(|v| v.id == id)
+    }
+
+    /// The saved voice that is `provider`'s `voice`.
+    pub fn voice_of(&self, provider: &str, voice: &str) -> Option<&SavedVoice> {
+        self.voices
+            .iter()
+            .find(|v| v.provider == provider && v.voice == voice)
     }
 
     /// The sound holding the same audio as `item`.
@@ -212,6 +276,15 @@ fn read_sound(path: &Path) -> Result<Sound> {
         return Err(format!("the audio of {} is missing", name(path)));
     }
     Ok(sound)
+}
+
+fn read_voice(path: &Path) -> Result<SavedVoice> {
+    let file: VoiceFile = read_json(path)?;
+    check(path, &file.format, VOICE_FORMAT, file.version)?;
+    Ok(SavedVoice {
+        path: path.to_path_buf(),
+        ..file.voice
+    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -692,6 +765,152 @@ pub fn sound_media(project: &Project, sound: &Sound) -> (MediaId, Vec<Command>) 
     }
     let item = sound.item();
     (item.id, cloud::pool_commands(project, item, LIBRARY_BIN))
+}
+
+// -------------------------------------------------------------------- voices
+
+impl SavedVoice {
+    /// A new entry for `provider`'s `voice`, read with the usual settings.
+    pub fn new(provider: &str, voice: &cloud::Voice, origin: VoiceOrigin) -> Self {
+        Self {
+            id: LibraryId::new(),
+            name: voice.name.clone(),
+            provider: provider.to_owned(),
+            voice: voice.id.clone(),
+            origin,
+            traits: voice.traits.clone(),
+            stability: Reading::STABILITY,
+            similarity: Reading::SIMILARITY,
+            sample: None,
+            sample_info: None,
+            path: PathBuf::new(),
+        }
+    }
+
+    /// Its sample's file, when it has one.
+    pub fn sample_file(&self) -> Option<PathBuf> {
+        let path = paths::assets().join(self.sample.as_ref()?);
+        path.is_file().then_some(path)
+    }
+
+    /// Its sample as an item to listen to: not in any pool.
+    pub fn sample_item(&self) -> Option<MediaItem> {
+        Some(MediaItem {
+            id: MediaId::new(),
+            path: self.sample_file()?,
+            kind: MediaKind::Audio,
+            fingerprint: None,
+            info: Some(self.sample_info.clone()?),
+            bin: None,
+            tags: Vec::new(),
+            proxy: None,
+            generated: None,
+        })
+    }
+
+    /// How it reads a voiceover unless told otherwise.
+    pub fn reading(&self) -> Reading {
+        Reading {
+            voice: self.voice.clone(),
+            voice_name: self.name.clone(),
+            stability: self.stability,
+            similarity: self.similarity,
+        }
+    }
+
+    /// Group in the library.
+    pub fn category(&self) -> &'static str {
+        match self.origin {
+            VoiceOrigin::Designed { .. } => "Designed",
+            VoiceOrigin::Cloned { .. } => "Cloned",
+            VoiceOrigin::Shared { .. } => "Voice Library",
+            VoiceOrigin::Account => "Account",
+        }
+    }
+
+    /// What it was made from, for a tooltip.
+    pub fn description(&self) -> String {
+        match &self.origin {
+            VoiceOrigin::Designed { description, .. } => description.clone(),
+            VoiceOrigin::Cloned { sources } => sources.join(", "),
+            VoiceOrigin::Shared { name, .. } => name.clone(),
+            VoiceOrigin::Account => self.traits.join(", "),
+        }
+    }
+}
+
+/// Save `voice` to the library: over the entry for the same provider voice
+/// when there is one (keeping its id), else as a new one. `sample`, an
+/// item on a recording of it, is copied in as its sample.
+pub fn save_voice(
+    lib: &Library,
+    voice: &SavedVoice,
+    sample: Option<&MediaItem>,
+) -> Result<SavedVoice> {
+    if voice.name.trim().is_empty() {
+        return Err("the voice needs a name".into());
+    }
+    let existing = lib.voice_of(&voice.provider, &voice.voice);
+    let mut stored = voice.clone();
+    if let Some(e) = existing {
+        stored.id = e.id;
+        if stored.path.as_os_str().is_empty() {
+            stored.path = e.path.clone();
+        }
+        if stored.sample.is_none() {
+            stored.sample = e.sample.clone();
+            stored.sample_info = e.sample_info.clone();
+        }
+    }
+    if let Some(item) = sample {
+        let sample = item.path.as_path();
+        let ext = sample.extension().and_then(|e| e.to_str()).unwrap_or("mp3");
+        let file = format!(
+            "voices/{}-{}.{ext}",
+            file_name_part(&stored.provider),
+            file_name_part(&stored.voice)
+        );
+        let to = paths::assets().join(&file);
+        let _ = std::fs::remove_file(&to);
+        copy_audio(sample, &to)?;
+        stored.sample = Some(file);
+        stored.sample_info = item.info.clone();
+    }
+    write_voice(&stored)
+}
+
+fn write_voice(voice: &SavedVoice) -> Result<SavedVoice> {
+    let own = Some(voice.path.as_path()).filter(|p| !p.as_os_str().is_empty());
+    let path = file_for(&voice.name, VOICE_EXT, own);
+    write_json(
+        &path,
+        &VoiceFile {
+            format: VOICE_FORMAT.into(),
+            version: VERSION,
+            voice: voice.clone(),
+        },
+    )?;
+    moved(own, &path);
+    Ok(SavedVoice {
+        path,
+        ..voice.clone()
+    })
+}
+
+pub fn rename_voice(voice: &SavedVoice, name: &str) -> Result<SavedVoice> {
+    write_voice(&SavedVoice {
+        name: name.trim().to_owned(),
+        ..voice.clone()
+    })
+}
+
+/// Keep `reading`'s stability and similarity as how `voice` reads.
+pub fn set_voice_reading(voice: &SavedVoice, reading: &Reading) -> Result<SavedVoice> {
+    write_voice(&SavedVoice {
+        stability: reading.stability,
+        similarity: reading.similarity,
+        ..voice.clone()
+    })
 }
 
 // -------------------------------------------------------------------- shared
