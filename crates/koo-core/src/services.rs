@@ -186,6 +186,11 @@ pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
     /// item; a no-op if cached for its fingerprint.
     fn analyze(&self, item: &MediaItem) -> JobId;
+    /// Queue what is heard in a library sound: sounds, music, beats and
+    /// sound vectors, on this machine. No speech, so it spends no
+    /// transcription credits. Nothing if it has results, or the steps or
+    /// their models are off. May read the disk.
+    fn analyze_sound(&self, _item: &MediaItem) {}
     /// Apply `config` to the items analyzed from now on; a job already
     /// running keeps the one it started with.
     fn configure(&self, _config: AnalysisConfig) {}

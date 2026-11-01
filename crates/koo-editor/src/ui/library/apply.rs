@@ -226,7 +226,7 @@ fn gap_at(project: &Project, track: TrackId, at: Time) -> Option<TimeRange> {
     (end - at >= Time::from_secs_f64(MIN_GAP)).then(|| TimeRange::new(at, end))
 }
 
-fn new_track_name(project: &Project, kind: TrackKind) -> String {
+pub(super) fn new_track_name(project: &Project, kind: TrackKind) -> String {
     let prefix = match kind {
         TrackKind::Title => "T",
         TrackKind::Overlay => "O",

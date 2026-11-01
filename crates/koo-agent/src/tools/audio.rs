@@ -34,10 +34,10 @@ const PICTURE_WIDTH: u32 = 1400;
 /// Beats and downbeats listed by one `get_music` call, per stretch.
 const MAX_BEATS: usize = 256;
 /// Search matches scoring less are left out.
-const MIN_SCORE: f32 = 0.1;
+pub(super) const MIN_SCORE: f32 = 0.1;
 
 /// `x` to `places` decimals, for JSON that reads cleanly.
-fn round(x: f64, places: i32) -> f64 {
+pub(super) fn round(x: f64, places: i32) -> f64 {
     let k = 10f64.powi(places);
     (x * k).round() / k
 }

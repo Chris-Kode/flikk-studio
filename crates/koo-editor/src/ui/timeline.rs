@@ -1259,6 +1259,23 @@ impl TimelinePanel {
         }
     }
 
+    /// Show the row under a media drag at `p`.
+    fn media_drag_moved(
+        &mut self,
+        p: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let row = if bounds.contains(&p) {
+            let (_, y) = self.local(p);
+            let tl = &self.state.read(cx).bus.project().timeline;
+            layout::row_at(&self.rows(tl), y).map(|r| r.track)
+        } else {
+            None
+        };
+        self.set_drop(row.map(DropHint::Row), cx);
+    }
+
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
         self.drop = None;
         let p = window.mouse_position();
@@ -1324,6 +1341,22 @@ impl TimelinePanel {
                 s.edit(insert(track), cx);
             }
         });
+    }
+
+    /// Add the sound to the pool, then drop it like pool media.
+    fn drop_sound(&mut self, drag: &super::SoundDrag, window: &Window, cx: &mut Context<Self>) {
+        let media = self.state.update(cx, |s, cx| {
+            super::library::shared::use_sound(s, drag.sound, cx)
+        });
+        let Some(media) = media else {
+            self.drop = None;
+            return;
+        };
+        let drag = super::MediaDrag {
+            media,
+            name: drag.name.clone(),
+        };
+        self.drop_media(&drag, window, cx);
     }
 
     // -------------------------------------------------------------- actions
@@ -2485,19 +2518,19 @@ impl Render for TimelinePanel {
                             )
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::MediaDrag>, _, cx| {
-                                    let p = ev.event.position;
-                                    let row = if ev.bounds.contains(&p) {
-                                        let (_, y) = this.local(p);
-                                        let tl = &this.state.read(cx).bus.project().timeline;
-                                        layout::row_at(&this.rows(tl), y).map(|r| r.track)
-                                    } else {
-                                        None
-                                    };
-                                    this.set_drop(row.map(DropHint::Row), cx);
+                                    this.media_drag_moved(ev.event.position, ev.bounds, cx)
                                 },
                             ))
                             .on_drop(cx.listener(|this, drag: &super::MediaDrag, window, cx| {
                                 this.drop_media(drag, window, cx)
+                            }))
+                            .on_drag_move(cx.listener(
+                                |this, ev: &DragMoveEvent<super::SoundDrag>, _, cx| {
+                                    this.media_drag_moved(ev.event.position, ev.bounds, cx)
+                                },
+                            ))
+                            .on_drop(cx.listener(|this, drag: &super::SoundDrag, window, cx| {
+                                this.drop_sound(drag, window, cx)
                             }))
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::FxDrag>, _, cx| {

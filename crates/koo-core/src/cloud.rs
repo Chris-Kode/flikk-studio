@@ -293,20 +293,20 @@ pub fn media_item(
     }
 }
 
-/// The commands that add `item` to `project`'s pool, in the
-/// [`GENERATED_BIN`] bin, made first if the project has none.
-pub fn pool_commands(project: &Project, mut item: MediaItem) -> Vec<Command> {
+/// The commands that add `item` to `project`'s pool, in the bin named
+/// `name`, made first if the project has none.
+pub fn pool_commands(project: &Project, mut item: MediaItem, name: &str) -> Vec<Command> {
     let mut commands = Vec::new();
     let bin = match project
         .bins
         .iter()
-        .find(|b| b.parent.is_none() && b.name == GENERATED_BIN)
+        .find(|b| b.parent.is_none() && b.name == name)
     {
         Some(bin) => bin.id,
         None => {
             let bin = Bin {
                 id: BinId::new(),
-                name: GENERATED_BIN.into(),
+                name: name.into(),
                 parent: None,
             };
             let id = bin.id;

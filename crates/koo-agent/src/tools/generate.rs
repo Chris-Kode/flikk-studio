@@ -7,7 +7,7 @@
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
 use koo_core::bus::{Author, CommandBus};
-use koo_core::cloud::{CloudError, GenerateRequest, MusicSection};
+use koo_core::cloud::{self, CloudError, GenerateRequest, MusicSection};
 use koo_core::command::{Command, InsertMode};
 use koo_core::model::{MediaItem, Project, TrackKind};
 use koo_core::{MediaId, Time, TimeRange, TrackId};
@@ -225,7 +225,7 @@ pub fn finish(
 /// review so a proposal can use it.
 pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, String> {
     let id = item.id;
-    let commands = koo_core::cloud::pool_commands(bus.project(), item);
+    let commands = cloud::pool_commands(bus.project(), item, cloud::GENERATED_BIN);
     bus.execute_shared(commands, "Generate audio")
         .map(|_| id)
         .map_err(|e| e.to_string())
@@ -247,7 +247,7 @@ pub fn propose_placement(
         .and_then(|m| m.info.as_ref())
         .map(|i| i.duration)
         .filter(|d| *d > Time::ZERO)
-        .ok_or("the generated file could not be read")?;
+        .ok_or("the length of the file could not be read")?;
     let span = TimeRange::new(placement.at, placement.at + length);
     let free = placement.track.or_else(|| {
         project

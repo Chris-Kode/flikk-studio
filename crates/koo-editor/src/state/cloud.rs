@@ -338,7 +338,8 @@ impl EditorState {
             Some(Capability::SoundEffects) => "Generate sound effect",
             _ => "Generate music",
         };
-        let commands = koo_core::cloud::pool_commands(self.bus.project(), item);
+        let bin = koo_core::cloud::GENERATED_BIN;
+        let commands = koo_core::cloud::pool_commands(self.bus.project(), item, bin);
         let result = self.bus.execute_shared(commands, label);
         self.finish(result, cx).map(|_| id)
     }

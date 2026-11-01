@@ -1,14 +1,17 @@
-//! The user's library from the editor: programs and presets every project
-//! can use (see `koo_core::library`). Using a program copies it into the
-//! project first; saving one to the library links the project's copy to it.
+//! The user's library from the editor: programs, presets and sounds every
+//! project can use (see `koo_core::library`). Using a program copies it into
+//! the project first; saving one to the library links the project's copy to
+//! it. Using a sound adds it to the pool first.
 
-use super::apply::{apply_fx, picture_clips, sound_clips};
+use super::apply::{apply_fx, new_track_name, picture_clips, sound_clips};
 use crate::state::EditorState;
+use crate::ui::media_pool::import::{build_item, is_audio};
 use gpui_kit::*;
-use koo_core::command::Command;
+use koo_core::command::{Command, InsertMode};
 use koo_core::fx::{self, FxRef};
 use koo_core::library::{self, Preset};
-use koo_core::{LibraryId, model::Project};
+use koo_core::model::{MediaItem, TrackKind};
+use koo_core::{LibraryId, MediaId, Time, TimeRange, TrackId, model::Project};
 use std::path::PathBuf;
 
 /// The project's copy of library program `id`, copied in now if needed.
@@ -137,6 +140,8 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
         library::rename_program(&s.library, &program, name).map(|_| ())
     } else if let Some(preset) = s.library.preset(id).cloned() {
         library::rename_preset(&preset, name).map(|_| ())
+    } else if let Some(sound) = s.library.sound(id).cloned() {
+        library::rename_sound(&sound, name).map(|_| ())
     } else {
         return;
     };
@@ -146,8 +151,8 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
     }
 }
 
-/// Remove a program or preset from the library. Projects keep their
-/// copies.
+/// Remove a program, preset or sound from the library. Projects keep their
+/// copies, and sounds their audio.
 pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
     let Some(path) = file_of(s, id) else {
         return;
@@ -158,17 +163,20 @@ pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>)
     }
 }
 
-/// The file of a program or preset.
+/// The file of a program, preset or sound.
 pub fn file_of(s: &EditorState, id: LibraryId) -> Option<PathBuf> {
     s.library
         .program(id)
         .map(|p| p.path.clone())
         .or_else(|| s.library.preset(id).map(|p| p.path.clone()))
+        .or_else(|| s.library.sound(id).map(|p| p.path.clone()))
 }
 
-/// Copy `.koofx` and `.koopreset` files into the library.
+/// Copy `.koofx` and `.koopreset` files into the library, and audio files
+/// as sounds.
 pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorState>) {
-    let errors: Vec<String> = paths
+    let (audio, files): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|p| is_audio(p));
+    let errors: Vec<String> = files
         .iter()
         .filter_map(|p| library::import(&s.library, p).err())
         .collect();
@@ -176,6 +184,139 @@ pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorSta
     if !errors.is_empty() {
         fail(s, errors.join(" · "), cx);
     }
+    if !audio.is_empty() {
+        let media = s.services.media.clone();
+        save_sounds(
+            s,
+            move || {
+                let build = |p| build_item(p, None, media.as_deref());
+                audio.into_iter().filter_map(build).collect()
+            },
+            cx,
+        );
+    }
+}
+
+/// Save pool item `id` to the library.
+pub fn save_sound(s: &mut EditorState, id: MediaId, cx: &mut Context<EditorState>) {
+    if let Some(item) = s.bus.project().media(id).cloned() {
+        save_sounds(s, move || vec![item], cx);
+    }
+}
+
+/// Whether pool item `id` can go to the library: audio that is there to
+/// copy and not in it yet.
+pub fn can_save_sound(s: &EditorState, id: MediaId) -> bool {
+    s.bus.project().media(id).is_some_and(|item| {
+        item.kind == koo_core::model::MediaKind::Audio
+            && !s.offline.contains(&id)
+            && s.library.sound_of(item).is_none()
+    })
+}
+
+/// Off the UI thread: the audio is copied in.
+fn save_sounds(
+    s: &EditorState,
+    items: impl FnOnce() -> Vec<MediaItem> + Send + 'static,
+    cx: &mut Context<EditorState>,
+) {
+    let lib = s.library.clone();
+    let saved = cx.background_executor().spawn(async move {
+        let mut lib = lib;
+        let mut errors = Vec::new();
+        for item in items() {
+            match library::save_sound(&lib, &item) {
+                Ok(sound) => lib.sounds.push(sound),
+                Err(e) => errors.push(e),
+            }
+        }
+        errors
+    });
+    cx.spawn(async move |this, cx| {
+        let errors = saved.await;
+        let _ = this.update(cx, |s, cx| {
+            s.reload_library(cx);
+            if !errors.is_empty() {
+                fail(s, errors.join(" · "), cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// The project's media item for library sound `id`, added to the pool now
+/// if needed.
+pub fn use_sound(
+    s: &mut EditorState,
+    id: LibraryId,
+    cx: &mut Context<EditorState>,
+) -> Option<MediaId> {
+    let sound = s.library.sound(id)?.clone();
+    let (media, commands) = library::sound_media(s.bus.project(), &sound);
+    if commands.is_empty() {
+        return Some(media);
+    }
+    s.execute_batch(commands, "Add sound", cx).map(|_| media)
+}
+
+/// Open library sound `id` in the viewer to listen to it.
+pub fn open_sound(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
+    if let Some(media) = use_sound(s, id, cx) {
+        s.set_source_media(Some(media), cx);
+    }
+}
+
+/// Place library sound `id` at the playhead, on an audio track with nothing
+/// over its length, else on a new one.
+pub fn place_sound(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
+    let Some(sound) = s.library.sound(id).cloned() else {
+        return;
+    };
+    let length = sound
+        .duration()
+        .filter(|d| d.0 > 0)
+        .unwrap_or(Time::from_secs_f64(5.));
+    let at = s.playhead;
+    let Some(track) = free_audio_track(s, TimeRange::new(at, at + length), cx) else {
+        return;
+    };
+    let (media, mut commands) = library::sound_media(s.bus.project(), &sound);
+    commands.push(Command::InsertClip {
+        media,
+        source: TimeRange::new(Time::ZERO, length),
+        track,
+        at,
+        mode: InsertMode::Overwrite,
+    });
+    s.edit_batch(commands, "Add sound", cx);
+}
+
+/// An audio track free over `span`, added if there is none.
+fn free_audio_track(
+    s: &mut EditorState,
+    span: TimeRange,
+    cx: &mut Context<EditorState>,
+) -> Option<TrackId> {
+    let tracks = &s.bus.project().timeline.tracks;
+    let before: Vec<TrackId> = tracks.iter().map(|t| t.id).collect();
+    if let Some(track) = tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio && !t.locked)
+        .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&span)))
+    {
+        return Some(track.id);
+    }
+    let command = Command::AddTrack {
+        kind: TrackKind::Audio,
+        index: before.len(),
+        name: new_track_name(s.bus.project(), TrackKind::Audio),
+    };
+    s.execute(command, cx)?;
+    let tracks = &s.bus.project().timeline.tracks;
+    tracks
+        .iter()
+        .find(|t| !before.contains(&t.id))
+        .map(|t| t.id)
 }
 
 /// Save a preset made from the project and show it in the library.

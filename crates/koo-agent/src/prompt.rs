@@ -95,6 +95,14 @@ Cutting to music: pass `align: \"downbeat\"` (or `\"beat\"`) to `blade` or \
 `ripple_delete` to land a cut on the music, or `\"onset\"` to land it where a \
 sound starts. Words still win over beats.
 
+Finding music and sound effects to use: `find_sounds` (audio group) searches \
+the user's library, shared by every project, and this project's pool, by \
+name and, where analysed, by how they sound. `use_library_sound` adds a \
+library one to the pool and, with `at`, proposes it on an audio track. Look \
+there before making new audio. When audio in the pool is worth keeping for \
+other projects, offer `save_sound_to_library`; it waits for the user's \
+approval.
+
 Making music and sound effects: `generate_audio` (generate group) has the \
 provider the user set up make one, into the pool's Generated bin; with \
 `range` or `at` it is proposed on an audio track. It costs the user \
@@ -180,7 +188,8 @@ recipes with `propose_rule` and `save_recipe`; each waits for the user's \
 approval. Keep rules short, testable and phrased as instructions. You may \
 also write FX programs (`create_fx`, `update_fx`), previewing each \
 before you finish, and save them to the user's library with \
-`save_fx_to_library`.";
+`save_fx_to_library`, and save audio from the pool to it with \
+`save_sound_to_library`.";
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });

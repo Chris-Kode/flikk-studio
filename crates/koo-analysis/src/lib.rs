@@ -19,6 +19,10 @@
 //! the other models are optional: a step whose model is missing is left
 //! out, and the provider's audio events stand in for the sound tagger. The
 //! steps the user turned off ([`AnalysisSteps`]) don't run either way.
+//!
+//! Library sounds are analyzed without being asked, so
+//! [`AnalyzeOptions::sound_only`] leaves speech and shots out: nothing goes
+//! to a provider, and "Analyze again" adds the rest.
 
 mod align;
 mod cache;
@@ -84,6 +88,8 @@ pub struct AnalyzeOptions {
     pub language: Option<String>,
     /// Ignore cached results and analyze again.
     pub refresh: bool,
+    /// Only what is heard: no transcript, speakers or shot changes.
+    pub sound_only: bool,
 }
 
 /// The [`AnalysisService`] that runs everything on this machine.
@@ -296,6 +302,20 @@ impl AnalysisService for LocalAnalysis {
         self.analyze_with(item, AnalyzeOptions::default())
     }
 
+    fn analyze_sound(&self, item: &MediaItem) {
+        let wanted = cfg!(feature = "sounds")
+            && lock(&self.shared.config).steps.sounds
+            && ModelTask::SoundTagging.model().is_downloaded();
+        let done = |fp| self.shared.complete(fp);
+        if wanted && item.fingerprint.as_ref().is_some_and(|fp| !done(fp)) {
+            let options = AnalyzeOptions {
+                sound_only: true,
+                ..AnalyzeOptions::default()
+            };
+            self.analyze_with(item, options);
+        }
+    }
+
     fn analyze_again(&self, item: &MediaItem) -> JobId {
         let options = AnalyzeOptions {
             refresh: true,
@@ -423,8 +443,8 @@ struct Plan {
     steps: AnalysisSteps,
     /// Transcribes in place of the local speech models.
     online: Option<Arc<dyn SpeechService>>,
-    /// A provider is set for transcription, so local models are optional:
-    /// a step whose model is missing is left out.
+    /// A provider is set for transcription or this is only a sound, so
+    /// local models are optional: a step whose model is missing is left out.
     lenient: bool,
     /// The sound pass runs, with sound search and beats when these say.
     sounds: bool,
@@ -433,9 +453,14 @@ struct Plan {
 }
 
 impl Plan {
-    fn new(config: &AnalysisConfig) -> Self {
-        let steps = config.steps;
-        let lenient = config.speech.is_some();
+    fn new(config: &AnalysisConfig, sound_only: bool) -> Self {
+        let mut steps = config.steps;
+        if sound_only {
+            steps.transcript = false;
+            steps.speakers = false;
+            steps.shots = false;
+        }
+        let lenient = sound_only || config.speech.is_some();
         let have = |task: ModelTask| !lenient || task.model().is_downloaded();
         let sounds = cfg!(feature = "sounds") && steps.sounds && have(ModelTask::SoundTagging);
         Self {
@@ -454,7 +479,7 @@ impl Plan {
 /// rest goes on; such a result is kept in memory for this session but only
 /// complete ones are written to disk.
 fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
-    let plan = Plan::new(&lock(&shared.config));
+    let plan = Plan::new(&lock(&shared.config), task.options.sound_only);
     let steps = plan.steps;
     let item = &task.item;
     let duration = item.info.as_ref().map(|i| i.duration);

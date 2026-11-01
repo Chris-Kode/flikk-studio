@@ -21,15 +21,19 @@ enum Place {
     Analysis,
     Models,
     Generated,
+    /// Audio of the library's sounds, also of ones removed from it, which
+    /// projects may still use.
+    Sounds,
     Backups,
 }
 
 impl Place {
-    const ALL: [Place; 5] = [
+    const ALL: [Place; 6] = [
         Place::Previews,
         Place::Analysis,
         Place::Models,
         Place::Generated,
+        Place::Sounds,
         Place::Backups,
     ];
 
@@ -39,6 +43,7 @@ impl Place {
             Place::Analysis => "Analysis",
             Place::Models => "Models",
             Place::Generated => "Generated audio",
+            Place::Sounds => "Library sounds",
             Place::Backups => "Backups",
         }
     }
@@ -49,6 +54,7 @@ impl Place {
             Place::Analysis => paths::cache().join("analysis"),
             Place::Models => paths::models(),
             Place::Generated => paths::generated(),
+            Place::Sounds => paths::assets(),
             Place::Backups => paths::backups(),
         }
     }

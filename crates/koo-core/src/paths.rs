@@ -43,7 +43,7 @@ pub fn backups() -> PathBuf {
     sub("backups")
 }
 
-/// FX programs and presets shared by every project.
+/// FX programs, presets and sounds shared by every project.
 pub fn library() -> PathBuf {
     sub("library")
 }
@@ -58,7 +58,7 @@ pub fn models() -> PathBuf {
     sub("models")
 }
 
-/// Shared asset library (PRD M5).
+/// Audio of the library's sounds, in a folder per content.
 pub fn assets() -> PathBuf {
     sub("assets")
 }

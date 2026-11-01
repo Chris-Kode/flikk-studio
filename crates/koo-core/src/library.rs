@@ -1,5 +1,6 @@
-//! The user's library: FX programs and presets shared by every project,
-//! one file each under `paths::library()` (`.koofx`, `.koopreset`).
+//! The user's library: FX programs, presets and sounds shared by every
+//! project, one file each under `paths::library()` (`.koofx`, `.koopreset`,
+//! `.koosound`).
 //!
 //! Projects never point into the library. Using a program copies it into
 //! the project ([`Project::fx`]) with [`FxAsset::origin`] naming the
@@ -8,13 +9,18 @@
 //! preset carries the project programs its effects use, so it applies in
 //! any project.
 //!
+//! A sound's audio lives in `paths::assets()`, and a project using it holds
+//! a media item on that file, as it does for any source. Removing a sound
+//! leaves the file, so projects using it stay online.
+//!
 //! Errors are messages for the user.
 
 use crate::audiofx::AudioFx;
+use crate::cloud::{self, Capability, GenerationInfo};
 use crate::command::Command;
 use crate::fx::{FxAsset, FxInstance, FxRef};
-use crate::ids::{ClipId, EffectId, FxId, LibraryId};
-use crate::model::{Grade, Project};
+use crate::ids::{ClipId, EffectId, FxId, LibraryId, MediaId};
+use crate::model::{Fingerprint, Grade, MediaInfo, MediaItem, MediaKind, Project};
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,8 +28,12 @@ use std::path::{Path, PathBuf};
 
 pub const PROGRAM_EXT: &str = "koofx";
 pub const PRESET_EXT: &str = "koopreset";
+pub const SOUND_EXT: &str = "koosound";
 const PROGRAM_FORMAT: &str = "koo-fx";
 const PRESET_FORMAT: &str = "koo-preset";
+const SOUND_FORMAT: &str = "koo-sound";
+/// Name of the bin sounds from the library go into.
+pub const LIBRARY_BIN: &str = "Library";
 /// Bumped when an older file needs an upgrade step on load.
 const VERSION: u32 = 1;
 
@@ -58,6 +68,24 @@ pub struct Preset {
     pub path: PathBuf,
 }
 
+/// A sound or piece of music any project can use.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sound {
+    pub id: LibraryId,
+    pub name: String,
+    /// The audio's file, relative to `paths::assets()`.
+    pub file: String,
+    pub fingerprint: Option<Fingerprint>,
+    pub info: Option<MediaInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// How a provider made it, when it was generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<Box<GenerationInfo>>,
+    #[serde(skip)]
+    pub path: PathBuf,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ProgramFile {
     format: String,
@@ -74,11 +102,20 @@ struct PresetFile {
     preset: Preset,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SoundFile {
+    format: String,
+    version: u32,
+    #[serde(flatten)]
+    sound: Sound,
+}
+
 /// Everything in the library, by name.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub programs: Vec<Program>,
     pub presets: Vec<Preset>,
+    pub sounds: Vec<Sound>,
 }
 
 impl Library {
@@ -95,6 +132,7 @@ impl Library {
             let read = match ext {
                 Some(PROGRAM_EXT) => read_program(&path).map(|p| lib.programs.push(p)),
                 Some(PRESET_EXT) => read_preset(&path).map(|p| lib.presets.push(p)),
+                Some(SOUND_EXT) => read_sound(&path).map(|s| lib.sounds.push(s)),
                 _ => Ok(()),
             };
             if let Err(e) = read {
@@ -103,6 +141,7 @@ impl Library {
         }
         lib.programs.sort_by_key(|p| p.asset.name.to_lowercase());
         lib.presets.sort_by_key(|p| p.name.to_lowercase());
+        lib.sounds.sort_by_key(|s| s.name.to_lowercase());
         lib
     }
 
@@ -112,6 +151,17 @@ impl Library {
 
     pub fn preset(&self, id: LibraryId) -> Option<&Preset> {
         self.presets.iter().find(|p| p.id == id)
+    }
+
+    pub fn sound(&self, id: LibraryId) -> Option<&Sound> {
+        self.sounds.iter().find(|s| s.id == id)
+    }
+
+    /// The sound holding the same audio as `item`.
+    pub fn sound_of(&self, item: &MediaItem) -> Option<&Sound> {
+        self.sounds
+            .iter()
+            .find(|s| s.audio() == item.path || same_audio(&s.fingerprint, &item.fingerprint))
     }
 
     /// The library program a project program came from, if still there.
@@ -149,6 +199,19 @@ fn read_preset(path: &Path) -> Result<Preset> {
         path: path.to_path_buf(),
         ..file.preset
     })
+}
+
+fn read_sound(path: &Path) -> Result<Sound> {
+    let file: SoundFile = read_json(path)?;
+    check(path, &file.format, SOUND_FORMAT, file.version)?;
+    let sound = Sound {
+        path: path.to_path_buf(),
+        ..file.sound
+    };
+    if !sound.audio().is_file() {
+        return Err(format!("the audio of {} is missing", name(path)));
+    }
+    Ok(sound)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -476,6 +539,158 @@ pub fn preset_commands(
         }
     }
     commands
+}
+
+// -------------------------------------------------------------------- sounds
+
+fn same_audio(a: &Option<Fingerprint>, b: &Option<Fingerprint>) -> bool {
+    a.is_some() && a == b
+}
+
+impl Sound {
+    /// The audio file.
+    pub fn audio(&self) -> PathBuf {
+        paths::assets().join(&self.file)
+    }
+
+    /// Group in the library.
+    pub fn category(&self) -> &'static str {
+        sound_category(self.generated.as_deref())
+    }
+
+    pub fn duration(&self) -> Option<crate::Time> {
+        self.info.as_ref().map(|i| i.duration)
+    }
+
+    /// A media item on its audio; not in a project or a bin yet.
+    pub fn item(&self) -> MediaItem {
+        MediaItem {
+            id: MediaId::new(),
+            path: self.audio(),
+            kind: MediaKind::Audio,
+            fingerprint: self.fingerprint.clone(),
+            info: self.info.clone(),
+            bin: None,
+            tags: self.tags.clone(),
+            proxy: None,
+            generated: self.generated.clone(),
+        }
+    }
+}
+
+/// Group of audio made as `generated`, plain audio when it wasn't.
+pub fn sound_category(generated: Option<&GenerationInfo>) -> &'static str {
+    match generated.map(|g| g.capability) {
+        Some(Capability::Music) => "Music",
+        Some(Capability::SoundEffects) => "Sound Effects",
+        _ => "Audio",
+    }
+}
+
+/// What to call `item` in the library: the start of what was asked of a
+/// provider, else its file name.
+fn sound_name(item: &MediaItem) -> String {
+    match &item.generated {
+        Some(g) => g
+            .prompt
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(|c: char| c.is_ascii_punctuation())
+            .to_owned(),
+        None => item
+            .path
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
+fn write_sound(sound: &Sound) -> Result<Sound> {
+    let own = Some(sound.path.as_path()).filter(|p| !p.as_os_str().is_empty());
+    let path = file_for(&sound.name, SOUND_EXT, own);
+    write_json(
+        &path,
+        &SoundFile {
+            format: SOUND_FORMAT.into(),
+            version: VERSION,
+            sound: sound.clone(),
+        },
+    )?;
+    moved(own, &path);
+    Ok(Sound {
+        path,
+        ..sound.clone()
+    })
+}
+
+/// Copy `from` to `to`, kept if already there: the same audio. Slow for
+/// long audio.
+fn copy_audio(from: &Path, to: &Path) -> Result<()> {
+    if to.is_file() {
+        return Ok(());
+    }
+    let tmp = to.with_file_name(format!(".{}.tmp", name(to)));
+    to.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::copy(from, &tmp))
+        .and_then(|_| std::fs::rename(&tmp, to))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("can't copy {}: {e}", name(from))
+        })
+}
+
+/// Put audio `item` in the library: its file copied in under a folder named
+/// by its content, keeping the name the pool shows. A sound with the same
+/// audio is returned as it is.
+pub fn save_sound(lib: &Library, item: &MediaItem) -> Result<Sound> {
+    if item.kind != MediaKind::Audio {
+        return Err(format!("{} is not a sound", name(&item.path)));
+    }
+    if let Some(sound) = lib.sound_of(item) {
+        return Ok(sound.clone());
+    }
+    let id = LibraryId::new();
+    let folder = item
+        .fingerprint
+        .as_ref()
+        .map_or_else(|| id.0.to_string(), |f| file_name_part(&f.0));
+    let file = format!("{folder}/{}", name(&item.path));
+    copy_audio(&item.path, &paths::assets().join(&file))?;
+    write_sound(&Sound {
+        id,
+        name: sound_name(item),
+        file,
+        fingerprint: item.fingerprint.clone(),
+        info: item.info.clone(),
+        tags: item.tags.clone(),
+        generated: item.generated.clone(),
+        path: PathBuf::new(),
+    })
+}
+
+pub fn rename_sound(sound: &Sound, name: &str) -> Result<Sound> {
+    write_sound(&Sound {
+        name: name.trim().to_owned(),
+        ..sound.clone()
+    })
+}
+
+/// The project's media item for `sound`: one with the same audio, else a
+/// new one and the commands that add it to the [`LIBRARY_BIN`] bin.
+pub fn sound_media(project: &Project, sound: &Sound) -> (MediaId, Vec<Command>) {
+    let audio = sound.audio();
+    if let Some(item) = project
+        .media
+        .iter()
+        .find(|m| m.path == audio || same_audio(&m.fingerprint, &sound.fingerprint))
+    {
+        return (item.id, Vec::new());
+    }
+    let item = sound.item();
+    (item.id, cloud::pool_commands(project, item, LIBRARY_BIN))
 }
 
 // -------------------------------------------------------------------- shared
