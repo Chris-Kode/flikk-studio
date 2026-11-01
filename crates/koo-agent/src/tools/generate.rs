@@ -1,13 +1,14 @@
-//! `generate_audio`: music or a sound effect made by the provider the user
-//! set for it (the Generate category). Each one spends the user's credits,
-//! so it waits for their approval unless they allowed it. The file goes to
-//! the pool's Music Generated or Sound Effects Generated bin; with `at` (or
-//! `range`) it is also proposed on an audio track.
+//! `generate_audio`: music, a sound effect or a voiceover made by the
+//! provider the user set for it (the Generate category). Each one spends the
+//! user's credits, so it waits for their approval unless they allowed it.
+//! The file goes to the pool's bin for what it is; with `at` (or `range`) it
+//! is also proposed on an audio track. `find_voices` lists who can read a
+//! voiceover.
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
 use koo_core::bus::{Author, CommandBus};
-use koo_core::cloud::{self, CloudError, GenerateRequest, MusicSection};
+use koo_core::cloud::{self, Capability, CloudError, GenerateRequest, MusicSection, Reading};
 use koo_core::command::{Command, InsertMode};
 use koo_core::model::{MediaItem, Project, TrackKind};
 use koo_core::{MediaId, Time, TimeRange, TrackId};
@@ -67,7 +68,31 @@ pub fn parse(project: &Project, args: &Args) -> ToolResultOf<(GenerateRequest, O
                 looping: args.opt_bool("loop")?.unwrap_or(false),
             }
         }
-        other => return fail(format!("unknown kind `{other}`: music or sound_effect")),
+        "voiceover" => {
+            cloud::check_script(&prompt).map_err(|e| ToolError(error_text(&e)))?;
+            let voice = args.str("voice")?.trim().to_owned();
+            let unit = |key: &str, default: f32| -> ToolResultOf<f32> {
+                match args.opt_f64(key)? {
+                    Some(v) if (0.0..=1.0).contains(&v) => Ok(v as f32),
+                    Some(_) => fail(format!("`{key}` runs from 0 to 1")),
+                    None => Ok(default),
+                }
+            };
+            GenerateRequest::Voiceover {
+                reading: Reading {
+                    voice_name: args.opt_str("voice_name")?.unwrap_or(&voice).to_owned(),
+                    stability: unit("stability", Reading::STABILITY)?,
+                    similarity: unit("similarity", Reading::SIMILARITY)?,
+                    voice,
+                },
+                text: prompt,
+            }
+        }
+        other => {
+            return fail(format!(
+                "unknown kind `{other}`: music, sound_effect or voiceover"
+            ));
+        }
     };
     let at = args.opt_time("at")?.or(range.map(|r| r.start));
     let track = args
@@ -163,11 +188,59 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     Ok(Step::Job(job))
 }
 
+/// The voices that can read a voiceover, filtered by `text`, in a job: the
+/// list is a request.
+pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+    let words: Vec<String> = args
+        .opt_str("text")?
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    let limit = args.opt_f64("limit")?.map_or(20, |n| n.max(1.0) as usize);
+    let Some(generation) = ctx.services.generation.clone() else {
+        return fail("Generation is not available in this build.");
+    };
+    if generation.provider_for(Capability::Voiceover).is_none() {
+        return fail(unavailable_for(Capability::Voiceover));
+    }
+    let job: Job = Box::new(move || {
+        let voices = match generation.voices() {
+            Ok(voices) => voices,
+            Err(e) => return JobDone::Done(Done::error(error_text(&e))),
+        };
+        let found: Vec<Value> = voices
+            .iter()
+            .filter(|v| {
+                let about = format!("{} {} {}", v.name, v.category, v.traits.join(" "));
+                let about = about.to_lowercase();
+                words.iter().all(|w| about.contains(w))
+            })
+            .take(limit)
+            .map(|v| {
+                json!({
+                    "voice": v.id,
+                    "name": v.name,
+                    "category": v.category,
+                    "traits": v.traits,
+                })
+            })
+            .collect();
+        let summary = format!("found {} voices", found.len());
+        JobDone::Done(Done::json(summary, &json!({ "voices": found })))
+    });
+    Ok(Step::Job(job))
+}
+
 /// Why the user's settings stop it.
 pub fn unavailable(request: &GenerateRequest) -> String {
+    unavailable_for(request.capability())
+}
+
+fn unavailable_for(capability: Capability) -> String {
     format!(
         "No provider with an API key is set for {} in Settings → Integrations. Tell the user; don't retry.",
-        request.capability().label().to_lowercase()
+        capability.label().to_lowercase()
     )
 }
 

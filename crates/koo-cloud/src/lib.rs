@@ -21,7 +21,7 @@ pub use keys::{KeySource, Keys};
 
 use koo_core::cloud::{
     Capability, CloudError, CloudResult, CloudSettings, GenerateRequest, Generated, GenerationInfo,
-    GenerationService, Heard, SpeechRequest, SpeechService,
+    GenerationService, Heard, SpeechRequest, SpeechService, Voice,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -121,6 +121,11 @@ pub trait Api: Sync {
         _request: &GenerateRequest,
         _stem: &Path,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    /// The voices voiceovers can use with `key`.
+    fn voices(&self, _key: &str) -> CloudResult<Vec<Voice>> {
         Err(CloudError::Unavailable("not offered".into()))
     }
 }
@@ -238,9 +243,45 @@ impl GenerationService for Cloud {
             provider: provider.id.to_owned(),
             model: model.id.to_owned(),
             prompt: request.prompt().to_owned(),
+            reading: request.reading().cloned(),
         };
         write_sidecar(&path, request, &info, cost);
         Ok(Generated { path, info, cost })
+    }
+
+    fn voices(&self) -> CloudResult<Vec<Voice>> {
+        let (provider, _) = self.require(Capability::Voiceover)?;
+        let key = self.key(provider)?;
+        provider.api.voices(&key)
+    }
+
+    fn voice_sample(&self, voice: &Voice) -> CloudResult<PathBuf> {
+        let fail = |what: String| CloudError::Failed(what);
+        let name: String = voice
+            .id
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        let dir = koo_core::paths::cache().join("voices");
+        let path = dir.join(format!("{name}.mp3"));
+        if path.exists() {
+            return Ok(path);
+        }
+        let url = voice
+            .sample
+            .as_deref()
+            .filter(|url| url.starts_with("https://"))
+            .ok_or_else(|| fail(format!("{} has no sample", voice.name)))?;
+        // A public file, on another host: the key doesn't go with it.
+        let reply = http::get(url, &[])?;
+        if !reply.ok() {
+            return Err(fail(format!("No sample of {}", voice.name)));
+        }
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(path.with_extension("mp3.part"), &reply.body))
+            .and_then(|()| std::fs::rename(path.with_extension("mp3.part"), &path));
+        written.map_err(|e| fail(format!("could not write {}: {e}", path.display())))?;
+        Ok(path)
     }
 }
 
@@ -250,6 +291,7 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> PathBuf {
     let what = match request {
         GenerateRequest::Music { .. } => "music",
         GenerateRequest::SoundEffect { .. } => "sfx",
+        GenerateRequest::Voiceover { .. } => "voiceover",
     };
     let words: Vec<String> = request
         .prompt()

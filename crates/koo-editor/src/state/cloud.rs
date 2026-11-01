@@ -1,7 +1,8 @@
 //! Online providers in the editor: each one's key and account as Settings →
 //! Integrations shows them, the provider picked for each capability, the
-//! analysis steps, and music and sound effects made from the media pool or
-//! approved for the agent. The requests themselves are `koo-cloud`'s.
+//! analysis steps, and music, sound effects and voiceovers made from the
+//! media pool or approved for the agent. The requests themselves are
+//! `koo-cloud`'s.
 
 use super::{ApprovalOutcome, EditorState};
 use crate::agent_link::approve;
@@ -45,7 +46,7 @@ pub enum Check {
     Failed(String),
 }
 
-/// Music or a sound effect being made from the media pool.
+/// Music, a sound effect or a voiceover being made from the media pool.
 #[derive(Clone, Debug)]
 pub struct Generating {
     pub id: u64,
@@ -135,7 +136,11 @@ impl EditorState {
                     Err(e) => status.check = Check::Failed(e),
                 }
                 if matches!(status.check, Check::Valid(_)) {
-                    for capability in [Capability::Music, Capability::SoundEffects] {
+                    for capability in [
+                        Capability::Music,
+                        Capability::SoundEffects,
+                        Capability::Voiceover,
+                    ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
                             this.set_provider(capability, Some(provider), cx);
@@ -319,6 +324,21 @@ impl EditorState {
         cx.notify();
     }
 
+    /// The voice that last read a voiceover.
+    pub fn last_voice(&self) -> Option<String> {
+        self.cloud.settings().voice
+    }
+
+    /// Start the next voiceover on `voice`.
+    pub fn remember_voice(&mut self, voice: &str) {
+        let mut settings = self.cloud.settings();
+        if settings.voice.as_deref() != Some(voice) {
+            settings.voice = Some(voice.to_owned());
+            persistence::with_store(|s| s.save_cloud_settings(&settings));
+            self.cloud.set_settings(settings);
+        }
+    }
+
     /// Forget a generation that failed.
     pub fn dismiss_generation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.generating.retain(|g| g.id != id);
@@ -336,6 +356,7 @@ impl EditorState {
         let id = item.id;
         let label = match item.generated.as_deref().map(|g| g.capability) {
             Some(Capability::SoundEffects) => "Generate sound effect",
+            Some(Capability::Voiceover) => "Generate voiceover",
             _ => "Generate music",
         };
         let bin = koo_core::cloud::generated_bin(&item);

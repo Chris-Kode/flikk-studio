@@ -98,6 +98,7 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
         "view_audio" | "measure_loudness" | "get_music" | "search_sounds" | "find_sounds" => {
             ToolCategory::Audio
         }
+        "find_voices" => ToolCategory::Generate,
         _ => spec.category?,
     })
 }
@@ -294,6 +295,11 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "jingle",
             "royalty",
             "sound effect",
+            "voiceover",
+            "voice over",
+            "voice-over",
+            "narrat",
+            "text to speech",
             "foley",
             "whoosh",
             "riser",

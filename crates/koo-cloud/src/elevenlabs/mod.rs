@@ -1,13 +1,17 @@
-//! ElevenLabs (api.elevenlabs.io): transcription with Scribe, music and
-//! sound effects. Every call sends the key as `xi-api-key`.
+//! ElevenLabs (api.elevenlabs.io): transcription with Scribe, music, sound
+//! effects and voiceovers. Every call sends the key as `xi-api-key`.
 
 mod music;
 mod sound;
+mod speech;
 mod transcribe;
+mod voices;
 
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
-use koo_core::cloud::{Capability, CloudError, CloudResult, GenerateRequest, Heard, SpeechRequest};
+use koo_core::cloud::{
+    Capability, CloudError, CloudResult, GenerateRequest, Heard, SpeechRequest, Voice,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -64,6 +68,13 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Voiceover,
+            models: &[CloudModel {
+                id: "eleven_v4",
+                name: "Eleven v4",
+            }],
+        },
     ],
     api: &ElevenLabs,
 };
@@ -112,7 +123,12 @@ impl Api for ElevenLabs {
         match request {
             GenerateRequest::Music { .. } => music::run(key, model, request, stem),
             GenerateRequest::SoundEffect { .. } => sound::run(key, model, request, stem),
+            GenerateRequest::Voiceover { .. } => speech::run(key, model, request, stem),
         }
+    }
+
+    fn voices(&self, key: &str) -> CloudResult<Vec<Voice>> {
+        voices::list(key)
     }
 }
 

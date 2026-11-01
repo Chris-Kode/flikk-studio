@@ -583,6 +583,7 @@ pub fn sound_category(generated: Option<&GenerationInfo>) -> &'static str {
     match generated.map(|g| g.capability) {
         Some(Capability::Music) => "Music",
         Some(Capability::SoundEffects) => "Sound Effects",
+        Some(Capability::Voiceover) => "Voiceover",
         _ => "Audio",
     }
 }
