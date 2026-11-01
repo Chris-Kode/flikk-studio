@@ -1,6 +1,8 @@
 //! Transcript and captions (PRD E3, C1–C3): the words under the timeline in
 //! timeline order, text-based ripple delete, caption generation and inline
 //! caption edits. Caption styles have their own panel (`caption_style`).
+//! A speaker's words can go to the Voices dialog: as a recording of them, to
+//! find shared voices like theirs or to clone it.
 
 mod captions;
 mod words;
@@ -292,6 +294,70 @@ impl TranscriptPanel {
         ))
     }
 
+    /// The name of who says the selection's first word, when voices can
+    /// be found and made.
+    fn selected_speaker(&self, cx: &App) -> Option<String> {
+        if !crate::ui::voices::available(self.state.read(cx)) {
+            return None;
+        }
+        let (a, _) = self.selection()?;
+        let speaker = self.words.get(a)?.word.speaker?;
+        Some(
+            self.speakers
+                .get(&speaker)
+                .cloned()
+                .unwrap_or_else(|| "the Speaker".into()),
+        )
+    }
+
+    /// Cut the selection's speaker into one recording, then open the
+    /// Voices dialog on it: to clone their voice, or to find ones like it.
+    fn speaker_voice(&mut self, clone: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::state::voices::{SPEAKER_LIMIT, recording, speaker_spans};
+        let Some(name) = self.selected_speaker(cx) else {
+            return;
+        };
+        let Some(speaker) = self
+            .selection()
+            .and_then(|(a, _)| self.words.get(a)?.word.speaker)
+        else {
+            return;
+        };
+        let project = self.state.read(cx).bus.project().clone();
+        let Some((source, spans)) = speaker_spans(&project, &self.words, speaker) else {
+            return;
+        };
+        let file_name = name.clone();
+        let cut = cx
+            .background_executor()
+            .spawn(async move { recording(&source, &spans, SPEAKER_LIMIT, &file_name) });
+        let state = self.state.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let result = cut.await;
+            let _ = cx.update(|window, cx| match result {
+                Ok(file) => {
+                    let start = if clone {
+                        crate::ui::voices::Start::Clone {
+                            files: vec![file],
+                            name,
+                        }
+                    } else {
+                        crate::ui::voices::Start::Similar {
+                            recording: file,
+                            label: name,
+                        }
+                    };
+                    crate::ui::voices::open(state, start, None, window, cx);
+                }
+                Err(e) => state.update(cx, |s, cx| {
+                    s.status = Some(e);
+                    cx.notify();
+                }),
+            });
+        })
+        .detach();
+    }
+
     fn add_to_chat(&mut self, cx: &mut Context<Self>) {
         if let Some(r) = self.selection_ref() {
             self.state.update(cx, |s, cx| s.mention(vec![r], cx));
@@ -382,12 +448,31 @@ impl TranscriptPanel {
                 if panel.read(cx).selection().is_none() {
                     return menu;
                 }
-                let panel = panel.clone();
-                menu.item(
-                    PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
-                        panel.update(cx, |this, cx| this.add_to_chat(cx))
-                    }),
-                )
+                let speaker = panel.read(cx).selected_speaker(cx);
+                let p = panel.clone();
+                let menu = menu.item(
+                    PopupMenuItem::new("Add to chat")
+                        .on_click(move |_, _, cx| p.update(cx, |this, cx| this.add_to_chat(cx))),
+                );
+                let Some(name) = speaker else {
+                    return menu;
+                };
+                let (p1, p2) = (panel.clone(), panel.clone());
+                menu.item(PopupMenuItem::separator())
+                    .item(
+                        PopupMenuItem::new(format!("Find Voices Like {name}…")).on_click(
+                            move |_, window, cx| {
+                                p1.update(cx, |this, cx| this.speaker_voice(false, window, cx))
+                            },
+                        ),
+                    )
+                    .item(
+                        PopupMenuItem::new(format!("Clone {name}’s Voice…")).on_click(
+                            move |_, window, cx| {
+                                p2.update(cx, |this, cx| this.speaker_voice(true, window, cx))
+                            },
+                        ),
+                    )
             })
             .into_any_element()
     }

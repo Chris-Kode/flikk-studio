@@ -1,7 +1,8 @@
 //! Carrying out an approved agent request: memory goes to the store,
 //! programs and sounds to the user's library, renders and exports to `koo-deliver`,
-//! music, sound effects and voiceovers to the provider set for them. Outputs
-//! always get a free name, so nothing here overwrites a file.
+//! music, sound effects and voiceovers to the provider set for them, as are
+//! voices added or designed, which then go to the library. Outputs always
+//! get a free name, so nothing here overwrites a file.
 
 use crate::persistence;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -30,6 +31,9 @@ pub enum Started {
     /// Runs off the UI thread and yields a file a provider made, for the
     /// pool, with where to place it.
     Generate(Box<dyn FnOnce() -> Result<Generated> + Send>),
+    /// Runs off the UI thread, adding or designing a voice that lands in
+    /// the library; yields what to tell the agent.
+    Voice(Box<dyn FnOnce() -> Result<String> + Send>),
 }
 
 /// What an approved generation made.
@@ -89,6 +93,29 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 })
             })))
         }
+        "add_voice" => {
+            let adding = koo_agent::tools::voices::add_from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
+            let (generation, media) = voice_services(inputs.services)?;
+            Ok(Started::Voice(Box::new(move || {
+                koo_agent::tools::voices::add(generation.as_ref(), media.as_deref(), &adding)
+                    .map_err(|e| anyhow!(e))
+            })))
+        }
+        "design_voice" => {
+            let (design, name) = koo_agent::tools::voices::design_from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
+            let (generation, media) = voice_services(inputs.services)?;
+            Ok(Started::Voice(Box::new(move || {
+                koo_agent::tools::voices::design(
+                    generation.as_ref(),
+                    media.as_deref(),
+                    &design,
+                    &name,
+                )
+                .map_err(|e| anyhow!(e))
+            })))
+        }
         "export_otio" => {
             let project = inputs.project.clone();
             let path = free_output(&project, "otio");
@@ -114,6 +141,19 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         }
         other => bail!("`{other}` cannot be approved"),
     }
+}
+
+type VoiceServices = (
+    std::sync::Arc<dyn koo_core::cloud::GenerationService>,
+    Option<std::sync::Arc<dyn koo_core::services::MediaService>>,
+);
+
+fn voice_services(services: &Services) -> Result<VoiceServices> {
+    let generation = services
+        .generation
+        .clone()
+        .ok_or_else(|| anyhow!("generation is not available"))?;
+    Ok((generation, services.media.clone()))
 }
 
 fn save_rule(args: &Value, project: &Project, settings: &mut AgentSettings) -> Result<Started> {

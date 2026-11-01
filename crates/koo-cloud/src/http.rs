@@ -139,6 +139,95 @@ pub fn post_json(
     })
 }
 
+pub fn delete(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
+    with_retries(false, || {
+        let mut request = agent().delete(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.call()
+    })
+}
+
+/// A file in a [`post_form`]: its field, path and media type.
+pub type FormFile<'a> = (&'a str, &'a Path, &'a str);
+
+/// A `multipart/form-data` POST of `fields` and `files`, read into memory
+/// first: for a few short recordings. See [`with_retries`] for
+/// `server_errors`.
+pub fn post_form(
+    url: &str,
+    headers: &[(&str, &str)],
+    fields: &[(&str, String)],
+    files: &[FormFile],
+    server_errors: bool,
+) -> Result<Reply, CloudError> {
+    let boundary = boundary();
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    for (field, path, mime) in files {
+        let bytes = std::fs::read(path)
+            .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().replace('"', "'"))
+            .unwrap_or_else(|| "audio".into());
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{file_name}\"\r\nContent-Type: {mime}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    with_retries(server_errors, || {
+        let mut request = agent().post(url).header("content-type", &content_type);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.send(&body[..])
+    })
+}
+
+/// A multipart boundary no file is likely to hold.
+fn boundary() -> String {
+    format!(
+        "koo-editor-{:x}{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+/// The media type of an audio file, by its extension.
+pub fn audio_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("m4a" | "mp4" | "aac") => "audio/mp4",
+        Some("ogg" | "opus") => "audio/ogg",
+        Some("webm") => "audio/webm",
+        _ => "audio/mpeg",
+    }
+}
+
 /// A `multipart/form-data` POST of `fields` and the file at `path` under
 /// `field`, read as it is sent; `progress` gets 0..1 of it. See
 /// [`with_retries`] for `server_errors`.
@@ -150,14 +239,7 @@ pub fn post_file(
     progress: &(dyn Fn(f32) + Sync),
     server_errors: bool,
 ) -> Result<Reply, CloudError> {
-    let boundary = format!(
-        "koo-editor-{:x}{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let boundary = boundary();
     let mut head = String::new();
     for (name, value) in fields {
         head.push_str(&format!(

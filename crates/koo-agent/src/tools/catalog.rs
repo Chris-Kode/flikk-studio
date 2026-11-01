@@ -4,6 +4,7 @@
 
 use super::{groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
+use koo_core::cloud;
 use koo_core::command::ToolCategory;
 use koo_core::model::{BlendMode, ClipColor, Format, Property};
 use serde_json::{Value, json};
@@ -1283,13 +1284,44 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "find_voices",
             Some(ReadProject),
-            "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",
+            "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",
             object(
                 json!({
                     "text": string("Words the voice must have: \"calm british narration\". Left out, lists them"),
+                    "library": boolean("Search the provider's shared Voice Library rather than the account"),
+                    "gender": one_of(&cloud::VOICE_GENDERS, "Only voices of this gender"),
+                    "age": one_of(&cloud::VOICE_AGES, "Only voices of this age"),
+                    "language": string("Only voices speaking this language: ISO 639-1, like \"es\""),
+                    "use_case": one_of(&cloud::VOICE_USES, "Only voices made for this"),
                     "limit": number("Most voices (default 20)")
                 }),
                 &[],
+            ),
+        ),
+        spec(
+            "add_voice",
+            Some(Generate),
+            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: unless they allowed generating, it waits for their approval and the voice id reaches you in the next turn's approvals.",
+            object(
+                json!({
+                    "voice": string("The shared voice's id from find_voices"),
+                    "owner": string("Its `owner` from find_voices"),
+                    "name": string("What to call it: its name, unless the user named it")
+                }),
+                &["voice", "owner", "name"],
+            ),
+        ),
+        spec(
+            "design_voice",
+            Some(Generate),
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits for their approval and the voice id reaches you in the next turn's approvals.",
+            object(
+                json!({
+                    "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),
+                    "text": string("What the samples say, 100–1,000 characters, in the voice's language and style (default: the provider writes one)"),
+                    "name": string("What to call the voice")
+                }),
+                &["description", "name"],
             ),
         ),
         // ---- conversation

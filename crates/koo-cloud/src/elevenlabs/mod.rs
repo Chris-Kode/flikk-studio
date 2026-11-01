@@ -1,6 +1,9 @@
 //! ElevenLabs (api.elevenlabs.io): transcription with Scribe, music, sound
-//! effects and voiceovers. Every call sends the key as `xi-api-key`.
+//! effects, voiceovers, and the voices that read them: listed, searched in
+//! the shared library, designed, cloned. Every call sends the key as
+//! `xi-api-key`.
 
+mod design;
 mod music;
 mod sound;
 mod speech;
@@ -10,7 +13,8 @@ mod voices;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use koo_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, Heard, SpeechRequest, Voice,
+    Capability, CloudError, CloudResult, Designed, GenerateRequest, Heard, SpeechRequest, Voice,
+    VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -130,6 +134,44 @@ impl Api for ElevenLabs {
     fn voices(&self, key: &str) -> CloudResult<Vec<Voice>> {
         voices::list(key)
     }
+
+    fn search_voices(&self, key: &str, query: &VoiceQuery, page: usize) -> CloudResult<VoicePage> {
+        voices::search(key, query, page)
+    }
+
+    fn similar_voices(&self, key: &str, audio: &Path) -> CloudResult<Vec<Voice>> {
+        voices::similar(key, audio)
+    }
+
+    fn add_voice(&self, key: &str, voice: &Voice, name: &str) -> CloudResult<Voice> {
+        voices::add(key, voice, name)
+    }
+
+    fn design_voice(&self, key: &str, design: &VoiceDesign) -> CloudResult<Designed> {
+        design::design(key, design)
+    }
+
+    fn save_voice(
+        &self,
+        key: &str,
+        design: &VoiceDesign,
+        preview: &VoicePreview,
+        name: &str,
+    ) -> CloudResult<Voice> {
+        design::save(key, design, preview, name)
+    }
+
+    fn clone_voice(&self, key: &str, clone: &VoiceClone) -> CloudResult<Voice> {
+        voices::clone(key, clone)
+    }
+
+    fn rename_voice(&self, key: &str, voice: &str, name: &str) -> CloudResult<()> {
+        voices::rename(key, voice, name)
+    }
+
+    fn delete_voice(&self, key: &str, voice: &str) -> CloudResult<()> {
+        voices::delete(key, voice)
+    }
 }
 
 /// What an error reply means. The body is `{"detail": {"type", "code",
@@ -175,6 +217,13 @@ fn error(reply: &Reply) -> CloudError {
     }
     if has("quota_exceeded") || has("insufficient_credits") || reply.status == 402 {
         return CloudError::NoCredits { provider };
+    }
+    // Out of voice slots, or a plan without instant cloning.
+    if codes
+        .iter()
+        .any(|c| c.contains("limit_reached") || c.starts_with("can_not_use"))
+    {
+        return CloudError::NotAllowed(format!("{NAME}: {message}"));
     }
     // A key scoped to other endpoints; older replies say so with a 401.
     if has("missing_permissions") || has("insufficient_permissions") {

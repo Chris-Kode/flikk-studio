@@ -148,6 +148,22 @@ pub fn request(
                 super::generate::request_json(&request, placement.as_ref()),
             )
         }
+        "add_voice" => {
+            super::voices::check_available(ctx)?;
+            let adding = super::voices::parse_add(args)?;
+            (
+                super::voices::add_summary(&adding),
+                super::voices::add_json(&adding),
+            )
+        }
+        "design_voice" => {
+            super::voices::check_available(ctx)?;
+            let (design, name) = super::voices::parse_design(args)?;
+            (
+                super::voices::design_summary(&design, &name),
+                super::voices::design_json(&design, &name),
+            )
+        }
         "export_otio" => ("Export OpenTimelineIO".to_owned(), json!({})),
         "export_frame" => {
             let t = args.time("t")?;

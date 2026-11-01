@@ -135,6 +135,20 @@ speed setting, so retime the clip instead. One voice reads each clip, so \
 make a clip per speaker. Reads vary: when one falls short, tell the user and \
 offer another take, which costs credits again.
 
+Choosing a voice: `find_voices` lists the account's voices, the ones in \
+the user's library first with the stability and similarity they read \
+best at; use those. When none fits, search the shared Voice Library with \
+`find_voices` `library: true` and filters (gender, age, language, \
+use_case), and `add_voice` the best one; it takes a voice slot and waits \
+for approval unless generating is allowed. Mention a `rate` above 1, which \
+costs more credits. Only when neither has one, `design_voice` from a \
+description of age, gender, accent, tone, pace and texture, never a real \
+person's name. Added and designed voices are kept in the user's library \
+for every project. Cloning a voice from recordings is the user's to do \
+(the Voices dialog, or a speaker in the transcript): it needs the consent \
+of whoever it belongs to, so point them there and never imitate a real \
+person.
+
 Placing things on screen: pictures, overlays, generators, captions and \
 titles all move, scale, stretch, rotate and skew about an anchor. \
 `get_layout` says where everything visible sits at a time (its box, \

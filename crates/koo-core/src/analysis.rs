@@ -38,8 +38,9 @@ pub struct Transcript {
     pub language: String,
     pub words: Vec<Word>,
     pub speakers: Vec<Speaker>,
-    /// What transcribed it: a local model's id ("whisper-small-q8") or a
-    /// provider's model ("elevenlabs/scribe_v2").
+    /// What transcribed it: a local model's id ("whisper-small-q8"), a
+    /// provider's model ("elevenlabs/scribe_v2"), or "script" for a
+    /// voiceover, whose words are known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
 }

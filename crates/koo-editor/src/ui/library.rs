@@ -1,9 +1,10 @@
 //! Effects library (Resolve-style): video effects, transitions, shader
 //! generators, HTML titles and motion graphics, audio effects, the
-//! project's own programs and the user's library of programs, presets and
-//! sounds shared by every project, grouped by category and searchable. Items
-//! drag onto the timeline and the chat; double-click applies to the
-//! selection, or places a sound at the playhead.
+//! project's own programs and the user's library of programs, presets,
+//! sounds and voices shared by every project, grouped by category and
+//! searchable. Items drag onto the timeline and the chat; double-click
+//! applies to the selection, places a sound at the playhead, or opens the
+//! voiceover form on a voice. A voice gone from the account shows dimmed.
 
 mod apply;
 mod glyphs;
@@ -17,18 +18,22 @@ use crate::ui::media_pool::import::is_audio;
 use crate::ui::media_pool::listen_button;
 use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
 use apply::Starter;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::LibraryId;
 use koo_core::audiofx::AudioFxKind;
+use koo_core::cloud::VoiceOrigin;
 use koo_core::fx::{self, FxAsset, FxKind, FxLanguage, FxRef};
-use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, Sound};
+use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, SavedVoice, Sound};
 use koo_core::model::Project;
 use shared::Link;
 use std::collections::HashSet;
@@ -44,10 +49,11 @@ enum Section {
     Library,
     Presets,
     Sounds,
+    Voices,
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    const ALL: [Section; 10] = [
         Self::Video,
         Self::Transitions,
         Self::Generators,
@@ -57,6 +63,7 @@ impl Section {
         Self::Library,
         Self::Presets,
         Self::Sounds,
+        Self::Voices,
     ];
 
     fn label(self) -> &'static str {
@@ -70,6 +77,7 @@ impl Section {
             Self::Library => "Library",
             Self::Presets => "Presets",
             Self::Sounds => "Sounds",
+            Self::Voices => "Voices",
         }
     }
 
@@ -92,6 +100,7 @@ enum Item {
     Program(LibraryId),
     Preset(LibraryId),
     Sound(LibraryId),
+    Voice(LibraryId),
 }
 
 struct Entry {
@@ -182,6 +191,18 @@ fn sound_entry(s: &Sound) -> Entry {
     }
 }
 
+/// How it was made shows on hover.
+fn voice_entry(v: &SavedVoice) -> Entry {
+    Entry {
+        item: Item::Voice(v.id),
+        name: v.name.clone().into(),
+        category: v.category().into(),
+        description: v.description().into(),
+        glyph: FxGlyph::Audio,
+        kind: None,
+    }
+}
+
 fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
     let fx_entry = |a: &FxAsset| Entry {
         item: Item::Fx(a.id.clone()),
@@ -224,6 +245,7 @@ fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
             .collect(),
         Section::Presets => lib.presets.iter().map(preset_entry).collect(),
         Section::Sounds => lib.sounds.iter().map(sound_entry).collect(),
+        Section::Voices => lib.voices.iter().map(voice_entry).collect(),
         _ => fx::builtins()
             .iter()
             .filter(|a| Section::of(a) == section)
@@ -269,6 +291,9 @@ impl LibraryPanel {
                 }
             }),
         ];
+        if !state.read(cx).library.voices.is_empty() {
+            state.update(cx, |s, cx| s.want_voices(cx));
+        }
         Self {
             state,
             search,
@@ -280,14 +305,18 @@ impl LibraryPanel {
         }
     }
 
-    fn apply(&mut self, item: &Item, cx: &mut Context<Self>) {
+    fn apply(&mut self, item: &Item, window: &mut Window, cx: &mut Context<Self>) {
         let item = item.clone();
+        if let Item::Voice(id) = item {
+            return read_with(&self.state, id, window, cx);
+        }
         self.state.update(cx, |s, cx| match &item {
             Item::Fx(r) => apply_fx(s, r, cx),
             Item::Audio(kind) => apply::apply_audio(s, *kind, cx),
             Item::Program(id) => shared::apply_program(s, *id, cx),
             Item::Preset(id) => shared::apply_preset(s, *id, cx),
             Item::Sound(id) => shared::place_sound(s, *id, cx),
+            Item::Voice(_) => {}
         });
     }
 
@@ -298,6 +327,7 @@ impl LibraryPanel {
             .map(|p| p.asset.name.clone())
             .or_else(|| lib.preset(id).map(|p| p.name.clone()))
             .or_else(|| lib.sound(id).map(|s| s.name.clone()))
+            .or_else(|| lib.voice(id).map(|v| v.name.clone()))
         else {
             return;
         };
@@ -459,9 +489,12 @@ impl LibraryPanel {
             Item::Program(id) => format!("lib-{}", id.0),
             Item::Preset(id) => format!("preset-{}", id.0),
             Item::Sound(id) => format!("sound-{}", id.0),
+            Item::Voice(id) => format!("voice-{}", id.0),
         };
         let renaming = match &e.item {
-            Item::Program(id) | Item::Preset(id) | Item::Sound(id) => self.renaming == Some(*id),
+            Item::Program(id) | Item::Preset(id) | Item::Sound(id) | Item::Voice(id) => {
+                self.renaming == Some(*id)
+            }
             _ => false,
         };
         if renaming {
@@ -477,7 +510,21 @@ impl LibraryPanel {
                 let sound = self.state.read(cx).library.sound(*id).map(Sound::item);
                 sound.map(|s| listen_button(format!("listen-{}", id.0), &self.state, &s, cx))
             }
+            Item::Voice(id) => {
+                let sample = self.state.read(cx).library.voice(*id);
+                let sample = sample.and_then(SavedVoice::sample_item);
+                sample.map(|s| listen_button(format!("listen-{}", id.0), &self.state, &s, cx))
+            }
             _ => None,
+        };
+        // Gone from the account: it reads nothing until made again.
+        let gone = match &e.item {
+            Item::Voice(id) => {
+                let state = self.state.read(cx);
+                let voice = state.library.voice(*id);
+                voice.is_some_and(|v| state.account_voices.has(&v.voice) == Some(false))
+            }
+            _ => false,
         };
         let item = e.item.clone();
         let description = e.description.clone();
@@ -492,6 +539,7 @@ impl LibraryPanel {
             .cursor_pointer()
             .when(selected, |d| d.bg(active))
             .when(!selected, |d| d.hover(|s| s.bg(hover)))
+            .when(gone, |d| d.opacity(0.5))
             .child(fx_glyph(
                 e.glyph,
                 px(13.),
@@ -502,10 +550,10 @@ impl LibraryPanel {
             .when(!description.is_empty(), |d| {
                 d.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
             })
-            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.selected = Some(item.clone());
                 if ev.click_count() >= 2 {
-                    this.apply(&item, cx);
+                    this.apply(&item, window, cx);
                 }
                 cx.notify();
             }));
@@ -557,15 +605,18 @@ fn item_menu(
     item: &Item,
     cx: &App,
 ) -> gpui_kit::component::menu::PopupMenu {
+    if let Item::Voice(id) = item {
+        return voice_menu(menu, panel, state, *id, cx);
+    }
     let (p, it) = (panel.clone(), item.clone());
     let sound = matches!(item, Item::Sound(_));
     let menu = menu.item(
         PopupMenuItem::new(if sound { "Add to Timeline" } else { "Apply" })
-            .on_click(move |_, _, cx| p.update(cx, |this, cx| this.apply(&it, cx))),
+            .on_click(move |_, window, cx| p.update(cx, |this, cx| this.apply(&it, window, cx))),
     );
     let r = match item {
         Item::Fx(r) => r,
-        Item::Audio(_) => return menu,
+        Item::Audio(_) | Item::Voice(_) => return menu,
         Item::Program(id) => return library_menu(menu, panel, state, *id, true),
         Item::Preset(id) => return library_menu(menu, panel, state, *id, false),
         Item::Sound(id) => {
@@ -651,6 +702,102 @@ fn item_menu(
         PopupMenuItem::new("Delete")
             .on_click(move |_, _, cx| s4.update(cx, |s, cx| apply::remove(s, &r4, cx))),
     )
+}
+
+/// Open the voiceover form on library voice `id`, read as it last read.
+fn read_with(state: &Entity<EditorState>, id: LibraryId, window: &mut Window, cx: &mut App) {
+    let Some(saved) = state.read(cx).library.voice(id).cloned() else {
+        return;
+    };
+    state.update(cx, |s, _| s.remember_voice(&saved.voice));
+    let take = crate::ui::media_pool::voiceover::Take {
+        script: String::new(),
+        reading: saved.reading(),
+    };
+    crate::ui::media_pool::voiceover::open(state.clone(), Some(take), window, cx);
+}
+
+/// What a voice in the library offers: reading with it, hearing it,
+/// designing it again when the account no longer has it, renaming,
+/// removing it from the library, and deleting it from the account.
+fn voice_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: &Entity<LibraryPanel>,
+    state: &Entity<EditorState>,
+    id: LibraryId,
+    cx: &App,
+) -> gpui_kit::component::menu::PopupMenu {
+    let s = state.read(cx);
+    let Some(saved) = s.library.voice(id).cloned() else {
+        return menu;
+    };
+    let gone = s.account_voices.has(&saved.voice) == Some(false);
+    let sample = saved.sample_item();
+    let playing = sample
+        .as_ref()
+        .zip(s.source.as_ref())
+        .is_some_and(|(item, p)| p.is(item) && p.is_playing());
+    let provider = koo_cloud::provider(&saved.provider).map_or("the provider", |p| p.name);
+    let (s1, s2, s3) = (state.clone(), state.clone(), state.clone());
+    let mut menu = menu.item(
+        PopupMenuItem::new("Read a Voiceover…")
+            .disabled(gone)
+            .on_click(move |_, window, cx| read_with(&s1, id, window, cx)),
+    );
+    if let Some(sample) = sample {
+        menu = menu.item(
+            PopupMenuItem::new(if playing { "Pause" } else { "Play" })
+                .on_click(move |_, _, cx| s2.update(cx, |s, cx| s.toggle_source(&sample, cx))),
+        );
+    }
+    if let (true, VoiceOrigin::Designed { description, .. }) = (gone, &saved.origin) {
+        let description = description.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Design Again…").on_click(move |_, window, cx| {
+                crate::ui::voices::open(
+                    s3.clone(),
+                    crate::ui::voices::Start::Describe {
+                        description: description.clone(),
+                    },
+                    None,
+                    window,
+                    cx,
+                )
+            }),
+        );
+    }
+    let p = panel.clone();
+    let (s4, s5) = (state.clone(), state.clone());
+    let name = saved.name.clone();
+    menu.item(PopupMenuItem::separator())
+        .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+            p.update(cx, |this, cx| this.start_rename(id, window, cx))
+        }))
+        .item(PopupMenuItem::separator())
+        .item(
+            PopupMenuItem::new("Remove from Library")
+                .on_click(move |_, _, cx| s4.update(cx, |s, cx| s.forget_voice(id, cx))),
+        )
+        .item(
+            PopupMenuItem::new(format!("Delete from {provider}…")).on_click(
+                move |_, window, cx| {
+                    let (state, name) = (s5.clone(), name.clone());
+                    window.open_alert_dialog(cx, move |alert, _, _| {
+                        let state = state.clone();
+                        alert
+                            .title(format!("Delete “{name}” from {provider}?"))
+                            .description("Voiceovers it read stay.")
+                            .ok_text("Delete")
+                            .ok_variant(ButtonVariant::Danger)
+                            .show_cancel(true)
+                            .on_ok(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.delete_saved_voice(id, cx));
+                                true
+                            })
+                    });
+                },
+            ),
+        )
 }
 
 /// What a library item offers besides using it.

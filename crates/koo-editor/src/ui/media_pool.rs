@@ -5,7 +5,7 @@
 mod generate;
 pub(crate) mod import;
 mod thumbs;
-mod voiceover;
+pub(crate) mod voiceover;
 
 use crate::state::EditorState;
 use crate::ui::MediaDrag;
@@ -111,6 +111,19 @@ impl MediaPoolPanel {
             cx.defer_in(window, move |this: &mut Self, window, cx| {
                 match form.as_str() {
                     "voiceover" => this.open_voiceover(None, window, cx),
+                    "voices" | "voices-describe" | "voices-audio" => {
+                        let start = match form.as_str() {
+                            "voices-describe" => crate::ui::voices::Start::Describe {
+                                description: String::new(),
+                            },
+                            "voices-audio" => crate::ui::voices::Start::Clone {
+                                files: Vec::new(),
+                                name: String::new(),
+                            },
+                            _ => crate::ui::voices::Start::Find,
+                        };
+                        crate::ui::voices::open(this.state.clone(), start, None, window, cx)
+                    }
                     "sfx" => this.open_generate(generate::Kind::SoundEffect, window, cx),
                     _ => this.open_generate(generate::Kind::Music, window, cx),
                 }
@@ -165,8 +178,8 @@ impl MediaPoolPanel {
     }
 
     /// The item's "Analyze" entry; `None` for images, which are not
-    /// analyzed. Disabled while a task's picked model is missing, or the
-    /// item is queued or analyzing.
+    /// analyzed. Disabled while a task's picked model is missing, unless a
+    /// voiceover can do without, or the item is queued or analyzing.
     fn analyze_entry(&self, id: MediaId, cx: &App) -> Option<AnalyzeEntry> {
         let state = self.state.read(cx);
         let item = state.bus.project().media(id)?;
@@ -181,9 +194,10 @@ impl MediaPoolPanel {
             .find(|j| j.media == Some(id))
             .is_some_and(|j| matches!(j.state, JobState::Queued | JobState::Running { .. }));
         let fp = item.fingerprint.as_ref();
+        let script = item.generated.as_deref().and_then(|g| g.script());
         Some(AnalyzeEntry {
             again: fp.and_then(|fp| analysis.analysis(fp)).is_some(),
-            enabled: fp.is_some() && state.models_ready() && !busy,
+            enabled: fp.is_some() && (script.is_some() || state.models_ready()) && !busy,
         })
     }
 
@@ -430,12 +444,25 @@ impl MediaPoolPanel {
                                 );
                             }
                             if can_voiceover {
-                                let panel = panel.clone();
+                                let p = panel.clone();
                                 menu = menu.item(PopupMenuItem::new("Voiceover…").on_click(
                                     move |_, window, cx| {
-                                        panel.update(cx, |this, cx| {
+                                        p.update(cx, |this, cx| {
                                             this.open_voiceover(None, window, cx)
                                         })
+                                    },
+                                ));
+                                let p = panel.clone();
+                                menu = menu.item(PopupMenuItem::new("Voices…").on_click(
+                                    move |_, window, cx| {
+                                        let state = p.read(cx).state.clone();
+                                        crate::ui::voices::open(
+                                            state,
+                                            crate::ui::voices::Start::Find,
+                                            None,
+                                            window,
+                                            cx,
+                                        );
                                     },
                                 ));
                             }
@@ -878,13 +905,24 @@ fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &
     };
     let menu = match voiceover_take(panel, id, cx) {
         Some(take) => {
-            let panel = panel.clone();
-            menu.item(
-                PopupMenuItem::new("Regenerate…").on_click(move |_, window, cx| {
+            let p = panel.clone();
+            let state = panel.read(cx).state.clone();
+            let saved = voice_saved(&state, &take, cx);
+            let menu = menu.item(PopupMenuItem::new("Regenerate…").on_click(
+                move |_, window, cx| {
                     let take = Some(take.clone());
-                    panel.update(cx, |this, cx| this.open_voiceover(take, window, cx))
-                }),
-            )
+                    p.update(cx, |this, cx| this.open_voiceover(take, window, cx))
+                },
+            ));
+            if saved {
+                menu
+            } else {
+                let s = state.clone();
+                menu.item(
+                    PopupMenuItem::new("Save Voice to Library")
+                        .on_click(move |_, _, cx| s.update(cx, |s, cx| save_voice(s, id, cx))),
+                )
+            }
         }
         None => menu,
     };
@@ -910,6 +948,46 @@ fn voiceover_take(
         script: generated.prompt.clone(),
         reading,
     })
+}
+
+/// Whether the voice that read `take` is in the library.
+fn voice_saved(state: &Entity<EditorState>, take: &voiceover::Take, cx: &App) -> bool {
+    let state = state.read(cx);
+    let provider = state.voice_provider().unwrap_or_default();
+    state
+        .library
+        .voice_of(&provider, &take.reading.voice)
+        .is_some()
+}
+
+/// Keep the voice that read voiceover `id` in the library, with the
+/// voiceover as its sample.
+fn save_voice(s: &mut EditorState, id: MediaId, cx: &mut Context<EditorState>) {
+    let Some(item) = s.bus.project().media(id).cloned() else {
+        return;
+    };
+    let Some(reading) = item.generated.as_deref().and_then(|g| g.reading.clone()) else {
+        return;
+    };
+    let known = s
+        .account_voices
+        .voices
+        .iter()
+        .flatten()
+        .find(|v| v.id == reading.voice)
+        .cloned();
+    let voice = known.unwrap_or_else(|| koo_core::cloud::Voice {
+        id: reading.voice.clone(),
+        name: reading.voice_name.clone(),
+        ..Default::default()
+    });
+    s.keep_voice(
+        &voice,
+        koo_core::cloud::VoiceOrigin::Account,
+        Some(&item),
+        cx,
+    );
+    s.keep_reading(&reading, cx);
 }
 
 /// Whether pool item `id` is playing.

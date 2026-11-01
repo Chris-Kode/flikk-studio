@@ -20,8 +20,9 @@ mod keys;
 pub use keys::{KeySource, Keys};
 
 use koo_core::cloud::{
-    Capability, CloudError, CloudResult, CloudSettings, GenerateRequest, Generated, GenerationInfo,
-    GenerationService, Heard, SpeechRequest, SpeechService, Voice,
+    Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest, Generated,
+    GenerationInfo, GenerationService, Heard, SpeechRequest, SpeechService, Voice, VoiceClone,
+    VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -128,6 +129,51 @@ pub trait Api: Sync {
     fn voices(&self, _key: &str) -> CloudResult<Vec<Voice>> {
         Err(CloudError::Unavailable("not offered".into()))
     }
+
+    /// The provider's shared voices; only for providers offering
+    /// voiceovers, as are the calls below.
+    fn search_voices(
+        &self,
+        _key: &str,
+        _query: &VoiceQuery,
+        _page: usize,
+    ) -> CloudResult<VoicePage> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn similar_voices(&self, _key: &str, _audio: &Path) -> CloudResult<Vec<Voice>> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn add_voice(&self, _key: &str, _voice: &Voice, _name: &str) -> CloudResult<Voice> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn design_voice(&self, _key: &str, _design: &VoiceDesign) -> CloudResult<Designed> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn save_voice(
+        &self,
+        _key: &str,
+        _design: &VoiceDesign,
+        _preview: &VoicePreview,
+        _name: &str,
+    ) -> CloudResult<Voice> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn clone_voice(&self, _key: &str, _clone: &VoiceClone) -> CloudResult<Voice> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn rename_voice(&self, _key: &str, _voice: &str, _name: &str) -> CloudResult<()> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    fn delete_voice(&self, _key: &str, _voice: &str) -> CloudResult<()> {
+        Err(CloudError::Unavailable("not offered".into()))
+    }
 }
 
 /// Runs each request on the provider picked for its capability. Clones of
@@ -194,6 +240,13 @@ impl Cloud {
         })
     }
 
+    /// The client and key of the provider doing voiceovers: voices belong
+    /// to it.
+    fn voice_api(&self) -> CloudResult<(&'static dyn Api, String)> {
+        let (provider, _) = self.require(Capability::Voiceover)?;
+        Ok((provider.api, self.key(provider)?))
+    }
+
     fn require(
         &self,
         capability: Capability,
@@ -249,10 +302,59 @@ impl GenerationService for Cloud {
         Ok(Generated { path, info, cost })
     }
 
+    fn voice_provider(&self) -> Option<String> {
+        self.picked(Capability::Voiceover)
+            .map(|(p, _)| p.id.to_owned())
+    }
+
     fn voices(&self) -> CloudResult<Vec<Voice>> {
-        let (provider, _) = self.require(Capability::Voiceover)?;
-        let key = self.key(provider)?;
-        provider.api.voices(&key)
+        let (api, key) = self.voice_api()?;
+        api.voices(&key)
+    }
+
+    fn search_voices(&self, query: &VoiceQuery, page: usize) -> CloudResult<VoicePage> {
+        let (api, key) = self.voice_api()?;
+        api.search_voices(&key, query, page)
+    }
+
+    fn similar_voices(&self, audio: &Path) -> CloudResult<Vec<Voice>> {
+        let (api, key) = self.voice_api()?;
+        api.similar_voices(&key, audio)
+    }
+
+    fn add_voice(&self, voice: &Voice, name: &str) -> CloudResult<Voice> {
+        let (api, key) = self.voice_api()?;
+        api.add_voice(&key, voice, name.trim())
+    }
+
+    fn design_voice(&self, design: &VoiceDesign) -> CloudResult<Designed> {
+        let (api, key) = self.voice_api()?;
+        api.design_voice(&key, design)
+    }
+
+    fn save_voice(
+        &self,
+        design: &VoiceDesign,
+        preview: &VoicePreview,
+        name: &str,
+    ) -> CloudResult<Voice> {
+        let (api, key) = self.voice_api()?;
+        api.save_voice(&key, design, preview, name.trim())
+    }
+
+    fn clone_voice(&self, clone: &VoiceClone) -> CloudResult<Voice> {
+        let (api, key) = self.voice_api()?;
+        api.clone_voice(&key, clone)
+    }
+
+    fn rename_voice(&self, voice: &str, name: &str) -> CloudResult<()> {
+        let (api, key) = self.voice_api()?;
+        api.rename_voice(&key, voice, name.trim())
+    }
+
+    fn delete_voice(&self, voice: &str) -> CloudResult<()> {
+        let (api, key) = self.voice_api()?;
+        api.delete_voice(&key, voice)
     }
 
     fn voice_sample(&self, voice: &Voice) -> CloudResult<PathBuf> {

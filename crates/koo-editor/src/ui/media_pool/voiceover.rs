@@ -1,7 +1,10 @@
 //! Voiceover: a script read by one of the provider's voices, landing in the
 //! Voiceover Generated bin. Delivery is written into the script: bracketed
 //! tags and pauses from the menus go in at the cursor, ellipses and capitals
-//! by hand. Regenerating a voiceover opens this form with its script.
+//! by hand. Regenerating a voiceover opens this form with its script. The
+//! user's own voices come first; "More voices" opens the Voices dialog to
+//! find, design or clone another, which this form then reads with. A voice
+//! in the library starts on the stability and similarity it last read with.
 
 use super::{MediaPoolPanel, listen_button};
 use crate::state::EditorState;
@@ -11,11 +14,12 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::searchable_list::SearchableListItem;
-use gpui_kit::component::select::{SearchableVec, Select, SelectState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -151,6 +155,15 @@ impl VoiceoverForm {
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.observe(&picker, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &picker,
+                window,
+                |this, _, ev: &SelectEvent<SearchableVec<VoiceRow>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(id)) = ev {
+                        this.apply_saved_reading(&id.clone(), window, cx);
+                    }
+                },
+            ),
             cx.subscribe(&script, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&stability, |_, _, _: &SliderEvent, cx| cx.notify()),
             cx.subscribe(&similarity, |_, _, _: &SliderEvent, cx| cx.notify()),
@@ -191,21 +204,74 @@ impl VoiceoverForm {
     ) {
         self.loading = false;
         match result {
-            Ok(voices) => {
-                let rows: Vec<VoiceRow> = voices.iter().map(VoiceRow::new).collect();
-                let wanted = voices
-                    .iter()
-                    .position(|v| Some(&v.id) == self.wanted.as_ref());
-                let selected = wanted.or((!voices.is_empty()).then_some(0));
-                self.picker.update(cx, |picker, cx| {
-                    picker.set_items(SearchableVec::new(rows), window, cx);
-                    picker.set_selected_index(selected.map(IndexPath::new), window, cx);
-                });
+            Ok(mut voices) => {
+                voices.sort_by_key(|v| !v.mine());
                 self.voices = voices;
+                let wanted = self.wanted.clone();
+                self.show_voices(wanted, window, cx);
             }
             Err(e) => self.error = Some(e.to_string().into()),
         }
         cx.notify();
+    }
+
+    /// Fill the picker, with `wanted` (else the first) picked.
+    fn show_voices(&mut self, wanted: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let rows: Vec<VoiceRow> = self.voices.iter().map(VoiceRow::new).collect();
+        let found = self
+            .voices
+            .iter()
+            .position(|v| Some(&v.id) == wanted.as_ref());
+        let selected = found.or((!self.voices.is_empty()).then_some(0));
+        self.picker.update(cx, |picker, cx| {
+            picker.set_items(SearchableVec::new(rows), window, cx);
+            picker.set_selected_index(selected.map(IndexPath::new), window, cx);
+        });
+    }
+
+    /// Read with `voice`, just found or made in the Voices dialog.
+    fn use_voice(&mut self, voice: &Voice, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.voices.iter().any(|v| v.id == voice.id) {
+            self.voices.insert(0, voice.clone());
+        }
+        self.loading = false;
+        self.error = None;
+        self.show_voices(Some(voice.id.clone()), window, cx);
+        self.apply_saved_reading(&voice.id, window, cx);
+        cx.notify();
+    }
+
+    /// Start on how library voice `voice` last read, when it is one.
+    fn apply_saved_reading(&mut self, voice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(provider) = state.voice_provider() else {
+            return;
+        };
+        let Some(saved) = state.library.voice_of(&provider, voice) else {
+            return;
+        };
+        let (stability, similarity) = (saved.stability, saved.similarity);
+        self.stability
+            .update(cx, |s, cx| s.set_value(stability, window, cx));
+        self.similarity
+            .update(cx, |s, cx| s.set_value(similarity, window, cx));
+        cx.notify();
+    }
+
+    /// Open the Voices dialog over this form; the voice kept there is
+    /// picked here.
+    fn more_voices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = cx.entity().downgrade();
+        let on_kept: crate::ui::voices::OnKept = std::rc::Rc::new(move |voice, window, cx| {
+            let _ = form.update(cx, |f, cx| f.use_voice(voice, window, cx));
+        });
+        crate::ui::voices::open(
+            self.state.clone(),
+            crate::ui::voices::Start::Find,
+            Some(on_kept),
+            window,
+            cx,
+        );
     }
 
     fn voice(&self, cx: &App) -> Option<&Voice> {
@@ -245,6 +311,7 @@ impl VoiceoverForm {
         self.state.update(cx, |s, cx| {
             if let Some(reading) = request.reading() {
                 s.remember_voice(&reading.voice);
+                s.keep_reading(reading, cx);
             }
             s.generate(request, cx);
         });
@@ -395,7 +462,17 @@ impl Render for VoiceoverForm {
                                 .disabled(self.voices.is_empty()),
                         ),
                     )
-                    .child(sample),
+                    .child(sample)
+                    .child(
+                        Button::new("more-voices")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip("More voices")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.more_voices(window, cx)),
+                            ),
+                    ),
             )
             .when_some(self.error.clone(), |el, error| {
                 el.child(div().text_xs().text_color(theme.red).child(error))
@@ -464,34 +541,40 @@ impl MediaPoolPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        let form = cx.new(|cx| VoiceoverForm::new(self.state.clone(), take, window, cx));
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let submit = form.clone();
-            let ready = form.read(cx).request(cx).is_some();
-            dialog
-                .title(Capability::Voiceover.label())
-                .w(px(520.))
-                .child(form.clone())
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("voiceover-cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("voiceover-ok")
-                                .primary()
-                                .label("Generate")
-                                .disabled(!ready)
-                                .on_click(move |_, window, cx| {
-                                    submit.update(cx, |f, cx| f.submit(window, cx))
-                                }),
-                        ),
-                )
-        });
+        open(self.state.clone(), take, window, cx);
     }
+}
+
+/// The voiceover form, with `take`'s script and voice when given: to make
+/// one again, or to read with a voice from the library.
+pub fn open(state: Entity<EditorState>, take: Option<Take>, window: &mut Window, cx: &mut App) {
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    let form = cx.new(|cx| VoiceoverForm::new(state, take, window, cx));
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let submit = form.clone();
+        let ready = form.read(cx).request(cx).is_some();
+        dialog
+            .title(Capability::Voiceover.label())
+            .w(px(520.))
+            .child(form.clone())
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("voiceover-cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("voiceover-ok")
+                            .primary()
+                            .label("Generate")
+                            .disabled(!ready)
+                            .on_click(move |_, window, cx| {
+                                submit.update(cx, |f, cx| f.submit(window, cx))
+                            }),
+                    ),
+            )
+    });
 }

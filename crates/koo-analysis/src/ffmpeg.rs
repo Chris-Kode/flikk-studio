@@ -215,6 +215,41 @@ pub fn stream_audio(
     Ok(())
 }
 
+/// The first audio stream of `path` over `spans` (source times, in order,
+/// not overlapping), joined into one mono 44.1 kHz WAV at `out`, at most
+/// `limit` long; the whole stream up to `limit` when `spans` is empty. For
+/// a provider to hear one voice.
+pub fn cut_speech(path: &Path, spans: &[TimeRange], limit: Time, out: &Path) -> Result<()> {
+    let mut args = strs(["-v", "error", "-y"]);
+    args.extend(input(path));
+    args.extend(strs(["-map", "0:a:0", "-vn", "-ac", "1", "-ar", "44100"]));
+    if !spans.is_empty() {
+        let keep: Vec<String> = spans
+            .iter()
+            .map(|r| {
+                format!(
+                    "between(t,{:.3},{:.3})",
+                    r.start.as_secs_f64(),
+                    r.end.as_secs_f64()
+                )
+            })
+            .collect();
+        args.extend(strs([
+            "-af".to_string(),
+            format!("aselect='{}',asetpts=N/SR/TB", keep.join("+")),
+        ]));
+    }
+    args.extend(strs([
+        "-t".to_string(),
+        format!("{:.3}", limit.as_secs_f64()),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+    ]));
+    args.push(out.as_os_str().to_owned());
+    run(&args, None, &|_| {}, discard)?;
+    Ok(())
+}
+
 /// ffmpeg arguments that write mono `f32` PCM at `rate` to stdout.
 fn pcm(path: &Path, n: u32, rate: u32, range: Option<TimeRange>) -> Vec<OsString> {
     let mut args = strs(["-v", "error"]);

@@ -3738,6 +3738,7 @@ dependencies = [
 name = "koo-cloud"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "keyring",
  "koo-core",
  "serde",
