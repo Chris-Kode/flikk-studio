@@ -221,6 +221,9 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "scope",
             "brighter",
             "darker",
+            "hdr",
+            "washed out",
+            "tone map",
         ],
     ),
     (

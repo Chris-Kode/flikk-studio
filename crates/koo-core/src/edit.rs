@@ -38,6 +38,7 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::SetFxAsset { .. }
             | Command::RemoveFxAsset { .. }
             | Command::SetAudioEffects { .. }
+            | Command::SetToneMap { .. }
     ) {
         warn_protected(project, &mut plan);
     }
@@ -269,6 +270,17 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 before,
                 after: media.clone(),
             }]))
+        }
+        Command::SetToneMap { media, tone_map } => {
+            let before = project
+                .media(*media)
+                .ok_or(CoreError::MediaNotFound(*media))?
+                .clone();
+            let after = MediaItem {
+                tone_map: tone_map.clone(),
+                ..before.clone()
+            };
+            Ok(ops(vec![Op::UpdateMedia { before, after }]))
         }
         Command::RemoveMedia { media } => {
             let item = project

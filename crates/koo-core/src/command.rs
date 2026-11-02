@@ -425,6 +425,13 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- HDR
+    /// How an HDR media item is mapped to SDR, for every clip of it.
+    SetToneMap {
+        media: MediaId,
+        tone_map: crate::hdr::ToneMap,
+    },
 }
 
 impl Command {
@@ -527,6 +534,7 @@ impl Command {
             ImportMedia { .. } | UpdateMedia { .. } | RemoveMedia { .. } | SetBins { .. } => {
                 ToolCategory::Media
             }
+            SetToneMap { .. } => ToolCategory::Color,
         }
     }
 

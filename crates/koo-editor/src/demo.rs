@@ -341,6 +341,7 @@ fn project() -> Demo {
         tags: vec!["brand".into()],
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     };
 
     let mut titles = Track::new(TrackKind::Title, "T1");
@@ -776,6 +777,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
                 height: 1080,
                 rate: Rate::FPS_30,
                 codec: "h264".into(),
+                hdr: None,
             }),
             audio: vec![AudioStream {
                 index: 1,
@@ -790,6 +792,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
         tags: tags.iter().map(|t| t.to_string()).collect(),
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     }
 }
 

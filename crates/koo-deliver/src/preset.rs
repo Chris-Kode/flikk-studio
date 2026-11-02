@@ -196,6 +196,11 @@ impl RenderSettings {
             }
             None => push(&["-vn"]),
         }
+        if self.video.is_some() {
+            // HDR sources are mapped to SDR (`koo_core::hdr`): say so.
+            push(&["-color_primaries", "bt709", "-color_trc", "bt709"]);
+            push(&["-colorspace", "bt709"]);
+        }
         match self.audio {
             AudioCodec::Aac { kbps } => push(&["-c:a", "aac", "-b:a", &format!("{kbps}k")]),
             AudioCodec::Pcm24 => push(&["-c:a", "pcm_s24le"]),

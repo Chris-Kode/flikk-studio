@@ -333,6 +333,12 @@ pub fn list_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 if !info.audio.is_empty() {
                     v["audio_streams"] = json!(info.audio.len());
                 }
+                if let Some(hdr) = info.video.as_ref().and_then(|v| v.hdr.as_ref()) {
+                    v["hdr"] = json!(hdr.describe());
+                    if !m.tone_map.is_default() {
+                        v["tone_map"] = json!(m.tone_map);
+                    }
+                }
             }
             if let Some(b) = m.bin.and_then(|b| project.bins.iter().find(|x| x.id == b)) {
                 v["bin"] = json!(b.name);

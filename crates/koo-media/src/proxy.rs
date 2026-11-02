@@ -1,8 +1,9 @@
 //! Playback proxies: 720p, short-GOP H.264 + AAC, keyed by fingerprint
 //! (PRD M4).
 
-use crate::decode::Process;
+use crate::decode::{Process, tone_then};
 use crate::{FfmpegMedia, err, tmp_sibling};
+use koo_core::hdr::Mapping;
 use koo_core::model::{Fingerprint, MediaItem};
 use koo_core::paths;
 use koo_core::services::{ServiceError, ServiceResult};
@@ -12,9 +13,22 @@ use std::path::PathBuf;
 
 /// Where the proxy for a fingerprint lives, whether or not it exists yet.
 pub fn proxy_path(fingerprint: &Fingerprint) -> PathBuf {
-    paths::cache()
-        .join("proxies")
-        .join(format!("{}.mp4", fingerprint.0))
+    proxy_path_mapped(fingerprint, None)
+}
+
+/// Where the item's proxy lives for its tone mapping: an HDR item's proxy
+/// is made mapped to SDR, so each mapping has its own file.
+pub fn proxy_path_for(item: &MediaItem) -> Option<PathBuf> {
+    let fp = item.fingerprint.as_ref()?;
+    Some(proxy_path_mapped(fp, Mapping::of(item).as_ref()))
+}
+
+pub(crate) fn proxy_path_mapped(fingerprint: &Fingerprint, mapping: Option<&Mapping>) -> PathBuf {
+    let name = match mapping {
+        Some(m) => format!("{}-{}.mp4", fingerprint.0, m.key()),
+        None => format!("{}.mp4", fingerprint.0),
+    };
+    paths::cache().join("proxies").join(name)
 }
 
 pub(crate) fn ensure_proxy(
@@ -23,7 +37,8 @@ pub(crate) fn ensure_proxy(
     progress: &dyn Fn(f32),
 ) -> ServiceResult<PathBuf> {
     let fingerprint = media.fingerprint_of(item)?;
-    let out = proxy_path(&fingerprint);
+    let mapping = Mapping::of(item);
+    let out = proxy_path_mapped(&fingerprint, mapping.as_ref());
     if out.is_file() {
         progress(1.0);
         return Ok(out);
@@ -45,14 +60,20 @@ pub(crate) fn ensure_proxy(
     let gop = (video.rate.fps() / 2.0).round().max(1.0).to_string();
     // Short side at most 720, keeping aspect; never upscale.
     let scale = "scale=w='if(gte(iw,ih),-2,min(720,iw))':h='if(gte(iw,ih),min(720,ih),-2)'";
+    let filters = tone_then(
+        media.tone_filters(mapping.as_ref())?.as_deref(),
+        scale.into(),
+    );
 
     let mut cmd = media.ffmpeg();
     cmd.arg("-i")
         .arg(&item.path)
-        .args(["-map", "0:v:0", "-map", "0:a?", "-vf", scale])
+        .args(["-map", "0:v:0", "-map", "0:a?", "-vf", &filters])
         .args(["-fps_mode", "cfr", "-r", &rate])
         .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
         .args(["-tune", "fastdecode", "-pix_fmt", "yuv420p", "-bf", "0"])
+        .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
+        .args(["-colorspace", "bt709"])
         .args(["-g", &gop, "-keyint_min", &gop, "-sc_threshold", "0"])
         .args(["-c:a", "aac", "-b:a", "128k"])
         .args(["-movflags", "+faststart", "-f", "mp4"])

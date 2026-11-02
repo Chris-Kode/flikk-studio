@@ -94,6 +94,9 @@ pub struct MediaItem {
     /// How a provider made it, when it was generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<Box<crate::cloud::GenerationInfo>>,
+    /// How HDR pictures are mapped to SDR (see [`crate::hdr`]).
+    #[serde(default, skip_serializing_if = "crate::hdr::ToneMap::is_default")]
+    pub tone_map: crate::hdr::ToneMap,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -111,6 +114,9 @@ pub struct VideoStream {
     pub height: u32,
     pub rate: Rate,
     pub codec: String,
+    /// Set for PQ and HLG streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<Box<crate::hdr::Hdr>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

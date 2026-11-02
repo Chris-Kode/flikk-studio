@@ -23,6 +23,7 @@ pub mod edit;
 pub mod error;
 pub mod fx;
 pub mod grade;
+pub mod hdr;
 pub mod heard;
 pub mod history;
 pub mod ids;

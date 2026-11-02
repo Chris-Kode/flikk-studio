@@ -179,6 +179,8 @@ struct Picture {
     path: PathBuf,
     still: bool,
     size: (u32, u32),
+    /// HDR → SDR filters, as the media engine decodes the file.
+    tone: Option<String>,
 }
 
 fn even(v: f64) -> u32 {
@@ -342,6 +344,7 @@ impl Builder<'_> {
     }
 
     fn picture(&mut self, clip: &Clip) -> Result<Option<Picture>> {
+        let mut tone = None;
         let (path, still, known) = match &clip.content {
             ClipContent::Media { media, .. } => {
                 let item = self
@@ -356,6 +359,9 @@ impl Builder<'_> {
                     .as_ref()
                     .and_then(|i| i.video.as_ref())
                     .map(|v| (v.width, v.height));
+                if item.kind == MediaKind::Video {
+                    tone = crate::ffmpeg::tone_filters(item)?;
+                }
                 (item.path.clone(), item.kind == MediaKind::Image, known)
             }
             ClipContent::Overlay { asset, .. } => (asset.clone(), is_still_path(asset), None),
@@ -367,7 +373,12 @@ impl Builder<'_> {
             bail!("media offline: {}", path.display());
         }
         let size = self.size_of(&path, known)?;
-        Ok(Some(Picture { path, still, size }))
+        Ok(Some(Picture {
+            path,
+            still,
+            size,
+            tone,
+        }))
     }
 
     fn gap(&mut self, frames: i64) -> String {
@@ -418,6 +429,7 @@ impl Builder<'_> {
             f.push(format!("trim=start={}:end={}", num(s0), num(s1)));
             f.push("setpts=PTS-STARTPTS".into());
             f.push(format!("fps={r}"));
+            f.extend(pic.tone.clone());
         }
         let timeline = matches!(clip.content, ClipContent::Media { .. })
             .then_some(&self.project.timeline.grade);

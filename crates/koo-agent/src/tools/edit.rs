@@ -285,6 +285,36 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
                 lut: args.opt_str("lut")?.map(Into::into),
             }]
         }
+        "set_tone_map" => {
+            let p = ctx.project();
+            let media = media_id(p, args.str("media")?)?;
+            let item = p
+                .media(media)
+                .ok_or_else(|| ToolError("media not found".into()))?;
+            if koo_core::hdr::hdr_of(item).is_none() {
+                return Err(ToolError(
+                    "this media item is not HDR; tone mapping only changes HDR footage".into(),
+                ));
+            }
+            let mut tone_map = item.tone_map.clone();
+            match args.opt_str("mode")? {
+                Some("auto") => tone_map.mode = koo_core::hdr::ToneMapMode::Auto,
+                Some("off") => tone_map.mode = koo_core::hdr::ToneMapMode::Off,
+                Some(other) => {
+                    return Err(ToolError(format!("`mode` is auto or off, not `{other}`")));
+                }
+                None => {}
+            }
+            if let Some(stops) = args.opt_f64("exposure")? {
+                let (lo, hi) = koo_core::hdr::EXPOSURE;
+                tone_map.exposure = (stops as f32).clamp(lo, hi);
+            }
+            if let Some(nits) = args.opt_f64("peak")? {
+                let (lo, hi) = koo_core::hdr::PEAK;
+                tone_map.peak = (nits > 0.0).then(|| (nits as f32).clamp(lo, hi));
+            }
+            vec![Command::SetToneMap { media, tone_map }]
+        }
         "copy_grade" => {
             let p = ctx.project();
             vec![Command::CopyGrade {

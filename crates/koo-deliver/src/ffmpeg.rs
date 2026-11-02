@@ -55,6 +55,27 @@ fn major_version() -> u32 {
     })
 }
 
+/// The filters mapping an HDR item's pictures to SDR with this FFmpeg,
+/// as the media engine decodes them; `None` for SDR or tone mapping off.
+pub(crate) fn tone_filters(item: &koo_core::model::MediaItem) -> Result<Option<String>> {
+    static METHOD: OnceLock<koo_core::hdr::Method> = OnceLock::new();
+    let Some(mapping) = koo_core::hdr::Mapping::of(item) else {
+        return Ok(None);
+    };
+    let method = *METHOD.get_or_init(|| {
+        let out = command(ffmpeg())
+            .args(["-hide_banner", "-filters"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        koo_core::hdr::Method::from_filters(&out)
+    });
+    let filters = mapping
+        .filters(method)
+        .context("could not prepare the HDR tone mapping")?;
+    Ok(Some(filters))
+}
+
 /// Arguments that read the filtergraph from `script`, so long timelines
 /// never hit command-line length limits.
 pub(crate) fn filter_script_args(script: &Path) -> [std::ffi::OsString; 2] {

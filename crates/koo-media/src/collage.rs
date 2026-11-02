@@ -4,6 +4,7 @@
 use crate::canvas::Canvas;
 use crate::decode::still;
 use crate::{FfmpegMedia, err, proxy, write_atomic};
+use koo_core::hdr::{Mapping, ToneMap};
 use koo_core::paths;
 use koo_core::services::MediaService;
 use koo_core::services::{
@@ -18,7 +19,7 @@ const COLUMNS: usize = 6;
 const GAP: u32 = 4;
 const BACKGROUND: [u8; 3] = [24, 24, 24];
 /// Bump when the rendering changes, so cached collages are redrawn.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 pub(crate) fn collage(media: &FfmpegMedia, request: &CollageRequest) -> ServiceResult<Collage> {
     let tiles: Vec<SamplePoint> = request.samples.iter().take(MAX_TILES).cloned().collect();
@@ -109,20 +110,25 @@ fn decode_all(
         .map_or(4, |n| n.get())
         .clamp(2, 8);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    // One probe per file, for its frame grid.
-    let rates = std::sync::Mutex::new(HashMap::new());
-    let rate_of = |path: &Path| -> Rate {
-        if let Some(rate) = rates.lock().unwrap().get(path) {
-            return *rate;
+    // One probe per file, for its frame grid and whether it is HDR (shown
+    // with the default tone map).
+    let probed = std::sync::Mutex::new(HashMap::new());
+    let probe_of = |path: &Path| -> (Rate, Option<Mapping>) {
+        if let Some(found) = probed.lock().unwrap().get(path) {
+            return Clone::clone(found);
         }
-        let rate = media
-            .probe(path)
-            .ok()
-            .and_then(|i| i.video)
-            .map(|v| v.rate)
-            .unwrap_or_default();
-        rates.lock().unwrap().insert(path.to_path_buf(), rate);
-        rate
+        let video = media.probe(path).ok().and_then(|i| i.video);
+        let found = (
+            video.as_ref().map(|v| v.rate).unwrap_or_default(),
+            video
+                .as_ref()
+                .and_then(|v| Mapping::of_stream(v, &ToneMap::default())),
+        );
+        probed
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), found.clone());
+        found
     };
     let mut results: Vec<Option<ServiceResult<Frame>>> = (0..tiles.len()).map(|_| None).collect();
     let slots = std::sync::Mutex::new(&mut results);
@@ -132,9 +138,12 @@ fn decode_all(
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(tile) = tiles.get(i) else { break };
-                    let path = source_of(tile);
-                    let rate = rate_of(&path);
-                    let frame = still(media, &path, Some((tile.source, rate)), tile_width);
+                    let (rate, mapping) = probe_of(&tile.path);
+                    let frame =
+                        source_of(media, tile, mapping.as_ref()).and_then(|(path, tone)| {
+                            let at = Some((tile.source, rate));
+                            still(media, &path, at, tile_width, tone.as_deref())
+                        });
                     slots.lock().unwrap()[i] = Some(frame);
                 }
             });
@@ -146,11 +155,19 @@ fn decode_all(
         .collect()
 }
 
-/// The proxy when it exists, else the source.
-fn source_of(tile: &SamplePoint) -> PathBuf {
-    tile.fingerprint
+/// The proxy when it exists, else the source with its tone mapping.
+fn source_of(
+    media: &FfmpegMedia,
+    tile: &SamplePoint,
+    mapping: Option<&Mapping>,
+) -> ServiceResult<(PathBuf, Option<String>)> {
+    let proxy = tile
+        .fingerprint
         .as_ref()
-        .map(proxy::proxy_path)
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| tile.path.clone())
+        .map(|fp| proxy::proxy_path_mapped(fp, mapping))
+        .filter(|p| p.is_file());
+    match proxy {
+        Some(proxy) => Ok((proxy, None)),
+        None => Ok((tile.path.clone(), media.tone_filters(mapping)?)),
+    }
 }
