@@ -72,6 +72,9 @@ pub struct CloudSettings {
     pub choices: BTreeMap<Capability, ProviderChoice>,
     /// Id of the voice that last read a voiceover.
     pub voice: Option<String>,
+    /// Videos are made without sound, which costs less on some models. The
+    /// media pool's form starts from it; the agent keeps to it.
+    pub silent_video: bool,
 }
 
 impl CloudSettings {
@@ -1005,6 +1008,8 @@ pub trait GenerationService: Send + Sync {
     fn voice_provider(&self) -> Option<String>;
     /// What the model picked for video can make, when one is.
     fn video_model(&self) -> Option<VideoModel>;
+    /// Whether videos are made with sound, as the user set it.
+    fn video_sound(&self) -> bool;
     /// Make `request` into a new file in `dir`, reporting to `task` and
     /// stopping when it is cancelled. Slow: minutes for music and video.
     fn generate(

@@ -296,6 +296,10 @@ impl GenerationService for Cloud {
         self.keys.get(provider).map(|_| provider.name.to_owned())
     }
 
+    fn video_sound(&self) -> bool {
+        !lock(&self.settings).silent_video
+    }
+
     fn video_model(&self) -> Option<VideoModel> {
         let (provider, model) = self.picked(Capability::Video)?;
         provider.api.video_model(model.id).cloned()

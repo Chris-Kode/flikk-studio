@@ -88,9 +88,12 @@ pub fn grab_all(project: &Project, services: &Services, grabs: &[FrameGrab]) -> 
 
 /// The request, the frames to grab for it and its placement, from the
 /// tool's arguments; checked against `model`, the one picked for video.
+/// Without `sound` (the user's setting) it is made silent, whatever the
+/// arguments say.
 pub fn parse(
     project: &Project,
     model: Option<&VideoModel>,
+    sound: bool,
     args: &Args,
 ) -> ToolResultOf<(GenerateRequest, Vec<FrameGrab>, Option<Placement>)> {
     let prompt = args.str("prompt")?.trim().to_owned();
@@ -148,7 +151,7 @@ pub fn parse(
         first_frame,
         last_frame,
         references,
-        audio: args.opt_bool("audio")?.unwrap_or(true),
+        audio: sound && args.opt_bool("audio")?.unwrap_or(true),
     };
     if let Some(model) = model {
         model
@@ -188,6 +191,7 @@ pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> Stri
     if let GenerateRequest::Video {
         first_frame,
         references,
+        audio,
         ..
     } = request
     {
@@ -195,6 +199,9 @@ pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> Stri
             text.push_str(" (from a frame)");
         } else if !references.is_empty() {
             text.push_str(&format!(" (after {} references)", references.len()));
+        }
+        if !audio {
+            text.push_str(", no sound");
         }
     }
     match placement {
@@ -235,7 +242,8 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail("Generation is not available in this build.");
     };
     let model = generation.video_model();
-    let (request, grabs, placement) = parse(ctx.project(), model.as_ref(), args)?;
+    let sound = generation.video_sound();
+    let (request, grabs, placement) = parse(ctx.project(), model.as_ref(), sound, args)?;
     if generation.provider_for(request.capability()).is_none() {
         return fail(unavailable(&request));
     }

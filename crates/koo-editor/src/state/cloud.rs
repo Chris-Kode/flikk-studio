@@ -396,6 +396,23 @@ impl EditorState {
         }
     }
 
+    /// Whether videos are made with sound.
+    pub fn video_sound(&self) -> bool {
+        !self.cloud.settings().silent_video
+    }
+
+    /// Make videos with sound, or without, from now on.
+    pub fn set_video_sound(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut settings = self.cloud.settings();
+        if settings.silent_video != on {
+            return;
+        }
+        settings.silent_video = !on;
+        persistence::with_store(|s| s.save_cloud_settings(&settings));
+        self.cloud.set_settings(settings);
+        cx.notify();
+    }
+
     /// Forget a generation that failed.
     pub fn dismiss_generation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.generating.retain(|g| g.id != id);

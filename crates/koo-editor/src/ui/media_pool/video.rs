@@ -139,6 +139,7 @@ impl VideoForm {
             cx.observe(&aspect, |_, _, cx| cx.notify()),
             cx.observe(&resolution, |_, _, cx| cx.notify()),
         ];
+        let sound = state.read(cx).video_sound();
         Self {
             state,
             prompt,
@@ -148,7 +149,7 @@ impl VideoForm {
             length,
             aspect,
             resolution,
-            audio: model.audio,
+            audio: model.audio && sound,
             model,
             _subscriptions,
         }

@@ -717,7 +717,10 @@ not retried with Whisper.
   agent job the editor sees on its next pump), `analyze_generated` queues it
   once: a video like footage when the analysis models are ready, a
   voiceover when transcripts are on. Items already in a project when it
-  opens are left as they were.
+  opens are left as they were. Settings → Integrations has a "Video sound"
+  switch under Video (`CloudSettings::silent_video`; sound costs more on
+  some models): the media pool's form starts its Sound switch from it, and
+  with it off the agent's videos are made silent whatever it asks.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

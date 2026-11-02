@@ -1297,7 +1297,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "last_frame": string("Media id of a picture to end on; needs a first frame"),
                     "last_frame_at": time("Or end on the program's frame at this time"),
                     "references": strings("Media ids of pictures, clips and sounds in the pool for it to follow; not with a first frame"),
-                    "audio": boolean("Make sound with it (default true)"),
+                    "audio": boolean("Make sound with it, where the model makes sound (default true). The user can turn video sound off in Settings; then it is made silent whatever this says"),
                     "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
                     "track": string("Video track to put it on (default: one with nothing there, else a new one)")
                 }),
