@@ -26,9 +26,17 @@ qoi = "0.4"
 
 # Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
 # vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU. On
-# macOS subject masks run on MLX, on the GPU too.
+# macOS subject masks run on MLX, on the GPU too, and slow motion and depth
+# on Core ML.
 [target.'cfg(target_os = "macos")'.dependencies]
-koo-models = { workspace = true, features = ["metal", "mlx"] }
+koo-models = { workspace = true, features = ["metal", "mlx", "coreml"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 koo-models = { workspace = true, features = ["vulkan"] }
+
+# Slow motion and depth on any GPU: DirectML on Windows, WebGPU on Linux.
+[target.'cfg(target_os = "windows")'.dependencies]
+koo-models = { workspace = true, features = ["directml"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+koo-models = { workspace = true, features = ["webgpu"] }

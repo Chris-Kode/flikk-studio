@@ -95,7 +95,7 @@ which the editor hands it (`AnalysisService::configure`).
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
 | Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
-| Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime. Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
+| Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime, on the GPU (`onnx::GpuSessions`). Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
 | Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
 | Depth maps | Depth Anything V2 Small (Apache-2.0; onnx-community's ONNX export, pinned) on ONNX Runtime, per source frame at 518 on the longer side, spread over each frame's 2nd–98th percentile, smoothed over ±2 frames, kept by fingerprint and model; effects read it as `getDepth(uv)` | One permissively licensed model gives relative depth for any picture; what effects need is what is in front of what, not metres. The larger sizes are CC-BY-NC |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
@@ -416,7 +416,8 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   frame, `t-<key>.mattes` per tracked subject; people:
   `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
   (optical flow frames, raw RGBA, `<key>.rgba`), `depth/<fp>/<model>/`
-  (`<frame>.depth` per source frame), `html/` (pages and browser
+  (`<frame>.depth` per source frame), `coreml/<model>-<sizes>/` (depth
+  models compiled for the GPU, 420 MB a size), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
   activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below),
   `hdr/` (tone-mapping tables), `respeak/` (a provider's takes of a fixed
@@ -560,7 +561,15 @@ runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
 aligner, the diarizer, the sound models, segmentation, frame interpolation, matting and depth) and the BPE tokenizer
-(`bpe.rs`).
+(`bpe.rs`). `onnx::GpuSessions` runs RIFE and Depth Anything on the GPU:
+Core ML on macOS, DirectML on Windows, WebGPU on x86-64 Linux (its Dawn
+library sits beside the binary, which finds it by rpath, and the editor
+does not start without it). They are the only ONNX models that gain from
+it: the others came out slower or level, measured on an M5 with Core ML,
+except WeSpeaker, which gives NaN there on real audio. A load, run or
+answer that fails on the GPU is run again on the CPU, where that model then
+stays. On macOS depth keeps its compiled models: they take 17 s to compile
+and 4 s to load. DirectML and WebGPU on Linux have not been run yet.
 
 Analysis only orchestrates: it asks each task's runner for the selected
 model (`Task::model`: the one the user picked, else the default) and never

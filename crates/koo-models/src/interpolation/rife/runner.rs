@@ -4,17 +4,17 @@
 
 use super::config::{FILE, MAX_WIDTH};
 use crate::interpolation::Interpolator;
-use crate::onnx;
+use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use koo_core::services::Frame;
-use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 use std::sync::{Arc, Mutex};
 
-/// The model, loaded on first use; it makes one frame at a time.
+/// The model, loaded on first use for each size; it makes one frame at a
+/// time.
 #[derive(Default)]
 pub struct Rife {
-    session: Mutex<Option<Session>>,
+    sessions: Mutex<GpuSessions>,
 }
 
 impl Interpolator for Rife {
@@ -41,30 +41,39 @@ impl Interpolator for Rife {
                 }
             }
         }
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        if session.is_none() {
-            *session = Some(onnx::session(&FILE.locate()?, FILE.what)?);
-        }
-        let session = session.as_mut().expect("loaded above");
-        let input = Tensor::from_array(([1usize, 6, mh as usize, mw as usize], input))
-            .map_err(|e| anyhow!("{e}"))?;
-        let step =
-            Tensor::from_array(((), vec![at.clamp(0.0, 1.0)])).map_err(|e| anyhow!("{e}"))?;
-        let outputs = session
-            .run(ort::inputs!["input" => input, "timestep" => step])
-            .map_err(|e| anyhow!("frame interpolation failed: {e}"))?;
-        let (_, out) = outputs["output"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow!("{e}"))?;
-        if out.len() < plane * 3 {
-            bail!("frame interpolation gave {} values", out.len());
-        }
-        let mut rgba = vec![255u8; plane * 4];
-        for i in 0..plane {
-            for c in 0..3 {
-                rgba[i * 4 + c] = (out[c * plane + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let sizes = [
+            ("dynamic_dim_0", 1),
+            ("dynamic_dim_1", 6),
+            ("dynamic_dim_2", mh as i64),
+            ("dynamic_dim_3", mw as i64),
+        ];
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let rgba = sessions.run(&FILE.locate()?, FILE.what, &sizes, |session| {
+            let shape = [1usize, 6, mh as usize, mw as usize];
+            let input =
+                TensorRef::from_array_view((shape, &input[..])).map_err(|e| anyhow!("{e}"))?;
+            let step =
+                Tensor::from_array(((), vec![at.clamp(0.0, 1.0)])).map_err(|e| anyhow!("{e}"))?;
+            let outputs = session
+                .run(ort::inputs!["input" => input, "timestep" => step])
+                .map_err(|e| anyhow!("frame interpolation failed: {e}"))?;
+            let (_, out) = outputs["output"]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| anyhow!("{e}"))?;
+            if out.len() < plane * 3 {
+                bail!("frame interpolation gave {} values", out.len());
             }
-        }
+            if out.iter().any(|v| !v.is_finite()) {
+                bail!("frame interpolation gave a frame that is not numbers");
+            }
+            let mut rgba = vec![255u8; plane * 4];
+            for i in 0..plane {
+                for c in 0..3 {
+                    rgba[i * 4 + c] = (out[c * plane + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            Ok(rgba)
+        })?;
         let made = Frame {
             width: mw,
             height: mh,

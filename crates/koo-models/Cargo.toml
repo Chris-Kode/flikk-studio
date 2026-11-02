@@ -31,6 +31,13 @@ depth = ["dep:ort"]
 mlx = ["dep:mlx-rs"]
 # Frames between frames for smooth slow motion (RIFE), run by ONNX Runtime.
 interpolate = ["dep:ort"]
+# RIFE and depth on the GPU, one backend per build. Core ML links Apple's
+# frameworks, so it builds on macOS only. DirectML builds on Windows and
+# takes any DirectX 12 GPU. WebGPU has builds for x86-64 Linux, and takes
+# any GPU with Vulkan drivers; its Dawn library goes beside the binary.
+coreml = ["ort?/coreml"]
+directml = ["ort?/directml"]
+webgpu = ["ort?/webgpu", "ort?/copy-dylibs"]
 # Person masks: people cut out of their background by a matting model,
 # run by ONNX Runtime.
 matting = ["dep:ort"]

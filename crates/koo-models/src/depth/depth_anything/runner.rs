@@ -4,17 +4,23 @@
 
 use super::config::{INPUT, MEAN, MODEL_FILE, PATCH, STD};
 use crate::depth::{DepthEstimator, Disparity};
-use crate::onnx;
+use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use koo_core::services::Frame;
-use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::TensorRef;
 use std::sync::Mutex;
 
-/// The graph, loaded on first use. One picture at a time.
-#[derive(Default)]
+/// The graph, loaded on first use for each size. One picture at a time.
 pub struct DepthAnything {
-    session: Mutex<Option<Session>>,
+    sessions: Mutex<GpuSessions>,
+}
+
+impl Default for DepthAnything {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(GpuSessions::keeping_compiled()),
+        }
+    }
 }
 
 /// The size the model sees a `width` × `height` picture at.
@@ -55,31 +61,34 @@ fn pixels(picture: &Frame, w: usize, h: usize) -> Result<Vec<f32>> {
 impl DepthEstimator for DepthAnything {
     fn estimate(&self, picture: &Frame) -> Result<Disparity> {
         let (w, h) = input_size(picture.width, picture.height);
-        let input = Tensor::from_array((vec![1, 3, h, w], pixels(picture, w, h)?))
-            .map_err(|e| anyhow!("{e}"))?;
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        if session.is_none() {
-            *session = Some(onnx::session(&MODEL_FILE.locate()?, MODEL_FILE.what)?);
-        }
-        let session = session.as_mut().expect("loaded above");
-        let outputs = session
-            .run(ort::inputs!["pixel_values" => input])
-            .map_err(|e| anyhow!("depth model failed: {e}"))?;
-        let (shape, values) = outputs["predicted_depth"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow!("{e}"))?;
-        let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-        let (oh, ow) = match dims.as_slice() {
-            [_, oh, ow] | [_, _, oh, ow] => (*oh, *ow),
-            _ => bail!("depth model gave a map of unexpected shape {dims:?}"),
-        };
-        if values.len() != ow * oh {
-            bail!("depth model gave a map of unexpected size");
-        }
-        Ok(Disparity {
-            width: ow,
-            height: oh,
-            values: values.to_vec(),
+        let input = pixels(picture, w, h)?;
+        let sizes = [("batch_size", 1), ("height", h as i64), ("width", w as i64)];
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.run(&MODEL_FILE.locate()?, MODEL_FILE.what, &sizes, |session| {
+            let input = TensorRef::from_array_view(([1, 3, h, w], &input[..]))
+                .map_err(|e| anyhow!("{e}"))?;
+            let outputs = session
+                .run(ort::inputs!["pixel_values" => input])
+                .map_err(|e| anyhow!("depth model failed: {e}"))?;
+            let (shape, values) = outputs["predicted_depth"]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| anyhow!("{e}"))?;
+            let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+            let (oh, ow) = match dims.as_slice() {
+                [_, oh, ow] | [_, _, oh, ow] => (*oh, *ow),
+                _ => bail!("depth model gave a map of unexpected shape {dims:?}"),
+            };
+            if values.len() != ow * oh {
+                bail!("depth model gave a map of unexpected size");
+            }
+            if values.iter().any(|v| !v.is_finite()) {
+                bail!("depth model gave a map that is not numbers");
+            }
+            Ok(Disparity {
+                width: ow,
+                height: oh,
+                values: values.to_vec(),
+            })
         })
     }
 }

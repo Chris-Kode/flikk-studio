@@ -99,6 +99,7 @@ impl Place {
                 "hdr",
                 "interpolated",
                 "depth",
+                "coreml",
                 "respeak",
             ]
             .iter()
