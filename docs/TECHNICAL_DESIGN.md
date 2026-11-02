@@ -425,7 +425,21 @@ not retried with Whisper.
   (`align::spread`), the aligner hears 30 s from where the last word placed
   ended with the words expected in the first 25 s, and words it puts in the
   last 3 s go again with the next stretch (`follow_script`), so an error in
-  how long the script takes doesn't add up over a long read. The language
+  how long the script takes doesn't add up over a long read. A stretch
+  can't hear past a long pause: silences over 10 s that neither the voice
+  activity nor the levels hear anything in are shortened to 3 s either side
+  first (`Shortened`), and a word placed over one keeps the side with more
+  speech. A passage of the script that isn't said, longer than the model
+  can squeeze where it is, leaves the words after it late, and a stretch
+  never hears before where the last one ended. Such a stretch squeezes many
+  of its words into one 80 ms step in scattered runs (a tenth at most when
+  well heard, one run for a passage squeezed in place); then short
+  stretches from words further on find the fewest words to leave behind
+  (`catch_up`), and the stretch before is heard again up to there, kept if
+  it follows the audio but for one squeezed run. Measured on espeak-ng
+  reads against its word events: 30–40 ms mean start error through 7
+  minutes; a 48-word unsaid passage left 0.5 s mean error (8.7 s before),
+  confined to around it. The language
   isn't known ("und"), so the aligner runs on any script. Its models are
   optional: without the aligner the words keep edges measured on the audio
   levels, and "Analyze again" aligns them once it is there. Analyzing a

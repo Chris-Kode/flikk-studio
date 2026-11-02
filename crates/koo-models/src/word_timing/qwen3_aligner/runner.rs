@@ -245,20 +245,20 @@ fn place(words: &mut [Word], aligned: &[Option<TimeRange>], end: Time) {
             // Inside the room the aligned words around it leave.
             let lo = aligned[..i].iter().rev().find_map(|a| *a).map(|a| a.end);
             let hi = aligned[i + 1..].iter().find_map(|a| *a).map(|a| a.start);
-            let lo = lo.unwrap_or(Time::ZERO);
+            let before = i.checked_sub(1).map(|p| words[p].range.end);
+            let lo = lo.max(before).unwrap_or(Time::ZERO);
             let hi = hi.unwrap_or(Time(i64::MAX)).max(lo);
             let w = &mut words[i].range;
             let start = w.start.clamp(lo, hi);
             *w = TimeRange::new(start, w.end.clamp(start, hi));
             continue;
         };
-        let lo = i
-            .checked_sub(1)
-            .map_or(Time::ZERO, |p| words[p].range.end.min(r.start));
+        // After the word before, which may have been made a frame longer.
+        let lo = i.checked_sub(1).map_or(Time::ZERO, |p| words[p].range.end);
         let w = &mut words[i].range;
         w.start = (r.start - EARLIER).max(lo);
-        // Both edges in one 80 ms step: still a word.
-        w.end = r.end.max(w.start + Levels::FRAME);
+        // Both edges in one 80 ms step: still a word, inside the audio.
+        w.end = r.end.max(w.start + Levels::FRAME).min(end).max(w.start);
     }
     // The room before each word, and after the last.
     let room: Vec<Time> = (0..=words.len())
