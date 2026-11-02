@@ -12,11 +12,16 @@ use gpui_kit::*;
 use koo_core::ClipId;
 use koo_core::command::Command;
 use koo_core::model::ClipColor;
+use koo_core::music_fit::Target;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum PopupKind {
-    Speed { ripple: bool },
+    Speed {
+        ripple: bool,
+    },
     Rename,
+    /// Fit a music clip to a typed length.
+    FitDuration,
 }
 
 pub struct Popup {
@@ -44,12 +49,13 @@ impl TimelinePanel {
             match kind {
                 PopupKind::Speed { .. } => format!("{}", (c.speed * 100.).round()),
                 PopupKind::Rename => c.display_name(project),
+                PopupKind::FitDuration => c.duration.to_string(),
             }
         };
         let input = cx.new(|cx| {
             let state = InputState::new(window, cx).default_value(value);
             match kind {
-                PopupKind::Speed { .. } => state,
+                PopupKind::Speed { .. } | PopupKind::FitDuration => state,
                 PopupKind::Rename => state.placeholder("Name"),
             }
         });
@@ -99,6 +105,19 @@ impl TimelinePanel {
                 clip: popup.clip,
                 name: Some(text),
             },
+            PopupKind::FitDuration => {
+                let Some(length) =
+                    koo_core::Time::parse_clock(&text).filter(|t| *t > koo_core::Time::ZERO)
+                else {
+                    return;
+                };
+                let clip = popup.clip;
+                self.state.update(cx, |s, cx| {
+                    s.fit_music(clip, Target::Duration(length), cx);
+                });
+                self.close_popup(window, cx);
+                return;
+            }
         };
         self.state.update(cx, |s, cx| {
             s.edit(command, cx);
@@ -111,7 +130,7 @@ impl TimelinePanel {
         let theme = cx.theme();
         let speed = match popup.kind {
             PopupKind::Speed { ripple } => Some(ripple),
-            PopupKind::Rename => None,
+            PopupKind::Rename | PopupKind::FitDuration => None,
         };
         let card = v_flex()
             .id("clip-popup")
@@ -182,6 +201,9 @@ enum Content {
         enabled: bool,
         media: bool,
         selected: Vec<ClipId>,
+        /// A media clip on an audio track, which can be fitted to a length.
+        music: bool,
+        in_out: Option<koo_core::TimeRange>,
     },
     Transition((ClipId, koo_core::command::Edge), refs::Ref),
     Lane {
@@ -206,6 +228,8 @@ fn content(panel: &Entity<TimelinePanel>, cx: &App) -> Option<Content> {
                 enabled: clip.enabled,
                 media: clip.media().is_some(),
                 selected: state.selection.clips.clone(),
+                music: clip.media().is_some() && track.kind == koo_core::model::TrackKind::Audio,
+                in_out: state.in_out.filter(|r| !r.is_empty()),
             }
         }
         MenuTarget::Transition(owner) => {
@@ -244,6 +268,8 @@ pub fn build(
             enabled,
             media,
             selected,
+            music,
+            in_out,
         } => {
             let open = |kind: PopupKind| {
                 let panel = panel.clone();
@@ -254,12 +280,21 @@ pub fn build(
             let colors = panel.clone();
             let toggle = panel.clone();
             let mention = panel.clone();
-            menu.item(
+            let fit = panel.clone();
+            let fit_duration = open(PopupKind::FitDuration);
+            let menu = menu.item(
                 PopupMenuItem::new("Change Speed…")
                     .disabled(locked || !media)
                     .on_click(open(PopupKind::Speed { ripple: false })),
-            )
-            .submenu("Clip Color", window, cx, move |menu, _, _| {
+            );
+            let menu = if music {
+                menu.submenu("Fit To", window, cx, move |menu, _, _| {
+                    fit_items(menu, &fit, id, locked, in_out, fit_duration.clone())
+                })
+            } else {
+                menu
+            };
+            menu.submenu("Clip Color", window, cx, move |menu, _, _| {
                 color_items(menu, &colors)
             })
             .item(
@@ -335,6 +370,36 @@ fn mention_items(
         }
         None => menu,
     }
+}
+
+/// Targets a music clip can be fitted to.
+fn fit_items(
+    menu: PopupMenu,
+    panel: &Entity<TimelinePanel>,
+    clip: ClipId,
+    locked: bool,
+    in_out: Option<koo_core::TimeRange>,
+    duration: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
+) -> PopupMenu {
+    let item = |label: &'static str, target: Option<Target>| {
+        let panel = panel.clone();
+        PopupMenuItem::new(label)
+            .disabled(locked || target.is_none())
+            .on_click(move |_, _, cx| {
+                if let Some(target) = target {
+                    panel.update(cx, |this, cx| {
+                        this.state.update(cx, |s, cx| s.fit_music(clip, target, cx))
+                    })
+                }
+            })
+    };
+    menu.item(item("Sequence End", Some(Target::SequenceEnd)))
+        .item(item("In/Out", in_out.map(Target::Range)))
+        .item(
+            PopupMenuItem::new("Duration…")
+                .disabled(locked)
+                .on_click(duration),
+        )
 }
 
 fn color_items(menu: PopupMenu, panel: &Entity<TimelinePanel>) -> PopupMenu {

@@ -526,6 +526,51 @@ not retried with Whisper.
   `KOOEDITOR_CLAP_TEXT_MODEL`, `KOOEDITOR_CLAP_VOCAB` and
   `KOOEDITOR_CLAP_MERGES` point at local copies instead.
 
+### Fitting music to a length
+
+`koo-core/src/music_fit*` makes a song end exactly where it should, on its
+real ending, with seamless edits instead of a hard cut or a fade (like
+Premiere's Remix). The timeline's clip menu offers "Fit To" → Sequence End
+(the end of the other tracks), In/Out, or Duration… on a media clip on an
+audio track; the agent has `fit_music`. Both build a `music_fit::Request`
+on the UI thread and run it off it:
+
+* **Bars:** the analysis' downbeats from the clip's in point on, missed
+  ones filled where a gap holds a whole number of bars, each moved onto the
+  attack within 40 ms of it (the largest rise of the high-passed level,
+  3 ms before it), so a cut keeps the hit whole. Quiet bars at the end
+  (8 dB under the song's median) are the ring of the final chord and join
+  the ending. Before the first bar is the head; after the last, the
+  ending.
+* **Features** (`music_fit/features.rs`), from PCM decoded at 22.05 kHz
+  mono through `MediaService::audio`: per quarter of each bar a 12-bin
+  chroma (55 Hz–5 kHz) and 12 MFCCs (26 mel bands, 2048-sample frames,
+  hop 512), and the bar's RMS level. A bar-to-bar similarity mixes chroma
+  agreement (cubed, 0.5), timbre (MFCC distance over its median, 0.35) and
+  level (0.15).
+* **Planner** (`music_fit/planner.rs`): a dynamic program over (bars
+  played, bar, bars since the last jump) finds the cheapest path from the
+  first bar to the last that keeps the first and last 4 bars (fewer in
+  short songs), runs at least 4 bars between jumps, and may jump back
+  (loops) or forward (skips). A jump from bar i into bar j costs 1, plus
+  5 × (1 − how much j sounds like i + 1 and j − 1 like i), plus a phrase
+  penalty (0 when the bars moved are a multiple of 8, 0.4 of 4, 1.5 of 2,
+  else 3), 0.5 off a 4-bar boundary, and the level change. Each length of
+  path is scored with where it leaves the ending: the ending's ring can be
+  trimmed down to its hit and half a bar under a fade at least a beat long;
+  ending early or cutting into the hit costs by the beat. The quality is
+  the weakest jump's score times how close the end lands.
+* **Applying:** `Command::FitMusic { clip, at, segments, crossfade,
+  fade_out }` (category Audio) replaces the clip with its segments back to
+  back from `at`, keeping its gain, effects and edge transitions; each join
+  gets a 30 ms `EndOnCut` transition, which audio tracks play as an
+  equal-power crossfade (`audiofx::spans`) in the viewer and the render
+  alike, so the downbeat after the cut is never faded. Keyframes are
+  dropped. It refuses clips at another speed (fitting keeps the tempo) and
+  results that would run over another clip on the track. One undo step for
+  the user, one reviewable item for the agent, whose result lists each
+  skip and loop with its source span, place and score.
+
 ### Subject masks
 
 * **Model** (`koo-models/src/segmentation/sam2/`): SAM 2.1 tiny (Meta,
@@ -637,7 +682,7 @@ not retried with Whisper.
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 82 in the catalog (80 plus
+* **Tools** (`koo-agent/src/tools/`): 83 in the catalog (81 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -971,6 +1016,7 @@ there.
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
+| Fit music to length | `koo-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
 | D1 render | `koo-deliver`, `ui/deliver.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
@@ -1032,6 +1078,20 @@ there.
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
   makes the first debug build take minutes instead of hours.
+
+* Fitting music was checked on a synthetic 120 BPM song (intro, A, B, A,
+  outro, a final chord ringing 5 s; built with NumPy) with its true
+  downbeats and with Beat This!'s: every target from 20 s to 130 s landed
+  exactly, joins showed no clicks (largest sample step at a join 0.03,
+  against 0.81 inside the song), and with true downbeats jumps paired the
+  same chords in the same section (85–96 %) where the length allowed a
+  4-bar move. With Beat This!'s, which finds bars in the final chord's
+  ring, the ending had about a bar to give, and some lengths took a weaker
+  jump (25–60 %). Not checked on real songs, nor by ear; no length leaves
+  the meter (a jump moves whole bars), so where whole bars can't reach the
+  target the song ends up to half a bar off or trims its ending's ring.
+  The context menu was checked by building only, not on screen. Bar
+  features are computed on every fit, not cached.
 
 ### Analysis accuracy
 
