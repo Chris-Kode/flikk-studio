@@ -48,10 +48,10 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
@@ -94,6 +94,9 @@ which the editor hands it (`AnalysisService::configure`).
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
+| Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
+| Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime. Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
+| Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
 | Depth maps | Depth Anything V2 Small (Apache-2.0; onnx-community's ONNX export, pinned) on ONNX Runtime, per source frame at 518 on the longer side, spread over each frame's 2nd–98th percentile, smoothed over ±2 frames, kept by fingerprint and model; effects read it as `getDepth(uv)` | One permissively licensed model gives relative depth for any picture; what effects need is what is in front of what, not metres. The larger sizes are CC-BY-NC |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
@@ -123,7 +126,23 @@ panics fails without stopping the queue.
   grade; `SequenceSettings`) and the project's FX programs.
 * **Clips** carry speed, enabled, name, color, a transform, a grade, an
   effect stack, audio effects, volume automation, `transition_in` /
-  `transition_out` (resolved by `fx::transitions`) and masks.
+  `transition_out` (resolved by `fx::transitions`), masks and a `retime`.
+* **Speed ramps** (`koo-core/src/speed.rs`, `Clip::retime`): speed keys
+  on clip time; between them the speed changes straight, before the first
+  and after the last it holds. Source time is the integral
+  (`Clip::source_offset`, inverse `Clip::timeline_offset`), behind
+  `Clip::to_source` / `to_timeline` and so behind the viewer, compositor,
+  render, transcript and caption mapping, handles, waveforms and silence
+  bands. `SetSpeedRamp` takes points over the clip (0..1, speed) and keeps
+  the source it plays: the clip's length follows the ramp, or with
+  `keep_length` the speeds are scaled to fit; presets (`SpeedPreset`: Ramp
+  in, Ramp out, Hero, Bullet, Montage) are shapes in multiples of the
+  clip's speed. Trims and splits slice the keys (one added at the cut), so
+  each frame keeps its speed; `SetSpeed` on a ramped clip scales the ramp.
+  `SetRetime` picks how slowed frames are drawn (`Interpolation`: repeat,
+  blend, optical flow) and whether ramped audio is stretched (pitch kept)
+  or muted (`RampAudio`). Without keys a clip plays at `speed` as before,
+  and old projects load unchanged.
 * **Transform:** position, scale, rotation, opacity, per-axis stretch, skew,
   anchor, crop, flip, blend mode, `fit` (`Contain` with bars, or `Cover`,
   filling the frame and panned by position) and a corner pin; all keyframable.
@@ -144,6 +163,12 @@ panics fails without stopping the queue.
   frame shows the nearest prompted frame's matte. `refine` eases the edge
   onto the picture's (hair). Feather, expansion, opacity, invert and mode
   work as for shapes; the prompts are not keyframed.
+* **Person masks** (`MaskShape::Person { edge }`, `koo-core/src/person.rs`):
+  the mask keeps every person a matting model finds in each frame, with no
+  prompt; `edge` (0..1, keyframable with the rest of the state) eases the
+  edge onto the picture's. Invert keeps the background instead. Feather,
+  expansion, opacity and mode work as for shapes, so it combines with
+  shape and subject masks. Old projects open unchanged (a new shape kind).
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both (40 ms after the earlier, 30 ms before the later), on
   a frame boundary when the pause holds one, with a 10 ms audio fade at the
@@ -219,9 +244,13 @@ the effect of its earlier calls.
   above the controls vertical apps draw.
 * **Program frame** (`koo_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
-  generator) → clip grade, then timeline grade → effect stack → masks (a
+  generator; a slowed clip that blends or flows shows the moment between
+  two source frames: `Pictures::pair` reads both, the batch mixes them, or
+  `InterpolationService::between` gives the optical flow frame once made,
+  at 1/32 steps so frames are reused) → clip grade, then timeline grade → effect stack → masks (a
   coverage raster multiplied into alpha; a subject's matte at the source
-  time drawn into it, see "Subject masks") → transform and blend mode;
+  time drawn into it, see "Subject masks", and a person mask's, see
+  "Person masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
   captions are lettered on top by `LetteringService` (cosmic-text
   `koo_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
@@ -274,10 +303,12 @@ the effect of its earlier calls.
 * Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
   `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
-  frame, `t-<key>.mattes` per tracked subject), `depth/<fp>/<model>/`
+  frame, `t-<key>.mattes` per tracked subject; people:
+  `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
+  (optical flow frames, raw RGBA, `<key>.rgba`), `depth/<fp>/<model>/`
   (`<frame>.depth` per source frame), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log).
+  activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -295,6 +326,63 @@ the effect of its earlier calls.
   the object, Shift: a new subject), a click on a point takes it away, and
   points drag. Cached frames are dropped when the subjects' version moves,
   so mattes show as they are made.
+
+### Render cache
+
+`koo-editor/src/render_cache*` keeps heavy frames on disk so playback stays
+real time however heavy the edit (Resolve's smart cache, Premiere's render
+bar).
+
+* **What is rendered:** the ranges `compose::needs_compositor` picks
+  (effects, generators, HTML generators, transitions, masks, subject masks,
+  retimed media…), drawn by `compose::submit_program` like the viewer and
+  the export, at the sequence's shape with a 720 short side (smaller
+  sequences at their own size), masks cut (not tinted).
+* **Keys** (`render_cache/key.rs`): the timeline is cut at every clip and
+  transition edge on the tracks that show; each piece that needs the
+  compositor is a span hashed (BLAKE3) over serialized state: the clips
+  shown there and the clips touching them (transitions draw from them),
+  their tracks, their media items (fingerprint, path, info, proxy), the
+  timeline without its tracks, markers and ducking, the project's FX
+  programs, the caption styles, the frame size, which engines are wired
+  (and whether the depth model is here), the subject and depth models, the
+  app version and a format number. A frame's key is
+  its span's hash and its index. Serialized values go through
+  `serde_json::Value`, whose maps sort their keys. Only fields known not to
+  draw are left out (clip audio, name and colour; track name and lock; bins
+  and tags), so a property added to a clip, track or the timeline later is
+  in the key without being listed. An edit changes the keys of the frames
+  it changes and no others; nothing is invalidated, frames no longer asked
+  for age out.
+* **Store** (`render_cache/store.rs`): `cache/frame-cache/<ab>/<key>.qoi`, a
+  magic, the key and a lossless QOI picture (BGRA), written to a temporary
+  file and renamed. An in-memory index (read from the folder on first use,
+  ordered by modified time, which reads touch) evicts the least recently
+  used past the size limit. A file that is missing or does not decode, or
+  whose key does not match, is dropped and the frame composed live.
+* **Background render** (`render_cache.rs`, `render_cache/worker.rs`):
+  `EditorState.render` polls 4 times a second. 200 ms after the shown
+  project (`display_project`: a previewed draft or a drag included) last
+  changed it is planned and measured off the UI thread; 1.5 s after the
+  last play, scrub or edit a worker thread renders the spans not on disk,
+  from the playhead on, then from the start, pipelined as in playback. Any
+  play, playhead move or edit drops the worker, which stops after the frame
+  in hand. A span waits (retried every 5 s) while its media is offline or
+  its subject masks' mattes are still being made; the depth maps its
+  clips read are made first (`complete_depth`), so a frame is only kept
+  as it will finally look. A stale or cancelled render can only write
+  frames under the keys of what it drew, so it never shows a wrong frame.
+* **Reading:** playback (`viewer/player.rs`) takes a frame from the
+  in-memory cache, else from disk when the cached frame is at least three
+  quarters of the viewer's width, else composes it; paused frames and
+  render-ahead use disk frames at least as wide as the viewer. A source
+  item in the viewer, a zoomed viewer and tinted masks always compose.
+* **Render bar:** a 2 px strip along the top of the ruler: `theme.success`
+  over cached frames, `theme.danger` over frames still to render; nothing
+  where no compositor is needed.
+* **Settings → Storage:** the "Render cache" row shows its size, opens and
+  clears its folder, sets the size limit (2–50 GB, 10 by default) and turns
+  background rendering off (`RenderCacheSettings` in the store's `meta`).
 
 ## 7. Analysis and models
 
@@ -320,9 +408,9 @@ the user analyzes it again.
 ### Models (`koo-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search, segmentation, depth). Its `mod.rs` holds the
+sound tagging, beats, sound search, segmentation, frame interpolation, matting, depth). Its `mod.rs` holds the
 task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `DepthEstimator`); `MODELS`, the
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`, `DepthEstimator`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -330,7 +418,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer, the sound models, segmentation and depth) and the BPE tokenizer
+aligner, the diarizer, the sound models, segmentation, frame interpolation, matting and depth) and the BPE tokenizer
 (`bpe.rs`).
 
 Analysis only orchestrates: it asks each task's runner for the selected
@@ -352,14 +440,22 @@ them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
-`aligner`, `diarizer`, `sounds`, `subjects`. Without one, its models stay
+`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
-subject masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
+subject masks keep nothing; without `interpolation`, optical flow blends;
+without `people`, person masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
 Apple's frameworks) adds the MLX subject mask model and makes it the
 default; `koo-editor` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
-as "Subject masks" but is not part of analysis: `required_tasks` never asks
-for it; nor for depth ("Depth maps", the `depth` feature, default on).
+as "Subject masks" and matting as "Person masks", but neither is part of
+analysis: `required_tasks` never asks for them. Frame interpolation ("Optical flow", RIFE) is listed the same way;
+picking optical flow for a clip without it raises a notice that leads to
+Settings → Models, and slowed frames are blended meanwhile.
+`LocalInterpolation` makes flow frames on one thread of its own, the
+newest asked first, keeps the last 48 in memory and every one under
+`cache/interpolated/` (cleared with Previews in Settings → Storage).
+Depth ("Depth maps", the `depth` feature, default on) is not part of
+analysis either.
 
 ### Transcription online
 
@@ -562,6 +658,51 @@ not retried with Whisper.
   `KOOEDITOR_CLAP_TEXT_MODEL`, `KOOEDITOR_CLAP_VOCAB` and
   `KOOEDITOR_CLAP_MERGES` point at local copies instead.
 
+### Fitting music to a length
+
+`koo-core/src/music_fit*` makes a song end exactly where it should, on its
+real ending, with seamless edits instead of a hard cut or a fade (like
+Premiere's Remix). The timeline's clip menu offers "Fit To" → Sequence End
+(the end of the other tracks), In/Out, or Duration… on a media clip on an
+audio track; the agent has `fit_music`. Both build a `music_fit::Request`
+on the UI thread and run it off it:
+
+* **Bars:** the analysis' downbeats from the clip's in point on, missed
+  ones filled where a gap holds a whole number of bars, each moved onto the
+  attack within 40 ms of it (the largest rise of the high-passed level,
+  3 ms before it), so a cut keeps the hit whole. Quiet bars at the end
+  (8 dB under the song's median) are the ring of the final chord and join
+  the ending. Before the first bar is the head; after the last, the
+  ending.
+* **Features** (`music_fit/features.rs`), from PCM decoded at 22.05 kHz
+  mono through `MediaService::audio`: per quarter of each bar a 12-bin
+  chroma (55 Hz–5 kHz) and 12 MFCCs (26 mel bands, 2048-sample frames,
+  hop 512), and the bar's RMS level. A bar-to-bar similarity mixes chroma
+  agreement (cubed, 0.5), timbre (MFCC distance over its median, 0.35) and
+  level (0.15).
+* **Planner** (`music_fit/planner.rs`): a dynamic program over (bars
+  played, bar, bars since the last jump) finds the cheapest path from the
+  first bar to the last that keeps the first and last 4 bars (fewer in
+  short songs), runs at least 4 bars between jumps, and may jump back
+  (loops) or forward (skips). A jump from bar i into bar j costs 1, plus
+  5 × (1 − how much j sounds like i + 1 and j − 1 like i), plus a phrase
+  penalty (0 when the bars moved are a multiple of 8, 0.4 of 4, 1.5 of 2,
+  else 3), 0.5 off a 4-bar boundary, and the level change. Each length of
+  path is scored with where it leaves the ending: the ending's ring can be
+  trimmed down to its hit and half a bar under a fade at least a beat long;
+  ending early or cutting into the hit costs by the beat. The quality is
+  the weakest jump's score times how close the end lands.
+* **Applying:** `Command::FitMusic { clip, at, segments, crossfade,
+  fade_out }` (category Audio) replaces the clip with its segments back to
+  back from `at`, keeping its gain, effects and edge transitions; each join
+  gets a 30 ms `EndOnCut` transition, which audio tracks play as an
+  equal-power crossfade (`audiofx::spans`) in the viewer and the render
+  alike, so the downbeat after the cut is never faded. Keyframes are
+  dropped. It refuses clips at another speed (fitting keeps the tempo) and
+  results that would run over another clip on the track. One undo step for
+  the user, one reviewable item for the agent, whose result lists each
+  skip and loop with its source span, place and score.
+
 ### Subject masks
 
 * **Model** (`koo-models/src/segmentation/sam2/`): SAM 2.1 tiny (Meta,
@@ -632,6 +773,50 @@ not retried with Whisper.
   exact distance transform further out), like shapes. A subject without
   its matte yet is left out of the raster; layout bounds a picture by its
   subjects' mattes.
+
+### Person masks
+
+* **Model** (`koo-models/src/matting/modnet/`): MODNet (Ke et al., Apache-2.0
+  code and weights), the official photographic portrait checkpoint as
+  Xenova's ONNX export (`Xenova/modnet`, Apache-2.0, pinned to commit
+  `fa2fa546`, 25.9 MB, full precision; `KOOEDITOR_MODNET` points at a local
+  copy). One graph: a picture with its short side at 512 (the long side
+  in proportion, at most 1024, both a multiple of 32), scaled to -1..1 →
+  coverage 0..1 at that size. Pictures are resampled by area averaging.
+* **Service** (`koo-analysis/src/people.rs`, `LocalPeople`, behind
+  `LocalSubjects`' person methods of `SubjectService`, sharing its media
+  engine and version): frames are read at a 512 short side through the
+  media engine (the proxy when there is one), matted in chunks of 32 and
+  kept by fingerprint, model and chunk, as run-length coded bytes (about
+  30 KB a frame for a 768 × 512 matte, so about 55 MB a minute at 30 fps)
+  in memory (96 chunks) and under `cache/mattes/` (cleared with the
+  previews in Settings → Storage). Every person mask on the same media
+  shares them. One worker serves the newest request first: drawing a frame
+  asks for the 3 s from it on, so playback finds them made; a render asks
+  for the frames of its range it shows and waits (`complete_person`). When
+  the newest request wants another chunk the worker leaves the one it is
+  on and goes on with it later. A frame not made yet shows the nearest made
+  one within a second, else the mask is left out. Each frame is eased
+  toward the one before (by half where they agree, not at all where the
+  coverage moved by 0.25 or more), which stops the flicker on still edges.
+* **Drawing** (`PersonMatte::field`): the coverage is upsampled bilinearly
+  to the mask raster, then within the band where the neighbourhood is
+  mixed it is eased by `edge` toward a guided filter of itself on the
+  decoded frame's luma (radius a 270th of the height times 1 + 3 × edge,
+  ε 10⁻⁴ + 10⁻³ × (1 − edge)): strands the small matte blurs come back
+  and halos of background tighten. Expansion is a grey dilation (or
+  erosion) by a square, feather three box blurs, so both keep the soft
+  edge. Layout bounds a picture by its people.
+* **Speed, here** (4 CPU cores, release build): MODNet takes 0.27 s for a
+  768 × 512 frame (0.34 s a frame through the service with decoding), and
+  the edge 0.1 s on a 1024-wide raster; a 2 s clip of 60 frames was
+  matted in 17 s, and read from the cache in under a millisecond after.
+  Playback outruns it on the CPU: frames ahead fill in as it goes.
+* **UI:** a person button (tooltip "Remove background") in the
+  inspector's masks section and in the viewer's mask tools adds the mask
+  to the clip (or selects the one it has); its row has the usual mode,
+  invert and keyframe, and an Edge slider. A click on a person in mask mode
+  selects the mask. Without the model, a notice leads to Settings → Models.
 
 ### Depth maps
 
@@ -737,7 +922,22 @@ not retried with Whisper.
   whole picture or is unsure; with `track` it says how many frames are
   left and how long that takes here. `get_clip` lists a subject's prompts
   on the timeline and how far it is tracked. The prompt steers the agent to
-  subjects for people and objects, and to check with `view_frame` `masks`.
+  subjects for objects and one person among several, and to check with
+  `view_frame` `masks`.
+* **Person masks:** `remove_background` (`tools/masks.rs`, transform
+  group) gives each of `clips` a person mask, or changes its own: `keep:
+  background` inverts it, `edge`, `feather` and `expansion` set its edge,
+  `restore` takes the clips' person masks away. `set_mask` takes
+  `shape.type: person` (with `edge`) too; `get_clip` says how many frames
+  are matted, and `view_frame` names person masks not matted there yet.
+* **Speed ramps:** `set_speed` (`tools/speed.rs`) takes one `speed`, a
+  `ramp` of [position 0..1, speed] points or a `preset` (`ramp_in`,
+  `ramp_out`, `hero`, `bullet`, `montage`, at `speed` or the clip's),
+  `keep_length`, `interpolation` (`nearest`, `blend`, `optical_flow`) and
+  `ramp_audio` (`stretch`, `mute`); `speed` alone on a ramped clip ends the
+  ramp. `get_clip` reports a ramp as its points. The tool retimes one
+  clip; a video's linked audio clip is retimed by its own call (the
+  inspector ramps both).
 * **Depth:** `add_depth_effect` (`tools/depth.rs`) puts a `lens_blur`,
   `fog` or `camera` on clips and says when depth maps cannot be made yet;
   `set_depth_focus` focuses a clip's lens blur (or a camera's pivot) on
@@ -949,23 +1149,48 @@ available to them.
   and titles burned in with ASS (libass; the viewer letters them with the
   same timing code in `captions/motion.rs`), gain, fades, equal-power
   crossfades, `atempo` retiming, ducking with `sidechaincompress`, audio
-  effects, and two-pass `loudnorm`.
+  effects, and two-pass `loudnorm`. Under a speed ramp the audio runs
+  through `atempo` stages (enough that each stays at 0.5 or more) whose
+  tempo an `asendcmd` script in the work folder moves every 50 ms of
+  timeline; the viewer's stretch reads its grains where the ramp has the
+  source (`Stretch::mapped`). Muted ramps leave the clip out.
 * **Composited ranges** (`composed.rs`): ranges that need the compositor
   (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
-  anchor, corner pins, masks, retimed media; `compose::needs_compositor`)
-  are drawn by `compose::program` from the original media and piped into
-  the graph as raw RGBA, which keeps captions and audio. Subject masks in
-  the range are found (and tracked) first, `SubjectService::complete`
-  taking half the progress; a subject that cannot be found fails the
-  render. Then every depth map the range's depth effects and masks read
-  (the frames their clips show there, transitions included, and the
-  frames smoothing reads) is made (`DepthService::complete`, half of what
+  anchor, corner pins, masks, retimed or ramped media;
+  `compose::needs_compositor`) are drawn by `compose::program` from the
+  original media and piped into the graph as raw RGBA, which keeps
+  captions and audio. Optical flow frames are made as each frame is
+  composed (`speed::Waiting`), never blended in their place. Subject masks in
+  the range are found (and tracked) first, and person masks' frames in it
+  matted, `SubjectService::complete` and `complete_person` taking half the
+  progress; a subject that cannot be found (or people without their model)
+  fails the render. A render of a person mask matched the viewer's frame
+  to a mean difference of 1.8/255 (H.264 included). Then every depth map
+  the range's depth effects and masks read (the frames their clips show
+  there, transitions included, and the frames smoothing reads) is made (`DepthService::complete`, half of what
   progress is left), so frames compose as the viewer shows them; a map
   that cannot be made fails the render.
 * **Queue** (`queue.rs`): jobs run one after another with progress from
   `-progress pipe:1`, can be cancelled and never overwrite a file.
-* **Presets:** 1080p60, 1080p30 and 4K30 H.264, ProRes 422 HQ, WAV and
-  Custom, sized by the short side so they keep the sequence's shape
+* **Hardware encoding** (`hw.rs`): H.264 and HEVC go to VideoToolbox
+  (macOS), NVENC, Quick Sync, VA-API (Linux) or AMF (Windows) when the
+  installed FFmpeg lists the encoder (`ffmpeg -encoders`) and a five-frame
+  trial encode with the render's own arguments succeeds. The probe runs
+  once per session, the trials in parallel (about 0.1 s here), off the UI
+  thread. The preset's CRF maps to each encoder's rate control: NVENC
+  `-rc vbr -cq`, Quick Sync `-global_quality`, VA-API and AMF constant QP,
+  one step below the CRF; VideoToolbox an average bitrate from the CRF,
+  size and rate (its constant quality is Apple silicon only). Frames are
+  converted to 4:2:0 by swscale as for libx264, so the matrix and colour
+  tags match; VA-API then `hwupload`s at the end of the graph. Composited
+  ranges pipe RGBA into the same graph, so they encode on hardware too.
+  The Deliver workspace's Encoder choice (Auto, Hardware, Software) is
+  saved per user (`Store::render_encoder`); Auto falls back to libx264 /
+  libx265 when the hardware encode fails, Hardware fails instead. The
+  agent's `queue_render` takes an optional `encoder`, else the user's
+  choice.
+* **Presets:** 1080p60, 1080p30 and 4K30 H.264, 4K30 HEVC (x265 CRF 22),
+  ProRes 422 HQ, WAV and Custom, sized by the short side so they keep the sequence's shape
   ("1080p" is 1080 × 1920 for 9:16).
 * **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
 
@@ -986,7 +1211,8 @@ the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
 Storage (what the user-data folder holds, with Clear for previews,
-subject mattes and depth maps among them, and analysis results). The FX code editor replaces
+subject mattes and depth maps among them, analysis results and the render cache, whose
+row also sets its size limit and turns background rendering off). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -1025,6 +1251,8 @@ see:
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_DEPTH` | `1` | A lens blur (focus pick armed), a 3D camera and a depth mask on the selected clip |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
+| `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
+| `KOOEDITOR_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
@@ -1048,12 +1276,16 @@ there.
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
+| Person masks | `koo-core/src/person.rs`, `mask.rs`, `compose.rs`, `koo-models/src/matting/`, `koo-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
 | Depth maps, depth effects and masks | `koo-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `koo-gpu` (`wrap.rs`, `batch.rs`), `koo-models/src/depth/`, `koo-analysis/src/depth*`, `koo-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
+| Speed ramps, slow motion | `koo-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `koo-models/src/interpolation/`, `koo-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `koo-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
-| D1 render | `koo-deliver`, `ui/deliver.rs` |
+| Fit music to length | `koo-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
+| D1 render | `koo-deliver`, `ui/deliver.rs`; hardware encoders `koo-deliver/src/hw.rs` |
+| Render cache | `koo-editor/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `koo-store/src/render_cache.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
@@ -1110,11 +1342,68 @@ there.
 * The SAM 2.1 graphs come from a third party's Hugging Face repository
   (pinned to a commit); a mirror under the project's own account would
   keep them reachable.
+* Hardware encoding has run on no real hardware encoder: this container
+  has no GPU, so the probe found none (its FFmpeg 6.1 lists NVENC, Quick
+  Sync and VA-API; the trials fail as they should). The fallback and the
+  NVENC argument path (graph, piped composited frames, audio) were checked
+  with a stand-in `KOOEDITOR_FFMPEG` that accepts `h264_nvenc`; VideoToolbox
+  and AMF are written from FFmpeg's encoder options, VA-API's `hwupload`
+  tail only parsed. The CRF-to-QP/bitrate mapping is not measured against
+  libx264 (no VMAF runs), nor the speed-up.
+* Speed ramps: optical flow runs on the CPU (ONNX Runtime) only: RIFE took
+  about 0.25 s for a 256 × 128 frame here; at 720p and 1080p it is likely
+  seconds a frame, so flow lags playback (blended until made) and slows
+  renders. No GPU, Mac or Windows was available to measure it. Frames are
+  kept raw (about 3.7 MB each at 720p) and pile up until Previews is
+  cleared. Flow is made from proxies in the viewer and from originals in
+  renders, so the two match in motion but not pixel for pixel.
+* Speed ramps: ramped audio in the viewer (our WSOLA stretch) and the
+  render (`atempo` moved in 50 ms steps) differ slightly in shape, as for
+  one speed. OTIO and FCPXML exports leave ramps out, as they do speed. The
+  protected-range check sees the two halves of a split ramped clip as
+  different pieces, so it may warn on a split that changes nothing.
+  Agent views (stills) show blended frames until flow frames are made.
+* The RIFE graph comes from a third party's Hugging Face repository
+  (`walterlow/RIFE_fp32_timestep`, pinned to a commit); a mirror under the
+  project's own account would keep it reachable.
+* Person masks: MODNet runs on the CPU (0.27 s a 768 × 512 frame on 4
+  cores here), so preview is not real time without a GPU provider, which
+  was not tried; nor were macOS and Windows. The ONNX file comes from a
+  third party's repository (Xenova, pinned to a commit); a mirror under
+  the project's own Hugging Face account would keep it reachable. Easing
+  over time starts again at a chunk made before the one ahead of it, so a
+  chunk's first frame can step. MODNet is trained on portraits: full
+  bodies far from the camera, several people overlapping and people
+  against busy backgrounds of their own colour leave holes or halos
+  (Expand below 0 trims a halo). Its quality was checked by eye on one
+  photograph and a 2 s clip made from it, not measured.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
   makes the first debug build take minutes instead of hours.
 
+* Fitting music was checked on a synthetic 120 BPM song (intro, A, B, A,
+  outro, a final chord ringing 5 s; built with NumPy) with its true
+  downbeats and with Beat This!'s: every target from 20 s to 130 s landed
+  exactly, joins showed no clicks (largest sample step at a join 0.03,
+  against 0.81 inside the song), and with true downbeats jumps paired the
+  same chords in the same section (85–96 %) where the length allowed a
+  4-bar move. With Beat This!'s, which finds bars in the final chord's
+  ring, the ending had about a bar to give, and some lengths took a weaker
+  jump (25–60 %). Not checked on real songs, nor by ear; no length leaves
+  the meter (a jump moves whole bars), so where whole bars can't reach the
+  target the song ends up to half a bar off or trims its ending's ring.
+  The context menu was checked by building only, not on screen. Bar
+  features are computed on every fit, not cached.
+* Render cache: keys cover the project and the editor's styles, not files
+  read by path behind them (an image parameter's file or a LUT changed in
+  place, analysis data kept outside the project): such a change shows only
+  after the cache is cleared. Built-in shaders and templates are keyed by
+  the app version, so a development build that changes one keeps showing
+  old frames until cleared. Frames are keyed by absolute time, so moving a
+  clip (or a ripple) renders the moved range again. Playback's disk reads
+  and QOI decoding were not measured here at real time on a GPU machine
+  (no GPU in the cloud containers), nor on macOS or Windows.
 * Depth maps run on the CPU everywhere (ONNX Runtime's CPU provider; no
   CoreML, DirectML or CUDA tried): 0.4–0.6 s a frame on 4 cores, so
   playback over footage not yet made shows the effects late (the nearest

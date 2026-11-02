@@ -5,6 +5,7 @@ mod notices;
 mod persistence;
 mod projects;
 mod relink;
+mod render_cache;
 mod state;
 mod ui;
 #[cfg(all(windows, target_env = "msvc"))]

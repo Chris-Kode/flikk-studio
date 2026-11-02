@@ -19,16 +19,22 @@
 //! cancels the older's job. A failed frame or job is not tried again until
 //! the model is downloaded anew.
 //!
+//! Person masks are its other half ([`crate::people`]): they share its
+//! media engine and its version, so views draw again as either makes
+//! mattes.
+//!
 //! [`Subject::key`]: koo_core::subject::Subject::key
 
 mod store;
 
+use crate::people::LocalPeople;
 use koo_core::ids::MaskId;
 use koo_core::jobs::{JobProgress, JobQueue};
 use koo_core::model::{Fingerprint, MediaItem, MediaKind};
+use koo_core::person::PersonMatte;
 use koo_core::services::{
-    Frame, FrameStream, MediaService, ServiceError, ServiceResult, SubjectRef, SubjectService,
-    SubjectStatus,
+    Frame, FrameStream, MediaService, PersonRef, ServiceError, ServiceResult, SubjectRef,
+    SubjectService, SubjectStatus,
 };
 use koo_core::subject::{Fnv, Matte, SubjectPrompt};
 use koo_core::time::{Rate, Time};
@@ -76,6 +82,8 @@ pub struct LocalSubjects {
     picks: JobQueue<PromptKey>,
     /// Subjects followed, one at a time.
     tracks: JobQueue<TrackJob>,
+    /// Person masks.
+    people: LocalPeople,
 }
 
 struct Shared {
@@ -131,6 +139,7 @@ fn runner(model: &'static Model) -> Option<Box<dyn Segmenter>> {
 impl LocalSubjects {
     pub fn new(media: Arc<dyn MediaService>) -> Self {
         Self {
+            people: LocalPeople::new(media.clone()),
             shared: Arc::new(Shared {
                 media,
                 picker: Mutex::new(Picker {
@@ -858,6 +867,27 @@ impl SubjectService for LocalSubjects {
     }
 
     fn version(&self) -> u64 {
-        self.shared.version.load(Ordering::SeqCst)
+        self.shared.version.load(Ordering::SeqCst) + self.people.version()
+    }
+
+    fn people_available(&self) -> Result<(), String> {
+        self.people.available()
+    }
+
+    fn person(&self, person: PersonRef<'_>, t: Time) -> Option<PersonMatte> {
+        self.people.matte(person, t)
+    }
+
+    fn person_status(&self, person: PersonRef<'_>) -> SubjectStatus {
+        self.people.status(person)
+    }
+
+    fn complete_person(
+        &self,
+        person: PersonRef<'_>,
+        progress: &dyn Fn(f32),
+        cancel: &AtomicBool,
+    ) -> ServiceResult<()> {
+        self.people.complete(person, progress, cancel)
     }
 }

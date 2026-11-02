@@ -29,6 +29,11 @@ depth = ["dep:ort"]
 # with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
 # only.
 mlx = ["dep:mlx-rs"]
+# Frames between frames for smooth slow motion (RIFE), run by ONNX Runtime.
+interpolate = ["dep:ort"]
+# Person masks: people cut out of their background by a matting model,
+# run by ONNX Runtime.
+matting = ["dep:ort"]
 
 [dependencies]
 anyhow.workspace = true

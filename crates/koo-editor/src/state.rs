@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod music_fit;
 mod source;
 pub mod voices;
 
@@ -38,6 +39,10 @@ const MODELS_NOTICE: &str = "models-missing";
 const SUBJECTS_POLL: Duration = Duration::from_millis(250);
 /// Key of the notice that subject masks need their model.
 const SUBJECTS_NOTICE: &str = "subjects-model";
+/// Key of the notice that optical flow needs its model.
+const FLOW_NOTICE: &str = "optical-flow-model";
+/// Key of the notice that person masks need their model.
+const PEOPLE_NOTICE: &str = "people-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -154,6 +159,8 @@ pub struct EditorState {
     /// Samples fetched for approval cards, by voice id; `None` while on
     /// their way.
     pub heard_voices: HashMap<String, Option<koo_core::model::MediaItem>>,
+    /// Heavy ranges composed onto disk while the user is idle.
+    pub render: crate::render_cache::Background,
 }
 
 impl EditorState {
@@ -264,6 +271,7 @@ impl EditorState {
             generated_seen: HashSet::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
+            render: crate::render_cache::Background::new(cx),
         };
         this.mark_generated_seen();
         this.configure_analysis();
@@ -1226,6 +1234,8 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
         fx,
         html,
         subjects,
+        interpolation: Some(Arc::new(koo_analysis::LocalInterpolation::new())
+            as Arc<dyn koo_core::services::InterpolationService>),
         depth,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
@@ -1332,9 +1342,59 @@ impl EditorState {
         ready.is_ok()
     }
 
-    /// Mattes or depth maps were made: draw again.
+    /// When optical flow is picked without its model: a notice that leads
+    /// to Settings → Models (slowed frames are blended meanwhile).
+    pub fn optical_flow_picked(&mut self, cx: &mut Context<Self>) {
+        let Some(Err(e)) = self.services.interpolation.as_ref().map(|s| s.available()) else {
+            return;
+        };
+        self.notices.clear(FLOW_NOTICE);
+        self.notices.set(Notice {
+            key: FLOW_NOTICE.into(),
+            level: Level::Warning,
+            title: "Optical flow needs its model".into(),
+            items: Vec::new(),
+            detail: Some(e),
+            action: Some(NoticeAction::OpenModels),
+        });
+        cx.notify();
+    }
+
+    /// Whether person masks can be made; when not (their model is
+    /// missing), a notice that leads to Settings → Models.
+    pub fn people_ready(&mut self, cx: &mut Context<Self>) -> bool {
+        let ready = match &self.services.subjects {
+            Some(s) => s.people_available(),
+            None => Err("Person masks need the media engine (FFmpeg).".into()),
+        };
+        let changed = match &ready {
+            Ok(()) => self.notices.clear(PEOPLE_NOTICE),
+            Err(e) => {
+                self.notices.clear(PEOPLE_NOTICE);
+                self.notices.set(Notice {
+                    key: PEOPLE_NOTICE.into(),
+                    level: Level::Warning,
+                    title: "Person masks need their model".into(),
+                    items: Vec::new(),
+                    detail: Some(e.clone()),
+                    action: Some(NoticeAction::OpenModels),
+                })
+            }
+        };
+        if changed {
+            cx.notify();
+        }
+        ready.is_ok()
+    }
+
+    /// Mattes were made: draw again.
     fn poll_subjects(&mut self, cx: &mut Context<Self>) {
         let version = self.services.subjects.as_ref().map_or(0, |s| s.version())
+            + self
+                .services
+                .interpolation
+                .as_ref()
+                .map_or(0, |s| s.version())
             + self.services.depth.as_ref().map_or(0, |d| d.version());
         if version != self.subjects_version {
             self.subjects_version = version;

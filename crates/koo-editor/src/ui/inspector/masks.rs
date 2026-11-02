@@ -4,8 +4,10 @@
 //! toggle for its whole shape at the playhead, removal, and its edge,
 //! opacity and box as sliders. A subject also tracks or not, refines its
 //! edge or not, turns into a path from its outline at the playhead, and
-//! shows how far its tracking got under its row. A depth mask keeps a
-//! range of distance (near, far, softness), the background at first.
+//! shows how far its tracking got under its row. A person mask (one
+//! button: the people kept, the background cut away) eases its edge onto
+//! the picture's by its Edge slider. A depth mask keeps a range of
+//! distance (near, far, softness), the background at first.
 
 use super::param::{Key, MaskField};
 use super::{InspectorPanel, clip_time, section_with};
@@ -18,7 +20,7 @@ use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::compose;
 use koo_core::mask::{Mask, MaskKeyframe, MaskMode, MaskShape, MaskState};
-use koo_core::model::Clip;
+use koo_core::model::{Clip, ClipContent};
 
 /// Most points of a path made from a subject's outline.
 const PATH_POINTS: usize = 48;
@@ -83,7 +85,27 @@ impl InspectorPanel {
                 "Depth",
                 clip,
                 cx,
-            ));
+            ))
+            .when(matches!(clip.content, ClipContent::Media { .. }), |row| {
+                let (id, masks) = (clip.id, clip.masks.clone());
+                row.child(
+                    Button::new("add-mask-person")
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Remove background")
+                        .child(glyph(Glyph::Person, px(13.), muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if masks.iter().any(Mask::is_person)
+                                || !this.state.update(cx, |s, cx| s.people_ready(cx))
+                            {
+                                return;
+                            }
+                            let mut masks = masks.clone();
+                            masks.push(Mask::person());
+                            this.run(vec![Command::SetMasks { clip: id, masks }], "set_masks", cx);
+                        })),
+                )
+            });
         let blocks: Vec<Div> = (0..clip.masks.len())
             .map(|i| self.mask_block(clip, i, window, cx))
             .collect();
@@ -123,14 +145,22 @@ impl InspectorPanel {
             MaskShape::Ellipse { .. } => "Ellipse",
             MaskShape::Path { .. } => "Path",
             MaskShape::Subject => "Subject",
+            MaskShape::Person { .. } => "Person",
             MaskShape::Depth { .. } => "Depth",
         };
         let subject = mask.picks().cloned();
-        let status = subject.as_ref().and_then(|_| {
-            let services = &state.services;
-            let r = compose::subject_ref(state.bus.project(), clip, &mask)?;
-            Some(services.subjects.as_ref()?.status(r))
-        });
+        let status = subject
+            .as_ref()
+            .and_then(|_| {
+                let services = &state.services;
+                let r = compose::subject_ref(state.bus.project(), clip, &mask)?;
+                Some(services.subjects.as_ref()?.status(r))
+            })
+            .or_else(|| {
+                let services = &state.services;
+                let r = compose::person_ref(state.bus.project(), clip, &mask)?;
+                Some(services.subjects.as_ref()?.person_status(r))
+            });
         let panel = cx.entity();
         let current = mask.mode;
         let mode_masks = clip.masks.clone();
@@ -309,7 +339,7 @@ impl InspectorPanel {
             .child(remove);
         let theme = cx.theme();
         let tracking = status.as_ref().and_then(|s| {
-            let track = mask.picks().is_some_and(|m| m.track);
+            let track = mask.picks().is_some_and(|m| m.track) || (mask.is_person() && s.tracking);
             let busy = s.tracking || (track && s.tracked < s.frames);
             (track && busy && s.error.is_none()).then(|| {
                 let fraction = s.tracked as f32 / s.frames.max(1) as f32;
@@ -341,6 +371,7 @@ impl InspectorPanel {
                 fields.extend([MaskField::Rotation, MaskField::Roundness])
             }
             MaskShape::Ellipse { .. } => fields.push(MaskField::Rotation),
+            MaskShape::Person { .. } => fields.push(MaskField::Edge),
             MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Depth { .. } => {}
         }
         let rows: Vec<Div> = fields

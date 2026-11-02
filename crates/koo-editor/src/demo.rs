@@ -7,11 +7,14 @@
 //! `KOOEDITOR_DEMO_DEPTH=1` puts depth effects and a depth mask on the
 //! selected clip.
 //! `KOOEDITOR_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
-//! media (see [`compose`]).
+//! media (see [`compose`]); `KOOEDITOR_DEMO_PERSON=<file>` a person mask
+//! on that file (see [`person`]).
 
 mod compose;
 mod depth;
 mod engines;
+mod person;
+pub mod speed;
 
 use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
@@ -65,6 +68,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
     let picks = timeline_fx(&mut demo.project);
+    speed::seed(&mut demo.project, demo.ids.selected);
     let analysis = interview_analysis(&demo);
     let jobs = vec![
         job(&demo.project.media[0], JobState::Done),
@@ -98,6 +102,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     seed_fx(state, &demo.ids, cx);
     chat_references(state, &demo, cx);
     compose::seed(state);
+    person::seed(state);
     depth::seed(state);
     cx.notify();
 }

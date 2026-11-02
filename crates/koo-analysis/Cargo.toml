@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "depth"]
+default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people", "depth"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["koo-models/whisper"]
@@ -20,6 +20,12 @@ sounds = ["koo-models/sounds"]
 # Subject masks: objects picked by clicks, found and followed through
 # video by SAM 2.1; without it subject masks keep nothing.
 subjects = ["koo-models/segment"]
+# Optical flow slow motion: frames made between frames by RIFE; without it
+# slowed clips are blended.
+interpolation = ["koo-models/interpolate"]
+# Person masks: people cut out of their background by MODNet; without it
+# person masks keep nothing.
+people = ["koo-models/matting"]
 # Depth maps for the depth effects and masks, by Depth Anything V2 Small;
 # without them depth effects leave the picture as it is.
 depth = ["koo-models/depth"]
