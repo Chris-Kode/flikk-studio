@@ -289,7 +289,9 @@ impl Grey {
         let (w, h) = (frame.width as usize, frame.height as usize);
         let px = frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(w * h)
             .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
             .collect();
@@ -437,7 +439,7 @@ fn estimate(before: &Pyramid, now: &Pyramid) -> [f32; 4] {
     let x1 = (w - b - reach).max(x0);
     let y0 = reach.min(h / 4);
     let y1 = (h - b - reach).max(y0);
-    let mut pairs: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    let mut pairs: Vec<Pair> = Vec::new();
     for gy in 0..GRID.1 {
         for gx in 0..GRID.0 {
             let x = x0 + (x1 - x0) * gx as i32 / (GRID.0 as i32 - 1).max(1);
@@ -483,12 +485,15 @@ fn estimate(before: &Pyramid, now: &Pyramid) -> [f32; 4] {
 }
 
 type Similarity = ((f64, f64), (f64, f64));
+/// A block's centre in the frame before and in this one, about the
+/// centre, in pixels.
+type Pair = ((f64, f64), (f64, f64));
 
 /// The move and turn `q = a·p + b` (`|a| = 1`) most `pairs` agree with:
 /// RANSAC on pairs of pairs, refined by least squares on those that agree;
 /// the median move when too few do. Shake hardly zooms from one frame to
 /// the next, and a fitted zoom was mostly noise, so none is.
-fn fit(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
+fn fit(pairs: &[Pair]) -> Similarity {
     let identity = ((1.0, 0.0), (0.0, 0.0));
     if pairs.len() < 3 {
         return match pairs.first() {
@@ -542,7 +547,7 @@ fn fit(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
 }
 
 /// [`least_squares`] without scale.
-fn least_squares_rigid(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
+fn least_squares_rigid(pairs: &[Pair]) -> Similarity {
     let (a, _) = least_squares(pairs);
     let len = a.0.hypot(a.1).max(1e-9);
     let a = (a.0 / len, a.1 / len);
@@ -559,7 +564,7 @@ fn least_squares_rigid(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
     (a, b)
 }
 
-fn agreeing(pairs: &[((f64, f64), (f64, f64))], (a, b): Similarity) -> Vec<usize> {
+fn agreeing(pairs: &[Pair], (a, b): Similarity) -> Vec<usize> {
     pairs
         .iter()
         .enumerate()
@@ -571,10 +576,7 @@ fn agreeing(pairs: &[((f64, f64), (f64, f64))], (a, b): Similarity) -> Vec<usize
         .collect()
 }
 
-fn two_point(
-    (p1, q1): ((f64, f64), (f64, f64)),
-    (p2, q2): ((f64, f64), (f64, f64)),
-) -> Option<Similarity> {
+fn two_point((p1, q1): Pair, (p2, q2): Pair) -> Option<Similarity> {
     let dp = (p2.0 - p1.0, p2.1 - p1.1);
     let dq = (q2.0 - q1.0, q2.1 - q1.1);
     let d = dp.0 * dp.0 + dp.1 * dp.1;
@@ -595,7 +597,7 @@ fn two_point(
     Some((a, b))
 }
 
-fn least_squares(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
+fn least_squares(pairs: &[Pair]) -> Similarity {
     let n = pairs.len() as f64;
     let (mut pm, mut qm) = ((0.0, 0.0), (0.0, 0.0));
     for (p, q) in pairs {
@@ -625,7 +627,7 @@ fn least_squares(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
 }
 
 /// The median of the blocks' moves, as a move alone.
-fn median_move(pairs: &[((f64, f64), (f64, f64))]) -> Similarity {
+fn median_move(pairs: &[Pair]) -> Similarity {
     let median = |mut v: Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(0.0)

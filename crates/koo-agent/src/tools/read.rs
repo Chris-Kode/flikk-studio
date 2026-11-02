@@ -392,6 +392,9 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     if !clip.masks.is_empty() {
         v["masks"] = super::masks::masks_json(project, clip, ctx.services);
     }
+    if let Some(s) = super::stabilize::clip_json(&clip.stabilization) {
+        v["stabilization"] = s;
+    }
     if !clip.effects.is_empty() {
         v["effects"] = clip
             .effects
