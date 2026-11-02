@@ -1,7 +1,7 @@
 //! Online providers in the editor: each one's key and account as Settings →
 //! Integrations shows them, the provider picked for each capability, the
-//! analysis steps, and music, sound effects and voiceovers made from the
-//! media pool or approved for the agent. The requests themselves are
+//! analysis steps, and music, sound effects, voiceovers and videos made from
+//! the media pool or approved for the agent. The requests themselves are
 //! `koo-cloud`'s.
 
 use super::{ApprovalOutcome, EditorState};
@@ -14,7 +14,7 @@ use koo_core::MediaId;
 use koo_core::analysis::AnalysisSteps;
 use koo_core::bus::{Author, CommandBus};
 use koo_core::changeset::ChangeSetState;
-use koo_core::cloud::{Capability, CloudError, GenerateRequest, ProviderChoice};
+use koo_core::cloud::{Capability, CloudError, GenerateRequest, GenerationTask, ProviderChoice};
 use koo_core::model::MediaItem;
 use koo_core::services::AnalysisConfig;
 
@@ -46,14 +46,20 @@ pub enum Check {
     Failed(String),
 }
 
-/// Music, a sound effect or a voiceover being made from the media pool.
+/// Music, a sound effect, a voiceover or a video being made from the media
+/// pool.
 #[derive(Clone, Debug)]
 pub struct Generating {
     pub id: u64,
     pub request: GenerateRequest,
+    /// Where it is, and how to stop it.
+    pub task: GenerationTask,
     /// Why it failed; `None` while it runs.
     pub failed: Option<CloudError>,
 }
+
+/// How often a running generation's row is redrawn with where it is.
+const STAGE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl EditorState {
     /// Read each provider's key off the UI thread (the credential store may
@@ -140,6 +146,7 @@ impl EditorState {
                         Capability::Music,
                         Capability::SoundEffects,
                         Capability::Voiceover,
+                        Capability::Video,
                     ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
@@ -291,16 +298,19 @@ impl EditorState {
     pub fn generate(&mut self, request: GenerateRequest, cx: &mut Context<Self>) {
         let id = self.next_generation;
         self.next_generation += 1;
+        let task = GenerationTask::default();
         self.generating.push(Generating {
             id,
             request: request.clone(),
+            task: task.clone(),
             failed: None,
         });
         let (cloud, media) = (self.cloud.clone(), self.services.media.clone());
+        let following = task.clone();
         let made = cx.background_executor().spawn(async move {
             use koo_core::cloud::GenerationService as _;
             cloud
-                .generate(&request, &koo_core::paths::generated())
+                .generate(&request, &koo_core::paths::generated(), &following)
                 .map(|g| koo_core::cloud::media_item(&g, media.as_deref()))
         });
         cx.spawn(async move |this, cx| {
@@ -311,6 +321,7 @@ impl EditorState {
                         this.generating.retain(|g| g.id != id);
                         this.add_generated(item, cx);
                     }
+                    Err(CloudError::Cancelled) => this.generating.retain(|g| g.id != id),
                     Err(e) => {
                         if let Some(g) = this.generating.iter_mut().find(|g| g.id == id) {
                             g.failed = Some(e);
@@ -321,6 +332,35 @@ impl EditorState {
             });
         })
         .detach();
+        // Redraw its row as it moves on, until it is done.
+        cx.spawn(async move |this, cx| {
+            let mut shown = task.stage();
+            loop {
+                cx.background_executor().timer(STAGE_POLL).await;
+                let running = this.update(cx, |this, cx| {
+                    let stage = task.stage();
+                    if stage != shown {
+                        shown = stage;
+                        cx.notify();
+                    }
+                    this.generating
+                        .iter()
+                        .any(|g| g.id == id && g.failed.is_none())
+                });
+                if !matches!(running, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask the provider to stop generation `id`; its row goes when it has.
+    pub fn stop_generation(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(g) = self.generating.iter().find(|g| g.id == id) {
+            g.task.cancel();
+        }
         cx.notify();
     }
 
@@ -358,6 +398,7 @@ impl EditorState {
         let label = match item.generated.as_deref().map(|g| g.capability) {
             Some(Capability::SoundEffects) => "Generate sound effect",
             Some(Capability::Voiceover) => "Generate voiceover",
+            Some(Capability::Video) => "Generate video",
             _ => "Generate music",
         };
         let script = item.generated.as_deref().and_then(|g| g.script());

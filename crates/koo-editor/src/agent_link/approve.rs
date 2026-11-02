@@ -84,7 +84,11 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
             let media = inputs.services.media.clone();
             Ok(Started::Generate(Box::new(move || {
                 let made = generation
-                    .generate(&request, &koo_core::paths::generated())
+                    .generate(
+                        &request,
+                        &koo_core::paths::generated(),
+                        &koo_core::cloud::GenerationTask::default(),
+                    )
                     .map_err(|e| anyhow!(generate::error_text(&e)))?;
                 Ok(Generated {
                     item: koo_core::cloud::media_item(&made, media.as_deref()),

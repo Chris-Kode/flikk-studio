@@ -174,17 +174,17 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail(unavailable(&request));
     }
     let media = ctx.services.media.clone();
-    let job: Job =
-        Box::new(
-            move || match generation.generate(&request, &koo_core::paths::generated()) {
-                Ok(made) => JobDone::Generated {
-                    item: Box::new(koo_core::cloud::media_item(&made, media.as_deref())),
-                    placement,
-                    summary: request.summary(),
-                },
-                Err(e) => JobDone::Done(Done::error(error_text(&e))),
+    let job: Job = Box::new(move || {
+        let task = cloud::GenerationTask::default();
+        match generation.generate(&request, &koo_core::paths::generated(), &task) {
+            Ok(made) => JobDone::Generated {
+                item: Box::new(koo_core::cloud::media_item(&made, media.as_deref())),
+                placement,
+                summary: request.summary(),
             },
-        );
+            Err(e) => JobDone::Done(Done::error(error_text(&e))),
+        }
+    });
     Ok(Step::Job(job))
 }
 

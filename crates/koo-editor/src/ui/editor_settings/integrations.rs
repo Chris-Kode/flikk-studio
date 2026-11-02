@@ -244,6 +244,9 @@ impl IntegrationsTab {
                 if let Some(left) = account.credits_left() {
                     parts.push(format!("{} credits left", thousands(left)));
                 }
+                if let Some(balance) = &account.balance {
+                    parts.push(format!("{balance} left"));
+                }
                 Some(
                     h_flex()
                         .gap_2()
