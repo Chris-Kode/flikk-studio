@@ -25,7 +25,8 @@ pub struct Claude {
 }
 
 impl Claude {
-    fn web_calls_started(&mut self, message: &Value) {
+    fn web_calls_started(&mut self, message: &Value) -> Vec<BackendEvent> {
+        let mut started = Vec::new();
         for block in content(message) {
             let field = |k: &str| block.get(k).and_then(Value::as_str);
             let tool = match field("name") {
@@ -33,11 +34,20 @@ impl Claude {
                 Some("WebFetch") => "web_fetch",
                 _ => continue,
             };
-            if let (Some("tool_use"), Some(id)) = (field("type"), field("id")) {
+            if let (Some("tool_use"), Some(id)) = (field("type"), field("id"))
+                && !self.web_calls.contains_key(id)
+            {
                 let input = block.get("input").cloned().unwrap_or_default();
+                started.push(BackendEvent::ToolStarted {
+                    key: id.to_owned(),
+                    tool,
+                    summary: web_summary(&input),
+                    args: input.clone(),
+                });
                 self.web_calls.insert(id.to_owned(), (tool, input));
             }
         }
+        started
     }
 
     fn web_calls_finished(&mut self, message: &Value) -> Vec<BackendEvent> {
@@ -45,13 +55,10 @@ impl Claude {
             .filter_map(|block| {
                 let id = block.get("tool_use_id")?.as_str()?;
                 let (tool, args) = self.web_calls.remove(id)?;
-                let summary = ["query", "url"]
-                    .iter()
-                    .find_map(|k| args.get(k)?.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
+                let summary = web_summary(&args);
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
                 Some(BackendEvent::Tool {
+                    key: Some(id.to_owned()),
                     tool,
                     args,
                     summary,
@@ -60,6 +67,15 @@ impl Claude {
             })
             .collect()
     }
+}
+
+/// What a web call searched for or read.
+fn web_summary(args: &Value) -> String {
+    ["query", "url"]
+        .iter()
+        .find_map(|k| args.get(k)?.as_str())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Content blocks of an `assistant` or `user` line.
@@ -182,17 +198,19 @@ impl Adapter for Claude {
                 _ => vec![],
             },
             Some("assistant") => {
-                self.web_calls_started(&v);
+                let started = self.web_calls_started(&v);
                 // Without partial messages (older CLIs), take whole messages.
                 if self.streamed {
-                    return vec![];
+                    return started;
                 }
                 self.text.new_message();
-                content(&v)
+                let mut out: Vec<BackendEvent> = content(&v)
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                     .filter_map(|b| b.get("text").and_then(Value::as_str))
                     .filter_map(|t| self.text.text(t))
-                    .collect()
+                    .collect();
+                out.extend(started);
+                out
             }
             Some("user") => self.web_calls_finished(&v),
             Some("result") => {

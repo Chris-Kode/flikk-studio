@@ -218,6 +218,16 @@ pub enum AgentEvent {
     Activity {
         entry: ActivityEntry,
     },
+    /// A call that takes a while began; `entry.running` is `call`. Its
+    /// [`AgentEvent::ToolFinished`] follows, unless the turn is stopped.
+    ToolStarted {
+        call: u64,
+        entry: ActivityEntry,
+    },
+    ToolFinished {
+        call: u64,
+        entry: ActivityEntry,
+    },
     ChangeSetReady {
         change_set: ChangeSetId,
     },
@@ -239,4 +249,7 @@ pub struct ActivityEntry {
     /// Transcript excerpts sent to the model.
     pub excerpts: Vec<String>,
     pub ok: bool,
+    /// The call's id while it runs. Never saved.
+    #[serde(skip)]
+    pub running: Option<u64>,
 }

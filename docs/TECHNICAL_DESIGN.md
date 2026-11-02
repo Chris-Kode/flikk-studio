@@ -1313,7 +1313,10 @@ on the UI thread and run it off it:
 * **Chat** (`ui/chat*`): sessions per project in
   `paths::projects()/<project>.chats.json`, each resuming its own backend
   conversation (`agent/sessions.json`). Tool calls stack into one card per
-  run. The change-set card sits above the composer, once per set however
+  run. A call that runs off-thread (a `koo` job, or the backend's own web
+  search and fetch) shows with a spinner from `AgentEvent::ToolStarted`
+  until its `ToolFinished` replaces it; one still running when the turn ends
+  is marked Stopped. The change-set card sits above the composer, once per set however
   many turns grew it, and stays with its outcome until the next message;
   it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Recipes run as
   `/name key=value …` (seven built-ins: rough-cut, dead-time, teaser,

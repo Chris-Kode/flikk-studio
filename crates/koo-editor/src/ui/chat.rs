@@ -513,7 +513,10 @@ fn signature(s: &EditorState) -> u64 {
     s.chat.len().hash(&mut h);
     s.chat
         .last()
-        .map(|m| (m.text.len(), m.tools.len()))
+        .map(|m| {
+            let running = m.tools.iter().filter(|t| t.running.is_some()).count();
+            (m.text.len(), m.tools.len(), running)
+        })
         .hash(&mut h);
     s.preview.hash(&mut h);
     s.agent_busy().hash(&mut h);

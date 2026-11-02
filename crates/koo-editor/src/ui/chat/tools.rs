@@ -1,9 +1,11 @@
 //! Tool calls in the thread (PRD AG10, V7). Calls made in a row stack into
 //! one card; a row expands to its arguments, transcript excerpts and the
-//! collages the model saw or the pictures it made.
+//! collages the model saw or the pictures it made. A call that takes a
+//! while shows a spinner until it ends.
 
 use super::ChatPanel;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme, h_flex, v_flex};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::ActivityEntry;
@@ -32,6 +34,7 @@ impl ChatPanel {
         }
         let open = self.tools_open.contains(&ix);
         let ok = entries.iter().all(|e| e.ok);
+        let running = entries.iter().any(|e| e.running.is_some());
         let names = entries
             .iter()
             .map(|e| e.tool.as_str())
@@ -40,7 +43,7 @@ impl ChatPanel {
         card.child(
             row(&theme)
                 .id("tools-head")
-                .child(status(ok, &theme))
+                .child(status(ok, running, &theme))
                 .child(
                     div()
                         .flex_none()
@@ -87,7 +90,7 @@ impl ChatPanel {
             .child(
                 row(&theme)
                     .id(("tool", j))
-                    .child(status(entry.ok, &theme))
+                    .child(status(entry.ok, entry.running.is_some(), &theme))
                     .child(
                         div()
                             .flex_none()
@@ -124,7 +127,13 @@ fn row(theme: &Theme) -> Div {
         .hover(|el| el.bg(theme.accent.opacity(0.5)))
 }
 
-fn status(ok: bool, theme: &Theme) -> Icon {
+fn status(ok: bool, running: bool, theme: &Theme) -> AnyElement {
+    if running {
+        return Spinner::new()
+            .with_size(px(14.))
+            .color(theme.muted_foreground)
+            .into_any_element();
+    }
     Icon::new(if ok {
         IconName::CircleCheck
     } else {
@@ -132,6 +141,7 @@ fn status(ok: bool, theme: &Theme) -> Icon {
     })
     .size_3p5()
     .text_color(if ok { theme.green } else { theme.red })
+    .into_any_element()
 }
 
 fn chevron(open: bool, theme: &Theme) -> Icon {

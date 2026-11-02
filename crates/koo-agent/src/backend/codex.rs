@@ -92,9 +92,9 @@ fn images_dir() -> PathBuf {
     home.join("generated_images")
 }
 
-/// A finished `web_search` item, which also covers opening pages. Codex
-/// reports no outcome for them.
-fn web_event(item: &Value) -> BackendEvent {
+/// A `web_search` item, which also covers opening pages: begun, or
+/// finished. Codex reports no outcome for them.
+fn web_event(item: &Value, started: bool) -> BackendEvent {
     let s = |p: &str| item.pointer(p).and_then(Value::as_str);
     let url = s("/action/url").unwrap_or_default();
     let (tool, summary) = match s("/action/type") {
@@ -116,11 +116,22 @@ fn web_event(item: &Value) -> BackendEvent {
             ("web_search", query.unwrap_or_else(|| queries.join(", ")))
         }
     };
-    BackendEvent::Tool {
-        tool,
-        args: item.get("action").cloned().unwrap_or_default(),
-        summary,
-        ok: true,
+    let key = s("/id").map(str::to_owned);
+    let args = item.get("action").cloned().unwrap_or_default();
+    match (started, key) {
+        (true, Some(key)) => BackendEvent::ToolStarted {
+            key,
+            tool,
+            args,
+            summary,
+        },
+        (_, key) => BackendEvent::Tool {
+            key,
+            tool,
+            args,
+            summary,
+            ok: true,
+        },
     }
 }
 
@@ -242,8 +253,14 @@ impl Adapter for Codex {
                     .into_iter()
                     .collect()
             }
+            Some("item.started") if s("/item/type") == Some("web_search") => {
+                match web_event(&v["item"], true) {
+                    started @ BackendEvent::ToolStarted { .. } => vec![started],
+                    _ => vec![],
+                }
+            }
             Some("item.completed") if s("/item/type") == Some("web_search") => {
-                vec![web_event(&v["item"])]
+                vec![web_event(&v["item"], false)]
             }
             Some("item.completed") if s("/item/type") == Some("error") => {
                 self.last_error = s("/item/message").map(str::to_owned);
