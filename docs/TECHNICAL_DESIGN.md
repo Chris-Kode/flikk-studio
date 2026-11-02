@@ -627,8 +627,8 @@ not retried with Whisper.
   time), listed by `Stabilizer::jobs`, with the inspector showing its
   progress; renders measure the paths they need first
   (`composed::measure_motion`, part of the progress), and the agent's
-  `get_shake` waits for it. About 1 s per minute of 30 fps footage in a
-  release build here.
+  `get_shake` waits for it. About 8 s per minute of 30 fps 720p footage
+  in a release build here, decoding included.
 * **Correcting** (`koo-core/src/stabilize.rs`, `Plan`): the steps over the
   source range the clip shows add up into the camera's pose per frame
   (where frame 0's centre went, its turn), composed exactly as

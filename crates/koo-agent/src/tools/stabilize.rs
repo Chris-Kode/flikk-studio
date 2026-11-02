@@ -37,7 +37,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_shake",
             category: Some(ToolCategory::ReadAnalysis),
-            description: "How shaky video clips are (measuring the camera's path when it has not been: about a second per minute of footage here), and how much stabilizing each would zoom in. `score` under 0.25 is steady, 0.25–0.75 slightly shaky, 0.75–2 shaky, over 2 very shaky.",
+            description: "How shaky video clips are (measuring the camera's path when it has not been: several seconds per minute of footage), and how much stabilizing each would zoom in. `score` under 0.25 is steady, 0.25–0.75 slightly shaky, 0.75–2 shaky, over 2 very shaky.",
             schema: json!({
                 "type": "object",
                 "properties": {
