@@ -19,6 +19,7 @@ mod profiles;
 pub mod project_file;
 mod recent;
 mod recipes;
+mod render_cache;
 mod schema;
 mod settings;
 
@@ -29,6 +30,7 @@ pub use notes::parse_notes;
 pub use profiles::{ProfileSummary, RuleFilter};
 pub use project_file::ProjectFile;
 pub use recipes::builtin_recipes;
+pub use render_cache::RenderCacheSettings;
 pub use settings::SettingsOverrides;
 
 use rusqlite::{Connection, OptionalExtension, params};

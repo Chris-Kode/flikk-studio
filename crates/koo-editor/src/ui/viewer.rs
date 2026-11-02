@@ -6,7 +6,9 @@
 //! time, the latest request wins), playback composes from streams and
 //! mixes audio in background threads. Composed frames are kept
 //! ([`cache`]), and a playhead that rests renders the next seconds ahead
-//! into them. Captions and titles are part of the frame, lettered as the
+//! into them. Frames the background render keeps on disk
+//! ([`crate::render_cache`]) are read instead of composed, when large
+//! enough and masks are not being edited. Captions and titles are part of the frame, lettered as the
 //! render burns them in (`koo_deliver::Letterer`).
 //!
 //! A pool item opened here ([`EditorState::source_picture`]) shows in place
@@ -35,6 +37,7 @@ use super::timeline::{
     NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
 };
 use crate::app::TogglePlay;
+use crate::render_cache::{self, Globals};
 use crate::state::{EditorState, Source};
 use crate::ui::media_pool::{item_name, seek_bar};
 use audio::AudioOut;
@@ -161,6 +164,7 @@ struct Job {
     services: Services,
     request: Request,
     t: Time,
+    disk: Option<Globals>,
 }
 
 struct Playback {
@@ -297,6 +301,13 @@ impl ViewerPanel {
             },
             source: state.source_picture().map(|s| s.item().id),
         }
+    }
+
+    /// What frames on disk share, when they can stand in for `key`'s:
+    /// the program, its masks not tinted.
+    fn disk(&self, key: PlayKey, cx: &App) -> Option<Globals> {
+        (key.masks == MaskView::Cut && key.source.is_none())
+            .then(|| render_cache::globals(self.state.read(cx)))
     }
 
     /// Frames composed before subjects' mattes were made go, so the
@@ -476,6 +487,7 @@ impl ViewerPanel {
     /// Start, follow or stop the playback threads, and pick up their frames.
     fn sync_playback(&mut self, cx: &mut Context<Self>) {
         let key = self.key(cx);
+        let disk = self.disk(key, cx);
         let state = self.state.read(cx);
         let media = state.services.media.clone();
         let source = state.source_picture().is_some();
@@ -501,6 +513,7 @@ impl ViewerPanel {
                 key,
                 self.cache.clone(),
                 self.shift.clone(),
+                disk,
             );
             // A source plays its own sound.
             let audio = (!source).then(|| AudioOut::start(media, project.clone(), playhead));
@@ -528,6 +541,7 @@ impl ViewerPanel {
     /// Paused (or shuttling): compose the frame under the playhead.
     fn request_frame(&mut self, cx: &mut Context<Self>) {
         let key = self.key(cx);
+        let disk = self.disk(key, cx);
         let state = self.state.read(cx);
         let t = state.monitor_time();
         let rate = state.monitor_project().timeline.settings.rate;
@@ -568,6 +582,7 @@ impl ViewerPanel {
             services: state.services.clone(),
             request,
             t: Time::from_frame(request.frame, rate),
+            disk,
         };
         if self.composing {
             self.pending = Some(job);
@@ -585,6 +600,20 @@ impl ViewerPanel {
                 .background_executor()
                 .spawn(async move {
                     let width = job.request.key.width;
+                    if let Some(globals) = job.disk {
+                        let plan = render_cache::plan_for(&job.project, globals);
+                        let image = (width <= plan.size.0)
+                            .then(|| render_cache::image(&plan, request.frame))
+                            .flatten();
+                        if let Some(image) = image {
+                            if let Ok(mut cache) = cache.lock() {
+                                let (w, h) = plan.size;
+                                let bytes = w as usize * h as usize * 4;
+                                cache.insert(request.key, request.frame, image.clone(), bytes);
+                            }
+                            return Some(image);
+                        }
+                    }
                     let size = compose::size_for_width(&job.project, width);
                     let mut stills = Stills::new(job.services.media.clone(), width);
                     let frame = compose::submit_program(
@@ -1109,7 +1138,6 @@ impl ViewerPanel {
                 if this.requested != Some(request) || this.playback.is_some() {
                     return;
                 }
-                let state = this.state.read(cx);
                 let Some((_, project)) = this.snapshot.clone().filter(|(k, _)| *k == request.key)
                 else {
                     return;
@@ -1118,12 +1146,15 @@ impl ViewerPanel {
                 let end = project.timeline.duration().to_frame(rate);
                 let span = (AHEAD_SECONDS * rate.num as f64 / rate.den.max(1) as f64) as i64;
                 let frames = request.frame + 1..(request.frame + 1 + span).min(end);
+                let disk = this.disk(request.key, cx);
+                let state = this.state.read(cx);
                 let player = Player::render_ahead(
                     state.services.clone(),
                     project,
                     frames,
                     request.key,
                     this.cache.clone(),
+                    disk,
                 );
                 this.ahead = Some((request, player));
             });

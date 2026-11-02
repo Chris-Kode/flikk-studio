@@ -155,6 +155,8 @@ pub struct EditorState {
     /// Samples fetched for approval cards, by voice id; `None` while on
     /// their way.
     pub heard_voices: HashMap<String, Option<koo_core::model::MediaItem>>,
+    /// Heavy ranges composed onto disk while the user is idle.
+    pub render: crate::render_cache::Background,
 }
 
 impl EditorState {
@@ -264,6 +266,7 @@ impl EditorState {
             generated_seen: HashSet::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
+            render: crate::render_cache::Background::new(cx),
         };
         this.mark_generated_seen();
         this.configure_analysis();
