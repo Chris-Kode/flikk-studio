@@ -33,8 +33,8 @@
 //!
 //! Titles and captions are lettering, drawn over every picture by
 //! [`Services::lettering`] when it is wired (the viewer and the agent's
-//! views) and transformed like pictures; renders burn them in with FFmpeg
-//! instead.
+//! views, and renders on an FFmpeg without libass) and transformed like
+//! pictures; other renders burn them in with FFmpeg instead.
 //!
 //! A transition renders each side's layer onto its own transparent canvas,
 //! blends them with [`FxService::transition`] at the transition's progress

@@ -280,6 +280,7 @@ pub fn render_blocking(
     }
 
     spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
+    composed::letter(&request.project, &mut spec, &request.services);
     let g = graph::build(&request.project, &spec, &work.0)?;
     let script = write_script(&work.0, "graph.txt", &g.script)?;
     let tmp = temp_path(out, &JobId::new().to_string());

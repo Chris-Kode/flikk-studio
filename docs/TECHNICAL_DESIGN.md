@@ -871,7 +871,9 @@ available to them.
   per job, sources opened inside it. Cuts, transforms, keyframes as FFmpeg
   expressions matching the viewer's curves, the grade as a `lut3d`, captions
   and titles burned in with ASS (libass; the viewer letters them with the
-  same timing code in `captions/motion.rs`), gain, fades, equal-power
+  same timing code in `captions/motion.rs`, and so does the render when
+  FFmpeg has no `ass` filter, by piping the frames through the compositor
+  with `Letterer`), gain, fades, equal-power
   crossfades, `atempo` retiming, ducking with `sidechaincompress`, audio
   effects, and two-pass `loudnorm`.
 * **Composited ranges** (`composed.rs`): ranges that need the compositor

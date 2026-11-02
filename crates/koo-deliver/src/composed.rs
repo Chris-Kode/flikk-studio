@@ -1,20 +1,22 @@
 //! Renders through the compositor: every output frame is composed by
 //! [`koo_core::compose::program`] at render size and piped into FFmpeg as
 //! raw RGBA, where the graph ([`GraphSpec::piped`]) burns in captions and
-//! titles (so the compositor leaves them out) and builds the audio in the
-//! same process.
+//! titles (so the compositor leaves them out, unless FFmpeg cannot burn them
+//! in, see [`letter`]) and builds the audio in the same process.
 
+use crate::Letterer;
 use crate::ffmpeg::{self, command};
-use crate::graph::{Graph, GraphSpec};
+use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
 use koo_core::model::{MediaItem, Project};
-use koo_core::services::{Frame, Services};
+use koo_core::services::{Frame, LetteringService, Services};
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Make every matte the subject masks over `range` show (tracking them
@@ -69,6 +71,17 @@ pub(crate) fn wanted(project: &Project, range: TimeRange, services: &Services) -
     services.media.is_some() && compose::needs_compositor(project, range)
 }
 
+/// Pipe `spec` through the compositor to letter its captions and titles
+/// there, when FFmpeg has no `ass` filter to burn them in with.
+pub(crate) fn letter(project: &Project, spec: &mut GraphSpec, services: &Services) {
+    spec.lettered = spec.video
+        && spec.burn_captions
+        && services.media.is_some()
+        && graph::has_text(project, spec.range)
+        && !ffmpeg::has_ass();
+    spec.piped |= spec.lettered;
+}
+
 /// Source pictures for a render: decoded in step with the frames from the
 /// original files, never the playback proxies.
 struct Originals(Streams);
@@ -93,7 +106,7 @@ impl Pictures for Originals {
 /// Composes the frames of `spec`'s range in order.
 pub(crate) struct Frames<'a> {
     project: &'a Project,
-    /// Without lettering.
+    /// Lettering only when [`GraphSpec::lettered`].
     services: Services,
     spec: &'a GraphSpec,
     pictures: Originals,
@@ -102,10 +115,13 @@ pub(crate) struct Frames<'a> {
 impl<'a> Frames<'a> {
     pub(crate) fn new(project: &'a Project, services: &'a Services, spec: &'a GraphSpec) -> Self {
         let pictures = Originals(Streams::new(services.media.clone(), spec.width, spec.rate));
+        let lettering = spec.lettered.then(|| {
+            Arc::new(Letterer::new(spec.caption_styles.clone())) as Arc<dyn LetteringService>
+        });
         Self {
             project,
             services: Services {
-                lettering: None,
+                lettering,
                 ..services.clone()
             },
             spec,
@@ -190,12 +206,7 @@ pub(crate) fn run(
     let status = child.wait()?;
     let stderr = errors.join().unwrap_or_default();
     if !status.success() || write_failed {
-        let message = stderr
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty())
-            .unwrap_or("ffmpeg failed");
-        return Err(anyhow!(message.to_owned()));
+        return Err(anyhow!(ffmpeg::last_error(&stderr)));
     }
     Ok(())
 }

@@ -718,7 +718,8 @@ pub struct Services {
     pub fx: Option<Arc<dyn FxService>>,
     pub html: Option<Arc<dyn HtmlService>>,
     /// Draws captions and titles into the program. Renders leave it out:
-    /// they burn lettering in with FFmpeg.
+    /// they burn lettering in with FFmpeg, or wire their own when FFmpeg
+    /// cannot.
     pub lettering: Option<Arc<dyn LetteringService>>,
     /// Music and sound effects from the providers picked for them.
     pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
