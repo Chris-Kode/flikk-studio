@@ -21,17 +21,20 @@
 //! - fonts and `<img>` decoding are awaited before every capture.
 //!
 //! One worker thread owns the browser, launched on first use with its
-//! profile under the cache directory and killed with the engine.
+//! profile under the cache directory and killed with the engine. Renders
+//! run a [`crew::Crew`] of browsers of their own.
 
 mod cdp;
+mod crew;
 mod document;
 mod worker;
 
-use koo_core::services::{Frame, FxCall, HtmlService, ServiceError, ServiceResult};
+use document::Prepared;
+use koo_core::services::{Frame, FxCall, HtmlCrew, HtmlService, ServiceError, ServiceResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use worker::Request;
 
@@ -67,6 +70,11 @@ impl HtmlEngine {
         &self.browser
     }
 
+    fn cached(&self, key: &Key) -> bool {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.frames.contains_key(key)
+    }
+
     fn send(&self, request: Request) -> ServiceResult<()> {
         let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
         if requests.is_none() {
@@ -98,14 +106,8 @@ impl HtmlService for HtmlEngine {
     }
 
     fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame> {
-        let job = document::prepare(call);
-        let key = (
-            job.doc_key,
-            job.state_key,
-            (call.time.max(0.0) * 1000.0).round() as u64,
-            width,
-            height,
-        );
+        let job = Arc::new(document::prepare(call));
+        let key = key(&job, call, width, height);
         if let Some(frame) = self
             .cache
             .lock()
@@ -130,6 +132,10 @@ impl HtmlService for HtmlEngine {
             .put(key, frame.clone());
         Ok(frame)
     }
+
+    fn crew(self: Arc<Self>) -> Option<Arc<dyn HtmlCrew>> {
+        Some(Arc::new(crew::Crew::new(self)?))
+    }
 }
 
 impl Drop for HtmlEngine {
@@ -144,6 +150,16 @@ impl Drop for HtmlEngine {
 
 /// (document, params, milliseconds, width, height)
 type Key = (u64, u64, u64, u32, u32);
+
+fn key(job: &Prepared, call: &FxCall<'_>, width: u32, height: u32) -> Key {
+    (
+        job.doc_key,
+        job.state_key,
+        (call.time.max(0.0) * 1000.0).round() as u64,
+        width,
+        height,
+    )
+}
 
 #[derive(Default)]
 struct FrameCache {

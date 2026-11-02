@@ -777,6 +777,16 @@ pub trait HtmlService: Send + Sync {
     /// One frame with alpha, laid out at `call.canvas` and scaled to
     /// `width` × `height`.
     fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame>;
+    /// A service for one render, for engines that can make frames at once.
+    fn crew(self: Arc<Self>) -> Option<Arc<dyn HtmlCrew>> {
+        None
+    }
+}
+
+/// An [`HtmlService`] for one render, which says what it will ask for next.
+pub trait HtmlCrew: HtmlService {
+    /// `call` will be asked for soon. Calls come in the order they show.
+    fn ahead(&self, call: &FxCall<'_>, width: u32, height: u32);
 }
 
 /// Captions and titles drawn as pictures (`koo-deliver`), in the caption

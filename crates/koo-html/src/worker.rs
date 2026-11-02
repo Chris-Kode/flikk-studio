@@ -1,4 +1,4 @@
-//! The thread that owns the browser. Requests arrive over a channel and run
+//! The thread that owns a browser. Requests arrive over a channel and run
 //! one at a time; a few warm tabs keep recently used documents loaded, so
 //! repeated frames of one clip only seek and capture.
 
@@ -10,6 +10,7 @@ use koo_core::services::{Frame, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
@@ -55,11 +56,13 @@ const LOAD: Duration = Duration::from_secs(15);
 
 pub enum Request {
     Frame {
-        job: Prepared,
+        job: Arc<Prepared>,
         width: u32,
         height: u32,
         reply: Sender<ServiceResult<Frame>>,
     },
+    /// Move the page on to a frame another browser captures.
+    Seek { job: Arc<Prepared>, width: u32 },
     Check {
         job: Prepared,
         reply: Sender<ServiceResult<Vec<String>>>,
@@ -105,6 +108,11 @@ pub fn run(exe: PathBuf, requests: Receiver<Request>) {
                 let result = worker.retry(|w| w.render(&job, width, height));
                 let _ = reply.send(result.map_err(|e| ServiceError(format!("{e:#}"))));
             }
+            Request::Seek { job, width } => {
+                let scale = width as f64 / job.canvas.0.max(1) as f64;
+                // The browser that captures this frame reports what is wrong.
+                let _ = worker.retry(|w| w.reach(&job, scale));
+            }
             Request::Check { job, reply } => {
                 let result = worker.retry(|w| w.check(&job));
                 let _ = reply.send(result.map_err(|e| ServiceError(format!("{e:#}"))));
@@ -149,26 +157,12 @@ impl Worker {
             bail!("frame size must not be zero");
         }
         let scale = width as f64 / job.canvas.0.max(1) as f64;
-        let mut png = None;
-        for _ in 0..2 {
-            let i = self.tab_for(job, scale)?;
-            self.tick += 1;
-            self.tabs[i].used = self.tick;
-            let result = self.capture(i, job, scale);
-            if !matches!(result, Ok(Some(_))) {
-                // Scripts can't go back in time: start over in a new tab. A
-                // tab that failed may be wedged (a page in an endless loop).
-                let tab = self.tabs.remove(i);
-                close(cdp(&mut self.browser, &self.exe)?, &tab);
-            }
-            if let Some(bytes) = result? {
-                png = Some(bytes);
-                break;
-            }
+        let i = self.reach(job, scale)?;
+        let png = self.capture(i);
+        if png.is_err() {
+            self.discard(i)?;
         }
-        let png =
-            png.ok_or_else(|| anyhow!("the page could not seek to {} s", job.state["time"]))?;
-        let (w, h, rgba) = decode_png(&png)?;
+        let (w, h, rgba) = decode_png(&png?)?;
         let rgba = if (w, h) == (width, height) {
             rgba
         } else {
@@ -181,8 +175,33 @@ impl Worker {
         })
     }
 
-    /// Seek tab `i` and take a PNG; `None` when the page needs a reload.
-    fn capture(&mut self, i: usize, job: &Prepared, scale: f64) -> Result<Option<Vec<u8>>> {
+    /// The tab of `job`'s document, sought to its time.
+    fn reach(&mut self, job: &Prepared, scale: f64) -> Result<usize> {
+        for _ in 0..2 {
+            let i = self.tab_for(job, scale)?;
+            self.tick += 1;
+            self.tabs[i].used = self.tick;
+            let sought = self.seek(i, job, scale);
+            if !matches!(sought, Ok(true)) {
+                // Scripts can't go back in time: start over in a new tab. A
+                // tab that failed may be wedged (a page in an endless loop).
+                self.discard(i)?;
+            }
+            if sought? {
+                return Ok(i);
+            }
+        }
+        bail!("the page could not seek to {} s", job.state["time"])
+    }
+
+    fn discard(&mut self, i: usize) -> Result<()> {
+        let tab = self.tabs.remove(i);
+        close(cdp(&mut self.browser, &self.exe)?, &tab);
+        Ok(())
+    }
+
+    /// Seek tab `i`; false when the page needs a reload.
+    fn seek(&mut self, i: usize, job: &Prepared, scale: f64) -> Result<bool> {
         let conn = cdp(&mut self.browser, &self.exe)?;
         let tab = &mut self.tabs[i];
         if self.front.as_deref() != Some(tab.target.as_str()) {
@@ -191,9 +210,13 @@ impl Worker {
             self.front = Some(tab.target.clone());
         }
         metrics(conn, tab, job.canvas, scale)?;
-        if seek(conn, tab, job)? == "reload" {
-            return Ok(None);
-        }
+        Ok(seek(conn, tab, job)? != "reload")
+    }
+
+    /// A PNG of tab `i`, which is in front.
+    fn capture(&mut self, i: usize) -> Result<Vec<u8>> {
+        let conn = cdp(&mut self.browser, &self.exe)?;
+        let tab = &self.tabs[i];
         let shot = conn.call(
             Some(&tab.session),
             "Page.captureScreenshot",
@@ -204,9 +227,7 @@ impl Worker {
             .get("data")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("the screenshot came back empty"))?;
-        Ok(Some(
-            base64::engine::general_purpose::STANDARD.decode(data)?,
-        ))
+        Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
     }
 
     /// A tab with `job`'s document loaded: a warm one, else a new one in

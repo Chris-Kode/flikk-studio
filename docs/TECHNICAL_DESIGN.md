@@ -346,7 +346,10 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   engine reruns when parameters or the clip length change. Pages lay out on
   the sequence's shape with a 1080 CSS px short side, so templates keep
   their proportions at any resolution; in portrait, bottom elements rise
-  above the controls vertical apps draw.
+  above the controls vertical apps draw. A render runs three browsers of its
+  own (`koo_html::crew`): each seeks through every frame, so scripts run as
+  in one browser, and they take turns capturing the frames the compositor
+  will ask for next.
 * **Program frame** (`koo_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
   generator; a slowed clip that blends or flows shows the moment between
@@ -502,10 +505,10 @@ bar).
   `EditorState.render` polls 4 times a second. 200 ms after the shown
   project (`display_project`: a previewed draft or a drag included) last
   changed it is planned and measured off the UI thread; 1.5 s after the
-  last play, scrub or edit a worker thread renders the spans not on disk,
-  from the playhead on, then from the start, pipelined as in playback. Any
-  play, playhead move or edit drops the worker, which stops after the frame
-  in hand. A span waits (retried every 5 s) while its media is offline or
+  last play, scrub, edit or delivery a worker thread renders the spans not
+  on disk, from the playhead on, then from the start, pipelined as in
+  playback. Any play, playhead move, edit or job in the render queue drops
+  the worker, which stops after the frame in hand. A span waits (retried every 5 s) while its media is offline or
   its subject masks' mattes are still being made; the depth maps its
   clips read are made first (`complete_depth`), so a frame is only kept
   as it will finally look. A stale or cancelled render can only write

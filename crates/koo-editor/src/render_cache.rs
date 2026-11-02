@@ -12,9 +12,10 @@
 //!
 //! [`Background`] lives in `EditorState` and polls 4 times a second: it
 //! plans the shown project once it settles (the timeline's render bar comes
-//! from that plan), stops the [`worker`] while playing, scrubbing or
-//! editing, and starts it after [`IDLE`] without either. Settings → Storage
-//! turns it off, sets the size limit and clears the frames.
+//! from that plan), stops the [`worker`] while playing, scrubbing, editing
+//! or delivering, and starts it after [`IDLE`] without any of them.
+//! Settings → Storage turns it off, sets the size limit and clears the
+//! frames.
 
 mod key;
 mod store;
@@ -35,7 +36,8 @@ use worker::Worker;
 const POLL: Duration = Duration::from_millis(250);
 /// How long the project must stay as it is before it is planned again.
 const SETTLE: Duration = Duration::from_millis(200);
-/// How long without playing, scrubbing or editing before rendering starts.
+/// How long without playing, scrubbing, editing or delivering before
+/// rendering starts.
 const IDLE: Duration = Duration::from_millis(1500);
 /// How long a render that left frames out (offline media, mattes being
 /// made) waits before it tries again.
@@ -205,7 +207,9 @@ fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
         live: state.live_version,
         globals: globals(state),
     };
-    let busy = state.playing || state.source.as_ref().is_some_and(|s| s.is_playing());
+    let busy = state.playing
+        || state.source.as_ref().is_some_and(|s| s.is_playing())
+        || state.render_queue.is_busy();
     let playhead = state.playhead;
     let bg = &mut state.render;
     if bg.seen != Some(sig) {

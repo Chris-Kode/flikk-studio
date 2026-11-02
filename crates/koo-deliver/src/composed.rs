@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
 use koo_core::depth;
 use koo_core::model::{MediaItem, Project};
-use koo_core::services::{Frame, LetteringService, PersonRef, Services};
+use koo_core::services::{Frame, HtmlCrew, HtmlService, LetteringService, PersonRef, Services};
 use koo_core::speed::Waiting;
 use koo_core::stabilize;
 use koo_core::time::FLICKS_PER_SECOND;
@@ -21,6 +21,10 @@ use std::io::{Read as _, Write as _};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Frames past the one being composed that HTML generators are captured
+/// for, so its browsers stay busy between the frames it asks for.
+const AHEAD: i64 = 16;
 
 /// Make every matte the subject masks over `range` show (tracking them
 /// when they track), and the person masks' frames in it, before frames
@@ -219,6 +223,9 @@ pub(crate) struct Frames<'a> {
     services: Services,
     spec: &'a GraphSpec,
     pictures: Originals,
+    crew: Option<Arc<dyn HtmlCrew>>,
+    /// The first frame the crew has not heard of.
+    told: i64,
 }
 
 impl<'a> Frames<'a> {
@@ -227,9 +234,14 @@ impl<'a> Frames<'a> {
         let lettering = spec.lettered.then(|| {
             Arc::new(Letterer::new(spec.caption_styles.clone())) as Arc<dyn LetteringService>
         });
+        let crew = services.html.clone().and_then(|html| html.crew());
         Self {
             project,
             services: Services {
+                html: match &crew {
+                    Some(crew) => Some(crew.clone() as Arc<dyn HtmlService>),
+                    None => services.html.clone(),
+                },
                 lettering,
                 // Every frame between source frames is made, not blended.
                 interpolation: services.interpolation.clone().map(|s| {
@@ -239,14 +251,36 @@ impl<'a> Frames<'a> {
             },
             spec,
             pictures,
+            crew,
+            told: 0,
+        }
+    }
+
+    /// When output frame `f` shows.
+    fn time(&self, f: i64) -> Time {
+        let flicks = f as i128 * self.spec.rate.den as i128 * FLICKS_PER_SECOND as i128
+            / self.spec.rate.num.max(1) as i128;
+        self.spec.range.start + Time(flicks as i64)
+    }
+
+    /// Tell the crew the frames up to [`AHEAD`] past `f`.
+    fn tell(&mut self, f: i64) {
+        let Some(crew) = self.crew.clone() else {
+            return;
+        };
+        let (width, height) = (self.spec.width, self.spec.height);
+        while self.told <= f + AHEAD && self.time(self.told) < self.spec.range.end {
+            compose::html_calls(self.project, self.time(self.told), |call| {
+                crew.ahead(call, width, height);
+            });
+            self.told += 1;
         }
     }
 
     /// Output frame `f` (from the range start).
     pub(crate) fn frame(&mut self, f: i64) -> Frame {
-        let flicks = f as i128 * self.spec.rate.den as i128 * FLICKS_PER_SECOND as i128
-            / self.spec.rate.num.max(1) as i128;
-        let t = self.spec.range.start + Time(flicks as i64);
+        self.tell(f);
+        let t = self.time(f);
         compose::program(
             self.project,
             t,

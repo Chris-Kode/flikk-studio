@@ -238,6 +238,47 @@ pub fn person_mattes(
         .collect()
 }
 
+/// The call of every HTML generator [`program`] draws at `t`, in the order
+/// it draws them.
+pub fn html_calls(project: &Project, t: Time, mut each: impl FnMut(&FxCall<'_>)) {
+    let s = &project.timeline.settings;
+    let canvas = (s.width.max(1), s.height.max(1));
+    let mut generator = |clip: &Clip| {
+        let ClipContent::Generator { fx: instance } = &clip.content else {
+            return;
+        };
+        let Some(asset) = fx::asset(project, &instance.fx) else {
+            return;
+        };
+        if asset.kind != FxKind::Generator || asset.language != FxLanguage::Html {
+            return;
+        }
+        let local = t - clip.start;
+        let tf = clip.transform_at(local);
+        if tf.opacity <= 0.0 || tf.scale <= 0.0 || tf.stretch.iter().any(|s| *s <= 0.0) {
+            return;
+        }
+        each(&FxCall {
+            asset,
+            values: &instance.values_at(asset, local),
+            time: local.as_secs_f64(),
+            duration: clip.duration.as_secs_f64(),
+            canvas,
+        });
+    };
+    for track in picture_tracks(project) {
+        let placed = fx::transitions(track);
+        if let Some(pt) = placed
+            .iter()
+            .find(|p| p.transition.fx.enabled && p.range.contains(t))
+        {
+            pt.from.into_iter().chain(pt.to).for_each(&mut generator);
+        } else if let Some(clip) = track.clip_at(t).filter(|c| c.enabled) {
+            generator(clip);
+        }
+    }
+}
+
 /// [`program`] in two halves, for playback: pictures are decoded, uploaded
 /// and the frame submitted now; [`Pending::wait`] reads it back in `order`,
 /// so the next frame can be prepared while the GPU works on this one.
