@@ -90,6 +90,12 @@ fn masks_note(project: &Project, t: Time, services: &Services) -> String {
                 waiting.push(format!("{} on {}", short(m.id), short(clip.id)));
             }
         }
+        let people = compose::person_mattes(project, services, clip, t);
+        for m in clip.masks.iter().filter(|m| m.enabled && m.is_person()) {
+            if !people.iter().any(|(id, _)| *id == m.id) {
+                waiting.push(format!("person {} on {}", short(m.id), short(clip.id)));
+            }
+        }
     }
     let mut note = if masked == 0 {
         " No clip here has masks.".to_string()
@@ -98,7 +104,7 @@ fn masks_note(project: &Project, t: Time, services: &Services) -> String {
     };
     if !waiting.is_empty() {
         note.push_str(&format!(
-            " Subject masks still being found (not drawn): {}.",
+            " Subject and person masks still being found (not drawn; look again shortly): {}.",
             waiting.join(", ")
         ));
     }

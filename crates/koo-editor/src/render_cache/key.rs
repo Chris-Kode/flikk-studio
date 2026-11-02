@@ -68,7 +68,8 @@ pub struct Span {
     hash: [u8; 32],
     /// Media the frames decode: they wait until it is online.
     pub media: Vec<MediaId>,
-    /// Subject masks shown: their frames wait until every matte is made.
+    /// Subject and person masks shown: their frames wait until every
+    /// matte is made.
     pub subjects: Vec<(ClipId, MaskId)>,
 }
 
@@ -183,7 +184,7 @@ impl Plan {
                         subjects.extend(
                             clip.masks
                                 .iter()
-                                .filter(|m| m.enabled && m.picks().is_some())
+                                .filter(|m| m.enabled && (m.picks().is_some() || m.is_person()))
                                 .map(|m| (clip.id, m.id)),
                         );
                     }

@@ -34,6 +34,7 @@ pub mod model;
 pub mod music_fit;
 pub mod ops;
 pub mod paths;
+pub mod person;
 pub mod query;
 pub mod scopes;
 pub mod services;

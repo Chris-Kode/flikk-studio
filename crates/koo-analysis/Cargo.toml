@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation"]
+default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["koo-models/whisper"]
@@ -23,6 +23,9 @@ subjects = ["koo-models/segment"]
 # Optical flow slow motion: frames made between frames by RIFE; without it
 # slowed clips are blended.
 interpolation = ["koo-models/interpolate"]
+# Person masks: people cut out of their background by MODNet; without it
+# person masks keep nothing.
+people = ["koo-models/matting"]
 
 [dependencies]
 anyhow.workspace = true

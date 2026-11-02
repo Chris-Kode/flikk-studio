@@ -1,4 +1,4 @@
-//! Cached frames on disk, under `paths::cache()/frames/`: one QOI file per
+//! Cached frames on disk, under `paths::cache()/frame-cache/`: one QOI file per
 //! [`Key`] (in a folder per first byte), written atomically, the least
 //! recently used removed past the size limit. The index is read from the
 //! folder on first use, ordered by the files' modified times, which reads
@@ -95,7 +95,7 @@ pub fn store() -> &'static Store {
 
 /// Where cached frames live.
 pub fn dir() -> PathBuf {
-    paths::cache().join("frames")
+    paths::cache().join("frame-cache")
 }
 
 impl Store {

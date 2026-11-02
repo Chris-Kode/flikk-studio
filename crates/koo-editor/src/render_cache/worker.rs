@@ -3,9 +3,9 @@
 //! same compositor as the viewer and the export
 //! ([`koo_core::compose::submit_program`]), and writes them to the
 //! [`store`]. Frames are pipelined as in playback. A span waits while its
-//! media is offline or its subjects' mattes are still being made, and
-//! optical-flow frames are made in place, so no frame is kept that live
-//! composing would draw differently later.
+//! media is offline or its subjects' mattes are still being made; person
+//! masks are matted and optical-flow frames made in place first, so no
+//! frame is kept that live composing would draw differently later.
 //! Dropping the worker stops it after the frame in hand; frames are keyed
 //! by what they show, so one finished after an edit is simply never asked
 //! for.
@@ -77,9 +77,42 @@ pub fn ready(project: &Project, services: &Services, span: &Span) -> bool {
             let Some(mask) = clip.masks.iter().find(|m| m.id == *mask) else {
                 return false;
             };
+            if mask.is_person() {
+                return compose::person_ref(project, clip, mask).is_some_and(|person| {
+                    let status = subjects.person_status(person);
+                    status.error.is_none() && status.tracked >= status.frames
+                });
+            }
             compose::subject_ref(project, clip, mask)
                 .is_some_and(|subject| subjects.status(subject).complete(subject.subject.track))
         })
+}
+
+/// Matte the frames of `span`'s person masks, as a render does, so the
+/// span can be kept; gives up when `stop` is set or a mask can't be made.
+fn complete_people(project: &Project, services: &Services, span: &Span, stop: &AtomicBool) {
+    let Some(subjects) = &services.subjects else {
+        return;
+    };
+    for (clip, mask) in &span.subjects {
+        let Some((_, clip)) = project.timeline.clip(*clip) else {
+            continue;
+        };
+        let Some(mask) = clip.masks.iter().find(|m| m.id == *mask) else {
+            continue;
+        };
+        let Some(person) = compose::person_ref(project, clip, mask) else {
+            continue;
+        };
+        let status = subjects.person_status(person);
+        if status.error.is_some() || status.tracked >= status.frames {
+            continue;
+        }
+        if stop.load(Ordering::Relaxed) || subjects.complete_person(person, &|_| {}, stop).is_err()
+        {
+            return;
+        }
+    }
 }
 
 /// The frames of `span` from `from` on, then those before.
@@ -115,6 +148,7 @@ fn run(project: &Project, services: &Services, plan: &Plan, from: i64, stop: &At
     };
     for (i, frames) in order(plan, from) {
         let span = &plan.spans[i];
+        complete_people(project, services, span, stop);
         if !ready(project, services, span) {
             continue;
         }

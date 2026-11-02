@@ -33,6 +33,7 @@ mod align;
 mod cache;
 mod ffmpeg;
 mod interpolation;
+mod people;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -244,6 +245,9 @@ impl LocalAnalysis {
         if cfg!(feature = "interpolation") {
             tasks.push(ModelTask::FrameInterpolation);
         }
+        if cfg!(feature = "people") {
+            tasks.push(ModelTask::Matting);
+        }
         tasks
     }
 
@@ -268,6 +272,8 @@ impl LocalAnalysis {
                 ModelTask::Segmentation => false,
                 // Optical flow slow motion, not analysis.
                 ModelTask::FrameInterpolation => false,
+                // Person masks, not analysis.
+                ModelTask::Matting => false,
             })
             .collect()
     }

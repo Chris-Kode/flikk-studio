@@ -24,7 +24,9 @@
 //! 4. **Masks**: the clip's masks, drawn in the picture's own uv
 //!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
 //!    Subject masks are drawn from their mattes at the source time
-//!    ([`subject_mattes`]), refined onto the decoded frame's edges. With
+//!    ([`subject_mattes`]), refined onto the decoded frame's edges; person
+//!    masks from theirs ([`person_mattes`]), eased onto the same frame's
+//!    edges by their `edge` amount. With
 //!    [`MaskView::Tinted`] the picture stays whole and what the masks cut
 //!    away is tinted over it instead, for editing them.
 //! 5. **Transform** and **blend**: fitted inside the canvas (as the export
@@ -74,9 +76,10 @@ use crate::model::{
     BlendMode, Clip, ClipContent, Grade, MediaItem, MediaKind, Project, Property, Track, TrackKind,
     Transform,
 };
+use crate::person::PersonMatte;
 use crate::services::{
-    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services,
-    SubjectRef, Surface,
+    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, Placement,
+    Services, SubjectRef, Surface,
 };
 use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
@@ -177,6 +180,54 @@ pub fn subject_mattes(
         .filter_map(|m| {
             let subject = subject_ref(project, clip, m)?;
             Some((m.id, service.matte(subject, source)?))
+        })
+        .collect()
+}
+
+/// The person mask `mask` of `clip`, as [`SubjectService`] sees it: on
+/// media from the pool.
+///
+/// [`SubjectService`]: crate::services::SubjectService
+pub fn person_ref<'a>(
+    project: &'a Project,
+    clip: &'a Clip,
+    mask: &'a crate::mask::Mask,
+) -> Option<PersonRef<'a>> {
+    let ClipContent::Media { media, .. } = &clip.content else {
+        return None;
+    };
+    if !mask.is_person() {
+        return None;
+    }
+    let item = project.media(*media)?;
+    let (a, b) = (clip.to_source(clip.start)?, clip.to_source(clip.end())?);
+    Some(PersonRef {
+        mask: mask.id,
+        item,
+        range: TimeRange::new(a.min(b), a.max(b)),
+    })
+}
+
+/// The mattes of `clip`'s enabled person masks at timeline time `t`, those
+/// made so far.
+pub fn person_mattes(
+    project: &Project,
+    services: &Services,
+    clip: &Clip,
+    t: Time,
+) -> Vec<(MaskId, PersonMatte)> {
+    let Some(service) = &services.subjects else {
+        return Vec::new();
+    };
+    let Some(source) = clip.to_source(t) else {
+        return Vec::new();
+    };
+    clip.masks
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let person = person_ref(project, clip, m)?;
+            Some((m.id, service.person(person, source)?))
         })
         .collect()
 }
@@ -650,9 +701,11 @@ impl Ctx<'_, '_> {
         let (mw, mh) = crate::mask::raster_size((w, h));
         let aspect = w.max(1) as f32 / h.max(1) as f32;
         let mattes = subject_mattes(self.project, self.services, clip, t);
+        let people = person_mattes(self.project, self.services, clip, t);
         let subjects = crate::mask::SubjectMattes {
             mattes: &mattes,
             picture: self.guide.as_ref(),
+            people: &people,
         };
         crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh, &subjects)
     }
@@ -692,7 +745,7 @@ impl Ctx<'_, '_> {
                 let refines = clip
                     .masks
                     .iter()
-                    .any(|m| m.enabled && m.picks().is_some_and(|s| s.refine));
+                    .any(|m| m.enabled && (m.picks().is_some_and(|s| s.refine) || m.is_person()));
                 if refines {
                     self.guide = Some(frame.clone());
                 }

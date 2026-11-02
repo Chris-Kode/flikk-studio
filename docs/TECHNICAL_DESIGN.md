@@ -51,7 +51,7 @@ described here, update the section in the same commit.
 | `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache | core, models |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
@@ -96,6 +96,7 @@ which the editor hands it (`AnalysisService::configure`).
 
 | Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
 | Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime. Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
+| Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
@@ -161,6 +162,12 @@ panics fails without stopping the queue.
   frame shows the nearest prompted frame's matte. `refine` eases the edge
   onto the picture's (hair). Feather, expansion, opacity, invert and mode
   work as for shapes; the prompts are not keyframed.
+* **Person masks** (`MaskShape::Person { edge }`, `koo-core/src/person.rs`):
+  the mask keeps every person a matting model finds in each frame, with no
+  prompt; `edge` (0..1, keyframable with the rest of the state) eases the
+  edge onto the picture's. Invert keeps the background instead. Feather,
+  expansion, opacity and mode work as for shapes, so it combines with
+  shape and subject masks. Old projects open unchanged (a new shape kind).
 * **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
   words, clear of both (40 ms after the earlier, 30 ms before the later), on
   a frame boundary when the pause holds one, with a 10 ms audio fade at the
@@ -231,7 +238,8 @@ the effect of its earlier calls.
   `InterpolationService::between` gives the optical flow frame once made,
   at 1/32 steps so frames are reused) → clip grade, then timeline grade → effect stack → masks (a
   coverage raster multiplied into alpha; a subject's matte at the source
-  time drawn into it, see "Subject masks") → transform and blend mode;
+  time drawn into it, see "Subject masks", and a person mask's, see
+  "Person masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
   captions are lettered on top by `LetteringService` (cosmic-text
   `koo_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
@@ -260,10 +268,11 @@ the effect of its earlier calls.
 * Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
   `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
-  frame, `t-<key>.mattes` per tracked subject), `interpolated/<fp>/`
+  frame, `t-<key>.mattes` per tracked subject; people:
+  `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
   (optical flow frames, raw RGBA, `<key>.rgba`), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log), `frames/<ab>/<key>.qoi` (the render cache, below).
+  activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -308,7 +317,7 @@ bar).
   in the key without being listed. An edit changes the keys of the frames
   it changes and no others; nothing is invalidated, frames no longer asked
   for age out.
-* **Store** (`render_cache/store.rs`): `cache/frames/<ab>/<key>.qoi`, a
+* **Store** (`render_cache/store.rs`): `cache/frame-cache/<ab>/<key>.qoi`, a
   magic, the key and a lossless QOI picture (BGRA), written to a temporary
   file and renamed. An in-memory index (read from the folder on first use,
   ordered by modified time, which reads touch) evicts the least recently
@@ -361,9 +370,9 @@ the user analyzes it again.
 ### Models (`koo-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search, segmentation, frame interpolation). Its `mod.rs` holds the
+sound tagging, beats, sound search, segmentation, frame interpolation, matting). Its `mod.rs` holds the
 task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`); `MODELS`, the
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -371,7 +380,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer, the sound models, segmentation and frame interpolation) and the BPE tokenizer
+aligner, the diarizer, the sound models, segmentation, frame interpolation and matting) and the BPE tokenizer
 (`bpe.rs`).
 
 Analysis only orchestrates: it asks each task's runner for the selected
@@ -393,14 +402,15 @@ them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
-`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`. Without one, its models stay
+`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
-subject masks keep nothing; without `interpolation`, optical flow blends). `koo-models`' `mlx` (macOS only: mlx-sys links
+subject masks keep nothing; without `interpolation`, optical flow blends;
+without `people`, person masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
 Apple's frameworks) adds the MLX subject mask model and makes it the
 default; `koo-editor` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
-as "Subject masks" but is not part of analysis: `required_tasks` never asks
-for it. Frame interpolation ("Optical flow", RIFE) is listed the same way;
+as "Subject masks" and matting as "Person masks", but neither is part of
+analysis: `required_tasks` never asks for them. Frame interpolation ("Optical flow", RIFE) is listed the same way;
 picking optical flow for a clip without it raises a notice that leads to
 Settings → Models, and slowed frames are blended meanwhile.
 `LocalInterpolation` makes flow frames on one thread of its own, the
@@ -724,6 +734,50 @@ on the UI thread and run it off it:
   its matte yet is left out of the raster; layout bounds a picture by its
   subjects' mattes.
 
+### Person masks
+
+* **Model** (`koo-models/src/matting/modnet/`): MODNet (Ke et al., Apache-2.0
+  code and weights), the official photographic portrait checkpoint as
+  Xenova's ONNX export (`Xenova/modnet`, Apache-2.0, pinned to commit
+  `fa2fa546`, 25.9 MB, full precision; `KOOEDITOR_MODNET` points at a local
+  copy). One graph: a picture with its short side at 512 (the long side
+  in proportion, at most 1024, both a multiple of 32), scaled to -1..1 →
+  coverage 0..1 at that size. Pictures are resampled by area averaging.
+* **Service** (`koo-analysis/src/people.rs`, `LocalPeople`, behind
+  `LocalSubjects`' person methods of `SubjectService`, sharing its media
+  engine and version): frames are read at a 512 short side through the
+  media engine (the proxy when there is one), matted in chunks of 32 and
+  kept by fingerprint, model and chunk, as run-length coded bytes (about
+  30 KB a frame for a 768 × 512 matte, so about 55 MB a minute at 30 fps)
+  in memory (96 chunks) and under `cache/mattes/` (cleared with the
+  previews in Settings → Storage). Every person mask on the same media
+  shares them. One worker serves the newest request first: drawing a frame
+  asks for the 3 s from it on, so playback finds them made; a render asks
+  for the frames of its range it shows and waits (`complete_person`). When
+  the newest request wants another chunk the worker leaves the one it is
+  on and goes on with it later. A frame not made yet shows the nearest made
+  one within a second, else the mask is left out. Each frame is eased
+  toward the one before (by half where they agree, not at all where the
+  coverage moved by 0.25 or more), which stops the flicker on still edges.
+* **Drawing** (`PersonMatte::field`): the coverage is upsampled bilinearly
+  to the mask raster, then within the band where the neighbourhood is
+  mixed it is eased by `edge` toward a guided filter of itself on the
+  decoded frame's luma (radius a 270th of the height times 1 + 3 × edge,
+  ε 10⁻⁴ + 10⁻³ × (1 − edge)): strands the small matte blurs come back
+  and halos of background tighten. Expansion is a grey dilation (or
+  erosion) by a square, feather three box blurs, so both keep the soft
+  edge. Layout bounds a picture by its people.
+* **Speed, here** (4 CPU cores, release build): MODNet takes 0.27 s for a
+  768 × 512 frame (0.34 s a frame through the service with decoding), and
+  the edge 0.1 s on a 1024-wide raster; a 2 s clip of 60 frames was
+  matted in 17 s, and read from the cache in under a millisecond after.
+  Playback outruns it on the CPU: frames ahead fill in as it goes.
+* **UI:** a person button (tooltip "Remove background") in the
+  inspector's masks section and in the viewer's mask tools adds the mask
+  to the clip (or selects the one it has); its row has the usual mode,
+  invert and keyframe, and an Edge slider. A click on a person in mask mode
+  selects the mask. Without the model, a notice leads to Settings → Models.
+
 ## 8. Agent
 
 * **Backends** (`koo-agent/src/backend/`): Claude runs as
@@ -764,7 +818,7 @@ on the UI thread and run it off it:
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 83 in the catalog (81 plus
+* **Tools** (`koo-agent/src/tools/`): 84 in the catalog (82 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -794,7 +848,14 @@ on the UI thread and run it off it:
   whole picture or is unsure; with `track` it says how many frames are
   left and how long that takes here. `get_clip` lists a subject's prompts
   on the timeline and how far it is tracked. The prompt steers the agent to
-  subjects for people and objects, and to check with `view_frame` `masks`.
+  subjects for objects and one person among several, and to check with
+  `view_frame` `masks`.
+* **Person masks:** `remove_background` (`tools/masks.rs`, transform
+  group) gives each of `clips` a person mask, or changes its own: `keep:
+  background` inverts it, `edge`, `feather` and `expansion` set its edge,
+  `restore` takes the clips' person masks away. `set_mask` takes
+  `shape.type: person` (with `edge`) too; `get_clip` says how many frames
+  are matted, and `view_frame` names person masks not matted there yet.
 * **Speed ramps:** `set_speed` (`tools/speed.rs`) takes one `speed`, a
   `ramp` of [position 0..1, speed] points or a `preset` (`ramp_in`,
   `ramp_out`, `hero`, `bullet`, `montage`, at `speed` or the clip's),
@@ -1020,9 +1081,11 @@ available to them.
   original media and piped into the graph as raw RGBA, which keeps
   captions and audio. Optical flow frames are made as each frame is
   composed (`speed::Waiting`), never blended in their place. Subject masks in
-  the range are found (and tracked) first, `SubjectService::complete`
-  taking half the progress; a subject that cannot be found fails the
-  render.
+  the range are found (and tracked) first, and person masks' frames in it
+  matted, `SubjectService::complete` and `complete_person` taking half the
+  progress; a subject that cannot be found (or people without their model)
+  fails the render. A render of a person mask matched the viewer's frame
+  to a mean difference of 1.8/255 (H.264 included).
 * **Queue** (`queue.rs`): jobs run one after another with progress from
   `-progress pipe:1`, can be cancelled and never overwrite a file.
 * **Hardware encoding** (`hw.rs`): H.264 and HEVC go to VideoToolbox
@@ -1104,6 +1167,7 @@ see:
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
 | `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
+| `KOOEDITOR_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
@@ -1127,6 +1191,7 @@ there.
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
+| Person masks | `koo-core/src/person.rs`, `mask.rs`, `compose.rs`, `koo-models/src/matting/`, `koo-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
 | Speed ramps, slow motion | `koo-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `koo-models/src/interpolation/`, `koo-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `koo-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
@@ -1215,6 +1280,17 @@ there.
 * The RIFE graph comes from a third party's Hugging Face repository
   (`walterlow/RIFE_fp32_timestep`, pinned to a commit); a mirror under the
   project's own account would keep it reachable.
+* Person masks: MODNet runs on the CPU (0.27 s a 768 × 512 frame on 4
+  cores here), so preview is not real time without a GPU provider, which
+  was not tried; nor were macOS and Windows. The ONNX file comes from a
+  third party's repository (Xenova, pinned to a commit); a mirror under
+  the project's own Hugging Face account would keep it reachable. Easing
+  over time starts again at a chunk made before the one ahead of it, so a
+  chunk's first frame can step. MODNet is trained on portraits: full
+  bodies far from the camera, several people overlapping and people
+  against busy backgrounds of their own colour leave holes or halos
+  (Expand below 0 trims a halo). Its quality was checked by eye on one
+  photograph and a 2 s clip made from it, not measured.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`

@@ -9,6 +9,11 @@
 //! result says what it kept (its share of the picture, its box in frame
 //! pixels, the model's confidence) and what to do when that looks wrong.
 //! With `track` it is followed through the clip in the background.
+//!
+//! A `person` shape keeps the people a matting model finds in every frame
+//! (`koo_core::person`), with no prompt; `remove_background` adds one (or
+//! with `keep: background`, one that cuts the people away) to several
+//! clips at once, or takes them away again.
 
 use super::edit::with_notes;
 use super::{Done, Job, JobDone, Step, ToolCtx, propose};
@@ -23,7 +28,7 @@ use koo_core::subject::{Matte, Subject, SubjectPoint, SubjectPrompt};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-pub const SHAPES: [&str; 4] = ["rectangle", "ellipse", "path", "subject"];
+pub const SHAPES: [&str; 5] = ["rectangle", "ellipse", "path", "subject", "person"];
 pub const MODES: [&str; 3] = ["add", "subtract", "intersect"];
 
 /// `clip`'s masks as tools show them: short ids, times in timeline seconds,
@@ -37,6 +42,16 @@ pub fn masks_json(project: &Project, clip: &Clip, services: &Services) -> Value 
             if let Some(keys) = v.get_mut("keyframes").and_then(Value::as_array_mut) {
                 for (k, key) in keys.iter_mut().zip(&m.keyframes) {
                     k["at"] = secs(clip.start + key.at);
+                }
+            }
+            if m.is_person()
+                && let Some(status) = compose::person_ref(project, clip, m)
+                    .zip(services.subjects.as_ref())
+                    .map(|(r, s)| s.person_status(r))
+            {
+                v["matted"] = json!(format!("{}/{} frames", status.tracked, status.frames));
+                if let Some(e) = status.error {
+                    v["error"] = json!(e);
                 }
             }
             if let Some(subject) = m.picks() {
@@ -137,7 +152,10 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
             Some(MaskShape::Ellipse { .. }) => "ellipse",
             Some(MaskShape::Path { .. }) => "path",
             Some(MaskShape::Subject) => "subject",
-            None => return fail("`shape.type` is one of rectangle, ellipse, path, subject"),
+            Some(MaskShape::Person { .. }) => "person",
+            None => {
+                return fail("`shape.type` is one of rectangle, ellipse, path, subject, person");
+            }
         },
     };
     let num = |key: &str| -> ToolResultOf<Option<f32>> {
@@ -176,6 +194,15 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
             rotation_deg: num("rotation")?.unwrap_or(r0),
         },
         "subject" => MaskShape::Subject,
+        "person" => MaskShape::Person {
+            edge: num("edge")?
+                .or(match current {
+                    Some(MaskShape::Person { edge }) => Some(*edge),
+                    _ => None,
+                })
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0),
+        },
         _ => {
             let (p0, smooth0) = match current {
                 Some(MaskShape::Path { points, smooth }) => (points.clone(), *smooth),
@@ -269,6 +296,7 @@ fn shape_from_frame(shape: &Shape, s: &MaskShape) -> Option<MaskShape> {
             smooth: *smooth,
         },
         MaskShape::Subject => MaskShape::Subject,
+        MaskShape::Person { edge } => MaskShape::Person { edge: *edge },
     })
 }
 
@@ -830,4 +858,77 @@ pub fn remove_mask(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>>
         clip: clip.id,
         masks,
     }])
+}
+
+/// `remove_background`: on each of `clips`, a person mask keeping the
+/// people (or with `keep: background`, cutting them away), the clip's own
+/// changed when it has one; with `restore`, its person masks taken away.
+pub fn remove_background(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
+    let project = ctx.project();
+    let mut ids = args.strings("clips")?;
+    if let Some(one) = args.opt_str("clip")? {
+        ids.push(one.to_owned());
+    }
+    if ids.is_empty() {
+        return fail("give `clips`");
+    }
+    let invert = match args.opt_str("keep")? {
+        None | Some("people") => false,
+        Some("background") => true,
+        Some(k) => return fail(format!("`keep` is people or background, not `{k}`")),
+    };
+    let restore = args.opt_bool("restore")? == Some(true);
+    let edge = args.opt_f64("edge")?.map(|v| (v as f32).clamp(0.0, 1.0));
+    let feather = args.opt_f64("feather")?.map(|v| (v as f32).max(0.0));
+    let expansion = args.opt_f64("expansion")?.map(|v| v as f32);
+    let mut commands = Vec::new();
+    for text in ids {
+        let id = clip_id(project, &text)?;
+        let (track, clip) = project
+            .timeline
+            .clip(id)
+            .ok_or_else(|| ToolError(format!("clip {text} not found")))?;
+        if track.kind == TrackKind::Audio || compose::is_lettering(track, clip) {
+            return fail(format!("{text} is not a picture clip"));
+        }
+        if !matches!(clip.content, ClipContent::Media { .. }) {
+            return fail(format!(
+                "{text} is not video or an image from the pool: only those have people to find"
+            ));
+        }
+        let mut masks = clip.masks.clone();
+        if restore {
+            masks.retain(|m| !m.is_person());
+        } else {
+            let i = match masks.iter().position(Mask::is_person) {
+                Some(i) => i,
+                None => {
+                    masks.push(Mask::person());
+                    masks.len() - 1
+                }
+            };
+            let mask = &mut masks[i];
+            mask.invert = invert;
+            mask.enabled = true;
+            let mut states: Vec<&mut MaskState> = std::iter::once(&mut mask.state)
+                .chain(mask.keyframes.iter_mut().map(|k| &mut k.state))
+                .collect();
+            for state in &mut states {
+                if let (Some(e), MaskShape::Person { edge }) = (edge, &mut state.shape) {
+                    *edge = e;
+                }
+                if let Some(f) = feather {
+                    state.feather = f;
+                }
+                if let Some(x) = expansion {
+                    state.expansion = x;
+                }
+            }
+        }
+        commands.push(Command::SetMasks {
+            clip: clip.id,
+            masks,
+        });
+    }
+    Ok(commands)
 }
