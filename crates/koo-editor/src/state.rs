@@ -4,6 +4,7 @@
 
 mod cloud;
 mod source;
+mod sync;
 pub mod voices;
 
 pub use cloud::{Check, Generating, ProviderStatus};
