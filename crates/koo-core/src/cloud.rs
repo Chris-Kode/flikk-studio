@@ -214,6 +214,10 @@ pub enum GenerateRequest {
         /// What is said, with its delivery written in.
         text: String,
         reading: Reading,
+        /// What is said just before and after it, so its delivery fits
+        /// there; heard by the provider, not read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<SpeechContext>,
     },
     /// From a description alone, from a first frame (image to video), or
     /// after references (reference to video); see [`VideoMode`].
@@ -494,6 +498,16 @@ impl Reading {
     pub const SIMILARITY: f32 = 0.75;
 }
 
+/// The speech around a voiceover that continues a recording: a word fixed
+/// in the speaker's voice is read as part of what they said.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeechContext {
+    #[serde(default)]
+    pub previous: String,
+    #[serde(default)]
+    pub next: String,
+}
+
 /// The most one voiceover can say, about 10 minutes of speech.
 pub const SCRIPT_CHARS: usize = 10_000;
 
@@ -567,7 +581,7 @@ impl GenerateRequest {
 
     /// One line for cards and logs: "Music, 30 s: calm lo-fi beat".
     pub fn summary(&self) -> String {
-        if let Self::Voiceover { text, reading } = self {
+        if let Self::Voiceover { text, reading, .. } = self {
             let start: String = text.chars().take(SUMMARY_CHARS).collect();
             let more = if start.len() < text.len() { "…" } else { "" };
             return format!("Voiceover, {}: {start}{more}", reading.voice_name);

@@ -19,6 +19,7 @@ mod masks;
 mod music;
 mod preview;
 mod read;
+pub mod respeak;
 mod sounds;
 mod speed;
 mod stabilize;
@@ -136,6 +137,13 @@ pub enum JobDone {
     Generated {
         item: Box<koo_core::model::MediaItem>,
         placement: Option<generate::Placement>,
+        summary: String,
+    },
+    /// Words said again for a fix, to add to the pool and cut in on the UI
+    /// thread.
+    Respoken {
+        item: Box<koo_core::model::MediaItem>,
+        fix: Box<koo_core::respeak::Fix>,
         summary: String,
     },
 }
@@ -292,6 +300,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "stabilize" => stabilize::stabilize(ctx, &args),
         "get_shake" => stabilize::get_shake(ctx, &args),
         "fit_music" => music::fit_music(ctx, &args),
+        "replace_words" => respeak::serve(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool if depth::TOOLS.contains(&tool) => depth::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),

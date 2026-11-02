@@ -34,6 +34,16 @@ pub enum Started {
     /// Runs off the UI thread, adding or designing a voice that lands in
     /// the library; yields what to tell the agent.
     Voice(Box<dyn FnOnce() -> Result<String> + Send>),
+    /// Runs off the UI thread, saying a fix's words again; yields them for
+    /// the pool, with the fix to cut them in by.
+    Respeak(Box<dyn FnOnce() -> Result<Respoken> + Send>),
+}
+
+/// Words an approved fix had said again.
+pub struct Respoken {
+    pub item: MediaItem,
+    pub fix: koo_core::respeak::Fix,
+    pub summary: String,
 }
 
 /// What an approved generation made.
@@ -129,6 +139,23 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     placement,
                     summary: request.summary(),
                 })
+            })))
+        }
+        "replace_words" => {
+            let (fix, reading) = koo_agent::tools::respeak::from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
+            let source = inputs
+                .project
+                .media(fix.media)
+                .cloned()
+                .ok_or_else(|| anyhow!("the recording is not in the pool"))?;
+            let services = inputs.services.clone();
+            Ok(Started::Respeak(Box::new(move || {
+                let summary = koo_agent::tools::respeak::summary(&fix, &reading);
+                let task = koo_core::cloud::GenerationTask::default();
+                let item = koo_core::respeak::make(&fix, &source, &reading, &services, &task)
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Respoken { item, fix, summary })
             })))
         }
         "add_voice" => {

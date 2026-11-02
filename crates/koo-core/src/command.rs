@@ -477,6 +477,20 @@ pub enum Command {
         media: MediaId,
         tone_map: crate::hdr::ToneMap,
     },
+    // ---- speech (E3)
+    /// Say other words in place of the speech in `range` of `track` (cut
+    /// to cut, in the pauses around it): `media`, a whole recording of
+    /// them, plays there instead, with a fade at both joins. Where it is
+    /// longer or shorter, what follows ripples on every unlocked track,
+    /// and the picture over it slows to hold or is cut. See
+    /// [`crate::respeak`].
+    ReplaceSpeech {
+        range: TimeRange,
+        track: TrackId,
+        media: MediaId,
+        #[serde(default)]
+        fade: Time,
+    },
 }
 
 impl Command {
@@ -548,7 +562,8 @@ impl Command {
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. }
-            | SetFormat { .. } => ToolCategory::EditTimeline,
+            | SetFormat { .. }
+            | ReplaceSpeech { .. } => ToolCategory::EditTimeline,
             SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }

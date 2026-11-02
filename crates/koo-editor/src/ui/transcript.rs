@@ -2,9 +2,11 @@
 //! timeline order, text-based ripple delete, caption generation and inline
 //! caption edits. Caption styles have their own panel (`caption_style`).
 //! A speaker's words can go to the Voices dialog: as a recording of them, to
-//! find shared voices like theirs or to clone it.
+//! find shared voices like theirs or to clone it. Words typed over the
+//! selected ones are said in the speaker's voice and cut in (`retype`).
 
 mod captions;
+mod retype;
 mod words;
 
 use crate::state::EditorState;
@@ -69,12 +71,17 @@ pub struct TranscriptPanel {
     /// Caption being edited inline, with its editor.
     editing: Option<ClipId>,
     editor: Entity<InputState>,
+    /// Words being typed over, first to last, with their editor.
+    retyping: Option<(usize, usize)>,
+    retyper: Entity<InputState>,
     /// Caption rows, rebuilt when this key changes.
     captions: Vec<captions::CaptionRow>,
     captions_key: Option<(u64, Option<WordsKey>, Option<ClipId>)>,
     caption_list: ListState,
     /// Demo only: open on generated captions.
     demo_captions: bool,
+    /// Demo only: open typing over a few words.
+    demo_retype: bool,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -82,8 +89,14 @@ pub struct TranscriptPanel {
 impl TranscriptPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| InputState::new(window, cx));
+        let retyper = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&retyper, window, |this, _, ev, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.say_it(window, cx);
+                }
+            }),
             cx.subscribe_in(&editor, window, |this, input, ev, window, cx| match ev {
                 InputEvent::PressEnter { .. } | InputEvent::Blur => {
                     let text = input.read(cx).value().trim().to_owned();
@@ -120,11 +133,15 @@ impl TranscriptPanel {
             pressed_in_selection: None,
             editing: None,
             editor,
+            retyping: None,
+            retyper,
             captions: Vec::new(),
             captions_key: None,
             caption_list: ListState::new(0, ListAlignment::Top, px(400.)),
             demo_captions: crate::demo::enabled()
                 && std::env::var("KOOEDITOR_DEMO_VIEW").is_ok_and(|v| v == "captions"),
+            demo_retype: crate::demo::enabled()
+                && std::env::var("KOOEDITOR_DEMO_VIEW").is_ok_and(|v| v == "retype"),
             _subscriptions,
             _poll,
         }
@@ -164,6 +181,7 @@ impl TranscriptPanel {
         let n = self.words.len();
         self.anchor = self.anchor.filter(|&i| i < n);
         self.head = self.head.filter(|&i| i < n);
+        self.retyping = None;
     }
 
     fn selection(&self) -> Option<(usize, usize)> {
@@ -191,6 +209,7 @@ impl TranscriptPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.retyping = None;
         window.focus(&self.focus, cx);
         let inside = self.selection().is_some_and(|(a, b)| a <= i && i <= b);
         if inside && !ev.modifiers.shift && ev.click_count == 1 {
@@ -364,9 +383,14 @@ impl TranscriptPanel {
         }
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys typed over words are the editor's.
+        if self.retyping.is_some() {
+            return;
+        }
         match ev.keystroke.key.as_str() {
             "delete" | "backspace" => self.delete_selection(cx),
+            "enter" if self.selection().is_some() => self.retype(window, cx),
             "escape" => {
                 self.anchor = None;
                 self.head = None;
@@ -425,7 +449,9 @@ impl TranscriptPanel {
             .flex_1()
             .min_h_0()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
+            .on_key_down(
+                cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.drag_end(cx)),
@@ -454,6 +480,10 @@ impl TranscriptPanel {
                     PopupMenuItem::new("Add to chat")
                         .on_click(move |_, _, cx| p.update(cx, |this, cx| this.add_to_chat(cx))),
                 );
+                let p = panel.clone();
+                let menu = menu.item(PopupMenuItem::new("Retype…").on_click(
+                    move |_, window, cx| p.update(cx, |this, cx| this.retype(window, cx)),
+                ));
                 let Some(name) = speaker else {
                     return menu;
                 };
@@ -492,8 +522,18 @@ impl TranscriptPanel {
         let sel = self.selection();
         let drag = self.selection_ref().map(|r| RefDrag { refs: vec![r] });
         let panel = cx.entity().downgrade();
-        let words = p.words.clone().map(|i| {
+        let retyping = self.retyping.filter(|(a, _)| p.words.contains(a));
+        let mut field = retyping.map(|_| self.retype_field(cx));
+        let said = self.generated_media(cx);
+        let words = p.words.clone().filter_map(|i| {
+            if let Some((a, b)) = self.retyping
+                && a <= i
+                && i <= b
+            {
+                return if i == a { field.take() } else { None };
+            }
             let w = &self.words[i];
+            let generated = said.contains(&w.media);
             let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
             let current = w.timeline.contains(playhead);
             let low = w.word.confidence < LOW_CONFIDENCE;
@@ -508,6 +548,7 @@ impl TranscriptPanel {
                         .text_decoration_wavy()
                         .text_decoration_color(warn)
                 })
+                .when(generated, |d| d.italic())
                 .child(w.word.text.clone())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -528,6 +569,8 @@ impl TranscriptPanel {
                         cx.new(|_| drag.clone())
                     })
                 })
+                .into_any_element()
+                .into()
         });
         v_flex()
             .px_3()
@@ -586,11 +629,17 @@ fn paragraphs(
 }
 
 impl Render for TranscriptPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_words(cx);
         if self.demo_captions && !self.words.is_empty() {
             self.demo_captions = false;
             self.generate(cx);
+        }
+        if self.demo_retype && self.words.len() > 4 {
+            self.demo_retype = false;
+            self.anchor = Some(3);
+            self.head = Some(4);
+            self.retype(window, cx);
         }
         let body = match self.view {
             View::Transcript => self.transcript_view(cx),

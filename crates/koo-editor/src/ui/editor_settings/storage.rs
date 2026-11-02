@@ -99,6 +99,7 @@ impl Place {
                 "hdr",
                 "interpolated",
                 "depth",
+                "respeak",
             ]
             .iter()
             .map(|d| paths::cache().join(d))

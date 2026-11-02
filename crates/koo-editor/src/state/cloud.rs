@@ -528,7 +528,7 @@ impl EditorState {
     /// carried out later): its proposals go into the open chat's set, which
     /// then goes to review again. During a turn the set is open, and goes
     /// to review when the turn ends.
-    fn with_agent_set<T>(
+    pub(super) fn with_agent_set<T>(
         &mut self,
         cx: &mut Context<Self>,
         propose: impl FnOnce(&mut CommandBus, &Author) -> Result<T, String>,

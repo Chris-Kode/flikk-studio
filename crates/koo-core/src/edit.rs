@@ -509,6 +509,12 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 after,
             }]))
         }
+        Command::ReplaceSpeech {
+            range,
+            track,
+            media,
+            fade,
+        } => crate::respeak::plan(project, *range, *track, *media, *fade),
         Command::SetAudioEffects { clip, effects } => {
             let (_, c) = find_clip(tl, *clip)?;
             if c.media().is_none() {
