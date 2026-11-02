@@ -38,7 +38,9 @@ use koo_core::model::{
 use koo_core::{ChangeItemId, ChangeSetId, ClipId, Rate, Time, TimeRange, TrackId};
 use layout::{EDGE_PX, HEADER_WIDTH, RULER_HEIGHT, Row, SNAP_PX, TOOLBAR_HEIGHT, Viewport};
 use overlay::OverlayItem;
-use paint::{ClipScene, Colors, DropHint, Ghost, Marquee, Scene, TrackScene, TransitionScene};
+use paint::{
+    ClipScene, Colors, DropHint, Ghost, Marquee, Scene, TrackScene, TransitionScene, Warp,
+};
 use silence::SilenceCache;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -1664,8 +1666,16 @@ impl TimelinePanel {
                             enabled: clip.enabled,
                             generator: matches!(clip.content, ClipContent::Generator { .. }),
                             effects: !clip.effects.is_empty(),
-                            speed: ((clip.speed - 1.).abs() > 1e-6)
-                                .then(|| format!("{}%", (clip.speed * 100.).round()).into()),
+                            speed: if clip.is_ramped() {
+                                Some("ramp".into())
+                            } else {
+                                ((clip.speed - 1.).abs() > 1e-6)
+                                    .then(|| format!("{}%", (clip.speed * 100.).round()).into())
+                            },
+                            warp: (clip.media().is_some() && clip.is_retimed()).then(|| {
+                                let clip = clip.clone();
+                                std::sync::Arc::new(move |t: Time| clip.source_offset(t)) as Warp
+                            }),
                             selected: selection.contains(&clip.id),
                             lifted: lifted.contains(&clip.id),
                             peaks,
@@ -1746,6 +1756,7 @@ impl TimelinePanel {
             drop: self.drop,
             marquee,
             colors,
+            render: self.state.read(cx).render.status(),
         };
 
         if let Some(media) = media {
@@ -2183,16 +2194,11 @@ fn handles(project: &Project, clip: &Clip) -> (Option<Time>, Option<Time>) {
     else {
         return (None, None);
     };
-    let speed = clip.speed.max(1e-6);
-    let before = source_in.scale(1. / speed).max(Time::ZERO);
+    let before = (-clip.timeline_offset(-*source_in)).max(Time::ZERO);
     let after = project
         .media(*media)
         .and_then(|m| m.info.as_ref())
-        .map(|i| {
-            (i.duration - *source_in - clip.duration.scale(speed))
-                .scale(1. / speed)
-                .max(Time::ZERO)
-        });
+        .map(|i| (clip.timeline_offset(i.duration - *source_in) - clip.duration).max(Time::ZERO));
     (Some(before), after)
 }
 

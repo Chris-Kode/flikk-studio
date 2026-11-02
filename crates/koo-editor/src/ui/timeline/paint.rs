@@ -1,5 +1,6 @@
 //! Everything right of the track headers is one canvas: ruler, lanes, clips,
-//! waveforms, markers, the change-set overlay, silence bands and the playhead.
+//! waveforms, markers, the change-set overlay, silence bands, the render bar
+//! and the playhead.
 //! `Scene` is a snapshot taken in `render`, so painting never touches state.
 
 use super::layout::{self, RULER_HEIGHT, Row, Viewport};
@@ -28,6 +29,9 @@ pub struct Colors {
     pub marker: Hsla,
     pub protected: Hsla,
     pub selection: Hsla,
+    /// Render bar: frames on disk, and frames still to compose.
+    pub cached: Hsla,
+    pub uncached: Hsla,
 }
 
 impl Colors {
@@ -48,6 +52,8 @@ impl Colors {
             marker: theme.blue_light,
             protected: theme.warning,
             selection: theme.foreground,
+            cached: theme.success,
+            uncached: theme.danger,
         }
     }
 
@@ -60,6 +66,9 @@ impl Colors {
         }
     }
 }
+
+/// Clip time → source played since the clip's start.
+pub type Warp = Arc<dyn Fn(Time) -> Time>;
 
 pub struct ClipScene {
     pub range: TimeRange,
@@ -76,6 +85,9 @@ pub struct ClipScene {
     /// Being dragged: drawn faded at its old place.
     pub lifted: bool,
     pub peaks: Option<Arc<Vec<f32>>>,
+    /// Retimed: clip time → source played since its start, which `peaks`
+    /// span.
+    pub warp: Option<Warp>,
     /// Filmstrip tiles: x offset from the clip start, width, image.
     pub tiles: Vec<(f32, f32, Arc<RenderImage>)>,
     pub fade_in: Time,
@@ -141,6 +153,8 @@ pub struct Scene {
     pub drop: Option<DropHint>,
     pub marquee: Option<Marquee>,
     pub colors: Colors,
+    /// Which compositor ranges the background render has on disk.
+    pub render: Option<Arc<crate::render_cache::Status>>,
 }
 
 impl Scene {
@@ -664,7 +678,11 @@ fn paint_waveform(
     while x < x1 {
         let from = Time((len.0 as f64 * (x / width) as f64) as i64);
         let to = Time((len.0 as f64 * ((x + step) / width) as f64) as i64);
-        let p = waveform::peak(peaks, len, from, to).clamp(0., 1.);
+        let p = match &clip.warp {
+            Some(warp) => waveform::peak(peaks, warp(len), warp(from), warp(to)),
+            None => waveform::peak(peaks, len, from, to),
+        }
+        .clamp(0., 1.);
         tops.push((rect.origin.x + px(x), p));
         x += step;
     }
@@ -816,6 +834,18 @@ fn paint_ruler(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &
     let x_of = |t: Time| left + px(vp.x(t));
 
     window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
+        // The render bar, along the top edge.
+        for (range, cached) in scene.render.iter().flat_map(|s| &s.runs) {
+            let (a, b) = (x_of(range.start), x_of(range.end));
+            if b < ruler.origin.x || a > ruler.right() {
+                continue;
+            }
+            let color = if *cached { c.cached } else { c.uncached };
+            window.paint_quad(fill(
+                Bounds::new(point(a, ruler.origin.y), size((b - a).max(px(1.)), px(2.))),
+                color.opacity(0.8),
+            ));
+        }
         if let Some(r) = scene.in_out {
             let (a, b) = (x_of(r.start), x_of(r.end));
             window.paint_quad(fill(

@@ -388,7 +388,7 @@ impl Matte {
 
 /// `frame`'s luma resampled to `w` × `h`, 0..1, each pixel the mean of
 /// the source pixels under it.
-fn gray(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn gray(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
     let (fw, fh) = (frame.width.max(1) as usize, frame.height.max(1) as usize);
     let span = |i: usize, n: usize, of: usize| {
         let a = i * of / n;
@@ -450,7 +450,7 @@ fn refine(coverage: &[f32], near: &[f32], guide: &[f32], w: usize, h: usize) -> 
 
 /// The mean of `v` over a `2r + 1` square around each pixel, the edges
 /// repeated.
-fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+pub(crate) fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let pass = |src: &[f32], len: usize, count: usize, stride: usize, step: usize| {
         let mut out = vec![0.0; src.len()];
         let at = |line: usize, i: isize| {

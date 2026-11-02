@@ -17,6 +17,12 @@
 //! signed distances when it feathers or expands (see
 //! [`crate::subject`]). One without its matte yet is left out.
 //!
+//! A person mask ([`MaskShape::Person`]) keeps the people a matting model
+//! finds in every frame, with no prompt: its [`PersonMatte`] at the time
+//! ([`SubjectMattes::people`]) is drawn as coverage, its edge eased onto
+//! the picture's by `edge`, grown by expansion and softened by feather
+//! (see [`crate::person`]). One without its matte yet is left out too.
+//!
 //! The compositor multiplies the picture's alpha by [`raster`] before it
 //! is placed and blended (`FxBatch::mask`), on the GPU and the CPU alike.
 //! Captions and titles take no masks: the render burns them in with ASS,
@@ -24,6 +30,7 @@
 
 use crate::ids::MaskId;
 use crate::model::Ease;
+use crate::person::PersonMatte;
 use crate::services::Frame;
 use crate::subject::{FieldKind, Matte, Subject};
 use crate::time::Time;
@@ -42,6 +49,10 @@ fn one() -> f32 {
 
 fn yes() -> bool {
     true
+}
+
+fn half() -> f32 {
+    0.5
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,6 +104,12 @@ pub enum MaskShape {
     },
     /// The object [`Mask::subject`] picks, as the model finds it.
     Subject,
+    /// The people in the picture, as a matting model finds them in every
+    /// frame. `edge` (0..1) eases the edge onto the picture's own (hair).
+    Person {
+        #[serde(default = "half")]
+        edge: f32,
+    },
 }
 
 /// Everything about a mask that can be keyframed.
@@ -168,6 +185,16 @@ impl Mask {
             subject: Some(subject),
             ..Self::new(MaskShape::Subject)
         }
+    }
+
+    /// A mask keeping the people in the picture.
+    pub fn person() -> Self {
+        Self::new(MaskShape::Person { edge: half() })
+    }
+
+    /// Whether it keeps the people in the picture.
+    pub fn is_person(&self) -> bool {
+        matches!(self.state.shape, MaskShape::Person { .. })
     }
 
     /// Its subject, when it keeps one.
@@ -323,6 +350,9 @@ impl MaskState {
                 size: lerp2(*s0, *s1, k),
                 rotation_deg: lerp(*r0, *r1, k),
             },
+            (Person { edge: e0 }, Person { edge: e1 }) => Person {
+                edge: lerp(*e0, *e1, k),
+            },
             (Path { points: p0, smooth }, Path { points: p1, .. }) if p0.len() == p1.len() => {
                 Path {
                     points: p0.iter().zip(p1).map(|(a, b)| lerp2(*a, *b, k)).collect(),
@@ -354,13 +384,14 @@ impl MaskShape {
                     *p = add(*p);
                 }
             }
-            MaskShape::Subject => {}
+            MaskShape::Subject | MaskShape::Person { .. } => {}
         }
         out
     }
 
     /// Its outline as a closed polyline in uv, for a picture `aspect`
-    /// (width / height) wide; none for a subject (see [`Matte::outlines`]).
+    /// (width / height) wide; none for a subject (see [`Matte::outlines`])
+    /// or people.
     pub fn outline(&self, aspect: f32) -> Vec<[f32; 2]> {
         let aspect = aspect.max(1e-3);
         let to_uv = |p: [f32; 2]| [p[0] / aspect, p[1]];
@@ -422,7 +453,7 @@ impl MaskShape {
                     pts
                 }
             }
-            MaskShape::Subject => Vec::new(),
+            MaskShape::Subject | MaskShape::Person { .. } => Vec::new(),
         }
     }
 }
@@ -549,17 +580,26 @@ fn polygon_distance(v: &[[f32; 2]], p: [f32; 2]) -> f32 {
     if inside { -d } else { d }
 }
 
-/// What subject masks are drawn from at a time: each one's matte, and the
-/// picture whose edges they refine onto.
+/// What subject and person masks are drawn from at a time: each one's
+/// matte, and the picture whose edges they refine onto.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SubjectMattes<'a> {
     pub mattes: &'a [(MaskId, Matte)],
     pub picture: Option<&'a Frame>,
+    /// Person masks' mattes.
+    pub people: &'a [(MaskId, PersonMatte)],
 }
 
 impl SubjectMattes<'_> {
     fn get(&self, mask: MaskId) -> Option<&Matte> {
         self.mattes
+            .iter()
+            .find(|(id, _)| *id == mask)
+            .map(|(_, m)| m)
+    }
+
+    fn person(&self, mask: MaskId) -> Option<&PersonMatte> {
+        self.people
             .iter()
             .find(|(id, _)| *id == mask)
             .map(|(_, m)| m)
@@ -580,6 +620,27 @@ fn prepare(
     let turn = |deg: f32| deg.to_radians().sin_cos();
     let feather = state.feather.max(0.0);
     let reach = state.expansion.max(0.0) + feather;
+    if let MaskShape::Person { edge } = state.shape {
+        let matte = mattes.person(mask.id)?;
+        let [u0, v0, u1, v1] = matte.bounds().unwrap_or([0.5, 0.5, 0.5, 0.5]);
+        let field = raster.map_or_else(Vec::new, |(w, h)| {
+            matte.field(w, h, edge, feather, state.expansion, mattes.picture)
+        });
+        return Some(Prepared {
+            shape: Distance::Field(field, FieldKind::Coverage),
+            bounds: [
+                u0 * aspect - reach,
+                v0 - reach,
+                u1 * aspect + reach,
+                v1 + reach,
+            ],
+            expansion: state.expansion,
+            feather,
+            invert: mask.invert,
+            opacity: state.opacity.clamp(0.0, 1.0),
+            mode: mask.mode,
+        });
+    }
     if state.shape == MaskShape::Subject {
         let subject = mask.subject.as_ref()?;
         let matte = mattes.get(mask.id)?;
@@ -632,7 +693,9 @@ fn prepare(
             [size[0].abs() * aspect / 2.0, size[1].abs() / 2.0],
             turn(*rotation_deg),
         ),
-        MaskShape::Path { .. } | MaskShape::Subject => Distance::Polygon(outline.clone()),
+        MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Person { .. } => {
+            Distance::Polygon(outline.clone())
+        }
     };
     let bounds = outline.iter().fold(
         [f32::MAX, f32::MAX, f32::MIN, f32::MIN],

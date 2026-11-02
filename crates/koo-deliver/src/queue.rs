@@ -5,6 +5,7 @@
 use crate::composed::{self, Frames};
 use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
 use crate::graph::{self, GraphSpec, Loudnorm, Measured};
+use crate::hw::{self, Encoder, HwEncoder};
 use crate::preset::RenderSettings;
 use anyhow::{Context as _, Result, anyhow};
 use koo_core::JobId;
@@ -242,7 +243,8 @@ pub fn render_blocking(
     let mut spec = GraphSpec::new(&request.project, settings, &request.caption_styles);
     let mut share = 0.0;
 
-    // Subject masks: found (and followed) before any frame is composed.
+    // Subject and person masks: found (and followed) before any frame is
+    // composed.
     if spec.video && composed::wanted(&request.project, spec.range, &request.services) {
         let found = composed::find_subjects(
             &request.project,
@@ -281,31 +283,102 @@ pub fn render_blocking(
 
     spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
     let g = graph::build(&request.project, &spec, &work.0)?;
-    let script = write_script(&work.0, "graph.txt", &g.script)?;
     let tmp = temp_path(out, &JobId::new().to_string());
+    let progress = |p: f32| progress(share + p * (1.0 - share));
+    let attempts = attempts(settings, spec.video)?;
+    let last = attempts.len() - 1;
+    for (i, hw) in attempts.iter().enumerate() {
+        let result = encode(
+            request,
+            &spec,
+            &g,
+            &work.0,
+            hw.as_ref(),
+            &tmp,
+            &progress,
+            cancel,
+        );
+        match result {
+            Ok(()) => return publish(&tmp, out),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                // Auto: a hardware encoder that fails hands over to software.
+                if i == last || cancel.load(Ordering::Relaxed) {
+                    return Err(match hw {
+                        Some(hw) => e.context(format!("{} encoder", hw.api.label())),
+                        None => e,
+                    });
+                }
+            }
+        }
+    }
+    unreachable!("at least one attempt")
+}
+
+/// The encoders to try in turn: `None` is software.
+fn attempts(settings: &RenderSettings, video: bool) -> Result<Vec<Option<HwEncoder>>> {
+    let Some((codec, _)) = settings.hardware_codec().filter(|_| video) else {
+        return Ok(vec![None]);
+    };
+    let best = || hw::probe().best(codec).cloned();
+    Ok(match settings.encoder {
+        Encoder::Software => vec![None],
+        Encoder::Hardware => {
+            vec![Some(best().ok_or_else(|| {
+                anyhow!("no hardware encoder for this format on this machine")
+            })?)]
+        }
+        Encoder::Auto => match best() {
+            Some(hw) => vec![Some(hw), None],
+            None => vec![None],
+        },
+    })
+}
+
+/// One run of the final encode into `tmp`.
+#[allow(clippy::too_many_arguments)]
+fn encode(
+    request: &RenderRequest,
+    spec: &GraphSpec,
+    g: &graph::Graph,
+    dir: &Path,
+    hw: Option<&HwEncoder>,
+    tmp: &Path,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let settings = &request.settings;
+    let mut script = g.script.clone();
+    let mut video = g.video.clone();
+    if let (Some(v), Some(upload)) = (&video, hw.and_then(HwEncoder::upload_filter)) {
+        script = format!("{};\n[{v}]{upload}[vhw]\n", script.trim_end());
+        video = Some("vhw".into());
+    }
+    let script = write_script(dir, "graph.txt", &script)?;
     let mut args: Vec<OsString> = vec!["-loglevel".into(), "error".into(), "-y".into()];
+    if let Some(hw) = hw {
+        args.extend(hw.global_args());
+    }
     if spec.piped {
-        args.extend(composed::input_args(&spec));
+        args.extend(composed::input_args(spec));
     }
     args.extend(filter_script_args(&script));
-    if let Some(v) = &g.video {
+    if let Some(v) = &video {
         args.extend(["-map".into(), format!("[{v}]").into()]);
     }
     if let Some(a) = &g.audio {
         args.extend(["-map".into(), format!("[{a}]").into()]);
     }
-    args.extend(settings.codec_args().into_iter().map(OsString::from));
-    args.push(tmp.clone().into());
-    let progress = |p: f32| progress(share + p * (1.0 - share));
-    let result = if spec.piped {
-        let mut frames = Frames::new(&request.project, &request.services, &spec);
-        composed::run(&args, &g, &mut frames, &progress, cancel)
-    } else {
-        ffmpeg::run(&args, g.seconds, &progress, cancel).map(|_| ())
+    let codec = match hw {
+        Some(hw) => settings.hw_codec_args(hw, spec.width, spec.height, spec.rate.fps()),
+        None => settings.codec_args(),
     };
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+    args.extend(codec.into_iter().map(OsString::from));
+    args.push(tmp.into());
+    if spec.piped {
+        let mut frames = Frames::new(&request.project, &request.services, spec);
+        composed::run(&args, g, &mut frames, progress, cancel)
+    } else {
+        ffmpeg::run(&args, g.seconds, progress, cancel).map(|_| ())
     }
-    publish(&tmp, out)
 }

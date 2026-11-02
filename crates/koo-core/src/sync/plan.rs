@@ -210,6 +210,15 @@ fn retimed(clip: &Clip, at: f64, speed: f64) -> Result<Clip> {
     Ok(c)
 }
 
+/// A ramped clip's sound keeps no one offset, and a drift fix (a constant
+/// speed) would replace its ramp.
+fn ramped(clip: &Clip) -> CoreError {
+    CoreError::Invalid(format!(
+        "{} has a speed ramp; sync it before ramping it",
+        clip.id
+    ))
+}
+
 /// Builds ops against a working copy, so each one is planned on the
 /// project as the ones before it left it.
 struct Builder {
@@ -351,6 +360,9 @@ pub fn sync_clips(
             "{reference} is not a media clip"
         )));
     };
+    if r.is_ramped() {
+        return Err(ramped(r));
+    }
     let reference_at = (r.start, source_in, r.speed);
     let reference_clips = linked(tl, r);
     let mut b = Builder::new(project);
@@ -368,6 +380,14 @@ pub fn sync_clips(
         };
         let (at, speed) = follower_timing(reference_at, source_in, f.offset, f.drift)?;
         let group = linked(tl, clip);
+        if let Some(c) = group
+            .iter()
+            .filter_map(|id| tl.clip(*id))
+            .map(|(_, c)| c)
+            .find(|c| c.is_ramped())
+        {
+            return Err(ramped(c));
+        }
         moved_ids.extend(&group);
         for id in group {
             let (track, c) = tl.clip(id).ok_or(CoreError::ClipNotFound(id))?;
