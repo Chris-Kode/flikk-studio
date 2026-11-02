@@ -253,6 +253,71 @@ the effect of its earlier calls.
 * Change sets live in the bus only; saved chats keep a message's change-set
   id, not the set.
 
+### Sync by sound
+
+A second camera or a separate audio recorder is lined up with the main clip
+by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
+
+* **Measuring** (`sync/measure.rs`, pure Rust with its own radix-2 FFT in
+  `sync/fft.rs`): each recording's stream is decoded through
+  `MediaService::audio` to mono at 8 kHz, whole (up to 6 hours). A coarse
+  pass turns each into an onset envelope (spectral flux of 16 log-spaced
+  band energies, 100 a second, its local mean removed and its peaks capped)
+  and cross-correlates the two over every lag at once, each lag normalized
+  by the overlap it leaves (at least 3 s, or 30% of the shorter), so
+  offsets of hours and recordings that start late or stop early cost the
+  same. A fine pass reads 3–12 windows of 8 s spread over the overlap from
+  both and finds each window's lag with band-limited (150–3,800 Hz)
+  GCC-PHAT (β 0.8), to a fraction of a sample by a parabola. Flat first:
+  the windows' median offset and those within 1.5 ms of it; a robust line
+  (Theil–Sen, then least squares on the windows within 1.5 ms) wins when
+  more windows agree with it and the drift it shows adds up to 2 ms or more
+  over the overlap. The result is the follower's source time
+  `offset + r · (1 + drift)` for the reference's source time `r`, with a
+  confidence (0.35 from how far the coarse peak stands above the best lag
+  elsewhere, 0.65 from the share of fine windows that agree); under 0.5 it
+  is not used and the follower is left where it was. A follower that does
+  not match the reference is tried through another follower that did
+  (`sync::measure_group`). The measuring runs off the UI thread.
+* **Placing** (`sync/plan.rs`): `Command::SyncClips` and
+  `Command::PlaceSynced` carry what was measured, not positions, so a
+  proposal planned again after the user moved the reference still lands in
+  sync. A recording on the timeline is the clips that play one media item
+  from the same point (a video and the sound that landed with it); they
+  move together. The reference is the one on the lowest video track (the
+  earliest there), else the first selected; the agent can name it. A
+  follower that would overlap another clip goes to a free track of its kind,
+  else a new one; one that would start before zero loses its head. A
+  speed-ramped reference or follower is refused: its sound does not keep
+  one offset, and a drift fix is a constant speed that would replace the
+  ramp.
+  `PlaceSynced` lays pool items down whole from the playhead, each on a
+  free or new track, the group moved later together when one would start
+  before it. "Recorder sound" disables the cameras' sound clips when the
+  group holds a sound-only recording.
+* **Drift** is corrected by the follower's speed (`speed × (1 + drift)`).
+  Speeds within 0.1% of 1 (`sync::varispeed`, under two cents of pitch)
+  play by resampling, as a fast clock does, not by time-stretching: output
+  frame `n` is the input at `n · speed`, Catmull-Rom interpolated. The
+  preview mixer uses it in place of WSOLA, and the render decodes such a
+  clip's span the way the preview does, runs it through the same code and
+  reads the result as FLAC from the job's work folder
+  (`koo-deliver/src/varispeed.rs`) instead of `atempo`, so preview and
+  export put every sample at the same time. WSOLA and `atempo` were not
+  used for this: each wanders up to ±10 ms around the nominal time. A
+  follower video at such a speed is composited in renders, as any retimed
+  clip is.
+* **UI:** the timeline's clip menu offers "Sync by Audio" when the
+  selection holds two or more recordings with sound, and "Sync by Audio,
+  Recorder Sound" when it holds a sound-only one and a camera. The media
+  pool takes cmd/ctrl- or shift-click to add items to its selection; an
+  item's menu then offers "Sync" (and "Sync, Recorder Sound"). The edit is
+  one undo step; the status line says only what did not match and drift
+  that was corrected. The agent's `sync_audio` (`tools/sync.rs`) takes
+  `clips` (or pool `media` with `at`), `reference` and
+  `replace_camera_audio`, runs as a job and proposes the edit, reporting
+  each follower's offset, drift and confidence, or why it was not synced.
+
 ## 5. Compositor and FX
 
 * **One FX format** (`koo-core/src/fx/mod.rs`; its module docs are the
@@ -1031,7 +1096,7 @@ on the UI thread and run it off it:
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 90 in the catalog (88 plus
+* **Tools** (`koo-agent/src/tools/`): 91 in the catalog (89 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -1454,6 +1519,7 @@ there.
 | HDR tone mapping | `koo-core/src/hdr.rs`, `koo-media` probe, decode, proxy, `koo-deliver` graph, `ui/inspector/tone_map.rs`, `ui/media_pool/hdr.rs`, `set_tone_map` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
 | S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
+| Sync by sound (podcasts, multicam) | `koo-core/src/sync/`, `Command::SyncClips` / `PlaceSynced`, `state/sync.rs`, `ui/timeline/menu.rs`, `ui/media_pool.rs`, `ui/viewer/audio.rs`, `koo-deliver/src/varispeed.rs`, `tools/sync.rs` |
 
 ## 13. Known gaps
 
@@ -1559,6 +1625,19 @@ there.
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
   makes the first debug build take minutes instead of hours.
+* Sync by sound was measured only on FFmpeg-made material from synthetic
+  speech (espeak-ng voices over room tone and tones), not on real
+  recordings from two devices in a room; music-only overlap, very
+  reverberant rooms and recordings made far apart (sound arriving 10+ ms
+  later) are untried. Measuring keeps both onset envelopes in memory
+  (about 1.4 MB per hour each; the coarse correlation of two hour-long
+  recordings takes about 35 MB more) and reads each recording once whole
+  and once more in windows, with no progress shown and no cancel; an hour
+  takes about 10 s per recording in release, about twice that in debug
+  builds. Linked clips are found by media, start, source in and speed,
+  so a camera whose sound was moved apart from its picture syncs alone.
+  The pool's multi-selection is for syncing only; dragging still takes
+  one item. Not run on macOS or Windows.
 
 * Stabilization was checked on FFmpeg-made shake only (a fractal still
   jittered by crop and rotate), not on real handheld footage: rolling
@@ -1632,6 +1711,28 @@ there.
   Runtime can print an error as it tears down.
 
 ### Analysis accuracy
+
+* Sync by sound, against a 10-minute camera recording (AAC in MP4) of
+  synthetic speech over room tone; offsets as the follower's source time
+  for the reference's (`offset + r · (1 + drift)`), error at three points
+  of the overlap, release build:
+
+  | Follower | Truth | Measured | Error |
+  | --- | --- | --- | --- |
+  | Recorder (24-bit WAV) started 83.4567 s earlier | +83.4567 s | +83.45670 s | < 0.01 ms |
+  | Second camera started 95.1234 s later, 300 Hz–3 kHz, −12 dB, white noise, AAC | −95.1234 s | −95.12334 s | 0.06 ms |
+  | Recorder covering 6:40–15:00 only (MP3), partial overlap | −400 s | −400.00001 s | 0.01 ms |
+  | Recorder 0.0104% fast (`asetrate` 48,005 Hz) from 20.5 s earlier | +20.497865 s, drift −1.0415e-4 | +20.49790 s, −1.041e-4 | 0.04–0.06 ms |
+  | 4 min of unrelated talk and 2 min of room tone, then the camera's sound (44.1 kHz) | +366.4509 s | +366.45090 s | < 0.01 ms |
+  | Pink noise 3 dB under the speech (mean levels), three echoes (40–120 ms), −6 dB | −30 s | −30.00000 s | < 0.01 ms |
+  | 20 s excerpt from 4:10 | −250 s | −250.00001 s | 0.01 ms |
+  | Unrelated talk (same voices) | no match | confidence 0.09 | rejected |
+
+  Every match scored confidence 1.00 with all its fine windows agreeing.
+  Rendered through `SyncClips` and the WAV preset, the synced recorder
+  (drifting one included, through the resampler) measured against the
+  camera again at offset 0.04 ms or less and no drift. A 10-minute pair
+  takes about 5 s in release (envelopes 2 s each) and 10 s in debug.
 
 * Inside connected speech (no pause between words) more than half of the
   cuts still clip the tail or the onset of a word by more than 20 ms (on

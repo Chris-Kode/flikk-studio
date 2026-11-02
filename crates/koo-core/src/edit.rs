@@ -57,6 +57,17 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
         } => ripple_delete(tl, *range, tracks, *fade),
         Command::DeleteClips { clips, ripple } => delete_clips(tl, clips, *ripple),
         Command::MoveClip { clip, at, track } => move_clip(tl, *clip, *at, *track),
+        Command::SyncClips {
+            reference,
+            followers,
+            mute,
+        } => crate::sync::plan::sync_clips(project, *reference, followers, mute),
+        Command::PlaceSynced {
+            at,
+            reference,
+            followers,
+            mute,
+        } => crate::sync::plan::place_synced(project, *at, *reference, followers, mute),
 
         Command::AddMarker { range, kind, note } => Ok(ops(vec![Op::InsertMarker {
             marker: Marker {

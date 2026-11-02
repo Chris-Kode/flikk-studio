@@ -162,6 +162,9 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "shorts",
             "instagram",
             "youtube",
+            "sync",
+            "multicam",
+            "recorder",
         ],
     ),
     (

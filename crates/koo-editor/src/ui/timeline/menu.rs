@@ -201,6 +201,9 @@ enum Content {
         enabled: bool,
         media: bool,
         selected: Vec<ClipId>,
+        /// The selection can be synced by sound; `true` when it holds a
+        /// recorder and a camera.
+        sync: Option<bool>,
         /// A media clip on an audio track, which can be fitted to a length.
         music: bool,
         in_out: Option<koo_core::TimeRange>,
@@ -228,6 +231,8 @@ fn content(panel: &Entity<TimelinePanel>, cx: &App) -> Option<Content> {
                 enabled: clip.enabled,
                 media: clip.media().is_some(),
                 selected: state.selection.clips.clone(),
+                sync: (!state.sync_recordings(&state.selection.clips).is_empty())
+                    .then(|| state.sync_has_recorder(&state.selection.clips)),
                 music: clip.media().is_some() && track.kind == koo_core::model::TrackKind::Audio,
                 in_out: state.in_out.filter(|r| !r.is_empty()),
             }
@@ -268,6 +273,7 @@ pub fn build(
             enabled,
             media,
             selected,
+            sync,
             music,
             in_out,
         } => {
@@ -280,6 +286,10 @@ pub fn build(
             let colors = panel.clone();
             let toggle = panel.clone();
             let mention = panel.clone();
+            let menu = match sync {
+                Some(recorder) => sync_items(menu, panel, selected.clone(), recorder),
+                None => menu,
+            };
             let fit = panel.clone();
             let fit_duration = open(PopupKind::FitDuration);
             let menu = menu.item(
@@ -345,6 +355,33 @@ pub fn build(
         }
         Content::Ruler(first, in_out) => mention_items(menu, panel, vec![first], in_out),
     }
+}
+
+/// "Sync by Audio" for the selected clips, and keeping only the
+/// recorder's sound when there is one.
+fn sync_items(
+    menu: PopupMenu,
+    panel: &Entity<TimelinePanel>,
+    clips: Vec<ClipId>,
+    recorder: bool,
+) -> PopupMenu {
+    let item = |label: &'static str, mute: bool| {
+        let panel = panel.clone();
+        let clips = clips.clone();
+        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+            let clips = clips.clone();
+            panel.update(cx, |this, cx| {
+                this.state.update(cx, |s, cx| s.sync_clips(clips, mute, cx))
+            })
+        })
+    };
+    let menu = menu.item(item("Sync by Audio", false));
+    let menu = if recorder {
+        menu.item(item("Sync by Audio, Recorder Sound", true))
+    } else {
+        menu
+    };
+    menu.separator()
 }
 
 /// "Add to chat" for `refs`, plus the in/out range when one is marked.

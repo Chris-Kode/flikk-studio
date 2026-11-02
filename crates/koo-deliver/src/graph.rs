@@ -738,19 +738,40 @@ impl Builder<'_> {
             s1 = at(end).max(s0) + 0.1 * clip.speed_at(end - clip.start);
             ramp_tempo(clip, start + Time::from_secs_f64(lead), end, s0)
         });
-        let mut f = vec![format!(
-            "amovie={}:seek_point={}{}",
-            escape_path(&item.path),
-            num(s0),
-            audio_stream.map(|i| format!(":si={i}")).unwrap_or_default()
-        )];
-        f.push(format!("atrim=start={}:end={}", num(s0), num(s1)));
-        f.push("asetpts=PTS-STARTPTS".into());
-        f.push(format!(
-            "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
-        ));
+        let vary = !clip.is_ramped() && koo_core::sync::varispeed::is_varispeed(speed);
+        let mut f = if vary {
+            // Drift correction: resampled as the preview does it.
+            let file = work_dir.join(format!("{}.flac", self.label("vary")));
+            crate::varispeed::render(
+                item,
+                *audio_stream,
+                s0,
+                (length - lead).max(0.0),
+                speed,
+                sr,
+                &file,
+            )?;
+            vec![
+                format!("amovie={}", escape_path(&file)),
+                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
+            ]
+        } else {
+            let mut f = vec![format!(
+                "amovie={}:seek_point={}{}",
+                escape_path(&item.path),
+                num(s0),
+                audio_stream.map(|i| format!(":si={i}")).unwrap_or_default()
+            )];
+            f.push(format!("atrim=start={}:end={}", num(s0), num(s1)));
+            f.push("asetpts=PTS-STARTPTS".into());
+            f.push(format!(
+                "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
+            ));
+            f
+        };
         match ramp {
             Some(steps) => f.extend(self.ramp_atempo(&steps, work_dir)?),
+            None if vary => {}
             None => f.extend(atempo(speed)),
         }
         let lead_samples = (lead * sr as f64).round() as i64;

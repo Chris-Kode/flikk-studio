@@ -541,6 +541,22 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "sync_audio",
+            Some(EditTimeline),
+            "Line recordings up by their sound (a second camera, a separate audio recorder) and propose it: each follower, with its linked sound, moves to where it sounds like the reference; clock drift is corrected by a tiny speed change. Returns each one's offset and confidence; one that doesn't match is left alone. Give `clips` on the timeline, or `media` to place pool items stacked in sync from `at`.",
+            object(
+                json!({
+                    "clips": strings("Clip ids, two or more recordings (a video clip brings its linked sound)"),
+                    "media": strings("Pool media ids to place instead of `clips`"),
+                    "reference": string("Clip or media id that stays put (default: the clip on the lowest video track, or the first video)"),
+                    "replace_camera_audio": boolean("Disable the cameras' sound so only the recorder's is heard (default false)"),
+                    "at": time("With `media`: where the reference starts (default: the playhead)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "set_clips_enabled",
             Some(EditTimeline),
             "Propose disabling (or enabling) clips: disabled clips stay on the timeline but are not seen or heard.",

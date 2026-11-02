@@ -44,6 +44,7 @@ pub mod services;
 pub mod speed;
 pub mod stabilize;
 pub mod subject;
+pub mod sync;
 pub mod time;
 
 pub use error::{CoreError, Result};

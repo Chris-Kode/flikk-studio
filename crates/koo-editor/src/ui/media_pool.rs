@@ -68,6 +68,8 @@ pub struct MediaPoolPanel {
     bin: Option<BinId>,
     renaming: Option<BinId>,
     selected: Option<MediaId>,
+    /// Items added to the selection with cmd/ctrl- or shift-click.
+    also: Vec<MediaId>,
     thumbs: Thumbs,
     jobs: Vec<JobStatus>,
     /// Proxy creation progress, written from background threads.
@@ -155,6 +157,7 @@ impl MediaPoolPanel {
             bin: None,
             renaming: None,
             selected,
+            also: Vec::new(),
             thumbs: Thumbs::default(),
             jobs: Vec::new(),
             proxies: Arc::default(),
@@ -243,6 +246,18 @@ impl MediaPoolPanel {
 
     fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        let m = window.modifiers();
+        if !open && (m.secondary() || m.shift) && self.selected.is_some_and(|s| s != id) {
+            match self.also.iter().position(|a| *a == id) {
+                Some(i) => {
+                    self.also.remove(i);
+                }
+                None => self.also.push(id),
+            }
+            cx.notify();
+            return;
+        }
+        self.also.clear();
         self.selected = Some(id);
         if open {
             match self.selected_item(cx) {
@@ -293,6 +308,29 @@ impl MediaPoolPanel {
         self.state.update(cx, |s, cx| {
             s.execute(Command::UpdateMedia { media: item }, cx);
         });
+    }
+
+    /// The selected items to sync when `id` is one of them, reference
+    /// first, and whether they hold a recorder and a camera.
+    fn sync_group(&self, id: MediaId, cx: &App) -> Option<(Vec<MediaId>, bool)> {
+        let selected = self.selected?;
+        if self.also.is_empty() || (selected != id && !self.also.contains(&id)) {
+            return None;
+        }
+        let project = self.state.read(cx).bus.project();
+        let mut all = vec![selected];
+        all.extend(&self.also);
+        let group = koo_core::sync::pool_order(project, &all);
+        if group.len() < 2 {
+            return None;
+        }
+        let kind = |k| {
+            group
+                .iter()
+                .any(|m| project.media(*m).is_some_and(|i| i.kind == k))
+        };
+        let recorder = kind(MediaKind::Audio) && kind(MediaKind::Video);
+        Some((group, recorder))
     }
 
     fn selected_item(&self, cx: &App) -> Option<MediaItem> {
@@ -594,7 +632,7 @@ impl MediaPoolPanel {
         let listening = state.read(cx).source.as_ref();
         let listening = listening.filter(|p| p.is(item)).map(|p| p.fraction());
         let progress = self.progress(item.id).or(listening.map(Progress::Running));
-        let selected = self.selected == Some(item.id);
+        let selected = self.selected == Some(item.id) || self.also.contains(&item.id);
         let offline = self.state.read(cx).offline.contains(&item.id);
         let theme = cx.theme();
         let id = item.id;
@@ -957,6 +995,25 @@ fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &
                     PopupMenuItem::new("Save Voice to Library")
                         .on_click(move |_, _, cx| s.update(cx, |s, cx| save_voice(s, id, cx))),
                 )
+            }
+        }
+        None => menu,
+    };
+    let menu = match panel.read(cx).sync_group(id, cx) {
+        Some((group, recorder)) => {
+            let item = |label: &'static str, mute: bool| {
+                let state = panel.read(cx).state.clone();
+                let group = group.clone();
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let group = group.clone();
+                    state.update(cx, |s, cx| s.sync_media(group, mute, cx))
+                })
+            };
+            let menu = menu.item(item("Sync", false));
+            if recorder {
+                menu.item(item("Sync, Recorder Sound", true))
+            } else {
+                menu
             }
         }
         None => menu,

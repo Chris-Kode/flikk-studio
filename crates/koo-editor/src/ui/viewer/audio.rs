@@ -24,6 +24,7 @@ use koo_core::audiofx::{self, Ramp};
 use koo_core::model::{Clip, ClipContent, MediaItem, Project, Property, TrackKind};
 use koo_core::services::{MediaService, PcmStream};
 use koo_core::speed::RampAudio;
+use koo_core::sync::varispeed::{Varispeed, is_varispeed};
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange, TrackId};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -171,13 +172,37 @@ impl Source {
 /// before the media starts.
 struct Voice {
     stream: Box<dyn PcmStream>,
-    stretch: Option<Stretch>,
+    stretch: Option<Retime>,
     chain: Chain,
     /// Frames of silence before the source's first sample.
     lead: usize,
     /// Output frames to drop for the chain's look-ahead.
     discard: usize,
     tmp: Vec<f32>,
+}
+
+/// How a retimed clip plays: resampled for the tiny speed changes that
+/// correct clock drift (as the render does), else time-stretched.
+enum Retime {
+    Stretch(Stretch),
+    Varispeed(Varispeed),
+}
+
+impl Retime {
+    fn new(speed: f64, rate: u32) -> Option<Self> {
+        if is_varispeed(speed) {
+            Some(Self::Varispeed(Varispeed::new(speed)))
+        } else {
+            ((speed - 1.).abs() > 1e-6).then(|| Self::Stretch(Stretch::new(speed, rate)))
+        }
+    }
+
+    fn read(&mut self, out: &mut [f32], pull: &mut dyn FnMut(&mut [f32]) -> usize) {
+        match self {
+            Self::Stretch(s) => s.read(out, pull),
+            Self::Varispeed(v) => v.read(out, pull),
+        }
+    }
 }
 
 impl Voice {
@@ -402,9 +427,9 @@ impl Mixer {
         Some(Voice {
             stream,
             stretch: if clip.is_ramped() {
-                Some(ramp_stretch(clip, at + lead_t, self.rate))
+                Some(Retime::Stretch(ramp_stretch(clip, at + lead_t, self.rate)))
             } else {
-                ((clip.speed - 1.).abs() > 1e-6).then(|| Stretch::new(clip.speed, self.rate))
+                Retime::new(clip.speed, self.rate)
             },
             discard: chain.latency(),
             chain,

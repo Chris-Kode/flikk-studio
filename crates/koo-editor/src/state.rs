@@ -6,6 +6,7 @@ mod cloud;
 mod music_fit;
 mod respeak;
 mod source;
+mod sync;
 pub mod voices;
 
 pub use cloud::{Check, Generating, ProviderStatus};
