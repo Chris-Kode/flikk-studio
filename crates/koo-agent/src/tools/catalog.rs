@@ -524,7 +524,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_speed",
             Some(EditTimeline),
-            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed. A ramp (or preset) changes the speed over the clip; the clip plays the same source, so its length follows unless keep_length. Slowed frames repeat, blend, or are made by optical flow.",
+            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed. A ramp (or preset) changes the speed over the clip; the clip plays the same source, so its length follows unless keep_length. Slowed frames repeat, blend, or are made by optical flow. Retimes one clip: give a video's linked audio clip the same call.",
             object(
                 json!({
                     "clip": string("Clip id"),
