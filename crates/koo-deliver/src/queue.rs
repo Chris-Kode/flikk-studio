@@ -231,6 +231,9 @@ pub(crate) fn write_script(dir: &Path, name: &str, script: &str) -> Result<PathB
 const SUBJECTS_SHARE: f32 = 0.5;
 /// Of the progress, what measuring stabilized clips' camera takes.
 const MOTION_SHARE: f32 = 0.2;
+/// The part of what is left spent making depth maps, when it has any to
+/// make.
+const DEPTH_SHARE: f32 = 0.5;
 
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
@@ -269,6 +272,18 @@ pub fn render_blocking(
         )?;
         if measured {
             share += MOTION_SHARE;
+        }
+        // Depth maps too.
+        let (from, part) = (share, (1.0 - share) * DEPTH_SHARE);
+        let made = composed::find_depth(
+            &request.project,
+            spec.range,
+            &request.services,
+            &|p| progress(from + p * part),
+            cancel,
+        )?;
+        if made {
+            share = from + part;
         }
     }
 

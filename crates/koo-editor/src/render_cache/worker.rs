@@ -4,7 +4,8 @@
 //! ([`koo_core::compose::submit_program`]), and writes them to the
 //! [`store`]. Frames are pipelined as in playback. A span waits while its
 //! media is offline or its subjects' mattes are still being made; person
-//! masks are matted and optical-flow frames made in place first, so no
+//! masks are matted, depth maps made and optical-flow frames made in place
+//! first, so no
 //! frame is kept that live composing would draw differently later.
 //! Dropping the worker stops it after the frame in hand; frames are keyed
 //! by what they show, so one finished after an edit is simply never asked
@@ -76,27 +77,39 @@ pub fn ready(project: &Project, services: &Services, span: &Span) -> bool {
             })
         })
     });
-    let online = online && measured;
-    let Some(subjects) = &services.subjects else {
-        return online;
-    };
-    online
-        && span.subjects.iter().all(|(clip, mask)| {
-            let Some((_, clip)) = project.timeline.clip(*clip) else {
-                return false;
-            };
-            let Some(mask) = clip.masks.iter().find(|m| m.id == *mask) else {
-                return false;
-            };
-            if mask.is_person() {
-                return compose::person_ref(project, clip, mask).is_some_and(|person| {
-                    let status = subjects.person_status(person);
-                    status.error.is_none() && status.tracked >= status.frames
-                });
-            }
-            compose::subject_ref(project, clip, mask)
-                .is_some_and(|subject| subjects.status(subject).complete(subject.subject.track))
+    let depth_made = || {
+        let Some(service) = services.depth.as_ref().filter(|d| d.available().is_ok()) else {
+            return true;
+        };
+        span.depth.iter().all(|(clip, range)| {
+            depth_source(project, *clip, *range).is_none_or(|(item, r)| {
+                let status = service.status(&item, r);
+                status.error.is_none() && status.complete()
+            })
         })
+    };
+    if !online || !measured || !depth_made() {
+        return false;
+    }
+    let Some(subjects) = &services.subjects else {
+        return true;
+    };
+    span.subjects.iter().all(|(clip, mask)| {
+        let Some((_, clip)) = project.timeline.clip(*clip) else {
+            return false;
+        };
+        let Some(mask) = clip.masks.iter().find(|m| m.id == *mask) else {
+            return false;
+        };
+        if mask.is_person() {
+            return compose::person_ref(project, clip, mask).is_some_and(|person| {
+                let status = subjects.person_status(person);
+                status.error.is_none() && status.tracked >= status.frames
+            });
+        }
+        compose::subject_ref(project, clip, mask)
+            .is_some_and(|subject| subjects.status(subject).complete(subject.subject.track))
+    })
 }
 
 /// Matte the frames of `span`'s person masks, as a render does, so the
@@ -121,6 +134,38 @@ fn complete_people(project: &Project, services: &Services, span: &Span, stop: &A
         }
         if stop.load(Ordering::Relaxed) || subjects.complete_person(person, &|_| {}, stop).is_err()
         {
+            return;
+        }
+    }
+}
+
+/// What `clip` reads depth of over timeline `range`: its media and source
+/// range.
+fn depth_source(
+    project: &Project,
+    clip: koo_core::ClipId,
+    range: koo_core::TimeRange,
+) -> Option<(koo_core::model::MediaItem, koo_core::TimeRange)> {
+    let (track, clip) = project.timeline.clip(clip)?;
+    let (item, r) = koo_core::depth::source(project, track, clip, range)?;
+    Some((item.clone(), r))
+}
+
+/// Make the depth maps `span`'s clips read, as a render does, so the span
+/// can be kept; gives up when `stop` is set or a map can't be made.
+fn complete_depth(project: &Project, services: &Services, span: &Span, stop: &AtomicBool) {
+    let Some(service) = services.depth.as_ref().filter(|d| d.available().is_ok()) else {
+        return;
+    };
+    for (clip, range) in &span.depth {
+        let Some((item, r)) = depth_source(project, *clip, *range) else {
+            continue;
+        };
+        let status = service.status(&item, r);
+        if status.error.is_some() || status.complete() {
+            continue;
+        }
+        if stop.load(Ordering::Relaxed) || service.complete(&item, r, &|_| {}, stop).is_err() {
             return;
         }
     }
@@ -160,6 +205,7 @@ fn run(project: &Project, services: &Services, plan: &Plan, from: i64, stop: &At
     for (i, frames) in order(plan, from) {
         let span = &plan.spans[i];
         complete_people(project, services, span, stop);
+        complete_depth(project, services, span, stop);
         if !ready(project, services, span) {
             continue;
         }

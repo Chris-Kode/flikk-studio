@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people"]
+default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people", "depth"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["koo-models/whisper"]
@@ -26,6 +26,9 @@ interpolation = ["koo-models/interpolate"]
 # Person masks: people cut out of their background by MODNet; without it
 # person masks keep nothing.
 people = ["koo-models/matting"]
+# Depth maps for the depth effects and masks, by Depth Anything V2 Small;
+# without them depth effects leave the picture as it is.
+depth = ["koo-models/depth"]
 
 [dependencies]
 anyhow.workspace = true

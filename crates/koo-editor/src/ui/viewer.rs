@@ -28,6 +28,7 @@
 
 pub(crate) mod audio;
 mod cache;
+mod focus;
 mod gizmo;
 mod masks;
 mod player;
@@ -776,6 +777,10 @@ impl ViewerPanel {
             return;
         }
         self.pending_pick = None;
+        if let Some(pick) = self.state.read(cx).depth_pick {
+            self.pick_focus(pick, ev.position, &screen, cx);
+            return;
+        }
         if self.masks.on {
             self.mask_press(ev, &screen, under, cx);
             return;

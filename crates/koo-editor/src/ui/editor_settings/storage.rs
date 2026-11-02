@@ -98,6 +98,7 @@ impl Place {
                 "mattes",
                 "hdr",
                 "interpolated",
+                "depth",
             ]
             .iter()
             .map(|d| paths::cache().join(d))

@@ -8,6 +8,7 @@ use crate::ffmpeg::{self, command};
 use crate::graph::{Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
+use koo_core::depth;
 use koo_core::model::{MediaItem, Project};
 use koo_core::services::{Frame, PersonRef, Services};
 use koo_core::speed::Waiting;
@@ -132,6 +133,40 @@ pub(crate) fn measure_motion(
             .map_err(|e| anyhow!("stabilizing {}: {e}", item.path.display()))?;
     }
     Ok(!items.is_empty())
+}
+
+/// Make every depth map the clips over `range` read (their depth effects
+/// and masks), before frames are composed; `progress` gets 0..1. Whether
+/// there was any to make. Fails when one cannot be made (the model is
+/// missing).
+pub(crate) fn find_depth(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let Some(service) = &services.depth else {
+        return Ok(false);
+    };
+    let wanted: Vec<_> = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
+        .filter(|(_, c)| c.enabled && depth::clip_needs_depth(project, c))
+        .filter_map(|(t, c)| Some((c.id, depth::source(project, t, c, range)?)))
+        .filter(|(_, (item, r))| !service.status(item, *r).complete())
+        .collect();
+    let n = wanted.len() as f32;
+    for (i, (clip, (item, r))) in wanted.iter().enumerate() {
+        let part = |p: f32| progress((i as f32 + p) / n);
+        service
+            .complete(item, *r, &part, cancel)
+            .map_err(|e| anyhow!("depth of clip {}: {e}", short(clip)))?;
+    }
+    Ok(!wanted.is_empty())
 }
 
 fn short(id: impl std::fmt::Display) -> String {

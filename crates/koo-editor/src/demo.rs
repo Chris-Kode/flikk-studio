@@ -4,12 +4,15 @@
 //! panel can be exercised and screenshotted without real media.
 //! `KOOEDITOR_DEMO_WORKSPACE=<label>` opens that workspace;
 //! `KOOEDITOR_DEMO_SETTINGS=<page>` opens Settings on that page.
+//! `KOOEDITOR_DEMO_DEPTH=1` puts depth effects and a depth mask on the
+//! selected clip.
 //! `KOOEDITOR_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
 //! media (see [`compose`]); `KOOEDITOR_DEMO_PERSON=<file>` a person mask
 //! on that file (see [`person`]); `KOOEDITOR_DEMO_STABILIZE=<seconds>` a
 //! shaky clip, stabilized (see [`stabilize`]).
 
 mod compose;
+mod depth;
 mod engines;
 mod hdr;
 mod person;
@@ -105,6 +108,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     compose::seed(state);
     stabilize::seed(state);
     person::seed(state);
+    depth::seed(state);
     cx.notify();
 }
 

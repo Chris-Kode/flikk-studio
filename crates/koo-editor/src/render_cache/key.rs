@@ -56,8 +56,14 @@ impl Globals {
                 .is_some_and(|i| i.available().is_ok()) as u8,
             // Without it, stabilized clips draw as they are.
             services.stabilizer.is_some() as u8,
+            // Without the depth model, depth effects are left out.
+            services
+                .depth
+                .as_ref()
+                .is_some_and(|d| d.available().is_ok()) as u8,
         ]);
         h.update(koo_models::Task::Segmentation.model().id.as_bytes());
+        h.update(koo_models::Task::Depth.model().id.as_bytes());
         // HDR media look slightly different through zimg and the LUT.
         h.update(&[koo_deliver::ffmpeg::tone_method() as u8]);
         hash_json(&mut h, styles);
@@ -78,6 +84,9 @@ pub struct Span {
     /// Stabilized clips shown: their frames wait until each camera path is
     /// measured (until then they draw unstabilized).
     pub stabilized: Vec<ClipId>,
+    /// Clips whose depth effects or masks read depth, and the timeline
+    /// range of the span: its frames wait until every map is made.
+    pub depth: Vec<(ClipId, TimeRange)>,
 }
 
 /// The keyed spans of one project at one size.
@@ -155,6 +164,7 @@ impl Plan {
             let mut media: Vec<MediaId> = Vec::new();
             let mut subjects = Vec::new();
             let mut stabilized = Vec::new();
+            let mut depth = Vec::new();
             for ((_, track), track_hash) in tracks.iter().zip(&track_hashes) {
                 // Clips are sorted and never overlap, so those shown are
                 // one run.
@@ -199,6 +209,10 @@ impl Plan {
                     if (inside || touching) && koo_core::stabilize::applies(clip) {
                         stabilized.push(clip.id);
                     }
+                    // Touching clips too: transitions draw them.
+                    if clip.enabled && koo_core::depth::clip_needs_depth(project, clip) {
+                        depth.push((clip.id, range));
+                    }
                 }
             }
             spans.push(Span {
@@ -207,6 +221,7 @@ impl Plan {
                 media,
                 subjects,
                 stabilized,
+                depth,
             });
         }
         Self {

@@ -6,7 +6,8 @@
 //! edge or not, turns into a path from its outline at the playhead, and
 //! shows how far its tracking got under its row. A person mask (one
 //! button: the people kept, the background cut away) eases its edge onto
-//! the picture's by its Edge slider.
+//! the picture's by its Edge slider. A depth mask keeps a range of
+//! distance (near, far, softness), the background at first.
 
 use super::param::{Key, MaskField};
 use super::{InspectorPanel, clip_time, section_with};
@@ -74,6 +75,17 @@ impl InspectorPanel {
                 clip,
                 cx,
             ))
+            .child(add(
+                MaskShape::Depth {
+                    near: 0.5,
+                    far: 1.0,
+                    softness: 0.05,
+                },
+                Glyph::Depth,
+                "Depth",
+                clip,
+                cx,
+            ))
             .when(matches!(clip.content, ClipContent::Media { .. }), |row| {
                 let (id, masks) = (clip.id, clip.masks.clone());
                 row.child(
@@ -134,6 +146,7 @@ impl InspectorPanel {
             MaskShape::Path { .. } => "Path",
             MaskShape::Subject => "Subject",
             MaskShape::Person { .. } => "Person",
+            MaskShape::Depth { .. } => "Depth",
         };
         let subject = mask.picks().cloned();
         let status = subject
@@ -344,14 +357,22 @@ impl InspectorPanel {
                 .text_color(theme.red)
                 .child(SharedString::from(e))
         });
-        let mut fields = vec![MaskField::Feather, MaskField::Expansion, MaskField::Opacity];
+        let mut fields = match now.shape {
+            MaskShape::Depth { .. } => vec![
+                MaskField::Near,
+                MaskField::Far,
+                MaskField::Softness,
+                MaskField::Opacity,
+            ],
+            _ => vec![MaskField::Feather, MaskField::Expansion, MaskField::Opacity],
+        };
         match now.shape {
             MaskShape::Rectangle { .. } => {
                 fields.extend([MaskField::Rotation, MaskField::Roundness])
             }
             MaskShape::Ellipse { .. } => fields.push(MaskField::Rotation),
             MaskShape::Person { .. } => fields.push(MaskField::Edge),
-            MaskShape::Path { .. } | MaskShape::Subject => {}
+            MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Depth { .. } => {}
         }
         let rows: Vec<Div> = fields
             .into_iter()

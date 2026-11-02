@@ -2,7 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
-use super::{groups, layout, masks};
+use super::{depth, groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::cloud;
 use koo_core::command::ToolCategory;
@@ -710,7 +710,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for objects and for one person among several. A `person` shape keeps every person in every frame with soft hair edges and no prompt (`edge` 0..1 eases the edge onto the picture's); `remove_background` adds it to several clips at once. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for objects and for one person among several. A `person` shape keeps every person in every frame with soft hair edges and no prompt (`edge` 0..1 eases the edge onto the picture's); `remove_background` adds it to several clips at once. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.\n\nA `depth` shape (video and image clips from the pool) keeps what lies between `near` and `far` from the camera, by the picture's depth map (relative distance: 0 nearest, 1 farthest), fading over `softness`: `near: 0.5, far: 1` keeps the background, `near: 0, far: 0.4` the foreground. To grade or add an effect to one of them only, put a copy of the clip on the track above with the mask and change the copy.",
             examples(
                 object(
                     json!({
@@ -718,7 +718,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
                         "shape": {
                             "type": "object",
-                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it); depth: `near`, `far`, `softness` in distance (0 nearest, 1 farthest). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
                             "properties": {
                                 "type": { "type": "string", "enum": masks::SHAPES },
                                 "center": numbers(2, "[x, y]"),
@@ -730,7 +730,10 @@ pub fn catalog() -> Vec<ToolSpec> {
                                 "include": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points on the object" },
                                 "exclude": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points not on it" },
                                 "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" },
-                                "edge": number("Person: 0..1, how much the edge follows the picture's own (hair); default 0.5")
+                                "edge": number("Person: 0..1, how much the edge follows the picture's own (hair); default 0.5"),
+                                "near": number("Depth: nearest distance kept, 0 (nearest) to 1 (farthest)"),
+                                "far": number("Depth: farthest distance kept"),
+                                "softness": number("Depth: fade past each end, in distance (e.g. 0.05)")
                             }
                         },
                         "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
@@ -1408,6 +1411,37 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "name": string("What to call the voice")
                 }),
                 &["description", "name"],
+            ),
+        ),
+        // ---- depth
+        spec(
+            "add_depth_effect",
+            Some(Effects),
+            "Propose a depth-aware effect on video or image clips from the pool, read from each frame's depth map (relative distance: 0 nearest, 1 farthest). lens_blur: blurs by distance, keeping `focus` sharp over `range`, `blur` in pixels (focus it on a point with set_depth_focus; keyframe `focus` with set_effect_keyframe for a rack focus). fog: haze of color `tint` thickening with `density` past distance `start`. camera: a camera move over the clip with parallax, the 3D Ken Burns look for stills and short clips: `motion` Dolly (in; out with negative `amount`), Zoom (dolly zoom about `focus`), Orbit or Pan (along `angle` degrees), `amount` -1..1. Returns each new effect's `@effect clip/effect` reference. For depth masks use set_mask's `depth` shape.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "effect": one_of(&depth::EFFECTS.map(|(n, _)| n), "Which effect"),
+                    "params": params("Parameter name → value; omitted ones keep their defaults"),
+                    "reason": reason()
+                }),
+                &["clips", "effect"],
+            ),
+        ),
+        spec(
+            "set_depth_focus",
+            Some(Effects),
+            "Propose focusing a clip's lens_blur (or a camera move's pivot) on what is at `point` of the picture at `at`: the distance there becomes its `focus`. With `key`, or when `focus` is already keyframed, it is keyed at `at`; focus at two times for a rack focus. Waits for the frame's depth map.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id or `@effect clip/effect` (default: the clip's first lens_blur or camera)"),
+                    "point": numbers(2, "[x, y], fractions of the picture from its top-left"),
+                    "at": time("Timeline time of the frame (default: the clip's middle)"),
+                    "key": boolean("Keyframe the focus at `at` (default: only when it already has keyframes)"),
+                    "reason": reason()
+                }),
+                &["clip", "point"],
             ),
         ),
         // ---- conversation

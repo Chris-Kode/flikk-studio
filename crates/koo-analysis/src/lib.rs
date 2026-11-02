@@ -31,6 +31,7 @@
 
 mod align;
 mod cache;
+mod depth;
 mod ffmpeg;
 mod interpolation;
 mod motion;
@@ -62,6 +63,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub use depth::LocalDepth;
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
 pub use interpolation::LocalInterpolation;
@@ -250,6 +252,9 @@ impl LocalAnalysis {
         if cfg!(feature = "people") {
             tasks.push(ModelTask::Matting);
         }
+        if cfg!(feature = "depth") {
+            tasks.push(ModelTask::Depth);
+        }
         tasks
     }
 
@@ -276,6 +281,8 @@ impl LocalAnalysis {
                 ModelTask::FrameInterpolation => false,
                 // Person masks, not analysis.
                 ModelTask::Matting => false,
+                // Depth maps, not analysis.
+                ModelTask::Depth => false,
             })
             .collect()
     }

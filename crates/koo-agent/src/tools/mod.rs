@@ -9,6 +9,7 @@ mod analysis;
 mod approval;
 mod audio;
 pub mod catalog;
+mod depth;
 mod edit;
 mod fx;
 pub mod generate;
@@ -292,6 +293,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "get_shake" => stabilize::get_shake(ctx, &args),
         "fit_music" => music::fit_music(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
+        tool if depth::TOOLS.contains(&tool) => depth::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }
 }

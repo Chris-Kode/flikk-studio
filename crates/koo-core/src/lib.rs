@@ -19,6 +19,7 @@ pub mod cloud;
 pub mod command;
 pub mod compose;
 pub mod cuts;
+pub mod depth;
 pub mod edit;
 pub mod error;
 pub mod fx;

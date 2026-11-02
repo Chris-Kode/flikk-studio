@@ -209,7 +209,10 @@ fn box_corners(state: &MaskState, aspect: f32) -> Option<[[f32; 2]; 4]> {
             size,
             rotation_deg,
         } => (center, size, rotation_deg),
-        MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Person { .. } => return None,
+        MaskShape::Path { .. }
+        | MaskShape::Subject
+        | MaskShape::Person { .. }
+        | MaskShape::Depth { .. } => return None,
     };
     let (s, c) = rotation.to_radians().sin_cos();
     let (hw, hh) = (size[0] * aspect / 2.0, size[1] / 2.0);
@@ -656,7 +659,10 @@ impl MaskEditor {
                         *center = [(m[0] + o[0]) / 2.0, (m[1] + o[1]) / 2.0];
                         *size = [local[0].abs() / aspect, local[1].abs()];
                     }
-                    MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Person { .. } => {}
+                    MaskShape::Path { .. }
+                    | MaskShape::Subject
+                    | MaskShape::Person { .. }
+                    | MaskShape::Depth { .. } => {}
                 }
             }
             Edit::Feather => {

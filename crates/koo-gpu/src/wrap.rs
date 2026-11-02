@@ -16,7 +16,8 @@ pub const BIND_SAMPLER: u32 = 1;
 pub const BIND_TEX0: u32 = 2;
 /// A transition's incoming picture.
 pub const BIND_TEX1: u32 = 3;
-/// First Image parameter; the rest follow in declaration order.
+/// First Image parameter; the rest follow in declaration order, then the
+/// depth map of an effect that reads it (`getDepth`).
 pub const BIND_IMAGES: u32 = 4;
 
 /// Names the prelude defines; parameters may not reuse them.
@@ -30,6 +31,7 @@ const RESERVED: &[&str] = &[
     "getColor",
     "getFromColor",
     "getToColor",
+    "getDepth",
     "effect",
     "transition",
     "generate",
@@ -91,6 +93,8 @@ pub struct Wrapped {
     pub uniform_size: usize,
     /// Image parameters, in binding order.
     pub images: Vec<String>,
+    /// The binding of the depth map, when the program reads it.
+    pub depth: Option<u32>,
 }
 
 /// Hash of everything the generated source depends on: the code, the kind
@@ -239,6 +243,16 @@ pub fn wrap(asset: &FxAsset) -> Result<Wrapped, String> {
         );
         images.push(p.name.clone());
     }
+    let depth = koo_core::depth::needs_depth(asset).then(|| {
+        let binding = BIND_IMAGES + images.len() as u32;
+        // Distance from the camera, 0 nearest to 1 farthest (koo_core::depth).
+        let _ = writeln!(
+            src,
+            "layout(set = 0, binding = {binding}) uniform texture2D _koo_depth;\n\
+             float getDepth(vec2 uv) {{ return texture(sampler2D(_koo_depth, _koo_sampler), vec2(uv.x, 1.0 - uv.y)).r; }}"
+        );
+        binding
+    });
     src.push_str("layout(location = 0) out vec4 _koo_out;\n");
 
     let prelude_lines = line(&src) - 1;
@@ -269,6 +283,7 @@ pub fn wrap(asset: &FxAsset) -> Result<Wrapped, String> {
         target_offset,
         uniform_size,
         images,
+        depth,
     })
 }
 

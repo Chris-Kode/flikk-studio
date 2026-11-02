@@ -28,7 +28,7 @@ use koo_core::subject::{Matte, Subject, SubjectPoint, SubjectPrompt};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-pub const SHAPES: [&str; 5] = ["rectangle", "ellipse", "path", "subject", "person"];
+pub const SHAPES: [&str; 6] = ["rectangle", "ellipse", "path", "subject", "person", "depth"];
 pub const MODES: [&str; 3] = ["add", "subtract", "intersect"];
 
 /// `clip`'s masks as tools show them: short ids, times in timeline seconds,
@@ -153,8 +153,11 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
             Some(MaskShape::Path { .. }) => "path",
             Some(MaskShape::Subject) => "subject",
             Some(MaskShape::Person { .. }) => "person",
+            Some(MaskShape::Depth { .. }) => "depth",
             None => {
-                return fail("`shape.type` is one of rectangle, ellipse, path, subject, person");
+                return fail(
+                    "`shape.type` is one of rectangle, ellipse, path, subject, person, depth",
+                );
             }
         },
     };
@@ -203,6 +206,21 @@ fn parse_shape(v: &Value, current: Option<&MaskShape>) -> ToolResultOf<MaskShape
                 .unwrap_or(0.5)
                 .clamp(0.0, 1.0),
         },
+        "depth" => {
+            let (n0, f0, s0) = match current {
+                Some(MaskShape::Depth {
+                    near,
+                    far,
+                    softness,
+                }) => (*near, *far, *softness),
+                _ => (0.5, 1.0, 0.05),
+            };
+            MaskShape::Depth {
+                near: num("near")?.unwrap_or(n0).clamp(0.0, 1.0),
+                far: num("far")?.unwrap_or(f0).clamp(0.0, 1.0),
+                softness: num("softness")?.unwrap_or(s0).clamp(0.0, 1.0),
+            }
+        }
         _ => {
             let (p0, smooth0) = match current {
                 Some(MaskShape::Path { points, smooth }) => (points.clone(), *smooth),
@@ -297,6 +315,7 @@ fn shape_from_frame(shape: &Shape, s: &MaskShape) -> Option<MaskShape> {
         },
         MaskShape::Subject => MaskShape::Subject,
         MaskShape::Person { edge } => MaskShape::Person { edge: *edge },
+        MaskShape::Depth { .. } => s.clone(),
     })
 }
 

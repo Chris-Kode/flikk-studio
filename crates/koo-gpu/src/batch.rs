@@ -193,12 +193,14 @@ impl<'a> Batch<'a> {
         result
     }
 
-    /// Record `call`'s program (a `kind`) drawing `inputs` into `target`.
+    /// Record `call`'s program (a `kind`) drawing `inputs` into `target`,
+    /// with `depth` for a program that reads it (blank without).
     fn program(
         &mut self,
         call: &FxCall<'_>,
         kind: FxKind,
         inputs: Vec<wgpu::TextureView>,
+        depth: Option<&wgpu::TextureView>,
         target: &wgpu::Texture,
     ) -> ServiceResult<()> {
         expect_kind(call.asset, kind)?;
@@ -213,6 +215,7 @@ impl<'a> Batch<'a> {
         };
         let pipeline = fx.pipeline(program, target.format()).clone();
         let layout = program.bind_layout.clone();
+        let depth_binding = program.wrapped.depth;
         let clock = Clock::new(call, target.width(), target.height());
         let bytes = program.wrapped.uniforms(call.asset, call.values, clock);
         drop(state);
@@ -230,6 +233,10 @@ impl<'a> Batch<'a> {
                 .enumerate()
                 .map(|(k, view)| (wrap::BIND_IMAGES + k as u32, Bind::View(view))),
         );
+        if let Some(binding) = depth_binding {
+            let view = depth.cloned().unwrap_or_else(|| fx.blank.clone());
+            bindings.push((binding, Bind::View(view)));
+        }
         self.passes.push(Pass {
             target: target.create_view(&Default::default()),
             clear: wgpu::Color::TRANSPARENT,
@@ -241,6 +248,47 @@ impl<'a> Batch<'a> {
             }),
         });
         Ok(())
+    }
+
+    /// `chain` over `input`, ping-ponging between two float canvases (the
+    /// last pass writes RGBA8), `depth` bound for programs that read it.
+    fn chain(
+        &mut self,
+        input: Surface,
+        depth: Option<Surface>,
+        chain: &[FxCall<'_>],
+    ) -> ServiceResult<Surface> {
+        if chain.is_empty() {
+            return Ok(input);
+        }
+        let depth = depth.map(|d| self.view(d)).transpose()?;
+        let source = self.view(input)?;
+        let (w, h) = self.size(input);
+        let mids: Vec<wgpu::Texture> = (0..(chain.len() - 1).min(2))
+            .map(|_| self.scratch(w, h, MID_FORMAT))
+            .collect();
+        let output = self.scratch(w, h, OUT_FORMAT);
+        let result = self.step(|batch| {
+            let mut source = source;
+            for (i, call) in chain.iter().enumerate() {
+                let target = if i + 1 == chain.len() {
+                    &output
+                } else {
+                    &mids[i % 2]
+                };
+                batch.program(call, FxKind::Effect, vec![source], depth.as_ref(), target)?;
+                source = target.create_view(&Default::default());
+            }
+            Ok(())
+        });
+        self.spare.extend(mids);
+        match result {
+            Ok(()) => Ok(self.push(output)),
+            Err(e) => {
+                self.spare.push(output);
+                Err(e)
+            }
+        }
     }
 
     /// A new surface from one convert pass over `a` and `b`.
@@ -269,6 +317,19 @@ impl<'a> Batch<'a> {
 }
 
 impl FxBatch for Batch<'_> {
+    fn apply(&mut self, input: Surface, chain: &[FxCall<'_>]) -> ServiceResult<Surface> {
+        self.chain(input, None, chain)
+    }
+
+    fn apply_depth(
+        &mut self,
+        input: Surface,
+        depth: Surface,
+        chain: &[FxCall<'_>],
+    ) -> ServiceResult<Surface> {
+        self.chain(input, Some(depth), chain)
+    }
+
     fn upload(&mut self, frame: &Frame) -> ServiceResult<Surface> {
         let mut state = self.fx.lock();
         let texture = self.fx.upload_frame(&mut state, frame)?;
@@ -282,40 +343,6 @@ impl FxBatch for Batch<'_> {
             .map_or((0, 0), |t| (t.width(), t.height()))
     }
 
-    /// Ping-pongs between two float canvases; the last pass writes RGBA8.
-    fn apply(&mut self, input: Surface, chain: &[FxCall<'_>]) -> ServiceResult<Surface> {
-        if chain.is_empty() {
-            return Ok(input);
-        }
-        let source = self.view(input)?;
-        let (w, h) = self.size(input);
-        let mids: Vec<wgpu::Texture> = (0..(chain.len() - 1).min(2))
-            .map(|_| self.scratch(w, h, MID_FORMAT))
-            .collect();
-        let output = self.scratch(w, h, OUT_FORMAT);
-        let result = self.step(|batch| {
-            let mut source = source;
-            for (i, call) in chain.iter().enumerate() {
-                let target = if i + 1 == chain.len() {
-                    &output
-                } else {
-                    &mids[i % 2]
-                };
-                batch.program(call, FxKind::Effect, vec![source], target)?;
-                source = target.create_view(&Default::default());
-            }
-            Ok(())
-        });
-        self.spare.extend(mids);
-        match result {
-            Ok(()) => Ok(self.push(output)),
-            Err(e) => {
-                self.spare.push(output);
-                Err(e)
-            }
-        }
-    }
-
     /// The output takes `to`'s size; `from` is stretched to fit.
     fn transition(
         &mut self,
@@ -326,7 +353,7 @@ impl FxBatch for Batch<'_> {
         let inputs = vec![self.view(from)?, self.view(to)?];
         let (w, h) = self.size(to);
         let output = self.scratch(w, h, OUT_FORMAT);
-        match self.step(|batch| batch.program(call, FxKind::Transition, inputs, &output)) {
+        match self.step(|batch| batch.program(call, FxKind::Transition, inputs, None, &output)) {
             Ok(()) => Ok(self.push(output)),
             Err(e) => {
                 self.spare.push(output);
@@ -338,7 +365,7 @@ impl FxBatch for Batch<'_> {
     fn generate(&mut self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Surface> {
         self.fx.check_size(width, height)?;
         let output = self.scratch(width, height, OUT_FORMAT);
-        match self.step(|batch| batch.program(call, FxKind::Generator, Vec::new(), &output)) {
+        match self.step(|batch| batch.program(call, FxKind::Generator, Vec::new(), None, &output)) {
             Ok(()) => Ok(self.push(output)),
             Err(e) => {
                 self.spare.push(output);

@@ -48,10 +48,10 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache | core, models |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
@@ -97,6 +97,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
 | Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime. Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
 | Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
+| Depth maps | Depth Anything V2 Small (Apache-2.0; onnx-community's ONNX export, pinned) on ONNX Runtime, per source frame at 518 on the longer side, spread over each frame's 2nd–98th percentile, smoothed over ±2 frames, kept by fingerprint and model; effects read it as `getDepth(uv)` | One permissively licensed model gives relative depth for any picture; what effects need is what is in front of what, not metres. The larger sizes are CC-BY-NC |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
@@ -179,6 +180,15 @@ panics fails without stopping the queue.
   join. The transcript panel's word delete and the agent's `cut_words` use
   it; the agent's `blade` and `ripple_delete` move a cut that falls on a word
   into the nearest pause and say so (`snap: false` turns it off).
+* **Depth masks** (`MaskShape::Depth`): keep what lies between `near` and
+  `far` from the camera (relative distance, 0 nearest to 1 farthest; see
+  "Depth maps"), fading over `softness` past each, from the picture's
+  depth map at the source time; the background, the foreground or a slice
+  between. They combine, invert, fade and keyframe (`near`, `far`,
+  `softness` move) like shapes; feather and expansion do not apply. To
+  grade or add an effect to one depth only, a copy of the clip on the track
+  above takes the mask and the change. Without its map yet the mask is
+  left out.
 * **Queries** (`koo-core/src/query.rs`): topmost clip at a time, sample
   points, transcript↔timeline word mapping, typed timestamp and chat
   reference resolution, effective style rules.
@@ -218,7 +228,8 @@ the effect of its earlier calls.
   51 GLSL programs in `fx/shaders.rs` (27 effects, 17 transitions,
   7 generators) and 15 HTML templates in `fx/templates.rs`. Programs the
   user or the agent writes live in `Project::fx` and are edited in the FX
-  code editor. An `FxInstance` uses an asset with parameter values and
+  code editor. Three more built-in effects, in `fx/depth.rs`, read depth
+  (see "Depth effects"). An `FxInstance` uses an asset with parameter values and
   keyframes: on a clip's effect stack, as a transition, or as a generator
   clip's content.
 * **GLSL** follows ShaderToy/gl-transitions: authors write `effect(uv)`,
@@ -254,6 +265,30 @@ the effect of its earlier calls.
   BGRA); submit and wait are separate so playback pipelines frames.
   Without a GPU, `CpuBatch` and `compose/cpu.rs` composite in memory
   (transitions become a dissolve; effects and GLSL generators are skipped).
+* **Depth effects** (`koo-core/src/depth.rs`, `fx/depth.rs`): a GLSL
+  effect that calls `float getDepth(vec2 uv)` reads the picture's depth map
+  (distance 0 nearest to 1 farthest, sampled like `getColor`); `koo-gpu`
+  declares it and binds the map after the image parameters
+  (`FxBatch::apply_depth`). The compositor asks the depth service for the
+  map of the source frame a clip shows (only for clips with such an effect
+  or a depth mask) and uploads it once for the clip's chain; until the map
+  is made those effects are left out. Built-ins: **Lens Blur**
+  (`depth_blur`: `focus`, `range`, `blur` in pixels; a scatter-as-gather
+  over two spirals of taps, what lies behind a pixel blurring no further
+  over it than the pixel itself, so a sharp subject keeps its edge and a
+  blurred foreground spills over it; keyframe `focus` for a rack focus),
+  **Depth Fog** (`depth_fog`: `tint`, `density`, `start`) and **3D
+  Camera** (`depth_parallax`: `motion` Dolly, Zoom (dolly zoom about
+  `focus`), Orbit or Pan along `angle`, `amount` −1..1, eased over the
+  clip; each output pixel searches the layers of distance from the front
+  for the surface it shows, so near things cover far ones and the gaps
+  they open are filled from the edge beside them, and the picture zooms in
+  just enough to keep the frame's edges covered all through the move).
+  The inspector's "Pick focus" on an effect with a `focus` arms the
+  viewer: the next click on the clip's picture makes that frame's map and
+  sets the focus to the distance there (a median over a small disc), keyed
+  at the playhead when `focus` already has keyframes
+  (`depth::focus_command`, `ui/viewer/focus.rs`).
 * **Grade** (`koo-core/src/grade.rs`): one pipeline (exposure, contrast, saturation,
   temperature/tint, lift/gamma/gain, offset, shadows/highlights, hue,
   curves, a LUT file), baked into a 65³ LUT for export.
@@ -277,7 +312,8 @@ the effect of its earlier calls.
   `<fp>.vectors`, `analysis/<fp>.motion` (camera paths), `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
   frame, `t-<key>.mattes` per tracked subject; people:
   `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
-  (optical flow frames, raw RGBA, `<key>.rgba`), `html/` (pages and browser
+  (optical flow frames, raw RGBA, `<key>.rgba`), `depth/<fp>/<model>/`
+  (`<frame>.depth` per source frame), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
   activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below),
   `hdr/` (tone-mapping tables). An HDR item's proxy is
@@ -345,8 +381,9 @@ bar).
   shown there and the clips touching them (transitions draw from them),
   their tracks, their media items (fingerprint, path, info, proxy), the
   timeline without its tracks, markers and ducking, the project's FX
-  programs, the caption styles, the frame size, which engines are wired,
-  the subject model, the app version and a format number. A frame's key is
+  programs, the caption styles, the frame size, which engines are wired
+  (and whether the depth model is here), the subject and depth models, the
+  app version and a format number. A frame's key is
   its span's hash and its index. Serialized values go through
   `serde_json::Value`, whose maps sort their keys. Only fields known not to
   draw are left out (clip audio, name and colour; track name and lock; bins
@@ -368,7 +405,8 @@ bar).
   from the playhead on, then from the start, pipelined as in playback. Any
   play, playhead move or edit drops the worker, which stops after the frame
   in hand. A span waits (retried every 5 s) while its media is offline or
-  its subject masks' mattes are still being made, so a frame is only kept
+  its subject masks' mattes are still being made; the depth maps its
+  clips read are made first (`complete_depth`), so a frame is only kept
   as it will finally look. A stale or cancelled render can only write
   frames under the keys of what it drew, so it never shows a wrong frame.
 * **Reading:** playback (`viewer/player.rs`) takes a frame from the
@@ -407,9 +445,9 @@ the user analyzes it again.
 ### Models (`koo-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search, segmentation, frame interpolation, matting). Its `mod.rs` holds the
+sound tagging, beats, sound search, segmentation, frame interpolation, matting, depth). Its `mod.rs` holds the
 task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`); `MODELS`, the
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`, `DepthEstimator`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -417,7 +455,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer, the sound models, segmentation, frame interpolation and matting) and the BPE tokenizer
+aligner, the diarizer, the sound models, segmentation, frame interpolation, matting and depth) and the BPE tokenizer
 (`bpe.rs`).
 
 Analysis only orchestrates: it asks each task's runner for the selected
@@ -453,6 +491,8 @@ Settings → Models, and slowed frames are blended meanwhile.
 `LocalInterpolation` makes flow frames on one thread of its own, the
 newest asked first, keeps the last 48 in memory and every one under
 `cache/interpolated/` (cleared with Previews in Settings → Storage).
+Depth ("Depth maps", the `depth` feature, default on) is not part of
+analysis either.
 
 ### Transcription online
 
@@ -881,6 +921,40 @@ on the UI thread and run it off it:
   invert and keyframe, and an Edge slider. A click on a person in mask mode
   selects the mask. Without the model, a notice leads to Settings → Models.
 
+### Depth maps
+
+* **Model** (`koo-models/src/depth/depth_anything/`): Depth Anything V2
+  Small (DINOv2 ViT-S and a DPT head; Apache-2.0, the Base and Large
+  weights being CC-BY-NC), as onnx-community's `depth-anything-v2-small`
+  export in full precision (99 MB, `onnx/model.onnx`), pinned to a commit
+  (`KOOEDITOR_DEPTH_MODEL` points at another copy). Pictures are decoded
+  640 wide, resampled bilinearly to 518 on the longer side, both sides a
+  multiple of 14 (518 × 294 for 16:9), and normalized as ImageNet; out
+  comes relative disparity at that size. The model was trained at 518 on
+  the shorter side; the longer side at 518 costs a third as much on the
+  CPU.
+* **Speed**, measured here (4 CPU cores, ONNX Runtime's CPU provider):
+  0.55–0.58 s a frame at 518 × 392 (a 4:3 picture), 0.40 s at 518 × 294
+  (16:9; with Python's ONNX Runtime on the same graph), the first run
+  1.4 s with loading; 62 frames of a 640 × 480 clip in 35.6 s through the
+  service. So a second of 30 fps footage takes 12–18 s.
+* **Service** (`koo-analysis/src/depth.rs`, `LocalDepth`): frames come from
+  the media engine (the proxy when there is one), numbered on the media's
+  rate (an image is one frame). Each frame's disparity is spread over its
+  own 2nd to 98th percentile (the model's answer has an unknown scale and
+  shift per frame), turned into distance and kept at 384 on the longer side
+  as bytes (about 80 KB a frame) under `cache/depth/` and in memory. The
+  map shown for a frame is smoothed over time with the two frames either
+  side: weighted by how near they are (σ 1.2 frames) and, pixel by pixel,
+  by how well each agrees once fitted onto this frame by least squares
+  (σ 0.08), so moving things keep this frame's depth while the range
+  steadies. With every neighbour made the result is fixed, so a render
+  (which makes them all first) matches the viewer. Asking for a frame
+  queues it, the next two seconds and the frames before it smoothing reads,
+  ahead of what was queued, on one worker thread; meanwhile the nearest
+  made frame within 12 stands in. A failed frame is not tried again in the
+  session. Settings → Storage clears the maps with the previews.
+
 ## 8. Agent
 
 * **Backends** (`koo-agent/src/backend/`): Claude runs as
@@ -921,7 +995,7 @@ on the UI thread and run it off it:
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 87 in the catalog (85 plus
+* **Tools** (`koo-agent/src/tools/`): 89 in the catalog (87 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -967,6 +1041,12 @@ on the UI thread and run it off it:
   ramp. `get_clip` reports a ramp as its points. The tool retimes one
   clip; a video's linked audio clip is retimed by its own call (the
   inspector ramps both).
+* **Depth:** `add_depth_effect` (`tools/depth.rs`) puts a `lens_blur`,
+  `fog` or `camera` on clips and says when depth maps cannot be made yet;
+  `set_depth_focus` focuses a clip's lens blur (or a camera's pivot) on
+  what is at a point of the picture at `at`: it makes that frame's map off
+  the UI thread, then proposes the focus, keyed at `at` with `key` or when
+  it already has keyframes. Depth masks are `set_mask`'s `depth` shape.
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
   changes on cue), a sound effect (up to 30 s, optionally looping) or a
@@ -1191,7 +1271,11 @@ available to them.
   matted, `SubjectService::complete` and `complete_person` taking half the
   progress; a subject that cannot be found (or people without their model)
   fails the render. A render of a person mask matched the viewer's frame
-  to a mean difference of 1.8/255 (H.264 included).
+  to a mean difference of 1.8/255 (H.264 included). Then every depth map
+  the range's depth effects and masks read (the frames their clips show
+  there, transitions included, and the frames smoothing reads) is made (`DepthService::complete`, half of what
+  progress is left), so frames compose as the viewer shows them; a map
+  that cannot be made fails the render.
 * **Queue** (`queue.rs`): jobs run one after another with progress from
   `-progress pipe:1`, can be cancelled and never overwrite a file.
 * **Hardware encoding** (`hw.rs`): H.264 and HEVC go to VideoToolbox
@@ -1233,7 +1317,7 @@ the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
 Storage (what the user-data folder holds, with Clear for previews,
-subject mattes among them, analysis results and the render cache, whose
+subject mattes and depth maps among them, analysis results and the render cache, whose
 row also sets its size limit and turns background rendering off). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
@@ -1271,6 +1355,7 @@ see:
 | `KOOEDITOR_DEMO_VIEW` | `captions` | The transcript's captions view |
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
+| `KOOEDITOR_DEMO_DEPTH` | `1` | A lens blur (focus pick armed), a 3D camera and a depth mask on the selected clip |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
 | `KOOEDITOR_DEMO_STABILIZE` | seconds | A shaky clip made with FFmpeg, stabilized and selected; `KOOEDITOR_DEMO_STABILIZE_MODE` = `off`, `locked` or `none` |
 | `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
@@ -1301,6 +1386,7 @@ there.
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
 | Stabilization | `koo-core/src/stabilize.rs`, `compose.rs`, `koo-analysis/src/motion.rs`, `ui/inspector/stabilize.rs`, `tools/stabilize.rs`, `koo-deliver/src/composed.rs` |
 | Person masks | `koo-core/src/person.rs`, `mask.rs`, `compose.rs`, `koo-models/src/matting/`, `koo-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
+| Depth maps, depth effects and masks | `koo-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `koo-gpu` (`wrap.rs`, `batch.rs`), `koo-models/src/depth/`, `koo-analysis/src/depth*`, `koo-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
 | Speed ramps, slow motion | `koo-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `koo-models/src/interpolation/`, `koo-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `koo-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
@@ -1412,9 +1498,10 @@ there.
   fast pan past the search (about 10 % of the width a frame) are
   unmeasured, and the correction is a similarity, so it cannot remove
   rolling-shutter skew. Scale is not measured, so a shaky zoom is not
-  steadied. Subject masks are drawn from mattes of the unstabilized
-  frame, so on a stabilized clip they sit off by the correction; shape
-  masks follow the stabilized picture. Clearing analysis results in
+  steadied. Subject and person masks are drawn from mattes of the
+  unstabilized frame, and depth effects and masks from its depth map, so
+  on a stabilized clip they sit off by the correction; shape masks follow
+  the stabilized picture. Clearing analysis results in
   Settings → Storage leaves paths already read in memory until the
   editor restarts. Not run on a GPU here (lavapipe and the CPU
   compositor only), nor on macOS or Windows.
@@ -1454,6 +1541,27 @@ there.
   method, so a proxy made with zimg is used after a switch to the LUT.
   Collages always show the default tone map. Playing HDR footage before its
   proxy exists maps it at full resolution, which is slow for 4K on a CPU.
+* Depth maps run on the CPU everywhere (ONNX Runtime's CPU provider; no
+  CoreML, DirectML or CUDA tried): 0.4–0.6 s a frame on 4 cores, so
+  playback over footage not yet made shows the effects late (the nearest
+  made frame's map stands in, else the picture as it is), and a render
+  makes them first, which can take far longer than the encode. Not run on
+  a Mac or Windows, nor on a real GPU: the depth shaders were compiled and
+  rendered here on lavapipe only.
+* Depth is relative and per picture: `focus`, `start` and mask ranges are
+  fractions of each shot's own range of depth, not distances, so the same
+  value can land elsewhere after a cut, and a shot whose range changes
+  (something walks close to the camera) shifts them. Smoothing steadies
+  the range over ±2 frames only. Maps are 8-bit at 384 on the longer side:
+  fine detail (hair, fences) is soft, and the lens blur can halo there.
+* The 3D Camera fills the gaps it uncovers by stretching the edge beside
+  them (no inpainting), so large moves on pictures with near objects
+  smear; keep `amount` modest for those.
+* The depth model's ONNX file comes from a third party's Hugging Face
+  repository (onnx-community, pinned to a commit); a mirror under the
+  project's own account would keep it reachable.
+* If the process exits while the depth worker is inside the model, ONNX
+  Runtime can print an error as it tears down.
 
 ### Analysis accuracy
 

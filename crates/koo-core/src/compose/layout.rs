@@ -274,6 +274,7 @@ fn picture_shape(
         mattes: &mattes,
         picture: None,
         people: &people,
+        depth: None,
     };
     if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect, &subjects)
     {
