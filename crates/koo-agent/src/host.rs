@@ -625,6 +625,17 @@ impl AgentHost {
                         &summary,
                     )
                 }
+                JobDone::Respoken { item, fix, summary } => {
+                    let author = match origin {
+                        Origin::Turn => self
+                            .turn
+                            .as_ref()
+                            .filter(|t| !t.cancelled)
+                            .map(|t| t.author.clone()),
+                        Origin::External(_) => Some(external_author()),
+                    };
+                    tools::respeak::finish(bus, author.as_ref(), *item, &fix, &summary)
+                }
                 JobDone::Propose {
                     commands,
                     reason,

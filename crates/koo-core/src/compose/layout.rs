@@ -269,9 +269,12 @@ fn picture_shape(
     // Masks that only add shapes leave their bounds at most.
     let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
     let mattes = super::subject_mattes(project, services, clip, t);
+    let people = super::person_mattes(project, services, clip, t);
     let subjects = crate::mask::SubjectMattes {
         mattes: &mattes,
         picture: None,
+        people: &people,
+        depth: None,
     };
     if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect, &subjects)
     {

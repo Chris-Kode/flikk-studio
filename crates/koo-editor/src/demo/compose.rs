@@ -76,6 +76,7 @@ fn item(media: &dyn MediaService, path: PathBuf) -> Result<MediaItem> {
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     })
 }
 

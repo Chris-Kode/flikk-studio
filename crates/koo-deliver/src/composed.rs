@@ -9,8 +9,11 @@ use crate::ffmpeg::{self, command};
 use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
+use koo_core::depth;
 use koo_core::model::{MediaItem, Project};
-use koo_core::services::{Frame, LetteringService, Services};
+use koo_core::services::{Frame, LetteringService, PersonRef, Services};
+use koo_core::speed::Waiting;
+use koo_core::stabilize;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange};
 use std::ffi::OsString;
@@ -20,9 +23,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Make every matte the subject masks over `range` show (tracking them
-/// when they track), before frames are composed; `progress` gets 0..1.
-/// Whether there was any to make. Fails when a subject cannot be found
-/// (the model is missing).
+/// when they track), and the person masks' frames in it, before frames
+/// are composed; `progress` gets 0..1. Whether there was any to make.
+/// Fails when a subject or the people cannot be found (the model is
+/// missing).
 pub(crate) fn find_subjects(
     project: &Project,
     range: TimeRange,
@@ -51,14 +55,119 @@ pub(crate) fn find_subjects(
             !service.status(*r).complete(track)
         })
         .collect();
-    let n = subjects.len() as f32;
+    // Person masks: the frames of their clips the range shows.
+    let people: Vec<PersonRef> = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.range().overlaps(&range))
+        .flat_map(|c| {
+            c.masks.iter().filter(|m| m.enabled).filter_map(move |m| {
+                let whole = compose::person_ref(project, c, m)?;
+                let (from, to) = (range.start.max(c.start), range.end.min(c.end()));
+                let (a, b) = (c.to_source(from)?, c.to_source(to)?);
+                Some(PersonRef {
+                    range: TimeRange::new(a.min(b), a.max(b)),
+                    ..whole
+                })
+            })
+        })
+        .filter(|r| {
+            let s = service.person_status(*r);
+            s.error.is_some() || s.tracked < s.frames
+        })
+        .collect();
+    let n = (subjects.len() + people.len()) as f32;
     for (i, r) in subjects.iter().enumerate() {
         let part = |p: f32| progress((i as f32 + p) / n);
         service
             .complete(*r, &part, cancel)
             .map_err(|e| anyhow!("subject mask {}: {e}", short(r.mask)))?;
     }
-    Ok(!subjects.is_empty())
+    for (i, r) in people.iter().enumerate() {
+        let i = subjects.len() + i;
+        let part = |p: f32| progress((i as f32 + p) / n);
+        service
+            .complete_person(*r, &part, cancel)
+            .map_err(|e| anyhow!("person mask {}: {e}", short(r.mask)))?;
+    }
+    Ok(!subjects.is_empty() || !people.is_empty())
+}
+
+/// Measure the camera path of every stabilized clip over `range` that is
+/// not measured yet, before frames are composed; `progress` gets 0..1.
+/// Whether there was any to measure. A path that cannot be measured fails
+/// the render.
+pub(crate) fn measure_motion(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let Some(stabilizer) = &services.stabilizer else {
+        return Ok(false);
+    };
+    let mut items: Vec<&MediaItem> = Vec::new();
+    for clip in project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.range().overlaps(&range))
+    {
+        if let Some((item, _)) = stabilize::source(project, clip)
+            && stabilizer.path(item).is_none()
+            && !items.iter().any(|i| i.id == item.id)
+        {
+            items.push(item);
+        }
+    }
+    let n = items.len() as f32;
+    for (i, item) in items.iter().enumerate() {
+        let part = |p: f32| progress((i as f32 + p) / n);
+        stabilizer
+            .complete(item, &part, cancel)
+            .map_err(|e| anyhow!("stabilizing {}: {e}", item.path.display()))?;
+    }
+    Ok(!items.is_empty())
+}
+
+/// Make every depth map the clips over `range` read (their depth effects
+/// and masks), before frames are composed; `progress` gets 0..1. Whether
+/// there was any to make. Fails when one cannot be made (the model is
+/// missing).
+pub(crate) fn find_depth(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let Some(service) = &services.depth else {
+        return Ok(false);
+    };
+    let wanted: Vec<_> = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
+        .filter(|(_, c)| c.enabled && depth::clip_needs_depth(project, c))
+        .filter_map(|(t, c)| Some((c.id, depth::source(project, t, c, range)?)))
+        .filter(|(_, (item, r))| !service.status(item, *r).complete())
+        .collect();
+    let n = wanted.len() as f32;
+    for (i, (clip, (item, r))) in wanted.iter().enumerate() {
+        let part = |p: f32| progress((i as f32 + p) / n);
+        service
+            .complete(item, *r, &part, cancel)
+            .map_err(|e| anyhow!("depth of clip {}: {e}", short(clip)))?;
+    }
+    Ok(!wanted.is_empty())
 }
 
 fn short(id: impl std::fmt::Display) -> String {
@@ -122,6 +231,10 @@ impl<'a> Frames<'a> {
             project,
             services: Services {
                 lettering,
+                // Every frame between source frames is made, not blended.
+                interpolation: services.interpolation.clone().map(|s| {
+                    Arc::new(Waiting(s)) as Arc<dyn koo_core::services::InterpolationService>
+                }),
                 ..services.clone()
             },
             spec,

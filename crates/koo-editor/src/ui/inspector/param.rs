@@ -48,6 +48,8 @@ pub enum Key {
     DuckReduction,
     DuckAttack,
     DuckRelease,
+    /// The selected clip's stabilization smoothness.
+    Smoothness,
 }
 
 /// A slider of a mask.
@@ -60,6 +62,12 @@ pub enum MaskField {
     Rotation,
     /// Rectangles.
     Roundness,
+    /// People: how much the edge follows the picture's.
+    Edge,
+    /// Depth masks: the range kept, and its fade.
+    Near,
+    Far,
+    Softness,
 }
 
 impl MaskField {
@@ -74,6 +82,10 @@ impl MaskField {
                 MaskShape::Rectangle { rotation_deg, .. } | MaskShape::Ellipse { rotation_deg, .. },
             ) => *rotation_deg,
             (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => *roundness,
+            (Self::Edge, MaskShape::Person { edge }) => *edge,
+            (Self::Near, MaskShape::Depth { near, .. }) => *near,
+            (Self::Far, MaskShape::Depth { far, .. }) => *far,
+            (Self::Softness, MaskShape::Depth { softness, .. }) => *softness,
             _ => 0.0,
         }
     }
@@ -91,6 +103,10 @@ impl MaskField {
             (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => {
                 *roundness = v.clamp(0.0, 1.0)
             }
+            (Self::Edge, MaskShape::Person { edge }) => *edge = v.clamp(0.0, 1.0),
+            (Self::Near, MaskShape::Depth { near, .. }) => *near = v.clamp(0.0, 1.0),
+            (Self::Far, MaskShape::Depth { far, .. }) => *far = v.clamp(0.0, 1.0),
+            (Self::Softness, MaskShape::Depth { softness, .. }) => *softness = v.clamp(0.0, 1.0),
             _ => {}
         }
     }
@@ -158,6 +174,10 @@ impl Key {
                 MaskField::Opacity => s("Opacity", 0., 100., 1., 0, 100., 1.),
                 MaskField::Rotation => s("Rotation", -180., 180., 0.5, 1, 1., 0.),
                 MaskField::Roundness => s("Round", 0., 100., 1., 0, 100., 0.),
+                MaskField::Edge => s("Edge", 0., 100., 1., 0, 100., 0.5),
+                MaskField::Near => s("Near", 0., 100., 1., 0, 100., 0.5),
+                MaskField::Far => s("Far", 0., 100., 1., 0, 100., 1.),
+                MaskField::Softness => s("Soft", 0., 100., 1., 0, 100., 0.05),
             },
             Key::TransitionDuration => s("Duration", 0.1, 5., 0.05, 2, 1., 1.),
             Key::Exposure => s("Exposure", -4., 4., 0.01, 2, 1., 0.),
@@ -191,6 +211,7 @@ impl Key {
             Key::DuckReduction => s("Reduction", -40., 0., 0.5, 1, 1., -12.),
             Key::DuckAttack => s("Attack", 0., 2000., 10., 0, 1000., 0.2),
             Key::DuckRelease => s("Release", 0., 4000., 10., 0, 1000., 0.6),
+            Key::Smoothness => s("Amount", 0., 100., 1., 0, 100., 0.5),
         }
     }
 }

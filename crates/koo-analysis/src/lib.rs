@@ -31,7 +31,12 @@
 
 mod align;
 mod cache;
+mod depth;
 mod ffmpeg;
+mod interpolation;
+mod motion;
+mod people;
+mod script;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -59,8 +64,11 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub use depth::LocalDepth;
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
+pub use interpolation::LocalInterpolation;
+pub use motion::LocalStabilizer;
 pub use subjects::LocalSubjects;
 
 /// Items analyzed at once. Each already keeps several cores busy, and the
@@ -239,6 +247,15 @@ impl LocalAnalysis {
         if cfg!(feature = "subjects") {
             tasks.push(ModelTask::Segmentation);
         }
+        if cfg!(feature = "interpolation") {
+            tasks.push(ModelTask::FrameInterpolation);
+        }
+        if cfg!(feature = "people") {
+            tasks.push(ModelTask::Matting);
+        }
+        if cfg!(feature = "depth") {
+            tasks.push(ModelTask::Depth);
+        }
         tasks
     }
 
@@ -261,6 +278,12 @@ impl LocalAnalysis {
                 ModelTask::SoundSearch => steps.sound_search(),
                 // Subject masks, not analysis.
                 ModelTask::Segmentation => false,
+                // Optical flow slow motion, not analysis.
+                ModelTask::FrameInterpolation => false,
+                // Person masks, not analysis.
+                ModelTask::Matting => false,
+                // Depth maps, not analysis.
+                ModelTask::Depth => false,
             })
             .collect()
     }
@@ -344,6 +367,10 @@ impl AnalysisService for LocalAnalysis {
 
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>> {
         self.shared.cached(fingerprint)
+    }
+
+    fn time_script(&self, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
+        script::time(&self.shared, path, script)
     }
 
     fn silences(&self, item: &MediaItem, min: Time) -> ServiceResult<Vec<TimeRange>> {

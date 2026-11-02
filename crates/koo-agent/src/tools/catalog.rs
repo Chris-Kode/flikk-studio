@@ -2,7 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
-use super::{groups, layout, masks};
+use super::{depth, groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::cloud;
 use koo_core::command::ToolCategory;
@@ -524,15 +524,36 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_speed",
             Some(EditTimeline),
-            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed.",
+            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed. A ramp (or preset) changes the speed over the clip; the clip plays the same source, so its length follows unless keep_length. Slowed frames repeat, blend, or are made by optical flow. Retimes one clip: give a video's linked audio clip the same call.",
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "speed": number("1 = normal, 0.01–100"),
+                    "speed": number("1 = normal, 0.01–100; on a ramped clip, ends the ramp. With preset: the base speed (default the clip's)"),
+                    "ramp": curve("Speed ramp [[position 0..1 over the clip, speed], …], straight between points; [] ends it"),
+                    "preset": one_of(&["ramp_in", "ramp_out", "hero", "bullet", "montage"], "Ready-made ramp: ramp_in slow→fast, ramp_out fast→slow, hero fast-slow-fast, bullet near-frozen middle, montage fast and slow by turns"),
+                    "keep_length": boolean("Scale the ramp's speeds so the clip keeps its length"),
+                    "interpolation": one_of(&["nearest", "blend", "optical_flow"], "Frames between source frames when slowed: repeat (default), blend, or optical flow (RIFE; blended until made or without the model)"),
+                    "ramp_audio": one_of(&["stretch", "mute"], "Audio under a ramp: follows the speed, pitch kept (default), or muted"),
                     "ripple": boolean("Move later clips to follow the new length (default false: stop at the next clip)"),
                     "reason": reason()
                 }),
-                &["clip", "speed"],
+                &["clip"],
+            ),
+        ),
+        spec(
+            "sync_audio",
+            Some(EditTimeline),
+            "Line recordings up by their sound (a second camera, a separate audio recorder) and propose it: each follower, with its linked sound, moves to where it sounds like the reference; clock drift is corrected by a tiny speed change. Returns each one's offset and confidence; one that doesn't match is left alone. Give `clips` on the timeline, or `media` to place pool items stacked in sync from `at`.",
+            object(
+                json!({
+                    "clips": strings("Clip ids, two or more recordings (a video clip brings its linked sound)"),
+                    "media": strings("Pool media ids to place instead of `clips`"),
+                    "reference": string("Clip or media id that stays put (default: the clip on the lowest video track, or the first video)"),
+                    "replace_camera_audio": boolean("Disable the cameras' sound so only the recorder's is heard (default false)"),
+                    "at": time("With `media`: where the reference starts (default: the playhead)"),
+                    "reason": reason()
+                }),
+                &[],
             ),
         ),
         spec(
@@ -705,7 +726,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for people and objects. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for objects and for one person among several. A `person` shape keeps every person in every frame with soft hair edges and no prompt (`edge` 0..1 eases the edge onto the picture's); `remove_background` adds it to several clips at once. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.\n\nA `depth` shape (video and image clips from the pool) keeps what lies between `near` and `far` from the camera, by the picture's depth map (relative distance: 0 nearest, 1 farthest), fading over `softness`: `near: 0.5, far: 1` keeps the background, `near: 0, far: 0.4` the foreground. To grade or add an effect to one of them only, put a copy of the clip on the track above with the mask and change the copy.",
             examples(
                 object(
                     json!({
@@ -713,7 +734,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
                         "shape": {
                             "type": "object",
-                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it); depth: `near`, `far`, `softness` in distance (0 nearest, 1 farthest). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
                             "properties": {
                                 "type": { "type": "string", "enum": masks::SHAPES },
                                 "center": numbers(2, "[x, y]"),
@@ -724,7 +745,11 @@ pub fn catalog() -> Vec<ToolSpec> {
                                 "smooth": boolean("A curve through the points instead of straight lines (default false)"),
                                 "include": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points on the object" },
                                 "exclude": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points not on it" },
-                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" }
+                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" },
+                                "edge": number("Person: 0..1, how much the edge follows the picture's own (hair); default 0.5"),
+                                "near": number("Depth: nearest distance kept, 0 (nearest) to 1 (farthest)"),
+                                "far": number("Depth: farthest distance kept"),
+                                "softness": number("Depth: fade past each end, in distance (e.g. 0.05)")
                             }
                         },
                         "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
@@ -752,6 +777,31 @@ pub fn catalog() -> Vec<ToolSpec> {
                     { "clip": "3f9a1c2e", "mask": "c41e7a02", "shape": { "exclude": [[1420, 610]] }, "space": "frame", "at": "0:04.000", "reason": "Leave out the chair it took" },
                     { "clip": "3f9a1c2e", "shape": { "type": "subject", "box": [880, 120, 1460, 1080] }, "space": "frame", "invert": true, "track": true, "reason": "Everything but the dancer, for a background effect" },
                     { "clip": "3f9a1c2e", "remove": true, "all": true, "reason": "Back to the full picture" }
+                ]),
+            ),
+        ),
+        spec(
+            "remove_background",
+            Some(Transform),
+            "Propose cutting the background away from behind the people in video and image clips, no green screen: each clip gets a person mask (a matting model finds every person in every frame, hair edges soft), or its own is changed. `keep: background` cuts the people away instead. Layers under the clip show through; the mask combines with the clip's other masks, effects and blend mode. With `restore`, the clips' person masks are taken away. People are found in the background as frames are shown; renders wait for them. For one object, or one person among several, use set_mask with a `subject` shape.",
+            examples(
+                object(
+                    json!({
+                        "clips": strings("Clip ids"),
+                        "keep": one_of(&["people", "background"], "What stays (default people)"),
+                        "edge": number("0..1, how much the edge follows the picture's own, for hair (default 0.5)"),
+                        "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.01)"),
+                        "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height (e.g. -0.005 to trim a halo)"),
+                        "restore": boolean("Take the clips' person masks away"),
+                        "reason": reason()
+                    }),
+                    &["clips"],
+                ),
+                json!([
+                    { "clips": ["3f9a1c2e"], "reason": "Put the presenter over the slides" },
+                    { "clips": ["3f9a1c2e", "8c21d0b7"], "expansion": -0.004, "reason": "Trim the light halo round her hair" },
+                    { "clips": ["3f9a1c2e"], "keep": "background", "reason": "Blur only the background: the copy above keeps the person" },
+                    { "clips": ["3f9a1c2e"], "restore": true, "reason": "Back to the full picture" }
                 ]),
             ),
         ),
@@ -847,6 +897,21 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "set_tone_map",
+            Some(Color),
+            "Propose how an HDR media item (`list_media` shows `hdr`) is mapped to SDR Rec.709, for every clip of it; the viewer and the export follow. `auto` (the default) tone maps it; `off` shows the raw signal, grey and washed out. `exposure` brightens or darkens before the curve; `peak` is the brightest the source is taken to get (lower keeps more contrast and clips highlights). Omitted fields keep their value.",
+            object(
+                json!({
+                    "media": string("Media id"),
+                    "mode": one_of(&["auto", "off"], "Tone mapping"),
+                    "exposure": number("Stops, -3..3, 0 = neutral"),
+                    "peak": number("Source peak in nits, 200..10000; 0 = from the file's metadata"),
+                    "reason": reason()
+                }),
+                &["media"],
+            ),
+        ),
+        spec(
             "copy_grade",
             Some(Color),
             "Propose copying one clip's grade to others.",
@@ -910,6 +975,23 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({ "track": string("Audio track name or id"), "at": time("Timeline seconds"), "songs": strings("Media ids in order"), "reason": reason() }),
                 &["track", "at", "songs"],
+            ),
+        ),
+        spec(
+            "fit_music",
+            Some(Audio),
+            "Propose a song fitted to a length so it ends on its real ending exactly when wanted: bars are skipped or repeated where they sound alike, on phrase boundaries, with short crossfades. Default target: the end of the other tracks. Returns each skip and loop. Needs the song analysed.",
+            object(
+                json!({
+                    "clip": string("Music clip id on an audio track (default: the only one)"),
+                    "end": time("Timeline time the song should end at"),
+                    "duration": time("Length from the clip's start"),
+                    "range": range("Timeline range the song should fill, starting at its start"),
+                    "loops": boolean("Repeat sections to make it longer (default true)"),
+                    "crossfade_ms": number("Crossfade at each edit (default 30)"),
+                    "reason": reason()
+                }),
+                &[],
             ),
         ),
         spec(
@@ -1213,7 +1295,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Deliver),
             "Ask the user to approve a render.",
             object(
-                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)") }),
+                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)"), "encoder": one_of(&["auto", "hardware", "software"], "H.264/HEVC encoder (default: the user's choice in Deliver)") }),
                 &["preset"],
             ),
         ),
@@ -1305,6 +1387,23 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "replace_words",
+            Some(Generate),
+            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: unless they allowed it, each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
+            object(
+                json!({
+                    "from": time("Start of the first word to replace, as the transcript gives it"),
+                    "to": time("Start of the last word to replace (default: just the first)"),
+                    "words": string("The words replaced, as the transcript has them, to check"),
+                    "text": string("What is said instead, as the speaker would say it, with punctuation"),
+                    "voice": string("A voice id from find_voices, when none is linked to the speaker"),
+                    "voice_name": string("Its name, for the approval card"),
+                    "reason": reason()
+                }),
+                &["from", "text"],
+            ),
+        ),
+        spec(
             "find_voices",
             Some(ReadProject),
             "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",
@@ -1347,6 +1446,37 @@ pub fn catalog() -> Vec<ToolSpec> {
                 &["description", "name"],
             ),
         ),
+        // ---- depth
+        spec(
+            "add_depth_effect",
+            Some(Effects),
+            "Propose a depth-aware effect on video or image clips from the pool, read from each frame's depth map (relative distance: 0 nearest, 1 farthest). lens_blur: blurs by distance, keeping `focus` sharp over `range`, `blur` in pixels (focus it on a point with set_depth_focus; keyframe `focus` with set_effect_keyframe for a rack focus). fog: haze of color `tint` thickening with `density` past distance `start`. camera: a camera move over the clip with parallax, the 3D Ken Burns look for stills and short clips: `motion` Dolly (in; out with negative `amount`), Zoom (dolly zoom about `focus`), Orbit or Pan (along `angle` degrees), `amount` -1..1. Returns each new effect's `@effect clip/effect` reference. For depth masks use set_mask's `depth` shape.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "effect": one_of(&depth::EFFECTS.map(|(n, _)| n), "Which effect"),
+                    "params": params("Parameter name → value; omitted ones keep their defaults"),
+                    "reason": reason()
+                }),
+                &["clips", "effect"],
+            ),
+        ),
+        spec(
+            "set_depth_focus",
+            Some(Effects),
+            "Propose focusing a clip's lens_blur (or a camera move's pivot) on what is at `point` of the picture at `at`: the distance there becomes its `focus`. With `key`, or when `focus` is already keyframed, it is keyed at `at`; focus at two times for a rack focus. Waits for the frame's depth map.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id or `@effect clip/effect` (default: the clip's first lens_blur or camera)"),
+                    "point": numbers(2, "[x, y], fractions of the picture from its top-left"),
+                    "at": time("Timeline time of the frame (default: the clip's middle)"),
+                    "key": boolean("Keyframe the focus at `at` (default: only when it already has keyframes)"),
+                    "reason": reason()
+                }),
+                &["clip", "point"],
+            ),
+        ),
         // ---- conversation
         spec(
             "ask_user",
@@ -1358,6 +1488,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
     ];
+    tools.extend(super::stabilize::specs());
     // ---- tool groups (see `groups`)
     let index = groups::index(&tools);
     let keys: Vec<&str> = groups::GROUPS.iter().map(|g| groups::key(*g)).collect();

@@ -1,6 +1,7 @@
 //! ffprobe JSON → [`MediaInfo`].
 
 use crate::{FfmpegMedia, command, err, stderr_tail};
+use koo_core::hdr::{Hdr, Transfer};
 use koo_core::model::{AudioStream, MediaInfo, MediaKind, VideoStream};
 use koo_core::services::{ServiceError, ServiceResult};
 use koo_core::time::{Rate, Time};
@@ -28,7 +29,76 @@ pub(crate) fn probe(media: &FfmpegMedia, path: &Path) -> ServiceResult<MediaInfo
         )));
     }
     let json: Value = serde_json::from_slice(&out.stdout).map_err(|e| err("ffprobe json", e))?;
-    Ok(parse(&json))
+    let mut info = parse(&json);
+    // PQ's peak is in the first frame's metadata, not the stream's.
+    if let Some(hdr) = info.video.as_mut().and_then(|v| v.hdr.as_mut())
+        && hdr.transfer == Transfer::Pq
+    {
+        hdr.peak = frame_peak(media, path);
+    }
+    Ok(info)
+}
+
+/// MaxCLL, else the mastering display's peak, from the first video frame.
+fn frame_peak(media: &FfmpegMedia, path: &Path) -> Option<f32> {
+    let out = command(&media.ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-read_intervals", "%+#1", "-show_frames"])
+        .args([
+            "-show_entries",
+            "frame=side_data_list",
+            "-print_format",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    let json: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let side = json["frames"][0]["side_data_list"].as_array()?;
+    let cll = side
+        .iter()
+        .filter_map(|d| d["max_content"].as_f64())
+        .find(|v| *v > 0.0);
+    let mastering = side
+        .iter()
+        .filter_map(|d| ratio(&d["max_luminance"]))
+        .find(|v| *v > 0.0);
+    cll.or(mastering).map(|v| v as f32)
+}
+
+/// "10000000/10000" or a number.
+fn ratio(v: &Value) -> Option<f64> {
+    if let Some((n, d)) = v.as_str().and_then(|s| s.split_once('/')) {
+        let (n, d): (f64, f64) = (n.trim().parse().ok()?, d.trim().parse().ok()?);
+        return (d != 0.0).then(|| n / d);
+    }
+    num_of(v)
+}
+
+/// PQ and HLG streams: their colour description and bit depth.
+fn hdr(s: &Value) -> Option<Box<Hdr>> {
+    let transfer = Transfer::from_ffprobe(s["color_transfer"].as_str()?)?;
+    let pix_fmt = str_of(&s["pix_fmt"]);
+    let bit_depth = ["p16", "p14", "p12", "p10", "p9"]
+        .iter()
+        .find(|p| pix_fmt.contains(*p))
+        .and_then(|p| p[1..].parse().ok())
+        .or_else(|| num_of(&s["bits_per_raw_sample"]).map(|b| b as u8))
+        .unwrap_or(8);
+    let dolby_vision = s["side_data_list"].as_array().and_then(|list| {
+        list.iter()
+            .find_map(|d| d["dv_profile"].as_u64())
+            .map(|p| p as u8)
+    });
+    Some(Box::new(Hdr {
+        transfer,
+        primaries: str_of(&s["color_primaries"]),
+        matrix: str_of(&s["color_space"]),
+        range: str_of(&s["color_range"]),
+        bit_depth,
+        peak: None,
+        dolby_vision,
+    }))
 }
 
 fn parse(json: &Value) -> MediaInfo {
@@ -46,6 +116,7 @@ fn parse(json: &Value) -> MediaInfo {
             height: s["height"].as_u64().unwrap_or(0) as u32,
             rate: frame_rate(s),
             codec: str_of(&s["codec_name"]),
+            hdr: hdr(s),
         });
 
     let audio = streams

@@ -12,6 +12,9 @@ mod effects;
 mod generator;
 mod masks;
 mod param;
+mod speed;
+mod stabilize;
+mod tone_map;
 mod transition;
 
 pub(crate) use clip::sound_clip;
@@ -131,6 +134,7 @@ impl InspectorPanel {
             peak_target,
             picture_tab: match crate::demo::fx_view().as_deref() {
                 Some("effects") => PictureTab::Effects,
+                _ if crate::demo::speed::enabled() => PictureTab::Speed,
                 _ => PictureTab::default(),
             },
             text,
@@ -360,6 +364,19 @@ impl InspectorPanel {
                     _ => d.release = Time::from_secs_f64(v as f64),
                 }
                 commands.push(Command::SetDucking { ducking: Some(d) });
+            }
+            Key::Smoothness => {
+                let Some(clip) = clips.first() else {
+                    return none;
+                };
+                label = "set_stabilization";
+                commands.push(Command::SetStabilization {
+                    clips: vec![clip.id],
+                    stabilization: koo_core::stabilize::Stabilization {
+                        smoothness: v,
+                        ..clip.stabilization.clone()
+                    },
+                });
             }
         }
         (commands, label)

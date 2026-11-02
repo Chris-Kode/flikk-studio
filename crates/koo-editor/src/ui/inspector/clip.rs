@@ -5,6 +5,7 @@
 //! text, timing and style.
 
 use super::param::{Key, format_value};
+use super::speed::SpeedRamp;
 use super::{InspectorPanel, section};
 use crate::ui::caption_style::Target;
 use crate::ui::library::{FxGlyph, fx_glyph};
@@ -71,6 +72,7 @@ pub(super) enum PictureTab {
     Effects,
     Color,
     Audio,
+    Speed,
 }
 
 impl InspectorPanel {
@@ -397,11 +399,24 @@ impl InspectorPanel {
         if sound.is_some() {
             tabs.push((PictureTab::Audio, "Audio"));
         }
+        if media {
+            tabs.push((PictureTab::Speed, "Speed"));
+        }
         let tab = Some(self.picture_tab)
             .filter(|t| tabs.iter().any(|(tab, _)| tab == t))
             .unwrap_or(PictureTab::Video);
+        let linked = sound.as_ref().map(|(_, a)| a.id);
         let body = match (tab, sound) {
             (PictureTab::Color, _) => self.color_view(window, cx),
+            (PictureTab::Speed, _) => {
+                let state = self.state.clone();
+                let ramp = window.use_keyed_state("clip-speed-ramp", cx, move |_, cx| {
+                    SpeedRamp::new(state, cx)
+                });
+                let (id, ripple) = (clip.id, self.speed_ripple);
+                ramp.update(cx, |r, _| r.set_clip(id, linked, ripple));
+                ramp.into_any_element()
+            }
             (PictureTab::Audio, Some((track, audio))) => {
                 self.clip_audio_view(&track, &audio, window, cx)
             }
@@ -409,9 +424,11 @@ impl InspectorPanel {
             _ => {
                 let program = self.generator_view(clip, window, cx);
                 let transform = self.transform_view(clip, false, window, cx);
+                let stabilize = self.stabilize_view(clip, window, cx);
                 v_flex()
                     .gap_4()
                     .children(program)
+                    .children(stabilize)
                     .child(transform)
                     .into_any_element()
             }

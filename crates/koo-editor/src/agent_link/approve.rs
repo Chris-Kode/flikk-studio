@@ -34,6 +34,16 @@ pub enum Started {
     /// Runs off the UI thread, adding or designing a voice that lands in
     /// the library; yields what to tell the agent.
     Voice(Box<dyn FnOnce() -> Result<String> + Send>),
+    /// Runs off the UI thread, saying a fix's words again; yields them for
+    /// the pool, with the fix to cut them in by.
+    Respeak(Box<dyn FnOnce() -> Result<Respoken> + Send>),
+}
+
+/// Words an approved fix had said again.
+pub struct Respoken {
+    pub item: MediaItem,
+    pub fix: koo_core::respeak::Fix,
+    pub summary: String,
 }
 
 /// What an approved generation made.
@@ -63,6 +73,11 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         "queue_render" => {
             let mut settings = preset(str_arg(args, "preset")?);
             settings.range = args.get("range").and_then(range);
+            settings.encoder = args
+                .get("encoder")
+                .and_then(Value::as_str)
+                .and_then(koo_deliver::Encoder::parse)
+                .unwrap_or_else(crate::ui::deliver::saved_encoder);
             let output = free_output(inputs.project, settings.extension());
             let id = inputs.queue.enqueue(RenderRequest {
                 project: inputs.project.clone(),
@@ -124,6 +139,23 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     placement,
                     summary: request.summary(),
                 })
+            })))
+        }
+        "replace_words" => {
+            let (fix, reading) = koo_agent::tools::respeak::from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
+            let source = inputs
+                .project
+                .media(fix.media)
+                .cloned()
+                .ok_or_else(|| anyhow!("the recording is not in the pool"))?;
+            let services = inputs.services.clone();
+            Ok(Started::Respeak(Box::new(move || {
+                let summary = koo_agent::tools::respeak::summary(&fix, &reading);
+                let task = koo_core::cloud::GenerationTask::default();
+                let item = koo_core::respeak::make(&fix, &source, &reading, &services, &task)
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Respoken { item, fix, summary })
             })))
         }
         "add_voice" => {
@@ -344,6 +376,8 @@ fn preset(name: &str) -> RenderSettings {
                 RenderSettings::prores_422_hq()
             } else if key.contains("wav") || key.contains("audio") {
                 RenderSettings::wav()
+            } else if key.contains("hevc") || key.contains("265") {
+                RenderSettings::hevc_4k30()
             } else if key.contains("4k") || key.contains("2160") {
                 RenderSettings::h264_4k30()
             } else if key.contains("30") {

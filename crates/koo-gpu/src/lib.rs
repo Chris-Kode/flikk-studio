@@ -254,6 +254,9 @@ impl GpuFx {
         for i in 0..wrapped.images.len() {
             entries.push(texture(wrap::BIND_IMAGES + i as u32));
         }
+        if let Some(binding) = wrapped.depth {
+            entries.push(texture(binding));
+        }
         let bind_layout = self
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

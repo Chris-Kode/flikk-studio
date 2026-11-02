@@ -8,20 +8,30 @@
 //! enabled clip under the playhead, or the transition covering it:
 //!
 //! 1. **Picture**: a media frame at the clip's source time
-//!    ([`Clip::to_source`], so speed is honoured), an overlay asset, or a
+//!    ([`Clip::to_source`], so speed and ramps are honoured; slowed clips
+//!    show the moment between two source frames as their
+//!    [`Interpolation`] says: the two mixed, or the optical flow frame
+//!    from [`Services::interpolation`] once made), an overlay asset, or a
 //!    generator ([`FxService::generate`] for GLSL, [`HtmlService::frame`]
-//!    for HTML) laid out at the output size.
+//!    for HTML) laid out at the output size. A stabilized media frame is
+//!    moved, turned and zoomed inside its own frame by the correction of
+//!    its source frame ([`crate::stabilize::correction`]).
 //! 2. **Grade**: the clip's, then for media the timeline's
 //!    ([`crate::grade`]).
 //! 3. **Effects**: the clip's enabled effect stack ([`FxService::apply`])
-//!    at clip-relative time. Effects run at the output size: the picture is
+//!    at clip-relative time. Effects that read depth get the source
+//!    frame's [`DepthMap`] beside the picture ([`FxBatch::apply_depth`]);
+//!    until it is made they are left out. Effects run at the output size: the picture is
 //!    first resampled to its fitted size in the output frame. Programs
 //!    measure `iResolution` in sequence pixels whatever size they run at,
 //!    so a blur radius means the same in a small viewer and in any render.
 //! 4. **Masks**: the clip's masks, drawn in the picture's own uv
 //!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
 //!    Subject masks are drawn from their mattes at the source time
-//!    ([`subject_mattes`]), refined onto the decoded frame's edges. With
+//!    ([`subject_mattes`]), refined onto the decoded frame's edges; person
+//!    masks from theirs ([`person_mattes`]), eased onto the same frame's
+//!    edges by their `edge` amount; depth masks from the same depth map as
+//!    the effects. With
 //!    [`MaskView::Tinted`] the picture stays whole and what the masks cut
 //!    away is tinted over it instead, for editing them.
 //! 5. **Transform** and **blend**: fitted inside the canvas (as the export
@@ -62,18 +72,22 @@ mod pictures;
 
 pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
-pub use pictures::{Pictures, Stills, Streams, overlay_item};
+pub use pictures::{Pictures, Stills, Streams, frame_length, overlay_item};
 
+use crate::depth::{self, DepthMap};
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
 use crate::grade;
 use crate::ids::{ClipId, MaskId};
 use crate::model::{
-    BlendMode, Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind, Transform,
+    BlendMode, Clip, ClipContent, Grade, MediaItem, MediaKind, Project, Property, Track, TrackKind,
+    Transform,
 };
+use crate::person::PersonMatte;
 use crate::services::{
-    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, SubjectRef,
-    Surface,
+    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, Placement,
+    Services, SubjectRef, Surface,
 };
+use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
 use crate::time::{Time, TimeRange};
 use batch::CpuBatch;
@@ -176,6 +190,54 @@ pub fn subject_mattes(
         .collect()
 }
 
+/// The person mask `mask` of `clip`, as [`SubjectService`] sees it: on
+/// media from the pool.
+///
+/// [`SubjectService`]: crate::services::SubjectService
+pub fn person_ref<'a>(
+    project: &'a Project,
+    clip: &'a Clip,
+    mask: &'a crate::mask::Mask,
+) -> Option<PersonRef<'a>> {
+    let ClipContent::Media { media, .. } = &clip.content else {
+        return None;
+    };
+    if !mask.is_person() {
+        return None;
+    }
+    let item = project.media(*media)?;
+    let (a, b) = (clip.to_source(clip.start)?, clip.to_source(clip.end())?);
+    Some(PersonRef {
+        mask: mask.id,
+        item,
+        range: TimeRange::new(a.min(b), a.max(b)),
+    })
+}
+
+/// The mattes of `clip`'s enabled person masks at timeline time `t`, those
+/// made so far.
+pub fn person_mattes(
+    project: &Project,
+    services: &Services,
+    clip: &Clip,
+    t: Time,
+) -> Vec<(MaskId, PersonMatte)> {
+    let Some(service) = &services.subjects else {
+        return Vec::new();
+    };
+    let Some(source) = clip.to_source(t) else {
+        return Vec::new();
+    };
+    clip.masks
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let person = person_ref(project, clip, m)?;
+            Some((m.id, service.person(person, source)?))
+        })
+        .collect()
+}
+
 /// [`program`] in two halves, for playback: pictures are decoded, uploaded
 /// and the frame submitted now; [`Pending::wait`] reads it back in `order`,
 /// so the next frame can be prepared while the GPU works on this one.
@@ -200,6 +262,7 @@ pub fn submit_program<'a>(
             programs: true,
             view,
             guide: None,
+            depth: None,
         };
         let surface = draw(&mut ctx)?;
         ctx.batch
@@ -281,6 +344,7 @@ fn render(
             programs: true,
             view,
             guide: None,
+            depth: None,
         };
         let surface = draw(&mut ctx)?;
         match ctx.batch.submit(surface, order).and_then(|p| p.wait()) {
@@ -310,6 +374,7 @@ fn render_cpu(
         programs: false,
         view,
         guide: None,
+        depth: None,
     };
     let surface = draw(&mut ctx)?;
     ctx.batch.submit(surface, order).and_then(|p| p.wait()).ok()
@@ -342,8 +407,8 @@ fn black((w, h): (u32, u32)) -> Frame {
 
 /// Whether `range` uses anything the FFmpeg graph cannot draw exactly:
 /// effects, generators, transitions, non-normal blend modes, crop, flip,
-/// stretch, skew, an anchor off the centre, a corner pin, masks or retimed
-/// media.
+/// stretch, skew, an anchor off the centre, a corner pin, masks,
+/// stabilization or retimed media.
 pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
     picture_tracks(project).any(|track| {
         fx::transitions(track)
@@ -363,6 +428,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                         || is_free_form(tf)
                         || tf.is_pinned()
                         || crate::mask::any_enabled(&c.masks)
+                        || crate::stabilize::applies(c)
                         || c.keyframes.iter().any(|k| {
                             Property::PIN.contains(&k.property)
                                 || matches!(
@@ -379,7 +445,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                                         | Property::AnchorY
                                 )
                         })
-                        || (c.media().is_some() && (c.speed - 1.0).abs() > 1e-9)
+                        || (c.media().is_some() && c.is_retimed())
                 })
     })
 }
@@ -535,6 +601,14 @@ fn lettering_layer(
     Some((l, place))
 }
 
+/// A frame between two source frames.
+enum Tween {
+    /// Ready to show.
+    Made(Frame),
+    /// Two frames to mix, by how far from the first.
+    Mix(Frame, Frame, f32),
+}
+
 struct Ctx<'a, 'b> {
     project: &'a Project,
     services: &'a Services,
@@ -549,6 +623,8 @@ struct Ctx<'a, 'b> {
     view: MaskView,
     /// The frame last decoded for a clip whose subjects refine onto it.
     guide: Option<Frame>,
+    /// The depth map of the frame last decoded for a clip that reads it.
+    depth: Option<DepthMap>,
 }
 
 impl Ctx<'_, '_> {
@@ -601,6 +677,7 @@ impl Ctx<'_, '_> {
         let place = placement(&tf, size, self.size);
         let raster = self.mask_raster(clip, size, t);
         self.guide = None;
+        self.depth = None;
         let tinted = match self.view {
             MaskView::Cut => false,
             MaskView::Tinted(only) => only.is_none_or(|c| c == clip.id),
@@ -637,9 +714,12 @@ impl Ctx<'_, '_> {
         let (mw, mh) = crate::mask::raster_size((w, h));
         let aspect = w.max(1) as f32 / h.max(1) as f32;
         let mattes = subject_mattes(self.project, self.services, clip, t);
+        let people = person_mattes(self.project, self.services, clip, t);
         let subjects = crate::mask::SubjectMattes {
             mattes: &mattes,
             picture: self.guide.as_ref(),
+            people: &people,
+            depth: self.depth.as_ref(),
         };
         crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh, &subjects)
     }
@@ -647,8 +727,9 @@ impl Ctx<'_, '_> {
     fn picture(&mut self, clip: &Clip, t: Time, limit: Option<usize>) -> Option<Surface> {
         let project = self.project;
         self.guide = None;
+        self.depth = None;
         let local = t - clip.start;
-        let effects: Vec<(&FxInstance, &FxAsset)> = clip
+        let mut effects: Vec<(&FxInstance, &FxAsset)> = clip
             .effects
             .iter()
             .take(limit.unwrap_or(usize::MAX))
@@ -670,15 +751,38 @@ impl Ctx<'_, '_> {
                 if item.kind == MediaKind::Audio {
                     return None;
                 }
-                let frame = self.pictures.frame(clip.id, item, clip.to_source(t)?)?;
+                let source = clip.to_source(t)?;
+                let tween = self.tween(clip, item, t, source);
+                let frame = match &tween {
+                    Some(Tween::Made(frame) | Tween::Mix(frame, ..)) => frame.clone(),
+                    None => self.pictures.frame(clip.id, item, source)?,
+                };
                 let refines = clip
                     .masks
                     .iter()
-                    .any(|m| m.enabled && m.picks().is_some_and(|s| s.refine));
+                    .any(|m| m.enabled && (m.picks().is_some_and(|s| s.refine) || m.is_person()));
                 if refines {
                     self.guide = Some(frame.clone());
                 }
-                self.upload(&frame, &grades)?
+                if depth::clip_needs_depth(project, clip) {
+                    self.depth = self
+                        .services
+                        .depth
+                        .as_ref()
+                        .and_then(|d| d.depth(item, clip.to_source(t)?));
+                }
+                let between = tween.is_some();
+                let picture = match tween {
+                    Some(Tween::Mix(a, b, at)) => {
+                        let a = self.upload(&a, &grades)?;
+                        match self.upload(&b, &grades) {
+                            Some(b) => self.batch.mix(a, b, at).unwrap_or(a),
+                            None => a,
+                        }
+                    }
+                    _ => self.upload(&frame, &grades)?,
+                };
+                self.stabilized(clip, t, between, picture)
             }
             ClipContent::Overlay { asset, .. } => {
                 let item = overlay_item(clip.id, asset);
@@ -688,6 +792,9 @@ impl Ctx<'_, '_> {
             ClipContent::Generator { fx } => self.generate(clip, fx, local, &grades)?,
             ClipContent::Title { .. } | ClipContent::Caption { .. } => return None,
         };
+        if self.depth.is_none() {
+            effects.retain(|(_, asset)| !depth::needs_depth(asset));
+        }
         if !self.programs || effects.is_empty() {
             return Some(picture);
         }
@@ -716,16 +823,85 @@ impl Ctx<'_, '_> {
                 canvas: self.sequence(),
             })
             .collect();
+        let depth = match &self.depth {
+            Some(map) if effects.iter().any(|(_, a)| depth::needs_depth(a)) => {
+                self.batch.upload(&map.to_frame()).ok()
+            }
+            _ => None,
+        };
         let batch = &mut self.batch;
-        match batch.apply(picture, &calls) {
+        let mut run = |surface: Surface, calls: &[FxCall<'_>]| match depth {
+            Some(d) => batch.apply_depth(surface, d, calls),
+            None => batch.apply(surface, calls),
+        };
+        match run(picture, &calls) {
             Ok(surface) => Some(surface),
             // One broken program should not hide the clip: run the others.
             Err(_) => Some(calls.iter().fold(picture, |surface, call| {
-                batch
-                    .apply(surface, std::slice::from_ref(call))
-                    .unwrap_or(surface)
+                run(surface, std::slice::from_ref(call)).unwrap_or(surface)
             })),
         }
+    }
+
+    /// `picture` with `clip`'s stabilization at `t` drawn into its own
+    /// frame ([`crate::stabilize`]), `between` source frames when it shows
+    /// a moment made between them; as it is when there is none (yet).
+    fn stabilized(&mut self, clip: &Clip, t: Time, between: bool, picture: Surface) -> Surface {
+        let Some(warp) =
+            crate::stabilize::correction(self.project, self.services, clip, t, between)
+        else {
+            return picture;
+        };
+        let size = self.batch.size(picture);
+        let place = placement_from(
+            &warp.transform(),
+            [size.0 as f32 / 2.0, size.1 as f32 / 2.0],
+            [size.0 as f32, size.1 as f32],
+            size,
+        );
+        self.batch
+            .composite(size.0, size.1, [0; 4], &[(picture, place)])
+            .unwrap_or(picture)
+    }
+
+    /// What a slowed `clip` shows at timeline time `t` (source time
+    /// `source`) between two source frames, as its [`Interpolation`] says:
+    /// `None` to show the frame there as it is.
+    fn tween(&mut self, clip: &Clip, item: &MediaItem, t: Time, source: Time) -> Option<Tween> {
+        let mode = clip.retime.interpolation;
+        if mode == Interpolation::Nearest
+            || item.kind == MediaKind::Image
+            || clip.speed_at(t - clip.start) >= 1.0 - 1e-9
+        {
+            return None;
+        }
+        let ((ta, a), (tb, b)) = self.pictures.pair(clip.id, item, source)?;
+        let span = (tb - ta).as_secs_f64();
+        if span <= 0.0 {
+            return None;
+        }
+        let at = ((source - ta).as_secs_f64() / span).clamp(0.0, 1.0) as f32;
+        let step = (at * BETWEEN_STEPS).round() / BETWEEN_STEPS;
+        if step <= 0.0 {
+            return Some(Tween::Made(a));
+        }
+        if step >= 1.0 {
+            return Some(Tween::Made(b));
+        }
+        if mode == Interpolation::OpticalFlow
+            && let Some(service) = &self.services.interpolation
+        {
+            let request = Between {
+                item,
+                a: (ta, &a),
+                b: (tb, &b),
+                at: step,
+            };
+            if let Some(made) = service.between(&request, false) {
+                return Some(Tween::Made(made));
+            }
+        }
+        Some(Tween::Mix(a, b, at))
     }
 
     /// `frame` graded by `grades` (on the CPU), in the batch.

@@ -242,6 +242,7 @@ impl InspectorPanel {
                     .when(!enabled, |d| d.text_color(muted))
                     .child(name.clone()),
             )
+            .children(self.focus_pick(clip, id, target.as_ref(), cx))
             .child(
                 Button::new(SharedString::from(format!("enable-{id}")))
                     .ghost()
@@ -285,6 +286,42 @@ impl InspectorPanel {
             .child(header)
             .children(params)
             .into_any_element()
+    }
+
+    /// For an effect with a depth focus: pick it with the next click in the
+    /// viewer.
+    fn focus_pick(
+        &self,
+        clip: ClipId,
+        effect: EffectId,
+        target: Option<&FxTarget>,
+        cx: &mut Context<Self>,
+    ) -> Option<Button> {
+        let asset = &target?.asset;
+        if !koo_core::depth::needs_depth(asset) || asset.param(fx::depth::FOCUS).is_none() {
+            return None;
+        }
+        let armed = self.state.read(cx).depth_pick == Some((clip, effect));
+        let theme = cx.theme();
+        let color = if armed {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        };
+        Some(
+            Button::new(SharedString::from(format!("focus-{effect}")))
+                .ghost()
+                .xsmall()
+                .toggled(armed)
+                .tooltip("Pick focus")
+                .child(glyph(Glyph::Focus, px(13.), color))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.depth_pick = if armed { None } else { Some((clip, effect)) };
+                        cx.notify();
+                    });
+                })),
+        )
     }
 
     fn effect_params(

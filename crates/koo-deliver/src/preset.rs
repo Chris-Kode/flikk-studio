@@ -1,5 +1,6 @@
 //! Render settings and the built-in presets (PRD D1).
 
+use crate::hw::{self, Encoder, HwEncoder};
 use koo_core::model::SequenceSettings;
 use koo_core::{Rate, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,9 @@ pub struct RenderSettings {
     pub burn_captions: bool,
     /// Part of the timeline to render; `None` renders all of it.
     pub range: Option<TimeRange>,
+    /// Hardware or software for H.264 and HEVC.
+    #[serde(default)]
+    pub encoder: Encoder,
 }
 
 impl RenderSettings {
@@ -95,6 +99,7 @@ impl RenderSettings {
             loudness: None,
             burn_captions: true,
             range: None,
+            encoder: Encoder::Auto,
         }
     }
 
@@ -110,6 +115,14 @@ impl RenderSettings {
         Self::video("4K30 H.264", 2160, Rate::FPS_30, 18)
     }
 
+    /// x265 CRF 22 looks like x264 CRF 18 at about 60 % of the size.
+    pub fn hevc_4k30() -> Self {
+        Self {
+            video: Some(VideoCodec::H265 { crf: 22 }),
+            ..Self::video("4K30 HEVC", 2160, Rate::FPS_30, 18)
+        }
+    }
+
     pub fn prores_422_hq() -> Self {
         Self {
             name: "ProRes 422 HQ".into(),
@@ -123,6 +136,7 @@ impl RenderSettings {
             loudness: None,
             burn_captions: true,
             range: None,
+            encoder: Encoder::Auto,
         }
     }
 
@@ -139,6 +153,7 @@ impl RenderSettings {
             loudness: None,
             burn_captions: false,
             range: None,
+            encoder: Encoder::Auto,
         }
     }
 
@@ -159,6 +174,7 @@ impl RenderSettings {
             Self::h264_1080p60(),
             Self::h264_1080p30(),
             Self::h264_4k30(),
+            Self::hevc_4k30(),
             Self::prores_422_hq(),
             Self::wav(),
             Self::custom(),
@@ -176,6 +192,31 @@ impl RenderSettings {
             (None, None, Some(short)) => seq.scaled(short),
             (w, h, _) => (w.unwrap_or(seq.width), h.unwrap_or(seq.height)),
         }
+    }
+
+    /// The hardware codec and CRF this render could use instead of
+    /// libx264/libx265.
+    pub fn hardware_codec(&self) -> Option<(hw::Codec, u8)> {
+        match self.video {
+            Some(VideoCodec::H264 { crf }) => Some((hw::Codec::H264, crf)),
+            Some(VideoCodec::H265 { crf }) => Some((hw::Codec::Hevc, crf)),
+            _ => None,
+        }
+    }
+
+    /// Output arguments with the video encoded by `hw` (at `width`×`height`,
+    /// `fps`) instead of software.
+    pub(crate) fn hw_codec_args(
+        &self,
+        hw: &HwEncoder,
+        width: u32,
+        height: u32,
+        fps: f64,
+    ) -> Vec<String> {
+        let crf = self.hardware_codec().map_or(18, |(_, crf)| crf);
+        let mut args = hw.codec_args(crf, width, height, fps);
+        args.extend(self.codec_args().into_iter().skip_while(|a| a != "-c:a"));
+        args
     }
 
     pub(crate) fn codec_args(&self) -> Vec<String> {
@@ -202,6 +243,12 @@ impl RenderSettings {
         }
         if matches!(self.container, Container::Mp4 | Container::Mov) {
             push(&["-movflags", "+faststart"]);
+        }
+        if self.video.is_some() {
+            // HDR sources are mapped to SDR (`koo_core::hdr`): say so. Last,
+            // so hardware encodes (`hw_codec_args`) keep it too.
+            push(&["-color_primaries", "bt709", "-color_trc", "bt709"]);
+            push(&["-colorspace", "bt709"]);
         }
         args
     }

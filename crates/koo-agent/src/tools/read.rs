@@ -89,6 +89,22 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
     if clip.speed != 1.0 {
         v["speed"] = json!(clip.speed);
     }
+    if clip.is_ramped() {
+        let d = clip.duration.as_secs_f64().max(1e-9);
+        v["ramp"] = json!(
+            clip.retime
+                .keys
+                .iter()
+                .map(|k| [(k.at.as_secs_f64() / d * 1000.0).round() / 1000.0, k.speed])
+                .collect::<Vec<_>>()
+        );
+        if clip.retime.audio != koo_core::speed::RampAudio::Stretch {
+            v["ramp_audio"] = json!("mute");
+        }
+    }
+    if clip.retime.interpolation != koo_core::speed::Interpolation::Nearest {
+        v["interpolation"] = json!(clip.retime.interpolation.key());
+    }
     if !clip.effects.is_empty() {
         v["effects"] = clip
             .effects
@@ -333,6 +349,12 @@ pub fn list_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 if !info.audio.is_empty() {
                     v["audio_streams"] = json!(info.audio.len());
                 }
+                if let Some(hdr) = info.video.as_ref().and_then(|v| v.hdr.as_ref()) {
+                    v["hdr"] = json!(hdr.describe());
+                    if !m.tone_map.is_default() {
+                        v["tone_map"] = json!(m.tone_map);
+                    }
+                }
             }
             if let Some(b) = m.bin.and_then(|b| project.bins.iter().find(|x| x.id == b)) {
                 v["bin"] = json!(b.name);
@@ -391,6 +413,9 @@ pub fn get_clip(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     }
     if !clip.masks.is_empty() {
         v["masks"] = super::masks::masks_json(project, clip, ctx.services);
+    }
+    if let Some(s) = super::stabilize::clip_json(&clip.stabilization) {
+        v["stabilization"] = s;
     }
     if !clip.effects.is_empty() {
         v["effects"] = clip

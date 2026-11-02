@@ -3,7 +3,10 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod music_fit;
+mod respeak;
 mod source;
+mod sync;
 pub mod voices;
 
 pub use cloud::{Check, Generating, ProviderStatus};
@@ -38,6 +41,10 @@ const MODELS_NOTICE: &str = "models-missing";
 const SUBJECTS_POLL: Duration = Duration::from_millis(250);
 /// Key of the notice that subject masks need their model.
 const SUBJECTS_NOTICE: &str = "subjects-model";
+/// Key of the notice that optical flow needs its model.
+const FLOW_NOTICE: &str = "optical-flow-model";
+/// Key of the notice that person masks need their model.
+const PEOPLE_NOTICE: &str = "people-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -89,6 +96,8 @@ pub struct EditorState {
     /// `services.subjects`' version when last looked at: mattes made since
     /// show on the next draw.
     pub subjects_version: u64,
+    /// A depth effect whose focus the next click in the viewer picks.
+    pub depth_pick: Option<(koo_core::ClipId, koo_core::EffectId)>,
     // --- timeline/viewer
     /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
     pub play_speed: f64,
@@ -152,6 +161,8 @@ pub struct EditorState {
     /// Samples fetched for approval cards, by voice id; `None` while on
     /// their way.
     pub heard_voices: HashMap<String, Option<koo_core::model::MediaItem>>,
+    /// Heavy ranges composed onto disk while the user is idle.
+    pub render: crate::render_cache::Background,
 }
 
 impl EditorState {
@@ -232,6 +243,7 @@ impl EditorState {
             lettering_styles: Vec::new(),
             lettering_version: 0,
             subjects_version: 0,
+            depth_pick: None,
             play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
@@ -261,6 +273,7 @@ impl EditorState {
             generated_seen: HashSet::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
+            render: crate::render_cache::Background::new(cx),
         };
         this.mark_generated_seen();
         this.configure_analysis();
@@ -1214,12 +1227,22 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
     let subjects = media
         .clone()
         .map(|m| Arc::new(koo_analysis::LocalSubjects::new(m)) as Arc<dyn SubjectService>);
+    let stabilizer = media.clone().map(|m| {
+        Arc::new(koo_analysis::LocalStabilizer::new(m)) as Arc<dyn koo_core::stabilize::Stabilizer>
+    });
+    let depth = media.clone().map(|m| {
+        Arc::new(koo_analysis::LocalDepth::new(m)) as Arc<dyn koo_core::depth::DepthService>
+    });
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
         html,
         subjects,
+        stabilizer,
+        interpolation: Some(Arc::new(koo_analysis::LocalInterpolation::new())
+            as Arc<dyn koo_core::services::InterpolationService>),
+        depth,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
@@ -1325,9 +1348,62 @@ impl EditorState {
         ready.is_ok()
     }
 
-    /// Mattes were made: draw again.
+    /// When optical flow is picked without its model: a notice that leads
+    /// to Settings → Models (slowed frames are blended meanwhile).
+    pub fn optical_flow_picked(&mut self, cx: &mut Context<Self>) {
+        let Some(Err(e)) = self.services.interpolation.as_ref().map(|s| s.available()) else {
+            return;
+        };
+        self.notices.clear(FLOW_NOTICE);
+        self.notices.set(Notice {
+            key: FLOW_NOTICE.into(),
+            level: Level::Warning,
+            title: "Optical flow needs its model".into(),
+            items: Vec::new(),
+            detail: Some(e),
+            action: Some(NoticeAction::OpenModels),
+        });
+        cx.notify();
+    }
+
+    /// Whether person masks can be made; when not (their model is
+    /// missing), a notice that leads to Settings → Models.
+    pub fn people_ready(&mut self, cx: &mut Context<Self>) -> bool {
+        let ready = match &self.services.subjects {
+            Some(s) => s.people_available(),
+            None => Err("Person masks need the media engine (FFmpeg).".into()),
+        };
+        let changed = match &ready {
+            Ok(()) => self.notices.clear(PEOPLE_NOTICE),
+            Err(e) => {
+                self.notices.clear(PEOPLE_NOTICE);
+                self.notices.set(Notice {
+                    key: PEOPLE_NOTICE.into(),
+                    level: Level::Warning,
+                    title: "Person masks need their model".into(),
+                    items: Vec::new(),
+                    detail: Some(e.clone()),
+                    action: Some(NoticeAction::OpenModels),
+                })
+            }
+        };
+        if changed {
+            cx.notify();
+        }
+        ready.is_ok()
+    }
+
+    /// Mattes were made, frames made between, or camera paths measured:
+    /// draw again.
     fn poll_subjects(&mut self, cx: &mut Context<Self>) {
-        let version = self.services.subjects.as_ref().map_or(0, |s| s.version());
+        let version = self.services.subjects.as_ref().map_or(0, |s| s.version())
+            + self
+                .services
+                .interpolation
+                .as_ref()
+                .map_or(0, |s| s.version())
+            + self.services.stabilizer.as_ref().map_or(0, |s| s.version())
+            + self.services.depth.as_ref().map_or(0, |d| d.version());
         if version != self.subjects_version {
             self.subjects_version = version;
             cx.notify();
@@ -1726,6 +1802,30 @@ impl EditorState {
                                 this.refresh_voices(cx);
                                 ApprovalOutcome::Done("Voice kept in the library".into())
                             }
+                            Err(e) => {
+                                this.agent.report_failure(
+                                    id,
+                                    format!("approved but failed: {summary}: {e:#}"),
+                                );
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                            entry.1 = outcome;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Ok(approve::Started::Respeak(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(made) => this.place_respoken(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
                                     id,

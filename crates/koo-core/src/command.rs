@@ -425,6 +425,93 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- stabilization
+    /// Stabilize clips, or with `enabled: false` stop; each video clip
+    /// gets these settings (see [`crate::stabilize`]).
+    SetStabilization {
+        clips: Vec<ClipId>,
+        stabilization: crate::stabilize::Stabilization,
+    },
+    // ---- audio: fit music to a length (see [`crate::music_fit`])
+    /// Replace a music clip by `segments` of its source back to back from
+    /// `at`, an equal-power `crossfade` ending on each join, and `fade_out`
+    /// on the last.
+    FitMusic {
+        clip: ClipId,
+        at: Time,
+        segments: Vec<TimeRange>,
+        #[serde(default)]
+        crossfade: Time,
+        #[serde(default)]
+        fade_out: Time,
+    },
+    // ---- speed ramps
+    /// Make a media clip's speed change over it: `points` are (position
+    /// 0..1 over the clip, speed), straight between them; fewer than two
+    /// (or all one speed) play it at one speed again. The clip plays the
+    /// same source, so its length follows the ramp, unless `keep_length`,
+    /// which scales the speeds to fit. Without ripple the clip stops at the
+    /// next clip. See [`crate::speed`].
+    SetSpeedRamp {
+        clip: ClipId,
+        points: Vec<[f64; 2]>,
+        #[serde(default)]
+        keep_length: bool,
+        #[serde(default)]
+        ripple: bool,
+    },
+    /// How a media clip shows the moments between source frames, and what
+    /// its audio does under a ramp; `None` leaves it as it is.
+    SetRetime {
+        clip: ClipId,
+        #[serde(default)]
+        interpolation: Option<crate::speed::Interpolation>,
+        #[serde(default)]
+        audio: Option<crate::speed::RampAudio>,
+    },
+
+    // ---- HDR
+    /// How an HDR media item is mapped to SDR, for every clip of it.
+    SetToneMap {
+        media: MediaId,
+        tone_map: crate::hdr::ToneMap,
+    },
+    // ---- speech (E3)
+    /// Say other words in place of the speech in `range` of `track` (cut
+    /// to cut, in the pauses around it): `media`, a whole recording of
+    /// them, plays there instead, with a fade at both joins. Where it is
+    /// longer or shorter, what follows ripples on every unlocked track,
+    /// and the picture over it slows to hold or is cut. See
+    /// [`crate::respeak`].
+    ReplaceSpeech {
+        range: TimeRange,
+        track: TrackId,
+        media: MediaId,
+        #[serde(default)]
+        fade: Time,
+    },
+    // ---- sync by sound (see [`crate::sync`])
+    /// Move each follower, with the clips linked to it (a video and its
+    /// sound), to where its sound meets the reference's, retimed by its
+    /// drift; to another track of its kind (or a new one) where it would
+    /// overlap. Disable the sound clips in `mute`.
+    SyncClips {
+        reference: ClipId,
+        followers: Vec<crate::sync::plan::SyncedClip>,
+        #[serde(default)]
+        mute: Vec<ClipId>,
+    },
+    /// Lay pool items on the timeline in sync: `reference` from `at`, each
+    /// follower on a track of its own where its sound meets it; the sound
+    /// of the items in `mute` placed disabled.
+    PlaceSynced {
+        at: Time,
+        reference: MediaId,
+        followers: Vec<crate::sync::plan::SyncedMedia>,
+        #[serde(default)]
+        mute: Vec<MediaId>,
+    },
 }
 
 impl Command {
@@ -491,15 +578,21 @@ impl Command {
             | SetTrackLocked { .. }
             | PlaceClips { .. }
             | SetSpeed { .. }
+            | SetSpeedRamp { .. }
+            | SetRetime { .. }
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. }
-            | SetFormat { .. } => ToolCategory::EditTimeline,
+            | SetFormat { .. }
+            | ReplaceSpeech { .. }
+            | SyncClips { .. }
+            | PlaceSynced { .. } => ToolCategory::EditTimeline,
             SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }
             | RemoveKeyframe { .. }
-            | SetMasks { .. } => ToolCategory::Transform,
+            | SetMasks { .. }
+            | SetStabilization { .. } => ToolCategory::Transform,
             SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
                 ToolCategory::Captions
             }
@@ -511,7 +604,8 @@ impl Command {
             | SetTrackMix { .. }
             | SetDucking { .. }
             | SetPlaylist { .. }
-            | SetAudioEffects { .. } => ToolCategory::Audio,
+            | SetAudioEffects { .. }
+            | FitMusic { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
             AddEffect { .. }
             | SetEffect { .. }
@@ -527,6 +621,7 @@ impl Command {
             ImportMedia { .. } | UpdateMedia { .. } | RemoveMedia { .. } | SetBins { .. } => {
                 ToolCategory::Media
             }
+            SetToneMap { .. } => ToolCategory::Color,
         }
     }
 

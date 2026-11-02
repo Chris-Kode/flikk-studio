@@ -24,12 +24,18 @@
 pub mod beats;
 #[cfg(any(feature = "aligner", feature = "sounds"))]
 mod bpe;
+pub mod depth;
 mod download;
+pub mod interpolation;
+pub mod matting;
 #[cfg(any(
     feature = "aligner",
     feature = "diarizer",
     feature = "sounds",
-    feature = "segment"
+    feature = "segment",
+    feature = "interpolate",
+    feature = "matting",
+    feature = "depth"
 ))]
 mod onnx;
 pub mod segmentation;
@@ -90,11 +96,18 @@ pub enum Task {
     SoundSearch,
     /// Subject masks: not part of analysis.
     Segmentation,
+    /// Optical flow slow motion: not part of analysis.
+    FrameInterpolation,
+    /// Person masks: not part of analysis.
+    Matting,
+    /// Depth maps for depth effects and masks: not part of analysis.
+    Depth,
 }
 
 impl Task {
-    /// In the order analysis runs them, then subject masks.
-    pub const ALL: [Task; 8] = [
+    /// In the order analysis runs them, then subject masks, optical flow,
+    /// person masks and depth.
+    pub const ALL: [Task; 11] = [
         Task::VoiceActivity,
         Task::Transcription,
         Task::WordTiming,
@@ -103,6 +116,9 @@ impl Task {
         Task::Beats,
         Task::SoundSearch,
         Task::Segmentation,
+        Task::FrameInterpolation,
+        Task::Matting,
+        Task::Depth,
     ];
 
     pub fn label(self) -> &'static str {
@@ -115,6 +131,9 @@ impl Task {
             Task::Beats => "Beats",
             Task::SoundSearch => "Sound search",
             Task::Segmentation => "Subject masks",
+            Task::FrameInterpolation => "Optical flow",
+            Task::Matting => "Person masks",
+            Task::Depth => "Depth maps",
         }
     }
 
@@ -129,6 +148,9 @@ impl Task {
             Task::Beats => beats::MODELS,
             Task::SoundSearch => sound_search::MODELS,
             Task::Segmentation => segmentation::MODELS,
+            Task::FrameInterpolation => interpolation::MODELS,
+            Task::Matting => matting::MODELS,
+            Task::Depth => depth::MODELS,
         }
     }
 

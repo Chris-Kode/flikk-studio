@@ -181,5 +181,6 @@ pub(crate) fn build_item(
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     })
 }

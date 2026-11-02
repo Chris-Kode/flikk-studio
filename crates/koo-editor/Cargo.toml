@@ -21,6 +21,8 @@ koo-html.workspace = true
 koo-models.workspace = true
 cpal = "0.16"
 image = { version = "0.25", default-features = false }
+blake3 = "1.8"
+qoi = "0.4"
 
 # Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
 # vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU. On

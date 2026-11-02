@@ -4,6 +4,7 @@
 //! provider.
 
 mod generate;
+mod hdr;
 pub(crate) mod import;
 mod thumbs;
 mod video;
@@ -67,10 +68,14 @@ pub struct MediaPoolPanel {
     bin: Option<BinId>,
     renaming: Option<BinId>,
     selected: Option<MediaId>,
+    /// Items added to the selection with cmd/ctrl- or shift-click.
+    also: Vec<MediaId>,
     thumbs: Thumbs,
     jobs: Vec<JobStatus>,
     /// Proxy creation progress, written from background threads.
     proxies: Arc<Mutex<HashMap<MediaId, f32>>>,
+    /// HDR proxies already looked for, by path (see `hdr.rs`).
+    hdr_proxies: std::collections::HashSet<std::path::PathBuf>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -152,9 +157,11 @@ impl MediaPoolPanel {
             bin: None,
             renaming: None,
             selected,
+            also: Vec::new(),
             thumbs: Thumbs::default(),
             jobs: Vec::new(),
             proxies: Arc::default(),
+            hdr_proxies: Default::default(),
             _subscriptions,
             _poll,
         }
@@ -169,6 +176,7 @@ impl MediaPoolPanel {
             .as_ref()
             .map(|a| a.jobs())
             .unwrap_or_default();
+        self.refresh_hdr_proxies(cx);
         let proxying = !self.proxies.lock().unwrap().is_empty();
         if jobs != self.jobs || proxying {
             self.jobs = jobs;
@@ -238,6 +246,18 @@ impl MediaPoolPanel {
 
     fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        let m = window.modifiers();
+        if !open && (m.secondary() || m.shift) && self.selected.is_some_and(|s| s != id) {
+            match self.also.iter().position(|a| *a == id) {
+                Some(i) => {
+                    self.also.remove(i);
+                }
+                None => self.also.push(id),
+            }
+            cx.notify();
+            return;
+        }
+        self.also.clear();
         self.selected = Some(id);
         if open {
             match self.selected_item(cx) {
@@ -288,6 +308,29 @@ impl MediaPoolPanel {
         self.state.update(cx, |s, cx| {
             s.execute(Command::UpdateMedia { media: item }, cx);
         });
+    }
+
+    /// The selected items to sync when `id` is one of them, reference
+    /// first, and whether they hold a recorder and a camera.
+    fn sync_group(&self, id: MediaId, cx: &App) -> Option<(Vec<MediaId>, bool)> {
+        let selected = self.selected?;
+        if self.also.is_empty() || (selected != id && !self.also.contains(&id)) {
+            return None;
+        }
+        let project = self.state.read(cx).bus.project();
+        let mut all = vec![selected];
+        all.extend(&self.also);
+        let group = koo_core::sync::pool_order(project, &all);
+        if group.len() < 2 {
+            return None;
+        }
+        let kind = |k| {
+            group
+                .iter()
+                .any(|m| project.media(*m).is_some_and(|i| i.kind == k))
+        };
+        let recorder = kind(MediaKind::Audio) && kind(MediaKind::Video);
+        Some((group, recorder))
     }
 
     fn selected_item(&self, cx: &App) -> Option<MediaItem> {
@@ -589,7 +632,7 @@ impl MediaPoolPanel {
         let listening = state.read(cx).source.as_ref();
         let listening = listening.filter(|p| p.is(item)).map(|p| p.fraction());
         let progress = self.progress(item.id).or(listening.map(Progress::Running));
-        let selected = self.selected == Some(item.id);
+        let selected = self.selected == Some(item.id) || self.also.contains(&item.id);
         let offline = self.state.read(cx).offline.contains(&item.id);
         let theme = cx.theme();
         let id = item.id;
@@ -621,6 +664,7 @@ impl MediaPoolPanel {
                     (None, MediaKind::Image) => d.child(IconName::Frame),
                     (None, MediaKind::Video) => d,
                 })
+                .children(hdr::badge(item, cx))
                 .children(progress.map(|p| progress_bar(p, cx)))
                 .when(offline, |d| {
                     d.child(
@@ -732,6 +776,7 @@ impl MediaPoolPanel {
                 head.push(format!("{}×{}", v.width, v.height));
                 head.push(format!("{:.2} fps", v.rate.fps()).replace(".00", ""));
                 head.push(v.codec.clone());
+                head.extend(v.hdr.as_ref().map(|h| h.describe()));
             }
             if !info.container.is_empty() {
                 head.push(info.container.clone());
@@ -950,6 +995,25 @@ fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &
                     PopupMenuItem::new("Save Voice to Library")
                         .on_click(move |_, _, cx| s.update(cx, |s, cx| save_voice(s, id, cx))),
                 )
+            }
+        }
+        None => menu,
+    };
+    let menu = match panel.read(cx).sync_group(id, cx) {
+        Some((group, recorder)) => {
+            let item = |label: &'static str, mute: bool| {
+                let state = panel.read(cx).state.clone();
+                let group = group.clone();
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let group = group.clone();
+                    state.update(cx, |s, cx| s.sync_media(group, mute, cx))
+                })
+            };
+            let menu = menu.item(item("Sync", false));
+            if recorder {
+                menu.item(item("Sync, Recorder Sound", true))
+            } else {
+                menu
             }
         }
         None => menu,

@@ -8,6 +8,8 @@ use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
 use crate::mask::Mask;
+use crate::speed::Retime;
+use crate::stabilize::Stabilization;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -94,6 +96,9 @@ pub struct MediaItem {
     /// How a provider made it, when it was generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<Box<crate::cloud::GenerationInfo>>,
+    /// How HDR pictures are mapped to SDR (see [`crate::hdr`]).
+    #[serde(default, skip_serializing_if = "crate::hdr::ToneMap::is_default")]
+    pub tone_map: crate::hdr::ToneMap,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -111,6 +116,9 @@ pub struct VideoStream {
     pub height: u32,
     pub rate: Rate,
     pub codec: String,
+    /// Set for PQ and HLG streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<Box<crate::hdr::Hdr>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -412,6 +420,13 @@ pub struct Clip {
     /// [`crate::mask`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masks: Vec<Mask>,
+    /// Smooths the camera's shake out of the picture (see
+    /// [`crate::stabilize`]).
+    #[serde(default, skip_serializing_if = "Stabilization::is_default")]
+    pub stabilization: Stabilization,
+    /// Speed ramp and frame interpolation (see [`crate::speed`]).
+    #[serde(default, skip_serializing_if = "Retime::is_default")]
+    pub retime: Retime,
 }
 
 impl Clip {
@@ -433,6 +448,8 @@ impl Clip {
             transition_in: None,
             transition_out: None,
             masks: Vec::new(),
+            stabilization: Stabilization::default(),
+            retime: Retime::default(),
         }
     }
 
@@ -445,11 +462,12 @@ impl Clip {
     }
 
     /// Timeline time → source time for media clips (PRD E8), honouring
-    /// [`Clip::speed`]. Times outside the clip map onto its handles.
+    /// [`Clip::speed`] and its ramp. Times outside the clip map onto its
+    /// handles.
     pub fn to_source(&self, t: Time) -> Option<Time> {
         match &self.content {
             ClipContent::Media { source_in, .. } => {
-                Some(*source_in + (t - self.start).scale(self.speed))
+                Some(*source_in + self.source_offset(t - self.start))
             }
             _ => None,
         }
@@ -459,7 +477,7 @@ impl Clip {
     pub fn to_timeline(&self, source_t: Time) -> Option<Time> {
         match &self.content {
             ClipContent::Media { source_in, .. } => {
-                let t = self.start + (source_t - *source_in).scale(1.0 / self.speed);
+                let t = self.start + self.timeline_offset(source_t - *source_in);
                 self.range().contains(t).then_some(t)
             }
             _ => None,

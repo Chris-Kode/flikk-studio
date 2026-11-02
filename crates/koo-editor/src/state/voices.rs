@@ -57,6 +57,7 @@ pub enum VoiceSample {
 pub fn approval_voice(request: &ApprovalRequest) -> Option<(String, Option<String>)> {
     let voice = match request.tool.as_str() {
         "add_voice" => request.args.get("voice")?.as_str()?.to_owned(),
+        "replace_words" => koo_agent::tools::respeak::from_json(&request.args)?.1.voice,
         "generate_audio" => match koo_agent::tools::generate::from_json(&request.args)?.0 {
             GenerateRequest::Voiceover { reading, .. } => reading.voice,
             _ => return None,
@@ -352,8 +353,14 @@ pub fn speaker_spans(
         .iter()
         .filter(|w| w.word.speaker == Some(speaker))
         .collect();
+    spans_of(project, &theirs)
+}
+
+/// Where `theirs`, the words of one voice, are clearest: the source and
+/// stretches of it holding most of them, up to [`SPEAKER_LIMIT`].
+pub fn spans_of(project: &Project, theirs: &[&TimelineWord]) -> Option<(PathBuf, Vec<TimeRange>)> {
     let mut by_media: HashMap<koo_core::MediaId, Vec<TimeRange>> = HashMap::new();
-    for w in &theirs {
+    for w in theirs {
         by_media.entry(w.media).or_default().push(w.source);
     }
     let (media, mut ranges) = by_media

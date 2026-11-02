@@ -136,26 +136,26 @@ impl Clip {
         out
     }
 
-    /// Where a source range lands on the timeline through this clip's speed,
-    /// unclamped (it may lie outside the clip).
+    /// Where a source range lands on the timeline through this clip's speed
+    /// (and ramp), unclamped (it may lie outside the clip).
     pub fn source_to_timeline_range(&self, source: TimeRange) -> TimeRange {
         let source_in = match &self.content {
             ClipContent::Media { source_in, .. } => *source_in,
             _ => Time::ZERO,
         };
-        let inv = 1.0 / self.speed;
         TimeRange::new(
-            self.start + (source.start - source_in).scale(inv),
-            self.start + (source.end - source_in).scale(inv),
+            self.start + self.timeline_offset(source.start - source_in),
+            self.start + self.timeline_offset(source.end - source_in),
         )
     }
 
-    /// Source range this clip plays, for media clips (`duration × speed`).
+    /// Source range this clip plays, for media clips (`duration × speed`,
+    /// or what its ramp plays).
     pub fn source_range(&self) -> Option<TimeRange> {
         match &self.content {
             ClipContent::Media { source_in, .. } => Some(TimeRange::new(
                 *source_in,
-                *source_in + self.duration.scale(self.speed),
+                *source_in + self.source_length(),
             )),
             _ => None,
         }
@@ -254,7 +254,8 @@ pub struct TimelineWord {
 
 /// Words heard under timeline `range`, in timeline order. Audio tracks are
 /// read first; the same source word reached through a linked video clip at
-/// the same time is listed once.
+/// the same time is listed once, and a source with clips on audio tracks
+/// is read there only.
 pub fn words_in_range(
     project: &Project,
     range: TimeRange,
@@ -269,11 +270,22 @@ pub fn words_in_range(
     let mut cache: HashMap<MediaId, Option<Arc<Analysis>>> = HashMap::new();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
+    // A source whose sound is laid on audio tracks is heard there only:
+    // its picture alone says nothing (speech replaced under it, say).
+    let heard: HashSet<MediaId> = tl
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .flat_map(|t| t.clips.iter().filter_map(Clip::media))
+        .collect();
     for track in tracks {
         for clip in track.clips.iter().filter(|c| c.range().overlaps(&range)) {
             let (Some(media), Some(source)) = (clip.media(), clip.source_range()) else {
                 continue;
             };
+            if track.kind != TrackKind::Audio && heard.contains(&media) {
+                continue;
+            }
             let found = cache.entry(media).or_insert_with(|| {
                 project
                     .media(media)

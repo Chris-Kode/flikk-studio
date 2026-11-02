@@ -99,6 +99,7 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
             ToolCategory::Audio
         }
         "find_voices" => ToolCategory::Generate,
+        "get_shake" => ToolCategory::Transform,
         _ => spec.category?,
     })
 }
@@ -137,6 +138,7 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "marker",
             "speed",
             "slow",
+            "ramp",
             "fast",
             "duplicate",
             "copy",
@@ -160,6 +162,9 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "shorts",
             "instagram",
             "youtube",
+            "sync",
+            "multicam",
+            "recorder",
         ],
     ),
     (
@@ -171,6 +176,10 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "crop",
             "rotat",
             "mask",
+            "background",
+            "green screen",
+            "cut out",
+            "cutout",
             "place",
             "center",
             "centre",
@@ -190,6 +199,12 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "smaller",
             "safe area",
             "layout",
+            "stabiliz",
+            "stabilis",
+            "shak",
+            "steady",
+            "handheld",
+            "jitter",
         ],
     ),
     (
@@ -221,6 +236,9 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "scope",
             "brighter",
             "darker",
+            "hdr",
+            "washed out",
+            "tone map",
         ],
     ),
     (
@@ -268,6 +286,13 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "wipe",
             "crossfade",
             "html",
+            "depth",
+            "focus",
+            "bokeh",
+            "fog",
+            "haze",
+            "parallax",
+            "ken burns",
             "gsap",
             "background",
         ],

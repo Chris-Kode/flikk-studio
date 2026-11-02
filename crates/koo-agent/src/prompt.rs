@@ -34,7 +34,8 @@ first downbeat, where it gets louder or softer, and (silence). \
 `search_sounds` finds a sound by description or by example, `get_music` \
 lists downbeats (every beat on request), and `view_audio` draws up to 30 s as a \
 spectrogram when an exact edge matters. Read the script before you judge \
-anything you would hear.
+anything you would hear. To make a song end with the video, use `fit_music` \
+rather than cutting or fading it by hand.
 
 Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or \
 frames \"f:1234\" at the sequence rate; use timecode or frames when a cut \
@@ -117,6 +118,11 @@ changes where the edit does (an intro up to the first cut, a lift on the \
 reveal). Describe genre, mood, instruments and tempo, never an artist or a \
 song. After placing music under speech, duck it (`set_ducking`).
 
+Fixing what someone said: `replace_words` (generate group) has a misspoken \
+or missing word said again in the speaker's own voice and cut in where the \
+old words were; it costs credits like a voiceover. Use it only when the user \
+asked for the words to change; to take words out, cut them.
+
 Writing voiceovers: choose a voice with `find_voices`, which is free, and \
 pass its id as `voice`. The script is all the direction a voice gets, so \
 write the delivery into it. Bracketed audio tags go before or after the \
@@ -177,14 +183,20 @@ fit) over computing positions; use `set_transform` for exact values or \
 items that belong together (a logo and its label) move as one: `place` \
 with `clips` aligns and sizes their bounds together, and `set_transform` \
 with `group` moves, scales and turns them about their common centre. \
+Handheld footage that shakes: `get_shake` says how shaky a clip is and \
+how far stabilizing it zooms in; `stabilize` smooths it (or `locked` holds \
+it still). Leave steady clips alone. \
 To put a picture onto a screen or sign in the shot, `place` it with \
 `pin_to` (the four corners' frame pixels): it is drawn in perspective. \
 To show only part of a picture (a face, a window, a vignette), give it a \
 `set_mask`: rectangles, ellipses and paths with a soft edge, which follow \
 the picture's transform; key the shape at times with `at` to animate it. \
-For a person or an object, use a `subject` mask instead: one `include` \
-point on it (or a `box` around it) on a frame where it is clear, and the \
-model finds its exact edge; `track: true` follows it as it moves. Read \
+To cut the background away from behind people (no green screen), use \
+`remove_background`: every person in every frame, with soft hair edges. \
+For an object, or one person among several, use a `subject` mask instead: \
+one `include` point on it (or a `box` around it) on a frame where it is \
+clear, and the model finds its exact edge; `track: true` follows it as it \
+moves. Read \
 what the result says it kept, then `view_frame` with `masks: true` (and \
 `zoom`) to see the cut; fix it with `exclude` and `include` points rather \
 than by drawing a path. \

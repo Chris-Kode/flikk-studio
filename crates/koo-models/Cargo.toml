@@ -23,10 +23,17 @@ sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
 # Subject masks: objects picked by clicks and followed through video, run
 # by ONNX Runtime.
 segment = ["dep:ort", "dep:serde_json"]
+# Depth maps for depth effects and masks, run by ONNX Runtime.
+depth = ["dep:ort"]
 # The same subject masks on MLX, Apple's array framework: on the Mac's GPU
 # with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
 # only.
 mlx = ["dep:mlx-rs"]
+# Frames between frames for smooth slow motion (RIFE), run by ONNX Runtime.
+interpolate = ["dep:ort"]
+# Person masks: people cut out of their background by a matting model,
+# run by ONNX Runtime.
+matting = ["dep:ort"]
 
 [dependencies]
 anyhow.workspace = true
