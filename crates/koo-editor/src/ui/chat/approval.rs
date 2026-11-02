@@ -1,9 +1,15 @@
 //! Approval cards (PRD: project/memory and deliver tools ask first), above
 //! the composer: one line per request with Approve / Deny, then what came of
-//! it in place of the buttons until the user's next message.
+//! it in place of the buttons until the user's next message. A voice to be
+//! added or read with plays from its card; approving a voice design opens
+//! the Voices dialog, where the user hears the takes and keeps one.
 
 use super::ChatPanel;
+use crate::state::voices::{VoiceSample, approval_voice};
 use crate::state::{ApprovalOutcome, EditorState};
+use crate::ui::media_pool::listen_button;
+use crate::ui::timeline::glyph::{Glyph, glyph};
+use crate::ui::voices::{self, OnKept, Start};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -11,8 +17,11 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_agent::PendingApproval;
+use koo_agent::tools::ApprovalRequest;
 use koo_core::command::ToolCategory;
 use koo_deliver::RenderState;
+use serde_json::Value;
+use std::rc::Rc;
 use std::time::Duration;
 
 const RENDER_POLL: Duration = Duration::from_millis(250);
@@ -46,10 +55,26 @@ impl ChatPanel {
             ToolCategory::Generate => IconName::Mic,
             _ => IconName::BookOpen,
         };
+        let approve = Button::new(("approve", id as usize))
+            .label("Approve")
+            .xsmall()
+            .primary();
+        let approve =
+            if request.tool == "design_voice" {
+                let args = request.args.clone();
+                approve.on_click(cx.listener(move |this, _, window, cx| {
+                    this.design_in_dialog(id, &args, window, cx)
+                }))
+            } else {
+                approve.on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.approve(id, cx))
+                }))
+            };
         let trailing = match outcome {
             None => h_flex()
                 .flex_none()
                 .gap_1()
+                .children(self.sample_button(request, id, cx))
                 .child(
                     Button::new(("deny", id as usize))
                         .label("Deny")
@@ -59,15 +84,7 @@ impl ChatPanel {
                             this.state.update(cx, |s, cx| s.deny_approval(id, cx))
                         })),
                 )
-                .child(
-                    Button::new(("approve", id as usize))
-                        .label("Approve")
-                        .xsmall()
-                        .primary()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.approve(id, cx))
-                        })),
-                )
+                .child(approve)
                 .into_any_element(),
             Some(outcome) => outcome_line(id, outcome, self.state.read(cx), cx),
         };
@@ -106,6 +123,64 @@ impl ChatPanel {
             )
             .child(trailing)
             .into_any_element()
+    }
+
+    /// Play the voice `request` adds or reads with, when it can be heard.
+    fn sample_button(
+        &self,
+        request: &ApprovalRequest,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (voice, url) = approval_voice(request)?;
+        let sample = self.state.read(cx).voice_sample(&voice, url.as_deref())?;
+        let key = ("approval-listen", id as usize);
+        Some(match sample {
+            VoiceSample::Here(item) => {
+                listen_button(key, &self.state, &item, cx).into_any_element()
+            }
+            VoiceSample::Fetching => h_flex()
+                .size(px(22.))
+                .flex_none()
+                .justify_center()
+                .child(Spinner::new().xsmall())
+                .into_any_element(),
+            VoiceSample::Remote(voice) => Button::new(key)
+                .ghost()
+                .xsmall()
+                .tooltip("Play")
+                .child(glyph(Glyph::Play, px(13.), cx.theme().foreground))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let voice = voice.clone();
+                    this.state.update(cx, |s, cx| s.hear_voice(voice, cx))
+                }))
+                .into_any_element(),
+        })
+    }
+
+    /// Approving a voice design: the Voices dialog makes the takes for the
+    /// user to hear; the request is settled with the voice they keep, and
+    /// stays waiting when they close it without one.
+    fn design_in_dialog(
+        &mut self,
+        id: u64,
+        args: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((design, name)) = koo_agent::tools::voices::design_from_json(args) else {
+            return self.state.update(cx, |s, cx| s.approve(id, cx));
+        };
+        let state = self.state.clone();
+        let on_kept: OnKept =
+            Rc::new(move |voice, _, cx| state.update(cx, |s, cx| s.settle_design(id, voice, cx)));
+        voices::open(
+            self.state.clone(),
+            Start::Design { design, name },
+            Some(on_kept),
+            window,
+            cx,
+        );
     }
 
     /// Repaint while a render approved here is running, so its progress moves.

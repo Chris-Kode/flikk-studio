@@ -147,6 +147,9 @@ pub struct EditorState {
     next_generation: u64,
     /// The voices of the provider doing voiceovers, as last read.
     pub account_voices: voices::AccountVoices,
+    /// Samples fetched for approval cards, by voice id; `None` while on
+    /// their way.
+    pub heard_voices: HashMap<String, Option<koo_core::model::MediaItem>>,
 }
 
 impl EditorState {
@@ -254,6 +257,7 @@ impl EditorState {
             generating: Vec::new(),
             next_generation: 1,
             account_voices: Default::default(),
+            heard_voices: HashMap::new(),
         };
         this.configure_analysis();
         this.analyze_sounds(cx);

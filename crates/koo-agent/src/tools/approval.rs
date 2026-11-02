@@ -143,17 +143,18 @@ pub fn request(
             if !available {
                 return Err(ToolError(super::generate::unavailable(&request)));
             }
-            (
-                super::generate::summary(&request, placement.as_ref()),
-                super::generate::request_json(&request, placement.as_ref()),
-            )
+            let mut json = super::generate::request_json(&request, placement.as_ref());
+            if let koo_core::cloud::GenerateRequest::Voiceover { reading, .. } = &request {
+                json = super::voices::with_sample(json, &reading.voice);
+            }
+            (super::generate::summary(&request, placement.as_ref()), json)
         }
         "add_voice" => {
             super::voices::check_available(ctx)?;
             let adding = super::voices::parse_add(args)?;
             (
                 super::voices::add_summary(&adding),
-                super::voices::add_json(&adding),
+                super::voices::with_sample(super::voices::add_json(&adding), &adding.voice),
             )
         }
         "design_voice" => {

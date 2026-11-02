@@ -145,7 +145,9 @@ use_case), and `add_voice` the best one; it takes a voice slot and waits \
 for approval unless generating is allowed. Mention a `rate` above 1, which \
 costs more credits. Only when neither has one, `design_voice` from a \
 description of age, gender, accent, tone, pace and texture, never a real \
-person's name. Added and designed voices are kept in the user's library \
+person's name; when it waits for approval, the user hears the takes and \
+keeps one (or picks another voice), and the result names the voice kept. \
+Added and designed voices are kept in the user's library \
 for every project. Cloning a voice from recordings is the user's to do \
 (the Voices dialog, or a speaker in the transcript): it needs the consent \
 of whoever it belongs to, so point them there and never imitate a real \

@@ -1314,7 +1314,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "design_voice",
             Some(Generate),
-            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits for their approval and then returns the voice id.",
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
             object(
                 json!({
                     "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),

@@ -6,6 +6,9 @@
 //! allowed generating. Either way the voice is kept in the user's library,
 //! where every project finds it. Cloning a voice is the user's alone: it
 //! needs the consent of whoever it belongs to.
+//!
+//! Where each voice listed can be heard is remembered, so an approval card
+//! plays it before the user decides.
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolResultOf, fail};
@@ -16,10 +19,35 @@ use koo_core::library::{self, Library, SavedVoice};
 use koo_core::model::MediaItem;
 use koo_core::services::MediaService;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Characters of a description listed for each voice.
 const ABOUT: usize = 160;
+
+/// Where the provider says each voice listed can be heard, by its id.
+static SAMPLES: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
+
+fn note_samples<'a>(voices: impl IntoIterator<Item = &'a Voice>) {
+    let Ok(mut samples) = SAMPLES.lock() else {
+        return;
+    };
+    for v in voices {
+        if let Some(url) = &v.sample {
+            samples.insert(v.id.clone(), url.clone());
+        }
+    }
+}
+
+/// `args` of an approval, with where `voice` can be heard when it was
+/// listed: the card plays it.
+pub fn with_sample(mut args: Value, voice: &str) -> Value {
+    let url = SAMPLES.lock().ok().and_then(|s| s.get(voice).cloned());
+    if let (Some(url), Some(map)) = (url, args.as_object_mut()) {
+        map.insert("sample".into(), json!(url));
+    }
+    args
+}
 
 pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let shared = args.opt_bool("library")?.unwrap_or(false);
@@ -46,6 +74,7 @@ pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         if shared {
             return match generation.search_voices(&query, 0) {
                 Ok(page) => {
+                    note_samples(&page.voices);
                     let found: Vec<Value> =
                         page.voices.iter().take(limit).map(shared_json).collect();
                     let summary = format!("found {} shared voices", found.len());
@@ -67,6 +96,7 @@ pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         let lib = Library::load();
         let provider = generation.voice_provider().unwrap_or_default();
         let saved = |v: &Voice| lib.voice_of(&provider, &v.id).cloned();
+        note_samples(&voices);
         voices.retain(|v| query.fits(v));
         // The user's library first, then voices they made, then the rest.
         voices.sort_by_key(|v| (saved(v).is_none(), !v.mine()));
