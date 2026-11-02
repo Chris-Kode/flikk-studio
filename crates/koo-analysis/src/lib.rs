@@ -32,6 +32,7 @@
 mod align;
 mod cache;
 mod ffmpeg;
+mod people;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -239,6 +240,9 @@ impl LocalAnalysis {
         if cfg!(feature = "subjects") {
             tasks.push(ModelTask::Segmentation);
         }
+        if cfg!(feature = "people") {
+            tasks.push(ModelTask::Matting);
+        }
         tasks
     }
 
@@ -261,6 +265,8 @@ impl LocalAnalysis {
                 ModelTask::SoundSearch => steps.sound_search(),
                 // Subject masks, not analysis.
                 ModelTask::Segmentation => false,
+                // Person masks, not analysis.
+                ModelTask::Matting => false,
             })
             .collect()
     }

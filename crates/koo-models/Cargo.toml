@@ -27,6 +27,9 @@ segment = ["dep:ort", "dep:serde_json"]
 # with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
 # only.
 mlx = ["dep:mlx-rs"]
+# Person masks: people cut out of their background by a matting model,
+# run by ONNX Runtime.
+matting = ["dep:ort"]
 
 [dependencies]
 anyhow.workspace = true

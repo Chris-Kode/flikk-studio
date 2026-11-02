@@ -340,6 +340,7 @@ impl ViewerPanel {
         masks::Subjects {
             frame,
             mattes: compose::subject_mattes(project, &state.services, clip, state.playhead),
+            people: compose::person_mattes(project, &state.services, clip, state.playhead),
         }
     }
 
@@ -447,6 +448,42 @@ impl ViewerPanel {
 
     /// Pick the subject tool, when its model is here; start encoding the
     /// frame under the playhead for the first click.
+    /// Keep the people in the active clip and cut its background away: a
+    /// person mask, or the one it has, selected.
+    fn remove_background(&mut self, cx: &mut Context<Self>) {
+        if !self.state.update(cx, |s, cx| s.people_ready(cx)) {
+            return;
+        }
+        let state = self.state.read(cx);
+        let Some(shape) = self
+            .gizmo
+            .active(&state.selection.clips, self.requested)
+            .filter(|s| !s.lettering)
+        else {
+            return;
+        };
+        let Some((_, clip)) = state.bus.project().timeline.clip(shape.clip) else {
+            return;
+        };
+        if self.subject_media(shape.clip, cx).is_none() {
+            return;
+        }
+        if let Some(mask) = clip.masks.iter().find(|m| m.is_person()) {
+            self.masks.selected = Some(mask.id);
+            return;
+        }
+        let mut masks = clip.masks.clone();
+        let mask = koo_core::mask::Mask::person();
+        self.masks.selected = Some(mask.id);
+        masks.push(mask);
+        let command = koo_core::command::Command::SetMasks {
+            clip: shape.clip,
+            masks,
+        };
+        self.state
+            .update(cx, |s, cx| s.edit_batch(vec![command], "set_masks", cx));
+    }
+
     fn pick_subject_tool(&mut self, cx: &mut Context<Self>) {
         if !self.state.update(cx, |s, cx| s.subjects_ready(cx)) {
             return;
@@ -1286,8 +1323,25 @@ impl ViewerPanel {
                         })
                     })
             };
+            let person = {
+                let viewer = viewer.clone();
+                Button::new("viewer-mask-person")
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Remove background")
+                    .child(glyph(Glyph::Person, px(13.), muted))
+                    .on_click(move |_, _, cx| {
+                        viewer.update(cx, |this, cx| {
+                            this.masks.cancel();
+                            this.masks.tool = None;
+                            this.remove_background(cx);
+                            cx.notify();
+                        })
+                    })
+            };
             h_flex()
                 .gap_1()
+                .child(person)
                 .children(
                     [
                         (masks::Tool::Subject, Glyph::Subject, "Subject"),

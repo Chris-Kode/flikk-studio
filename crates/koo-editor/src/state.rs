@@ -38,6 +38,8 @@ const MODELS_NOTICE: &str = "models-missing";
 const SUBJECTS_POLL: Duration = Duration::from_millis(250);
 /// Key of the notice that subject masks need their model.
 const SUBJECTS_NOTICE: &str = "subjects-model";
+/// Key of the notice that person masks need their model.
+const PEOPLE_NOTICE: &str = "people-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -1313,6 +1315,33 @@ impl EditorState {
                     key: SUBJECTS_NOTICE.into(),
                     level: Level::Warning,
                     title: "Subject masks need their model".into(),
+                    items: Vec::new(),
+                    detail: Some(e.clone()),
+                    action: Some(NoticeAction::OpenModels),
+                })
+            }
+        };
+        if changed {
+            cx.notify();
+        }
+        ready.is_ok()
+    }
+
+    /// Whether person masks can be made; when not (their model is
+    /// missing), a notice that leads to Settings → Models.
+    pub fn people_ready(&mut self, cx: &mut Context<Self>) -> bool {
+        let ready = match &self.services.subjects {
+            Some(s) => s.people_available(),
+            None => Err("Person masks need the media engine (FFmpeg).".into()),
+        };
+        let changed = match &ready {
+            Ok(()) => self.notices.clear(PEOPLE_NOTICE),
+            Err(e) => {
+                self.notices.clear(PEOPLE_NOTICE);
+                self.notices.set(Notice {
+                    key: PEOPLE_NOTICE.into(),
+                    level: Level::Warning,
+                    title: "Person masks need their model".into(),
                     items: Vec::new(),
                     detail: Some(e.clone()),
                     action: Some(NoticeAction::OpenModels),

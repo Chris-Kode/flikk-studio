@@ -182,9 +182,12 @@ To put a picture onto a screen or sign in the shot, `place` it with \
 To show only part of a picture (a face, a window, a vignette), give it a \
 `set_mask`: rectangles, ellipses and paths with a soft edge, which follow \
 the picture's transform; key the shape at times with `at` to animate it. \
-For a person or an object, use a `subject` mask instead: one `include` \
-point on it (or a `box` around it) on a frame where it is clear, and the \
-model finds its exact edge; `track: true` follows it as it moves. Read \
+To cut the background away from behind people (no green screen), use \
+`remove_background`: every person in every frame, with soft hair edges. \
+For an object, or one person among several, use a `subject` mask instead: \
+one `include` point on it (or a `box` around it) on a frame where it is \
+clear, and the model finds its exact edge; `track: true` follows it as it \
+moves. Read \
 what the result says it kept, then `view_frame` with `masks: true` (and \
 `zoom`) to see the cut; fix it with `exclude` and `include` points rather \
 than by drawing a path. \

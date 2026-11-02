@@ -138,6 +138,7 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "set_transform" => return set_transform(ctx, args, &reason),
         "set_mask" => return super::masks::set_mask(ctx, args, &reason),
         "remove_mask" => super::masks::remove_mask(ctx, args)?,
+        "remove_background" => super::masks::remove_background(ctx, args)?,
         "place" => return super::layout::place(ctx, args, &reason),
         "animate" => super::layout::animate(ctx, args)?,
 

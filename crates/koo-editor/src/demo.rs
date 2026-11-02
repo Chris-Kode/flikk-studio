@@ -5,10 +5,12 @@
 //! `KOOEDITOR_DEMO_WORKSPACE=<label>` opens that workspace;
 //! `KOOEDITOR_DEMO_SETTINGS=<page>` opens Settings on that page.
 //! `KOOEDITOR_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
-//! media (see [`compose`]).
+//! media (see [`compose`]); `KOOEDITOR_DEMO_PERSON=<file>` a person mask
+//! on that file (see [`person`]).
 
 mod compose;
 mod engines;
+mod person;
 
 use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
@@ -95,6 +97,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     seed_fx(state, &demo.ids, cx);
     chat_references(state, &demo, cx);
     compose::seed(state);
+    person::seed(state);
     cx.notify();
 }
 

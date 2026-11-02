@@ -242,7 +242,8 @@ pub fn render_blocking(
     let mut spec = GraphSpec::new(&request.project, settings, &request.caption_styles);
     let mut share = 0.0;
 
-    // Subject masks: found (and followed) before any frame is composed.
+    // Subject and person masks: found (and followed) before any frame is
+    // composed.
     if spec.video && composed::wanted(&request.project, spec.range, &request.services) {
         let found = composed::find_subjects(
             &request.project,
