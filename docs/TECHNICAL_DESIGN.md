@@ -48,10 +48,10 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
 | `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache | core, models |
+| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
@@ -94,6 +94,8 @@ which the editor hands it (`AnalysisService::configure`).
 | Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
+| Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
+| Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime. Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
@@ -122,7 +124,23 @@ panics fails without stopping the queue.
   grade; `SequenceSettings`) and the project's FX programs.
 * **Clips** carry speed, enabled, name, color, a transform, a grade, an
   effect stack, audio effects, volume automation, `transition_in` /
-  `transition_out` (resolved by `fx::transitions`) and masks.
+  `transition_out` (resolved by `fx::transitions`), masks and a `retime`.
+* **Speed ramps** (`koo-core/src/speed.rs`, `Clip::retime`): speed keys
+  on clip time; between them the speed changes straight, before the first
+  and after the last it holds. Source time is the integral
+  (`Clip::source_offset`, inverse `Clip::timeline_offset`), behind
+  `Clip::to_source` / `to_timeline` and so behind the viewer, compositor,
+  render, transcript and caption mapping, handles, waveforms and silence
+  bands. `SetSpeedRamp` takes points over the clip (0..1, speed) and keeps
+  the source it plays: the clip's length follows the ramp, or with
+  `keep_length` the speeds are scaled to fit; presets (`SpeedPreset`: Ramp
+  in, Ramp out, Hero, Bullet, Montage) are shapes in multiples of the
+  clip's speed. Trims and splits slice the keys (one added at the cut), so
+  each frame keeps its speed; `SetSpeed` on a ramped clip scales the ramp.
+  `SetRetime` picks how slowed frames are drawn (`Interpolation`: repeat,
+  blend, optical flow) and whether ramped audio is stretched (pitch kept)
+  or muted (`RampAudio`). Without keys a clip plays at `speed` as before,
+  and old projects load unchanged.
 * **Transform:** position, scale, rotation, opacity, per-axis stretch, skew,
   anchor, crop, flip, blend mode, `fit` (`Contain` with bars, or `Cover`,
   filling the frame and panned by position) and a corner pin; all keyframable.
@@ -208,7 +226,10 @@ the effect of its earlier calls.
   above the controls vertical apps draw.
 * **Program frame** (`koo_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
-  generator) → clip grade, then timeline grade → effect stack → masks (a
+  generator; a slowed clip that blends or flows shows the moment between
+  two source frames: `Pictures::pair` reads both, the batch mixes them, or
+  `InterpolationService::between` gives the optical flow frame once made,
+  at 1/32 steps so frames are reused) → clip grade, then timeline grade → effect stack → masks (a
   coverage raster multiplied into alpha; a subject's matte at the source
   time drawn into it, see "Subject masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
@@ -239,7 +260,8 @@ the effect of its earlier calls.
 * Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
   `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
-  frame, `t-<key>.mattes` per tracked subject), `html/` (pages and browser
+  frame, `t-<key>.mattes` per tracked subject), `interpolated/<fp>/`
+  (optical flow frames, raw RGBA, `<key>.rgba`), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
   activity log).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
@@ -284,9 +306,9 @@ the user analyzes it again.
 ### Models (`koo-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search, segmentation). Its `mod.rs` holds the
+sound tagging, beats, sound search, segmentation, frame interpolation). Its `mod.rs` holds the
 task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`); `MODELS`, the
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -294,7 +316,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer, the sound models and segmentation) and the BPE tokenizer
+aligner, the diarizer, the sound models, segmentation and frame interpolation) and the BPE tokenizer
 (`bpe.rs`).
 
 Analysis only orchestrates: it asks each task's runner for the selected
@@ -316,14 +338,19 @@ them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
 Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
-`aligner`, `diarizer`, `sounds`, `subjects`. Without one, its models stay
+`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
-subject masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
+subject masks keep nothing; without `interpolation`, optical flow blends). `koo-models`' `mlx` (macOS only: mlx-sys links
 Apple's frameworks) adds the MLX subject mask model and makes it the
 default; `koo-editor` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
 as "Subject masks" but is not part of analysis: `required_tasks` never asks
-for it.
+for it. Frame interpolation ("Optical flow", RIFE) is listed the same way;
+picking optical flow for a clip without it raises a notice that leads to
+Settings → Models, and slowed frames are blended meanwhile.
+`LocalInterpolation` makes flow frames on one thread of its own, the
+newest asked first, keeps the last 48 in memory and every one under
+`cache/interpolated/` (cleared with Previews in Settings → Storage).
 
 ### Transcription online
 
@@ -668,6 +695,14 @@ not retried with Whisper.
   left and how long that takes here. `get_clip` lists a subject's prompts
   on the timeline and how far it is tracked. The prompt steers the agent to
   subjects for people and objects, and to check with `view_frame` `masks`.
+* **Speed ramps:** `set_speed` (`tools/speed.rs`) takes one `speed`, a
+  `ramp` of [position 0..1, speed] points or a `preset` (`ramp_in`,
+  `ramp_out`, `hero`, `bullet`, `montage`, at `speed` or the clip's),
+  `keep_length`, `interpolation` (`nearest`, `blend`, `optical_flow`) and
+  `ramp_audio` (`stretch`, `mute`); `speed` alone on a ramped clip ends the
+  ramp. `get_clip` reports a ramp as its points. The tool retimes one
+  clip; a video's linked audio clip is retimed by its own call (the
+  inspector ramps both).
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
   changes on cue), a sound effect (up to 30 s, optionally looping) or a
@@ -873,12 +908,18 @@ available to them.
   and titles burned in with ASS (libass; the viewer letters them with the
   same timing code in `captions/motion.rs`), gain, fades, equal-power
   crossfades, `atempo` retiming, ducking with `sidechaincompress`, audio
-  effects, and two-pass `loudnorm`.
+  effects, and two-pass `loudnorm`. Under a speed ramp the audio runs
+  through `atempo` stages (enough that each stays at 0.5 or more) whose
+  tempo an `asendcmd` script in the work folder moves every 50 ms of
+  timeline; the viewer's stretch reads its grains where the ramp has the
+  source (`Stretch::mapped`). Muted ramps leave the clip out.
 * **Composited ranges** (`composed.rs`): ranges that need the compositor
   (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
-  anchor, corner pins, masks, retimed media; `compose::needs_compositor`)
-  are drawn by `compose::program` from the original media and piped into
-  the graph as raw RGBA, which keeps captions and audio. Subject masks in
+  anchor, corner pins, masks, retimed or ramped media;
+  `compose::needs_compositor`) are drawn by `compose::program` from the
+  original media and piped into the graph as raw RGBA, which keeps
+  captions and audio. Optical flow frames are made as each frame is
+  composed (`speed::Waiting`), never blended in their place. Subject masks in
   the range are found (and tracked) first, `SubjectService::complete`
   taking half the progress; a subject that cannot be found fails the
   render.
@@ -944,6 +985,7 @@ see:
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
+| `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
 | `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
@@ -968,6 +1010,7 @@ there.
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
+| Speed ramps, slow motion | `koo-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `koo-models/src/interpolation/`, `koo-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `koo-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
@@ -1028,6 +1071,22 @@ there.
 * The SAM 2.1 graphs come from a third party's Hugging Face repository
   (pinned to a commit); a mirror under the project's own account would
   keep them reachable.
+* Speed ramps: optical flow runs on the CPU (ONNX Runtime) only: RIFE took
+  about 0.25 s for a 256 × 128 frame here; at 720p and 1080p it is likely
+  seconds a frame, so flow lags playback (blended until made) and slows
+  renders. No GPU, Mac or Windows was available to measure it. Frames are
+  kept raw (about 3.7 MB each at 720p) and pile up until Previews is
+  cleared. Flow is made from proxies in the viewer and from originals in
+  renders, so the two match in motion but not pixel for pixel.
+* Speed ramps: ramped audio in the viewer (our WSOLA stretch) and the
+  render (`atempo` moved in 50 ms steps) differ slightly in shape, as for
+  one speed. OTIO and FCPXML exports leave ramps out, as they do speed. The
+  protected-range check sees the two halves of a split ramped clip as
+  different pieces, so it may warn on a split that changes nothing.
+  Agent views (stills) show blended frames until flow frames are made.
+* The RIFE graph comes from a third party's Hugging Face repository
+  (`walterlow/RIFE_fp32_timestep`, pinned to a commit); a mirror under the
+  project's own account would keep it reachable.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
