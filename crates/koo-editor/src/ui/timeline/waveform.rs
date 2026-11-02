@@ -57,13 +57,16 @@ impl Waveforms {
         let key = Key {
             media: *media,
             stream,
-            range: TimeRange::new(*source_in, *source_in + clip.duration),
+            range: clip
+                .source_range()
+                .unwrap_or(TimeRange::new(*source_in, *source_in + clip.duration)),
         };
         if let Some(peaks) = self.peaks.get(&key) {
             return (peaks.clone(), None);
         }
         self.peaks.insert(key, None);
-        let buckets = ((clip.duration.as_secs_f64() * DENSITY) as usize).clamp(16, MAX_BUCKETS);
+        let buckets =
+            ((key.range.duration().as_secs_f64() * DENSITY) as usize).clamp(16, MAX_BUCKETS);
         (
             None,
             Some(Request {

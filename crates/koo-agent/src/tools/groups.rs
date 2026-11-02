@@ -137,6 +137,7 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "marker",
             "speed",
             "slow",
+            "ramp",
             "fast",
             "duplicate",
             "copy",

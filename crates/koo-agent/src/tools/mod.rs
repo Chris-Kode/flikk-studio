@@ -18,6 +18,7 @@ mod masks;
 mod preview;
 mod read;
 mod sounds;
+mod speed;
 pub mod video;
 mod view;
 pub mod voices;

@@ -524,15 +524,20 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_speed",
             Some(EditTimeline),
-            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed.",
+            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed. A ramp (or preset) changes the speed over the clip; the clip plays the same source, so its length follows unless keep_length. Slowed frames repeat, blend, or are made by optical flow.",
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "speed": number("1 = normal, 0.01–100"),
+                    "speed": number("1 = normal, 0.01–100; on a ramped clip, ends the ramp. With preset: the base speed (default the clip's)"),
+                    "ramp": curve("Speed ramp [[position 0..1 over the clip, speed], …], straight between points; [] ends it"),
+                    "preset": one_of(&["ramp_in", "ramp_out", "hero", "bullet", "montage"], "Ready-made ramp: ramp_in slow→fast, ramp_out fast→slow, hero fast-slow-fast, bullet near-frozen middle, montage fast and slow by turns"),
+                    "keep_length": boolean("Scale the ramp's speeds so the clip keeps its length"),
+                    "interpolation": one_of(&["nearest", "blend", "optical_flow"], "Frames between source frames when slowed: repeat (default), blend, or optical flow (RIFE; blended until made or without the model)"),
+                    "ramp_audio": one_of(&["stretch", "mute"], "Audio under a ramp: follows the speed, pitch kept (default), or muted"),
                     "ripple": boolean("Move later clips to follow the new length (default false: stop at the next clip)"),
                     "reason": reason()
                 }),
-                &["clip", "speed"],
+                &["clip"],
             ),
         ),
         spec(
