@@ -31,6 +31,7 @@
 
 mod align;
 mod cache;
+mod depth;
 mod ffmpeg;
 #[cfg(feature = "sounds")]
 mod sounds;
@@ -59,6 +60,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub use depth::LocalDepth;
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
 pub use subjects::LocalSubjects;
@@ -239,6 +241,9 @@ impl LocalAnalysis {
         if cfg!(feature = "subjects") {
             tasks.push(ModelTask::Segmentation);
         }
+        if cfg!(feature = "depth") {
+            tasks.push(ModelTask::Depth);
+        }
         tasks
     }
 
@@ -261,6 +266,8 @@ impl LocalAnalysis {
                 ModelTask::SoundSearch => steps.sound_search(),
                 // Subject masks, not analysis.
                 ModelTask::Segmentation => false,
+                // Depth maps, not analysis.
+                ModelTask::Depth => false,
             })
             .collect()
     }

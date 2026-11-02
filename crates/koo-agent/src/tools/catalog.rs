@@ -705,7 +705,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for people and objects. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for people and objects. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.\n\nA `depth` shape (video and image clips from the pool) keeps what lies between `near` and `far` from the camera, by the picture's depth map (relative distance: 0 nearest, 1 farthest), fading over `softness`: `near: 0.5, far: 1` keeps the background, `near: 0, far: 0.4` the foreground. To grade or add an effect to one of them only, put a copy of the clip on the track above with the mask and change the copy.",
             examples(
                 object(
                     json!({
@@ -713,7 +713,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "mask": string("Mask id to change (from get_clip); omit to add a new mask"),
                         "shape": {
                             "type": "object",
-                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
+                            "description": "The outline. rectangle and ellipse: `center` [x, y] and `size` [w, h], `rotation` degrees clockwise, rectangle `roundness` 0..1; path: `points` [[x, y], …] (three or more), joined by straight lines, or with `smooth` by a curve through them (for faces and other round shapes; it can swing past the points); subject: `include` [[x, y], …] on the object, `exclude` [[x, y], …] off it, `box` [left, top, right, bottom] around it (null removes it); depth: `near`, `far`, `softness` in distance (0 nearest, 1 farthest). Coordinates are fractions of the picture (0..1 across it), or frame pixels with `space: frame`",
                             "properties": {
                                 "type": { "type": "string", "enum": masks::SHAPES },
                                 "center": numbers(2, "[x, y]"),
@@ -724,7 +724,10 @@ pub fn catalog() -> Vec<ToolSpec> {
                                 "smooth": boolean("A curve through the points instead of straight lines (default false)"),
                                 "include": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points on the object" },
                                 "exclude": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points not on it" },
-                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" }
+                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" },
+                                "near": number("Depth: nearest distance kept, 0 (nearest) to 1 (farthest)"),
+                                "far": number("Depth: farthest distance kept"),
+                                "softness": number("Depth: fade past each end, in distance (e.g. 0.05)")
                             }
                         },
                         "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),

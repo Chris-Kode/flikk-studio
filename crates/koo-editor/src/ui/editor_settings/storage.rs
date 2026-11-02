@@ -76,10 +76,17 @@ impl Place {
     /// and renders in progress stay.
     fn clear(self) {
         let dirs: Vec<PathBuf> = match self {
-            Place::Previews => ["proxies", "waveforms", "collages", "upload", "mattes"]
-                .iter()
-                .map(|d| paths::cache().join(d))
-                .collect(),
+            Place::Previews => [
+                "proxies",
+                "waveforms",
+                "collages",
+                "upload",
+                "mattes",
+                "depth",
+            ]
+            .iter()
+            .map(|d| paths::cache().join(d))
+            .collect(),
             Place::Analysis => vec![self.dir()],
             _ => Vec::new(),
         };

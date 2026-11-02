@@ -14,14 +14,17 @@
 //! 2. **Grade**: the clip's, then for media the timeline's
 //!    ([`crate::grade`]).
 //! 3. **Effects**: the clip's enabled effect stack ([`FxService::apply`])
-//!    at clip-relative time. Effects run at the output size: the picture is
+//!    at clip-relative time. Effects that read depth get the source
+//!    frame's [`DepthMap`] beside the picture ([`FxBatch::apply_depth`]);
+//!    until it is made they are left out. Effects run at the output size: the picture is
 //!    first resampled to its fitted size in the output frame. Programs
 //!    measure `iResolution` in sequence pixels whatever size they run at,
 //!    so a blur radius means the same in a small viewer and in any render.
 //! 4. **Masks**: the clip's masks, drawn in the picture's own uv
 //!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
 //!    Subject masks are drawn from their mattes at the source time
-//!    ([`subject_mattes`]), refined onto the decoded frame's edges. With
+//!    ([`subject_mattes`]), refined onto the decoded frame's edges; depth
+//!    masks from the same depth map as the effects. With
 //!    [`MaskView::Tinted`] the picture stays whole and what the masks cut
 //!    away is tinted over it instead, for editing them.
 //! 5. **Transform** and **blend**: fitted inside the canvas (as the export
@@ -64,6 +67,7 @@ pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
 pub use pictures::{Pictures, Stills, Streams, overlay_item};
 
+use crate::depth::{self, DepthMap};
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
 use crate::grade;
 use crate::ids::{ClipId, MaskId};
@@ -200,6 +204,7 @@ pub fn submit_program<'a>(
             programs: true,
             view,
             guide: None,
+            depth: None,
         };
         let surface = draw(&mut ctx)?;
         ctx.batch
@@ -281,6 +286,7 @@ fn render(
             programs: true,
             view,
             guide: None,
+            depth: None,
         };
         let surface = draw(&mut ctx)?;
         match ctx.batch.submit(surface, order).and_then(|p| p.wait()) {
@@ -310,6 +316,7 @@ fn render_cpu(
         programs: false,
         view,
         guide: None,
+        depth: None,
     };
     let surface = draw(&mut ctx)?;
     ctx.batch.submit(surface, order).and_then(|p| p.wait()).ok()
@@ -549,6 +556,8 @@ struct Ctx<'a, 'b> {
     view: MaskView,
     /// The frame last decoded for a clip whose subjects refine onto it.
     guide: Option<Frame>,
+    /// The depth map of the frame last decoded for a clip that reads it.
+    depth: Option<DepthMap>,
 }
 
 impl Ctx<'_, '_> {
@@ -601,6 +610,7 @@ impl Ctx<'_, '_> {
         let place = placement(&tf, size, self.size);
         let raster = self.mask_raster(clip, size, t);
         self.guide = None;
+        self.depth = None;
         let tinted = match self.view {
             MaskView::Cut => false,
             MaskView::Tinted(only) => only.is_none_or(|c| c == clip.id),
@@ -640,6 +650,7 @@ impl Ctx<'_, '_> {
         let subjects = crate::mask::SubjectMattes {
             mattes: &mattes,
             picture: self.guide.as_ref(),
+            depth: self.depth.as_ref(),
         };
         crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh, &subjects)
     }
@@ -647,8 +658,9 @@ impl Ctx<'_, '_> {
     fn picture(&mut self, clip: &Clip, t: Time, limit: Option<usize>) -> Option<Surface> {
         let project = self.project;
         self.guide = None;
+        self.depth = None;
         let local = t - clip.start;
-        let effects: Vec<(&FxInstance, &FxAsset)> = clip
+        let mut effects: Vec<(&FxInstance, &FxAsset)> = clip
             .effects
             .iter()
             .take(limit.unwrap_or(usize::MAX))
@@ -678,6 +690,13 @@ impl Ctx<'_, '_> {
                 if refines {
                     self.guide = Some(frame.clone());
                 }
+                if depth::clip_needs_depth(project, clip) {
+                    self.depth = self
+                        .services
+                        .depth
+                        .as_ref()
+                        .and_then(|d| d.depth(item, clip.to_source(t)?));
+                }
                 self.upload(&frame, &grades)?
             }
             ClipContent::Overlay { asset, .. } => {
@@ -688,6 +707,9 @@ impl Ctx<'_, '_> {
             ClipContent::Generator { fx } => self.generate(clip, fx, local, &grades)?,
             ClipContent::Title { .. } | ClipContent::Caption { .. } => return None,
         };
+        if self.depth.is_none() {
+            effects.retain(|(_, asset)| !depth::needs_depth(asset));
+        }
         if !self.programs || effects.is_empty() {
             return Some(picture);
         }
@@ -716,14 +738,22 @@ impl Ctx<'_, '_> {
                 canvas: self.sequence(),
             })
             .collect();
+        let depth = match &self.depth {
+            Some(map) if effects.iter().any(|(_, a)| depth::needs_depth(a)) => {
+                self.batch.upload(&map.to_frame()).ok()
+            }
+            _ => None,
+        };
         let batch = &mut self.batch;
-        match batch.apply(picture, &calls) {
+        let mut run = |surface: Surface, calls: &[FxCall<'_>]| match depth {
+            Some(d) => batch.apply_depth(surface, d, calls),
+            None => batch.apply(surface, calls),
+        };
+        match run(picture, &calls) {
             Ok(surface) => Some(surface),
             // One broken program should not hide the clip: run the others.
             Err(_) => Some(calls.iter().fold(picture, |surface, call| {
-                batch
-                    .apply(surface, std::slice::from_ref(call))
-                    .unwrap_or(surface)
+                run(surface, std::slice::from_ref(call)).unwrap_or(surface)
             })),
         }
     }

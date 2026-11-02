@@ -17,11 +17,18 @@
 //! signed distances when it feathers or expands (see
 //! [`crate::subject`]). One without its matte yet is left out.
 //!
+//! A depth mask ([`MaskShape::Depth`]) keeps what lies within a range of
+//! distance from the camera, by the picture's [`DepthMap`] at the time
+//! (`SubjectMattes::depth`): the background, the foreground or a slice
+//! between, soft over `softness` at both ends. One without its map yet is
+//! left out.
+//!
 //! The compositor multiplies the picture's alpha by [`raster`] before it
 //! is placed and blended (`FxBatch::mask`), on the GPU and the CPU alike.
 //! Captions and titles take no masks: the render burns them in with ASS,
 //! which cannot feather or combine shapes.
 
+use crate::depth::DepthMap;
 use crate::ids::MaskId;
 use crate::model::Ease;
 use crate::services::Frame;
@@ -93,6 +100,15 @@ pub enum MaskShape {
     },
     /// The object [`Mask::subject`] picks, as the model finds it.
     Subject,
+    /// What lies between distances `near` and `far` (0 nearest, 1
+    /// farthest; see [`crate::depth`]), fading out over `softness` past
+    /// each.
+    Depth {
+        near: f32,
+        far: f32,
+        #[serde(default)]
+        softness: f32,
+    },
 }
 
 /// Everything about a mask that can be keyframed.
@@ -175,6 +191,15 @@ impl Mask {
         self.subject
             .as_ref()
             .filter(|_| self.state.shape == MaskShape::Subject)
+    }
+
+    /// Whether it keeps a range of depth, read from the picture's map.
+    pub fn reads_depth(&self) -> bool {
+        matches!(self.state.shape, MaskShape::Depth { .. })
+            || self
+                .keyframes
+                .iter()
+                .any(|k| matches!(k.state.shape, MaskShape::Depth { .. }))
     }
 
     /// The state at clip-relative time `t`: [`Mask::state`] without
@@ -329,6 +354,22 @@ impl MaskState {
                     smooth: *smooth,
                 }
             }
+            (
+                Depth {
+                    near: n0,
+                    far: f0,
+                    softness: s0,
+                },
+                Depth {
+                    near: n1,
+                    far: f1,
+                    softness: s1,
+                },
+            ) => Depth {
+                near: lerp(*n0, *n1, k),
+                far: lerp(*f0, *f1, k),
+                softness: lerp(*s0, *s1, k),
+            },
             (a, _) => a.clone(),
         };
         MaskState {
@@ -354,7 +395,7 @@ impl MaskShape {
                     *p = add(*p);
                 }
             }
-            MaskShape::Subject => {}
+            MaskShape::Subject | MaskShape::Depth { .. } => {}
         }
         out
     }
@@ -422,7 +463,7 @@ impl MaskShape {
                     pts
                 }
             }
-            MaskShape::Subject => Vec::new(),
+            MaskShape::Subject | MaskShape::Depth { .. } => Vec::new(),
         }
     }
 }
@@ -550,11 +591,13 @@ fn polygon_distance(v: &[[f32; 2]], p: [f32; 2]) -> f32 {
 }
 
 /// What subject masks are drawn from at a time: each one's matte, and the
-/// picture whose edges they refine onto.
+/// picture whose edges they refine onto; and what depth masks read.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SubjectMattes<'a> {
     pub mattes: &'a [(MaskId, Matte)],
     pub picture: Option<&'a Frame>,
+    /// The picture's depth map at the time, when it is made.
+    pub depth: Option<&'a DepthMap>,
 }
 
 impl SubjectMattes<'_> {
@@ -580,6 +623,26 @@ fn prepare(
     let turn = |deg: f32| deg.to_radians().sin_cos();
     let feather = state.feather.max(0.0);
     let reach = state.expansion.max(0.0) + feather;
+    if let MaskShape::Depth {
+        near,
+        far,
+        softness,
+    } = state.shape
+    {
+        let depth = mattes.depth?;
+        let field = raster.map_or_else(Vec::new, |(w, h)| {
+            depth_coverage(depth, w, h, near, far, softness)
+        });
+        return Some(Prepared {
+            shape: Distance::Field(field, FieldKind::Coverage),
+            bounds: [0.0, 0.0, aspect, 1.0],
+            expansion: 0.0,
+            feather: 0.0,
+            invert: mask.invert,
+            opacity: state.opacity.clamp(0.0, 1.0),
+            mode: mask.mode,
+        });
+    }
     if state.shape == MaskShape::Subject {
         let subject = mask.subject.as_ref()?;
         let matte = mattes.get(mask.id)?;
@@ -632,7 +695,9 @@ fn prepare(
             [size[0].abs() * aspect / 2.0, size[1].abs() / 2.0],
             turn(*rotation_deg),
         ),
-        MaskShape::Path { .. } | MaskShape::Subject => Distance::Polygon(outline.clone()),
+        MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Depth { .. } => {
+            Distance::Polygon(outline.clone())
+        }
     };
     let bounds = outline.iter().fold(
         [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
@@ -652,6 +717,44 @@ fn prepare(
         opacity: state.opacity.clamp(0.0, 1.0),
         mode: mask.mode,
     })
+}
+
+/// How much of each of `w` × `h` raster pixels lies between `near` and
+/// `far` on `depth`, fading over `softness` past each end.
+fn depth_coverage(
+    depth: &DepthMap,
+    w: u32,
+    h: u32,
+    near: f32,
+    far: f32,
+    softness: f32,
+) -> Vec<f32> {
+    let (lo, hi) = (near.min(far), near.max(far));
+    let soft = softness.max(1.0 / 255.0);
+    let smooth = |x: f32| {
+        let c = x.clamp(0.0, 1.0);
+        c * c * (3.0 - 2.0 * c)
+    };
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let v = (y as f32 + 0.5) / h as f32;
+        for x in 0..w {
+            let d = depth.at([(x as f32 + 0.5) / w as f32, v]);
+            let rise = if lo <= 0.0 {
+                1.0
+            } else {
+                smooth((d - lo) / soft + 1.0)
+            };
+            let fall = if hi >= 1.0 {
+                1.0
+            } else {
+                smooth((hi - d) / soft + 1.0)
+            };
+            out.push(rise * fall);
+        }
+    }
+    out
 }
 
 impl Prepared {

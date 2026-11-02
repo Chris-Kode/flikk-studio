@@ -371,6 +371,21 @@ pub trait FxBatch {
     fn upload(&mut self, frame: &Frame) -> ServiceResult<Surface>;
     fn size(&self, surface: Surface) -> (u32, u32);
     fn apply(&mut self, input: Surface, chain: &[FxCall<'_>]) -> ServiceResult<Surface>;
+    /// [`FxBatch::apply`] with `depth` (an uploaded [`DepthMap::to_frame`],
+    /// any size) bound for the programs that read it
+    /// ([`crate::depth::needs_depth`]). Engines without depth run the chain
+    /// as it is.
+    ///
+    /// [`DepthMap::to_frame`]: crate::depth::DepthMap::to_frame
+    fn apply_depth(
+        &mut self,
+        input: Surface,
+        depth: Surface,
+        chain: &[FxCall<'_>],
+    ) -> ServiceResult<Surface> {
+        let _ = depth;
+        self.apply(input, chain)
+    }
     fn transition(
         &mut self,
         from: Surface,
@@ -724,6 +739,8 @@ pub struct Services {
     pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
     /// Finds and follows the objects subject masks keep.
     pub subjects: Option<Arc<dyn SubjectService>>,
+    /// Depth maps for depth effects and masks.
+    pub depth: Option<Arc<dyn crate::depth::DepthService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -737,6 +754,7 @@ impl std::fmt::Debug for Services {
             .field("lettering", &self.lettering.is_some())
             .field("generation", &self.generation.is_some())
             .field("subjects", &self.subjects.is_some())
+            .field("depth", &self.depth.is_some())
             .finish()
     }
 }

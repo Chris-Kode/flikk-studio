@@ -89,6 +89,8 @@ pub struct EditorState {
     /// `services.subjects`' version when last looked at: mattes made since
     /// show on the next draw.
     pub subjects_version: u64,
+    /// A depth effect whose focus the next click in the viewer picks.
+    pub depth_pick: Option<(koo_core::ClipId, koo_core::EffectId)>,
     // --- timeline/viewer
     /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
     pub play_speed: f64,
@@ -232,6 +234,7 @@ impl EditorState {
             lettering_styles: Vec::new(),
             lettering_version: 0,
             subjects_version: 0,
+            depth_pick: None,
             play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
@@ -1214,12 +1217,16 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
     let subjects = media
         .clone()
         .map(|m| Arc::new(koo_analysis::LocalSubjects::new(m)) as Arc<dyn SubjectService>);
+    let depth = media.clone().map(|m| {
+        Arc::new(koo_analysis::LocalDepth::new(m)) as Arc<dyn koo_core::depth::DepthService>
+    });
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
         html,
         subjects,
+        depth,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
@@ -1325,9 +1332,10 @@ impl EditorState {
         ready.is_ok()
     }
 
-    /// Mattes were made: draw again.
+    /// Mattes or depth maps were made: draw again.
     fn poll_subjects(&mut self, cx: &mut Context<Self>) {
-        let version = self.services.subjects.as_ref().map_or(0, |s| s.version());
+        let version = self.services.subjects.as_ref().map_or(0, |s| s.version())
+            + self.services.depth.as_ref().map_or(0, |d| d.version());
         if version != self.subjects_version {
             self.subjects_version = version;
             cx.notify();

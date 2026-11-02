@@ -228,6 +228,9 @@ pub(crate) fn write_script(dir: &Path, name: &str, script: &str) -> Result<PathB
 /// The part of a render's progress spent finding subject masks, when it
 /// has any to find (tracking dwarfs the encode).
 const SUBJECTS_SHARE: f32 = 0.5;
+/// The part of what is left spent making depth maps, when it has any to
+/// make.
+const DEPTH_SHARE: f32 = 0.5;
 
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
@@ -253,6 +256,18 @@ pub fn render_blocking(
         )?;
         if found {
             share = SUBJECTS_SHARE;
+        }
+        // Depth maps too.
+        let (from, part) = (share, (1.0 - share) * DEPTH_SHARE);
+        let made = composed::find_depth(
+            &request.project,
+            spec.range,
+            &request.services,
+            &|p| progress(from + p * part),
+            cancel,
+        )?;
+        if made {
+            share = from + part;
         }
     }
 

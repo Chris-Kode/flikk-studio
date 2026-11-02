@@ -272,6 +272,7 @@ fn picture_shape(
     let subjects = crate::mask::SubjectMattes {
         mattes: &mattes,
         picture: None,
+        depth: None,
     };
     if let Some([k0, l0, k1, l1]) = crate::mask::kept_bounds(&clip.masks, local, aspect, &subjects)
     {

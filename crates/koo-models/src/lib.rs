@@ -24,12 +24,14 @@
 pub mod beats;
 #[cfg(any(feature = "aligner", feature = "sounds"))]
 mod bpe;
+pub mod depth;
 mod download;
 #[cfg(any(
     feature = "aligner",
     feature = "diarizer",
     feature = "sounds",
-    feature = "segment"
+    feature = "segment",
+    feature = "depth"
 ))]
 mod onnx;
 pub mod segmentation;
@@ -90,11 +92,13 @@ pub enum Task {
     SoundSearch,
     /// Subject masks: not part of analysis.
     Segmentation,
+    /// Depth maps for depth effects and masks: not part of analysis.
+    Depth,
 }
 
 impl Task {
-    /// In the order analysis runs them, then subject masks.
-    pub const ALL: [Task; 8] = [
+    /// In the order analysis runs them, then subject masks and depth.
+    pub const ALL: [Task; 9] = [
         Task::VoiceActivity,
         Task::Transcription,
         Task::WordTiming,
@@ -103,6 +107,7 @@ impl Task {
         Task::Beats,
         Task::SoundSearch,
         Task::Segmentation,
+        Task::Depth,
     ];
 
     pub fn label(self) -> &'static str {
@@ -115,6 +120,7 @@ impl Task {
             Task::Beats => "Beats",
             Task::SoundSearch => "Sound search",
             Task::Segmentation => "Subject masks",
+            Task::Depth => "Depth maps",
         }
     }
 
@@ -129,6 +135,7 @@ impl Task {
             Task::Beats => beats::MODELS,
             Task::SoundSearch => sound_search::MODELS,
             Task::Segmentation => segmentation::MODELS,
+            Task::Depth => depth::MODELS,
         }
     }
 

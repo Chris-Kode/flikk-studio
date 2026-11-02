@@ -43,6 +43,10 @@ pub enum Glyph {
     MaskOverlay,
     /// Two beamed notes: music.
     Note,
+    /// Three planes going back: what lies at a range of depth.
+    Depth,
+    /// A ring with ticks: pick the focus in the viewer.
+    Focus,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -217,6 +221,23 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
                 arc((10.5, 5.5), (10.5, 10.5), 3.5, true, window);
                 arc((12.5, 3.5), (12.5, 12.5), 6., true, window);
             }
+        }
+        Glyph::Depth => {
+            lines(
+                &[(1.5, 6.), (8.5, 6.), (8.5, 14.5), (1.5, 14.5)],
+                true,
+                window,
+            );
+            lines(&[(5.5, 3.8), (11.5, 3.8), (11.5, 11.)], false, window);
+            lines(&[(9., 1.5), (14.5, 1.5), (14.5, 7.5)], false, window);
+        }
+        Glyph::Focus => {
+            circle(8., 8., 4.2, false, window);
+            circle(8., 8., 1.2, true, window);
+            lines(&[(8., 0.8), (8., 3.)], false, window);
+            lines(&[(8., 13.), (8., 15.2)], false, window);
+            lines(&[(0.8, 8.), (3., 8.)], false, window);
+            lines(&[(13., 8.), (15.2, 8.)], false, window);
         }
         Glyph::Note => {
             circle(4.6, 12.2, 2.1, true, window);

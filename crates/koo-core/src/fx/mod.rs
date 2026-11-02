@@ -78,6 +78,7 @@
 //! GSAP code outside it runs once, at load. Unit strings need a leading
 //! digit (`'0.6em'`): GSAP reads `'.6em'` as pixels.
 
+pub mod depth;
 mod shaders;
 mod templates;
 
@@ -598,6 +599,7 @@ pub fn builtins() -> &'static [FxAsset] {
     ALL.get_or_init(|| {
         let mut all = shaders::all();
         all.extend(templates::all());
+        all.extend(depth::all());
         all
     })
 }
