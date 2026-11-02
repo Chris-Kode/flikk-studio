@@ -472,6 +472,25 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             }
             update_clip(tl, *clip, |c| c.audio.effects = effects.clone())
         }
+        Command::SetStabilization {
+            clips,
+            stabilization,
+        } => {
+            for id in clips {
+                let (track, c) = find_clip(tl, *id)?;
+                let video = c
+                    .media()
+                    .and_then(|m| project.media(m))
+                    .is_some_and(|m| m.kind == MediaKind::Video);
+                let picture = matches!(track.kind, TrackKind::Video | TrackKind::Overlay);
+                if !video || !picture {
+                    return Err(CoreError::Invalid(format!("{id} is not a video clip")));
+                }
+            }
+            let mut s = stabilization.clone();
+            s.smoothness = s.smoothness.clamp(0.0, 1.0);
+            update_clips(tl, clips, |c| c.stabilization = s.clone())
+        }
     }
 }
 

@@ -32,6 +32,7 @@
 mod align;
 mod cache;
 mod ffmpeg;
+mod motion;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -61,6 +62,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
+pub use motion::LocalStabilizer;
 pub use subjects::LocalSubjects;
 
 /// Items analyzed at once. Each already keeps several cores busy, and the

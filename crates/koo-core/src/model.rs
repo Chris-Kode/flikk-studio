@@ -8,6 +8,7 @@ use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
 use crate::mask::Mask;
+use crate::stabilize::Stabilization;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -412,6 +413,10 @@ pub struct Clip {
     /// [`crate::mask`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masks: Vec<Mask>,
+    /// Smooths the camera's shake out of the picture (see
+    /// [`crate::stabilize`]).
+    #[serde(default, skip_serializing_if = "Stabilization::is_default")]
+    pub stabilization: Stabilization,
 }
 
 impl Clip {
@@ -433,6 +438,7 @@ impl Clip {
             transition_in: None,
             transition_out: None,
             masks: Vec::new(),
+            stabilization: Stabilization::default(),
         }
     }
 

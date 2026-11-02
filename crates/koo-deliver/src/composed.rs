@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
 use koo_core::model::{MediaItem, Project};
 use koo_core::services::{Frame, Services};
+use koo_core::stabilize;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange};
 use std::ffi::OsString;
@@ -57,6 +58,46 @@ pub(crate) fn find_subjects(
             .map_err(|e| anyhow!("subject mask {}: {e}", short(r.mask)))?;
     }
     Ok(!subjects.is_empty())
+}
+
+/// Measure the camera path of every stabilized clip over `range` that is
+/// not measured yet, before frames are composed; `progress` gets 0..1.
+/// Whether there was any to measure. A path that cannot be measured fails
+/// the render.
+pub(crate) fn measure_motion(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let Some(stabilizer) = &services.stabilizer else {
+        return Ok(false);
+    };
+    let mut items: Vec<&MediaItem> = Vec::new();
+    for clip in project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.range().overlaps(&range))
+    {
+        if let Some((item, _)) = stabilize::source(project, clip)
+            && stabilizer.path(item).is_none()
+            && !items.iter().any(|i| i.id == item.id)
+        {
+            items.push(item);
+        }
+    }
+    let n = items.len() as f32;
+    for (i, item) in items.iter().enumerate() {
+        let part = |p: f32| progress((i as f32 + p) / n);
+        stabilizer
+            .complete(item, &part, cancel)
+            .map_err(|e| anyhow!("stabilizing {}: {e}", item.path.display()))?;
+    }
+    Ok(!items.is_empty())
 }
 
 fn short(id: impl std::fmt::Display) -> String {

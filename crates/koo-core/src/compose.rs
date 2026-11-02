@@ -10,7 +10,9 @@
 //! 1. **Picture**: a media frame at the clip's source time
 //!    ([`Clip::to_source`], so speed is honoured), an overlay asset, or a
 //!    generator ([`FxService::generate`] for GLSL, [`HtmlService::frame`]
-//!    for HTML) laid out at the output size.
+//!    for HTML) laid out at the output size. A stabilized media frame is
+//!    moved, turned and zoomed inside its own frame by the correction of
+//!    its source frame ([`crate::stabilize::correction`]).
 //! 2. **Grade**: the clip's, then for media the timeline's
 //!    ([`crate::grade`]).
 //! 3. **Effects**: the clip's enabled effect stack ([`FxService::apply`])
@@ -342,8 +344,8 @@ fn black((w, h): (u32, u32)) -> Frame {
 
 /// Whether `range` uses anything the FFmpeg graph cannot draw exactly:
 /// effects, generators, transitions, non-normal blend modes, crop, flip,
-/// stretch, skew, an anchor off the centre, a corner pin, masks or retimed
-/// media.
+/// stretch, skew, an anchor off the centre, a corner pin, masks,
+/// stabilization or retimed media.
 pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
     picture_tracks(project).any(|track| {
         fx::transitions(track)
@@ -363,6 +365,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                         || is_free_form(tf)
                         || tf.is_pinned()
                         || crate::mask::any_enabled(&c.masks)
+                        || crate::stabilize::applies(c)
                         || c.keyframes.iter().any(|k| {
                             Property::PIN.contains(&k.property)
                                 || matches!(
@@ -678,7 +681,8 @@ impl Ctx<'_, '_> {
                 if refines {
                     self.guide = Some(frame.clone());
                 }
-                self.upload(&frame, &grades)?
+                let picture = self.upload(&frame, &grades)?;
+                self.stabilized(clip, t, picture)
             }
             ClipContent::Overlay { asset, .. } => {
                 let item = overlay_item(clip.id, asset);
@@ -726,6 +730,24 @@ impl Ctx<'_, '_> {
                     .unwrap_or(surface)
             })),
         }
+    }
+
+    /// `picture` with `clip`'s stabilization at `t` drawn into its own
+    /// frame ([`crate::stabilize`]); as it is when there is none (yet).
+    fn stabilized(&mut self, clip: &Clip, t: Time, picture: Surface) -> Surface {
+        let Some(warp) = crate::stabilize::correction(self.project, self.services, clip, t) else {
+            return picture;
+        };
+        let size = self.batch.size(picture);
+        let place = placement_from(
+            &warp.transform(),
+            [size.0 as f32 / 2.0, size.1 as f32 / 2.0],
+            [size.0 as f32, size.1 as f32],
+            size,
+        );
+        self.batch
+            .composite(size.0, size.1, [0; 4], &[(picture, place)])
+            .unwrap_or(picture)
     }
 
     /// `frame` graded by `grades` (on the CPU), in the batch.

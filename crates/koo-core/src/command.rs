@@ -425,6 +425,14 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- stabilization
+    /// Stabilize clips, or with `enabled: false` stop; each video clip
+    /// gets these settings (see [`crate::stabilize`]).
+    SetStabilization {
+        clips: Vec<ClipId>,
+        stabilization: crate::stabilize::Stabilization,
+    },
 }
 
 impl Command {
@@ -499,7 +507,8 @@ impl Command {
             | AddZoom { .. }
             | SetKeyframe { .. }
             | RemoveKeyframe { .. }
-            | SetMasks { .. } => ToolCategory::Transform,
+            | SetMasks { .. }
+            | SetStabilization { .. } => ToolCategory::Transform,
             SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
                 ToolCategory::Captions
             }

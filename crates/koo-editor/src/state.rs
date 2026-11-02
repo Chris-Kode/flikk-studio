@@ -1214,12 +1214,16 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
     let subjects = media
         .clone()
         .map(|m| Arc::new(koo_analysis::LocalSubjects::new(m)) as Arc<dyn SubjectService>);
+    let stabilizer = media.clone().map(|m| {
+        Arc::new(koo_analysis::LocalStabilizer::new(m)) as Arc<dyn koo_core::stabilize::Stabilizer>
+    });
     Services {
         media,
         analysis: Some(Arc::new(koo_analysis::LocalAnalysis::default()) as Arc<dyn AnalysisService>),
         fx,
         html,
         subjects,
+        stabilizer,
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
@@ -1325,9 +1329,11 @@ impl EditorState {
         ready.is_ok()
     }
 
-    /// Mattes were made: draw again.
+    /// Mattes were made, or camera paths measured: draw again.
     fn poll_subjects(&mut self, cx: &mut Context<Self>) {
         let version = self.services.subjects.as_ref().map_or(0, |s| s.version());
+        let paths = self.services.stabilizer.as_ref().map_or(0, |s| s.version());
+        let version = version.wrapping_add(paths);
         if version != self.subjects_version {
             self.subjects_version = version;
             cx.notify();

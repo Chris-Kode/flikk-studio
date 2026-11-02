@@ -228,6 +228,8 @@ pub(crate) fn write_script(dir: &Path, name: &str, script: &str) -> Result<PathB
 /// The part of a render's progress spent finding subject masks, when it
 /// has any to find (tracking dwarfs the encode).
 const SUBJECTS_SHARE: f32 = 0.5;
+/// Of the progress, what measuring stabilized clips' camera takes.
+const MOTION_SHARE: f32 = 0.2;
 
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
@@ -253,6 +255,18 @@ pub fn render_blocking(
         )?;
         if found {
             share = SUBJECTS_SHARE;
+        }
+        // Stabilized clips: their camera paths, measured first too.
+        let from = share;
+        let measured = composed::measure_motion(
+            &request.project,
+            spec.range,
+            &request.services,
+            &|p| progress(from + p * MOTION_SHARE),
+            cancel,
+        )?;
+        if measured {
+            share += MOTION_SHARE;
         }
     }
 
