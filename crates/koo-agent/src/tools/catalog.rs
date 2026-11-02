@@ -1282,6 +1282,29 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "generate_video",
+            Some(Generate),
+            "Make a video with the provider the user set up (Seedance on fal): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, or after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat). It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Lengths, aspect ratios and resolutions depend on the model the user picked; one it can't make is refused with its limits before anything is spent.",
+            object(
+                json!({
+                    "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`)"),
+                    "range": range("The timeline range it is for: sets its length (whole seconds), and where it is proposed"),
+                    "duration": number("Whole seconds, when there is no `range`; left out, the model picks"),
+                    "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "Shape (default: the model picks, from the first frame when there is one); match the sequence"),
+                    "resolution": one_of(&["480p", "720p", "1080p"], "Default: the model's (720p)"),
+                    "first_frame": string("Media id of a picture in the pool to start on"),
+                    "first_frame_at": time("Or start on the program's frame at this time (to continue a shot)"),
+                    "last_frame": string("Media id of a picture to end on; needs a first frame"),
+                    "last_frame_at": time("Or end on the program's frame at this time"),
+                    "references": strings("Media ids of pictures, clips and sounds in the pool for it to follow; not with a first frame"),
+                    "audio": boolean("Make sound with it (default true)"),
+                    "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
+                    "track": string("Video track to put it on (default: one with nothing there, else a new one)")
+                }),
+                &["prompt"],
+            ),
+        ),
+        spec(
             "find_voices",
             Some(ReadProject),
             "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",

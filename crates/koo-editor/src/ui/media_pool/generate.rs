@@ -1,7 +1,7 @@
 //! Generate: music or a sound effect from a description, made by the
 //! provider set in Settings → Integrations, landing in the Music Generated
 //! or Sound Effects Generated bin. Music runs as long as In/Out when they
-//! are set.
+//! are set. A row for each generation running (any kind) shows where it is.
 
 use super::MediaPoolPanel;
 use crate::state::EditorState;

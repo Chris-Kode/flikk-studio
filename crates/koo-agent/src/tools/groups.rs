@@ -304,6 +304,11 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "whoosh",
             "riser",
             "ambience",
+            "b-roll",
+            "broll",
+            "text to video",
+            "image to video",
+            "seedance",
         ],
     ),
     (

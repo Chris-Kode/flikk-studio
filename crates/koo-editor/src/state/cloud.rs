@@ -9,6 +9,7 @@ use crate::agent_link::approve;
 use crate::notices::{Level, Notice, NoticeAction};
 use crate::persistence;
 use gpui_kit::*;
+use koo_agent::tools::video::FrameGrab;
 use koo_cloud::{Account, KeySource, Provider};
 use koo_core::MediaId;
 use koo_core::analysis::AnalysisSteps;
@@ -296,6 +297,17 @@ impl EditorState {
     /// Make `request` with the provider picked for it, then add the file
     /// to the pool's Generated bin; the user asked, from the media pool.
     pub fn generate(&mut self, request: GenerateRequest, cx: &mut Context<Self>) {
+        self.generate_video(request, Vec::new(), cx);
+    }
+
+    /// [`Self::generate`], first grabbing the program's frames that
+    /// `request` starts or ends on.
+    pub fn generate_video(
+        &mut self,
+        request: GenerateRequest,
+        grabs: Vec<FrameGrab>,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
@@ -305,13 +317,18 @@ impl EditorState {
             task: task.clone(),
             failed: None,
         });
-        let (cloud, media) = (self.cloud.clone(), self.services.media.clone());
+        let (cloud, services) = (self.cloud.clone(), self.services.clone());
+        let project = (!grabs.is_empty()).then(|| self.bus.project().clone());
         let following = task.clone();
         let made = cx.background_executor().spawn(async move {
             use koo_core::cloud::GenerationService as _;
+            if let Some(project) = &project {
+                koo_agent::tools::video::grab_all(project, &services, &grabs)
+                    .map_err(CloudError::Failed)?;
+            }
             cloud
                 .generate(&request, &koo_core::paths::generated(), &following)
-                .map(|g| koo_core::cloud::media_item(&g, media.as_deref()))
+                .map(|g| koo_core::cloud::media_item(&g, services.media.as_deref()))
         });
         cx.spawn(async move |this, cx| {
             let result = made.await;

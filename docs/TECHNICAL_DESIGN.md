@@ -684,6 +684,22 @@ not retried with Whisper.
   proposes the placement into the chat's set and answers the waiting call
   with the media id; allowed, it runs as a tool job and answers the same. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
+* **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
+  with the provider picked for video (Seedance 2.0, 2.0 Fast or 2.5 on
+  fal): from the prompt alone, from a first frame (a picture in the pool,
+  or the program at a time, grabbed with `compose::program` into
+  `paths::cache()/frames` just before) to an optional last one, or after
+  references (pictures, clips and sounds in the pool, which the prompt names
+  `@Image1`, `@Video1`, `@Audio1`). Each model's `cloud::VideoModel` (its
+  lengths, shapes, resolutions and reference limits) refuses what it can't
+  make before anything is spent. fal runs it on its queue
+  (`fal/queue.rs`), uploading the files it follows to fal's storage first;
+  `cloud::GenerationTask` carries where it is (queued, running, coming
+  down) to the media pool's row, which can stop it until it is made. It
+  lands in the "Video Generated" bin and, with `at` or `range`, is proposed
+  on a video track free over its length (else a new one on top), its sound
+  on an audio track beside it. The media pool's Video form makes the same
+  request, starting on a pool picture or the frame at the playhead.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

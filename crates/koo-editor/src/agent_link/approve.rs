@@ -1,6 +1,6 @@
 //! Carrying out an approved agent request: memory goes to the store,
 //! programs and sounds to the user's library, renders and exports to `koo-deliver`,
-//! music, sound effects and voiceovers to the provider set for them, as are
+//! music, sound effects, voiceovers and videos to the provider set for them, as are
 //! voices added or designed, which then go to the library. Outputs always
 //! get a free name, so nothing here overwrites a file.
 
@@ -92,6 +92,35 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     .map_err(|e| anyhow!(generate::error_text(&e)))?;
                 Ok(Generated {
                     item: koo_core::cloud::media_item(&made, media.as_deref()),
+                    placement,
+                    summary: request.summary(),
+                })
+            })))
+        }
+        "generate_video" => {
+            use koo_agent::tools::video;
+            let (request, grabs, placement) =
+                video::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
+            let generation = inputs
+                .services
+                .generation
+                .clone()
+                .ok_or_else(|| anyhow!("generation is not available"))?;
+            let services = inputs.services.clone();
+            let project = (!grabs.is_empty()).then(|| inputs.project.clone());
+            Ok(Started::Generate(Box::new(move || {
+                if let Some(project) = &project {
+                    video::grab_all(project, &services, &grabs).map_err(|e| anyhow!(e))?;
+                }
+                let made = generation
+                    .generate(
+                        &request,
+                        &koo_core::paths::generated(),
+                        &koo_core::cloud::GenerationTask::default(),
+                    )
+                    .map_err(|e| anyhow!(video::error_text(&e)))?;
+                Ok(Generated {
+                    item: koo_core::cloud::media_item(&made, services.media.as_deref()),
                     placement,
                     summary: request.summary(),
                 })
