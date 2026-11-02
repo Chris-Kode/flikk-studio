@@ -145,6 +145,8 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
+    /// Generated items in the pool already looked at for analysis.
+    generated_seen: HashSet<koo_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
     pub account_voices: voices::AccountVoices,
 }
@@ -253,8 +255,10 @@ impl EditorState {
             analysis_steps,
             generating: Vec::new(),
             next_generation: 1,
+            generated_seen: HashSet::new(),
             account_voices: Default::default(),
         };
+        this.mark_generated_seen();
         this.configure_analysis();
         this.analyze_sounds(cx);
         this.load_keys(cx);
@@ -972,6 +976,7 @@ impl EditorState {
         self.bus = CommandBus::new(loaded.project);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
+        self.mark_generated_seen();
         let version = self.bus.version();
         self.file = loaded.file;
         self.saved = (
@@ -1103,6 +1108,8 @@ impl EditorState {
 
     fn pump_agent(&mut self, cx: &mut Context<Self>) {
         let events = self.agent.pump(&mut self.bus, &self.services);
+        // A job the agent was allowed may have added what a provider made.
+        self.analyze_generated(cx);
         if events.is_empty() {
             return;
         }

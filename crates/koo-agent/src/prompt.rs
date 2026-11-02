@@ -160,7 +160,9 @@ camera move, lens and light, style. To continue a shot, start on the \
 program's frame (`first_frame_at`, the last frame before the cut); to animate \
 a still, start on it (`first_frame`). To keep a character, product or look \
 consistent, pass pool items as `references` and name them in the prompt as \
-@Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`.
+@Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`. A \
+generated video is analyzed as it lands, like footage (shots, sound, any \
+speech), when the analysis models are ready: look at it before placing more.
 
 Placing things on screen: pictures, overlays, generators, captions and \
 titles all move, scale, stretch, rotate and skew about an anchor. \

@@ -712,7 +712,12 @@ not retried with Whisper.
   lands in the "Video Generated" bin and, with `at` or `range`, is proposed
   on a video track free over its length (else a new one on top), its sound
   on an audio track beside it. The media pool's Video form makes the same
-  request, starting on a pool picture or the frame at the playhead.
+  request, starting on a pool picture or the frame at the playhead. However
+  a generated item reaches the pool (the media pool, an approval, or an
+  agent job the editor sees on its next pump), `analyze_generated` queues it
+  once: a video like footage when the analysis models are ready, a
+  voiceover when transcripts are on. Items already in a project when it
+  opens are left as they were.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

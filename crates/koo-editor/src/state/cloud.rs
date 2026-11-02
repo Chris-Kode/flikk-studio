@@ -404,8 +404,8 @@ impl EditorState {
 
     /// Add `item`, which a provider made, to the pool's Generated bin as
     /// one undo step, and to the drafts waiting for review so a proposal
-    /// can place it. A voiceover is analyzed right away: its words are its
-    /// script, so that costs no credits. Its id when added.
+    /// can place it, then analyze it ([`Self::analyze_generated`]). Its id
+    /// when added.
     pub(crate) fn add_generated(
         &mut self,
         item: MediaItem,
@@ -418,16 +418,53 @@ impl EditorState {
             Some(Capability::Video) => "Generate video",
             _ => "Generate music",
         };
-        let script = item.generated.as_deref().and_then(|g| g.script());
-        let analyze = script.is_some() && item.fingerprint.is_some();
         let bin = koo_core::cloud::generated_bin(&item);
         let commands = koo_core::cloud::pool_commands(self.bus.project(), item, bin);
         let result = self.bus.execute_shared(commands, label);
         self.finish(result, cx)?;
-        if analyze && self.analysis_steps.transcript {
-            self.analyze(id, false, cx);
-        }
+        self.analyze_generated(cx);
         Some(id)
+    }
+
+    /// Take what is in the pool now as looked at: a project just opened
+    /// keeps its generated items as they were.
+    pub(super) fn mark_generated_seen(&mut self) {
+        self.generated_seen = self
+            .bus
+            .project()
+            .media
+            .iter()
+            .filter(|m| m.generated.is_some())
+            .map(|m| m.id)
+            .collect();
+    }
+
+    /// Analyze each item a provider made as it reaches the pool, once,
+    /// however it got there (the media pool, an approval, an agent job): a
+    /// video like footage, so the agent can see and hear it, once the
+    /// analysis models are ready; a voiceover when transcripts are on (its
+    /// words are its script, so it costs no credits). Music and sound
+    /// effects are left to be analyzed when asked.
+    pub(super) fn analyze_generated(&mut self, cx: &mut Context<Self>) {
+        let new: Vec<(MediaId, Capability)> = self
+            .bus
+            .project()
+            .media
+            .iter()
+            .filter(|m| m.fingerprint.is_some() && !self.generated_seen.contains(&m.id))
+            .filter_map(|m| Some((m.id, m.generated.as_deref()?.capability)))
+            .collect();
+        for (id, capability) in new {
+            self.generated_seen.insert(id);
+            let analyze = match capability {
+                Capability::Video => self.models_ready(),
+                Capability::Voiceover => self.analysis_steps.transcript,
+                _ => false,
+            };
+            if analyze {
+                self.analyze(id, false, cx);
+            }
+        }
     }
 
     /// Add what an approved generation made to the pool and, where the
