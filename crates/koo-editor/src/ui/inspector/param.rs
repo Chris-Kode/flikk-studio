@@ -48,6 +48,8 @@ pub enum Key {
     DuckReduction,
     DuckAttack,
     DuckRelease,
+    /// The selected clip's stabilization smoothness.
+    Smoothness,
 }
 
 /// A slider of a mask.
@@ -191,6 +193,7 @@ impl Key {
             Key::DuckReduction => s("Reduction", -40., 0., 0.5, 1, 1., -12.),
             Key::DuckAttack => s("Attack", 0., 2000., 10., 0, 1000., 0.2),
             Key::DuckRelease => s("Release", 0., 4000., 10., 0, 1000., 0.6),
+            Key::Smoothness => s("Amount", 0., 100., 1., 0, 100., 0.5),
         }
     }
 }

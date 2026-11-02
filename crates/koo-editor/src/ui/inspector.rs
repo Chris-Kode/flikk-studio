@@ -12,6 +12,7 @@ mod effects;
 mod generator;
 mod masks;
 mod param;
+mod stabilize;
 mod transition;
 
 pub(crate) use clip::sound_clip;
@@ -360,6 +361,19 @@ impl InspectorPanel {
                     _ => d.release = Time::from_secs_f64(v as f64),
                 }
                 commands.push(Command::SetDucking { ducking: Some(d) });
+            }
+            Key::Smoothness => {
+                let Some(clip) = clips.first() else {
+                    return none;
+                };
+                label = "set_stabilization";
+                commands.push(Command::SetStabilization {
+                    clips: vec![clip.id],
+                    stabilization: koo_core::stabilize::Stabilization {
+                        smoothness: v,
+                        ..clip.stabilization.clone()
+                    },
+                });
             }
         }
         (commands, label)
