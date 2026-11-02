@@ -55,6 +55,9 @@ pub struct GraphSpec {
     /// `koo_core::compose`, see [`crate::composed`]); the graph only burns
     /// in captions and builds the audio.
     pub piped: bool,
+    /// The piped frames already have captions and titles lettered on them
+    /// (see [`crate::composed::letter`]); the graph leaves them out.
+    pub lettered: bool,
 }
 
 impl GraphSpec {
@@ -75,6 +78,7 @@ impl GraphSpec {
             caption_styles: styles.to_vec(),
             loudnorm: None,
             piped: false,
+            lettered: false,
         }
     }
 }
@@ -189,6 +193,15 @@ fn even(v: f64) -> u32 {
     ((v / 2.0).round() as u32 * 2).max(2)
 }
 
+/// Whether a caption or title shows in `range`.
+pub(crate) fn has_text(project: &Project, range: TimeRange) -> bool {
+    project.timeline.tracks.iter().any(|t| {
+        !t.mix.mute
+            && matches!(t.kind, TrackKind::Caption | TrackKind::Title)
+            && t.clips.iter().any(|c| c.range().overlaps(&range))
+    })
+}
+
 fn is_still_path(path: &Path) -> bool {
     let ext = path
         .extension()
@@ -277,7 +290,8 @@ impl Builder<'_> {
                 cur = out;
             }
         }
-        if self.spec.burn_captions && self.has_text() {
+        if self.spec.burn_captions && !self.spec.lettered && has_text(self.project, self.spec.range)
+        {
             let ass = captions::to_ass(
                 self.project,
                 &self.spec.caption_styles,
@@ -295,14 +309,6 @@ impl Builder<'_> {
         }
         self.chains.push(format!("[{cur}]setsar=1[vout]"));
         Ok("vout".into())
-    }
-
-    fn has_text(&self) -> bool {
-        self.project.timeline.tracks.iter().any(|t| {
-            !t.mix.mute
-                && matches!(t.kind, TrackKind::Caption | TrackKind::Title)
-                && t.clips.iter().any(|c| c.range().overlaps(&self.spec.range))
-        })
     }
 
     fn video_track(&mut self, track: &Track) -> Result<Option<String>> {

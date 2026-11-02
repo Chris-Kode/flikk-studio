@@ -35,6 +35,7 @@ pub fn export_frame(
     let mut spec = GraphSpec::new(project, &settings, caption_styles);
     spec.audio = false;
     spec.piped = services.media.is_some();
+    composed::letter(project, &mut spec, services);
     let work = WorkDir::new()?;
     let g = graph::build(project, &spec, &work.0)?;
     let script = write_script(&work.0, "frame.txt", &g.script)?;

@@ -81,6 +81,23 @@ pub(crate) fn tone_filters(item: &koo_core::model::MediaItem) -> Result<Option<S
     Ok(Some(filters))
 }
 
+/// Whether this FFmpeg has the `ass` filter. Builds without libass don't,
+/// Homebrew's among them.
+pub(crate) fn has_ass() -> bool {
+    static HAS_ASS: OnceLock<bool> = OnceLock::new();
+    *HAS_ASS.get_or_init(|| {
+        let out = command(ffmpeg())
+            .args(["-hide_banner", "-filters"])
+            .output()
+            .ok();
+        out.is_some_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.split_whitespace().nth(1) == Some("ass"))
+        })
+    })
+}
+
 /// Arguments that read the filtergraph from `script`, so long timelines
 /// never hit command-line length limits.
 pub(crate) fn filter_script_args(script: &Path) -> [std::ffi::OsString; 2] {
@@ -193,7 +210,7 @@ pub(crate) fn run(
 }
 
 /// The most useful lines of an ffmpeg error log.
-fn last_error(stderr: &str) -> String {
+pub(crate) fn last_error(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)

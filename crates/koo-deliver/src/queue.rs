@@ -311,6 +311,7 @@ pub fn render_blocking(
     }
 
     spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
+    composed::letter(&request.project, &mut spec, &request.services);
     let g = graph::build(&request.project, &spec, &work.0)?;
     let tmp = temp_path(out, &JobId::new().to_string());
     let progress = |p: f32| progress(share + p * (1.0 - share));
