@@ -10,6 +10,7 @@
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use koo_core::agent::Backend as BackendKind;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::process::Command;
 
 /// Claude Code's own tools for the web.
@@ -19,6 +20,55 @@ const WEB_TOOLS: &str = "WebSearch,WebFetch";
 pub struct Claude {
     text: TextJoin,
     streamed: bool,
+    /// Web tool calls waiting for their result, by tool use id.
+    web_calls: HashMap<String, (&'static str, Value)>,
+}
+
+impl Claude {
+    fn web_calls_started(&mut self, message: &Value) {
+        for block in content(message) {
+            let field = |k: &str| block.get(k).and_then(Value::as_str);
+            let tool = match field("name") {
+                Some("WebSearch") => "web_search",
+                Some("WebFetch") => "web_fetch",
+                _ => continue,
+            };
+            if let (Some("tool_use"), Some(id)) = (field("type"), field("id")) {
+                let input = block.get("input").cloned().unwrap_or_default();
+                self.web_calls.insert(id.to_owned(), (tool, input));
+            }
+        }
+    }
+
+    fn web_calls_finished(&mut self, message: &Value) -> Vec<BackendEvent> {
+        content(message)
+            .filter_map(|block| {
+                let id = block.get("tool_use_id")?.as_str()?;
+                let (tool, args) = self.web_calls.remove(id)?;
+                let summary = ["query", "url"]
+                    .iter()
+                    .find_map(|k| args.get(k)?.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                Some(BackendEvent::Tool {
+                    tool,
+                    args,
+                    summary,
+                    ok: !failed,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Content blocks of an `assistant` or `user` line.
+fn content(message: &Value) -> impl Iterator<Item = &Value> {
+    message
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
 }
 
 impl Adapter for Claude {
@@ -131,18 +181,20 @@ impl Adapter for Claude {
                 }
                 _ => vec![],
             },
-            // Without partial messages (older CLIs), take whole messages.
-            Some("assistant") if !self.streamed => {
+            Some("assistant") => {
+                self.web_calls_started(&v);
+                // Without partial messages (older CLIs), take whole messages.
+                if self.streamed {
+                    return vec![];
+                }
                 self.text.new_message();
-                v.pointer("/message/content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
+                content(&v)
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                     .filter_map(|b| b.get("text").and_then(Value::as_str))
                     .filter_map(|t| self.text.text(t))
                     .collect()
             }
+            Some("user") => self.web_calls_finished(&v),
             Some("result") => {
                 let failed = v.get("is_error").and_then(Value::as_bool) == Some(true)
                     || s("/subtype").is_some_and(|st| st != "success");

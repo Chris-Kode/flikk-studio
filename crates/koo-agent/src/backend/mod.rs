@@ -7,7 +7,7 @@ mod codex;
 mod models;
 
 pub use claude::Claude;
-pub use codex::Codex;
+pub use codex::{Codex, ImageWatch};
 pub use models::{cached_models, refresh_models};
 
 use koo_core::agent::{Backend as BackendKind, ModelChoice};
@@ -46,6 +46,8 @@ pub struct TurnSpec {
     pub mcp: McpLaunch,
     /// Let the backend search the web and read pages with its own tools.
     pub web: bool,
+    /// Let Codex generate images with its own tool. Claude has none.
+    pub image_generation: bool,
     /// Empty working directory under `paths::home()`, so no project file of
     /// the user's (CLAUDE.md, AGENTS.md, .codex) is ever picked up.
     pub workdir: PathBuf,
@@ -59,6 +61,14 @@ pub enum BackendEvent {
     /// The backend's session id; persist it to resume the chat.
     Session(String),
     TextDelta(String),
+    /// One of the backend's own tools ran, named the same for every
+    /// backend. The `koo` tools are reported where they are served.
+    Tool {
+        tool: &'static str,
+        args: serde_json::Value,
+        summary: String,
+        ok: bool,
+    },
     /// The turn is over. `error` is set when it failed.
     Finished {
         error: Option<String>,

@@ -2,7 +2,7 @@
 //! (PRD AG2).
 
 use crate::args::{kind_name, range_json, secs, short};
-use koo_core::agent::{AgentSettings, EditorContext};
+use koo_core::agent::{AgentSettings, Backend, EditorContext};
 use koo_core::bus::AgentRole;
 use koo_core::memory::{RuleScope, RuleStatus, StyleRule};
 use koo_core::model::{ClipContent, Project};
@@ -20,6 +20,12 @@ commands or read files. Use the web to check what you put on screen \
 say what you looked up. Keep private details of the project out of your \
 searches. Nothing from the web comes into the project: you cannot \
 download media.";
+
+const IMAGES: &str = "\
+You also have an image generation tool. Use it when the user asks for a \
+picture. Each one lands in the pool's Images Generated bin, not in the chat: \
+find its id with `list_media` and use it like any other picture in the pool. \
+You cannot copy or move the saved file, and do not need to.";
 
 const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
@@ -257,6 +263,10 @@ before you finish, and save them to the user's library with \
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
+    if settings.image_generation && settings.backend == Backend::Codex {
+        out.push_str("\n\n");
+        out.push_str(IMAGES);
+    }
     out.push_str("\n\n");
     out.push_str(COMMON);
     out.push_str("\n\n");

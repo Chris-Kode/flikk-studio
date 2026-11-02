@@ -1,6 +1,6 @@
 //! Tool calls in the thread (PRD AG10, V7). Calls made in a row stack into
 //! one card; a row expands to its arguments, transcript excerpts and the
-//! collages the model saw.
+//! collages the model saw or the pictures it made.
 
 use super::ChatPanel;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme, h_flex, v_flex};

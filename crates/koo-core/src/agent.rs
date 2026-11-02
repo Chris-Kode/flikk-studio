@@ -126,6 +126,10 @@ pub struct AgentSettings {
     /// the project.
     #[serde(default)]
     pub web: bool,
+    /// Image generation through Codex's own tool; Claude has none. Off by
+    /// default.
+    #[serde(default)]
+    pub image_generation: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -230,7 +234,7 @@ pub struct ActivityEntry {
     pub tool: String,
     pub args: serde_json::Value,
     pub summary: String,
-    /// Collages and frames the model was shown.
+    /// Collages and frames the model was shown, or pictures it made.
     pub images: Vec<PathBuf>,
     /// Transcript excerpts sent to the model.
     pub excerpts: Vec<String>,

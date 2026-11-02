@@ -33,6 +33,7 @@ pub struct SettingsOverrides {
     pub language: Option<Option<String>>,
     pub style_profile: Option<Option<RuleId>>,
     pub web: Option<bool>,
+    pub image_generation: Option<bool>,
 }
 
 impl SettingsOverrides {
@@ -63,6 +64,9 @@ impl SettingsOverrides {
         if let Some(v) = self.web {
             s.web = v;
         }
+        if let Some(v) = self.image_generation {
+            s.image_generation = v;
+        }
         s
     }
 
@@ -80,6 +84,7 @@ impl SettingsOverrides {
             language: changed(&user.language, &effective.language),
             style_profile: changed(&user.style_profile, &effective.style_profile),
             web: changed(&user.web, &effective.web),
+            image_generation: changed(&user.image_generation, &effective.image_generation),
         }
     }
 }
@@ -127,7 +132,8 @@ impl Store {
             vision,
             language,
             style_profile,
-            web
+            web,
+            image_generation
         );
         self.save_user_settings(&user)?;
         Ok(next)

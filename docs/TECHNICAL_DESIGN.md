@@ -1095,7 +1095,15 @@ on the UI thread and run it off it:
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
-  search.
+  search. An "Image generation" switch, shown for Codex (off by default,
+  overridable per project), sets Codex's `features.image_generation`, which
+  Codex itself turns on by default. `codex exec` does not report its
+  pictures, so the host watches `$CODEX_HOME/generated_images/<thread>/`
+  every half second, before each of the turn's tool calls and when it ends,
+  and copies new ones to `paths::generated()` and the pool's "Images
+  Generated" bin, as the user's edit. The chat shows them as `generate_image`
+  calls. Web calls show as `web_search` and `web_fetch`, read from each
+  backend's stream, whatever the backend calls them.
 * **Tools** (`koo-agent/src/tools/`): 91 in the catalog (89 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
@@ -1279,7 +1287,7 @@ on the UI thread and run it off it:
   The media pool's ♫ menu makes the same from a form (Music runs as long as
   In/Out).
 * **Prompt** (`koo-agent/src/prompt.rs`): the system prompt is the tool
-  guidance (with or without web), the shared rules (seeing and hearing,
+  guidance (with or without web and images), the shared rules (seeing and hearing,
   time formats, references, cutting in pauses, protected ranges), the
   role's part, the FX conventions, the language and the user's standing
   instructions. Each message carries an `<editor_context>` (project

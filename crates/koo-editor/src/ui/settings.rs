@@ -231,14 +231,36 @@ impl SettingsPanel {
                 let on = *ix == 1;
                 this.update(cx, |s| s.web = on);
             }));
-        v_flex().children(rows).child(
-            h_flex()
-                .h(px(30.))
-                .justify_between()
-                .text_sm()
-                .child("Web")
-                .child(web),
-        )
+        let images = TabBar::new("perm-images")
+            .segmented()
+            .xsmall()
+            .selected_index(settings.image_generation as usize)
+            .child(Tab::new().label("Off"))
+            .child(Tab::new().label("On"))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                let on = *ix == 1;
+                this.update(cx, |s| s.image_generation = on);
+            }));
+        v_flex()
+            .children(rows)
+            .child(
+                h_flex()
+                    .h(px(30.))
+                    .justify_between()
+                    .text_sm()
+                    .child("Web")
+                    .child(web),
+            )
+            .when(settings.backend == Backend::Codex, |el| {
+                el.child(
+                    h_flex()
+                        .h(px(30.))
+                        .justify_between()
+                        .text_sm()
+                        .child("Image generation")
+                        .child(images),
+                )
+            })
     }
 
     fn slider_row(

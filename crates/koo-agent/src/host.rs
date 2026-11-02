@@ -18,7 +18,7 @@
 //! [`send`]: AgentHost::send
 //! [`pump`]: AgentHost::pump
 
-use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
+use crate::backend::{self, BackendEvent, ImageWatch, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
@@ -97,6 +97,8 @@ struct Turn {
     /// `tools::groups`).
     groups: BTreeSet<ToolCategory>,
     usage: Usage,
+    /// Set when Codex may generate images.
+    images: Option<ImageWatch>,
 }
 
 type JobResult = (Origin, Reply, String, Value, JobDone);
@@ -263,6 +265,12 @@ impl AgentHost {
         self.serve_calls(bus, services);
         self.drain_jobs(bus, services);
         self.drain_backend();
+        let look = self.turn.as_ref().is_some_and(|t| {
+            t.finished.is_some() || t.images.as_ref().is_some_and(ImageWatch::due)
+        });
+        if look {
+            self.collect_images(bus, services);
+        }
         self.maybe_finish(bus);
         self.maybe_close_external(bus);
         std::mem::take(&mut self.events)
@@ -360,6 +368,7 @@ impl AgentHost {
             model: q.settings.models.get(backend).clone(),
             mcp,
             web: q.settings.web,
+            image_generation: q.settings.image_generation,
             workdir,
             run_dir,
         };
@@ -376,6 +385,8 @@ impl AgentHost {
             label: recipe.map_or_else(|| "Thinking".to_owned(), |r| format!("Running /{r}")),
             fraction: None,
         });
+        let images = (backend == Backend::Codex && spec.image_generation)
+            .then(|| ImageWatch::new(spec.resume.clone()));
         self.turn = Some(Turn {
             author,
             backend,
@@ -392,6 +403,7 @@ impl AgentHost {
             saw_text: false,
             usage: Usage::new(picked, groups.clone()),
             groups,
+            images,
         });
     }
 
@@ -416,17 +428,42 @@ impl AgentHost {
         };
         for event in running.events.try_iter() {
             match event {
-                BackendEvent::Session(id) => session::store(
-                    turn.project,
-                    &turn.chat,
-                    turn.backend,
-                    role_of(&turn.author),
-                    Some(&id),
-                ),
+                BackendEvent::Session(id) => {
+                    if let Some(images) = &mut turn.images {
+                        images.set_thread(&id);
+                    }
+                    session::store(
+                        turn.project,
+                        &turn.chat,
+                        turn.backend,
+                        role_of(&turn.author),
+                        Some(&id),
+                    );
+                }
                 BackendEvent::TextDelta(text) => {
                     turn.saw_text = true;
                     if !turn.cancelled {
                         self.events.push(AgentEvent::TextDelta { text });
+                    }
+                }
+                BackendEvent::Tool {
+                    tool,
+                    args,
+                    summary,
+                    ok,
+                } => {
+                    if !turn.cancelled {
+                        self.events.push(AgentEvent::Activity {
+                            entry: ActivityEntry {
+                                at: now(),
+                                tool: tool.into(),
+                                args,
+                                summary,
+                                images: Vec::new(),
+                                excerpts: Vec::new(),
+                                ok,
+                            },
+                        });
                     }
                 }
                 BackendEvent::Finished { error } => {
@@ -456,6 +493,39 @@ impl AgentHost {
                 }
                 Err(e) => turn.finished = Some(Some(e.to_string())),
             }
+        }
+    }
+
+    /// Add the pictures Codex made since the last look to the pool. Here on
+    /// the UI thread, so the tool call after a picture finds it there.
+    fn collect_images(&mut self, bus: &mut CommandBus, services: &Services) {
+        let Some(images) = self
+            .turn
+            .as_mut()
+            .filter(|t| !t.cancelled)
+            .and_then(|t| t.images.as_mut())
+        else {
+            return;
+        };
+        for picture in images.fresh() {
+            let media = services.media.as_deref();
+            let added = tools::generate::add_image(bus, &picture, media);
+            let ok = added.is_ok();
+            let (summary, images) = match added {
+                Ok(path) => ("in the Images Generated bin".to_owned(), vec![path]),
+                Err(e) => (format!("Could not add it to the pool: {e}"), Vec::new()),
+            };
+            self.events.push(AgentEvent::Activity {
+                entry: ActivityEntry {
+                    at: now(),
+                    tool: "generate_image".into(),
+                    args: Value::Null,
+                    summary,
+                    images,
+                    excerpts: Vec::new(),
+                    ok,
+                },
+            });
         }
     }
 
@@ -518,6 +588,7 @@ impl AgentHost {
                     reply.tools(tools::list(bus, self.role, None));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
+                    self.collect_images(bus, services);
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;

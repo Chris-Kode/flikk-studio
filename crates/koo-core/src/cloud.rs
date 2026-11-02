@@ -1083,6 +1083,9 @@ pub trait GenerationService: Send + Sync {
 
 /// Name of the bin generated `item` goes into.
 pub fn generated_bin(item: &MediaItem) -> &'static str {
+    if item.kind == MediaKind::Image {
+        return "Images Generated";
+    }
     match item.generated.as_deref().map(|g| g.capability) {
         Some(Capability::SoundEffects) => "Sound Effects Generated",
         Some(Capability::Voiceover) => "Voiceover Generated",
@@ -1111,6 +1114,23 @@ pub fn media_item(
         tags: Vec::new(),
         proxy: None,
         generated: Some(Box::new(generated.info.clone())),
+        tone_map: Default::default(),
+    }
+}
+
+/// `path`, a picture an agent backend made with its own tool, as an item.
+/// Not in a bin yet; with no provider, it has no [`GenerationInfo`].
+pub fn image_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
+    MediaItem {
+        id: MediaId::new(),
+        kind: MediaKind::Image,
+        fingerprint: media.and_then(|m| m.fingerprint(&path).ok()),
+        info: media.and_then(|m| m.probe(&path).ok()),
+        path,
+        bin: None,
+        tags: Vec::new(),
+        proxy: None,
+        generated: None,
         tone_map: Default::default(),
     }
 }
