@@ -18,6 +18,7 @@ pub mod lettering;
 pub mod otio;
 pub mod preset;
 pub mod queue;
+mod varispeed;
 
 pub use captions::{Cue, export_ass, export_srt};
 pub use fcpxml::export_fcpxml;

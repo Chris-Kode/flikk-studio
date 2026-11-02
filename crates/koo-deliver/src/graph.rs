@@ -713,18 +713,38 @@ impl Builder<'_> {
         let s0 = src.max(0.0);
         // A little extra source so atempo's output never runs short.
         let s1 = s0 + (length - lead).max(0.0) * speed + 0.1 * speed;
-        let mut f = vec![format!(
-            "amovie={}:seek_point={}{}",
-            escape_path(&item.path),
-            num(s0),
-            audio_stream.map(|i| format!(":si={i}")).unwrap_or_default()
-        )];
-        f.push(format!("atrim=start={}:end={}", num(s0), num(s1)));
-        f.push("asetpts=PTS-STARTPTS".into());
-        f.push(format!(
-            "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
-        ));
-        f.extend(atempo(speed));
+        let mut f = if koo_core::sync::varispeed::is_varispeed(speed) {
+            // Drift correction: resampled as the preview does it.
+            let file = work_dir.join(format!("{}.flac", self.label("vary")));
+            crate::varispeed::render(
+                item,
+                *audio_stream,
+                s0,
+                (length - lead).max(0.0),
+                speed,
+                sr,
+                &file,
+            )?;
+            vec![
+                format!("amovie={}", escape_path(&file)),
+                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
+            ]
+        } else {
+            vec![
+                format!(
+                    "amovie={}:seek_point={}{}",
+                    escape_path(&item.path),
+                    num(s0),
+                    audio_stream.map(|i| format!(":si={i}")).unwrap_or_default()
+                ),
+                format!("atrim=start={}:end={}", num(s0), num(s1)),
+                "asetpts=PTS-STARTPTS".into(),
+                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
+            ]
+        };
+        if !koo_core::sync::varispeed::is_varispeed(speed) {
+            f.extend(atempo(speed));
+        }
         let lead_samples = (lead * sr as f64).round() as i64;
         if lead_samples > 0 {
             f.push(format!("adelay=delays={lead_samples}S:all=1"));
