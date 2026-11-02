@@ -12,6 +12,7 @@ mod effects;
 mod generator;
 mod masks;
 mod param;
+mod tone_map;
 mod transition;
 
 pub(crate) use clip::sound_clip;

@@ -187,7 +187,15 @@ impl InspectorPanel {
                         reset_ui.update(cx, |ui, cx| ui.commit_grade(Grade::default(), cx))
                     }),
             );
-        self.grade_controls(ui, title, actions, window, cx)
+        let grade = self.grade_controls(ui, title, actions, window, cx);
+        match self.tone_map_section(&clips, window, cx) {
+            Some(tone_map) => v_flex()
+                .gap_4()
+                .child(tone_map)
+                .child(grade)
+                .into_any_element(),
+            None => grade,
+        }
     }
 
     /// Grade presets from the library to apply to `clips`, and saving
