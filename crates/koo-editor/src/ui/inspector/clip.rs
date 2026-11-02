@@ -424,9 +424,11 @@ impl InspectorPanel {
             _ => {
                 let program = self.generator_view(clip, window, cx);
                 let transform = self.transform_view(clip, false, window, cx);
+                let stabilize = self.stabilize_view(clip, window, cx);
                 v_flex()
                     .gap_4()
                     .children(program)
+                    .children(stabilize)
                     .child(transform)
                     .into_any_element()
             }

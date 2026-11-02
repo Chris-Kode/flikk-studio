@@ -66,6 +66,17 @@ pub fn ready(project: &Project, services: &Services, span: &Span) -> bool {
             .media(*id)
             .is_some_and(|m| m.path.exists() || m.proxy.as_ref().is_some_and(|p| p.exists()))
     });
+    // A stabilized clip draws unstabilized until its camera path is
+    // measured.
+    let measured = services.stabilizer.as_ref().is_none_or(|stabilizer| {
+        span.stabilized.iter().all(|id| {
+            project.timeline.clip(*id).is_some_and(|(_, clip)| {
+                koo_core::stabilize::source(project, clip)
+                    .is_none_or(|(item, _)| stabilizer.path(item).is_some())
+            })
+        })
+    });
+    let online = online && measured;
     let Some(subjects) = &services.subjects else {
         return online;
     };

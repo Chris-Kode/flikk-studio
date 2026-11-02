@@ -796,6 +796,8 @@ pub struct Services {
     pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
     /// Finds and follows the objects subject masks keep.
     pub subjects: Option<Arc<dyn SubjectService>>,
+    /// Measures how the camera moved, for stabilized clips.
+    pub stabilizer: Option<Arc<dyn crate::stabilize::Stabilizer>>,
     /// Makes frames between source frames for smooth slow motion.
     pub interpolation: Option<Arc<dyn InterpolationService>>,
 }
@@ -811,6 +813,7 @@ impl std::fmt::Debug for Services {
             .field("lettering", &self.lettering.is_some())
             .field("generation", &self.generation.is_some())
             .field("subjects", &self.subjects.is_some())
+            .field("stabilizer", &self.stabilizer.is_some())
             .field("interpolation", &self.interpolation.is_some())
             .finish()
     }

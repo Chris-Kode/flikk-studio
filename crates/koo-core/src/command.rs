@@ -426,6 +426,13 @@ pub enum Command {
         bins: Vec<Bin>,
     },
 
+    // ---- stabilization
+    /// Stabilize clips, or with `enabled: false` stop; each video clip
+    /// gets these settings (see [`crate::stabilize`]).
+    SetStabilization {
+        clips: Vec<ClipId>,
+        stabilization: crate::stabilize::Stabilization,
+    },
     // ---- audio: fit music to a length (see [`crate::music_fit`])
     /// Replace a music clip by `segments` of its source back to back from
     /// `at`, an equal-power `crossfade` ending on each join, and `fade_out`
@@ -539,7 +546,8 @@ impl Command {
             | AddZoom { .. }
             | SetKeyframe { .. }
             | RemoveKeyframe { .. }
-            | SetMasks { .. } => ToolCategory::Transform,
+            | SetMasks { .. }
+            | SetStabilization { .. } => ToolCategory::Transform,
             SetCaptionStyle { .. } | AddCaption { .. } | EditCaption { .. } | ApplyTitle { .. } => {
                 ToolCategory::Captions
             }

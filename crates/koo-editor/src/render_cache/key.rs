@@ -54,6 +54,8 @@ impl Globals {
                 .interpolation
                 .as_ref()
                 .is_some_and(|i| i.available().is_ok()) as u8,
+            // Without it, stabilized clips draw as they are.
+            services.stabilizer.is_some() as u8,
         ]);
         h.update(koo_models::Task::Segmentation.model().id.as_bytes());
         hash_json(&mut h, styles);
@@ -71,6 +73,9 @@ pub struct Span {
     /// Subject and person masks shown: their frames wait until every
     /// matte is made.
     pub subjects: Vec<(ClipId, MaskId)>,
+    /// Stabilized clips shown: their frames wait until each camera path is
+    /// measured (until then they draw unstabilized).
+    pub stabilized: Vec<ClipId>,
 }
 
 /// The keyed spans of one project at one size.
@@ -147,6 +152,7 @@ impl Plan {
             let mut h = base.clone();
             let mut media: Vec<MediaId> = Vec::new();
             let mut subjects = Vec::new();
+            let mut stabilized = Vec::new();
             for ((_, track), track_hash) in tracks.iter().zip(&track_hashes) {
                 // Clips are sorted and never overlap, so those shown are
                 // one run.
@@ -188,6 +194,9 @@ impl Plan {
                                 .map(|m| (clip.id, m.id)),
                         );
                     }
+                    if (inside || touching) && koo_core::stabilize::applies(clip) {
+                        stabilized.push(clip.id);
+                    }
                 }
             }
             spans.push(Span {
@@ -195,6 +204,7 @@ impl Plan {
                 hash: *h.finalize().as_bytes(),
                 media,
                 subjects,
+                stabilized,
             });
         }
         Self {

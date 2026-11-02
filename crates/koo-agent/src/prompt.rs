@@ -178,6 +178,9 @@ fit) over computing positions; use `set_transform` for exact values or \
 items that belong together (a logo and its label) move as one: `place` \
 with `clips` aligns and sizes their bounds together, and `set_transform` \
 with `group` moves, scales and turns them about their common centre. \
+Handheld footage that shakes: `get_shake` says how shaky a clip is and \
+how far stabilizing it zooms in; `stabilize` smooths it (or `locked` holds \
+it still). Leave steady clips alone. \
 To put a picture onto a screen or sign in the shot, `place` it with \
 `pin_to` (the four corners' frame pixels): it is drawn in perspective. \
 To show only part of a picture (a face, a window, a vignette), give it a \

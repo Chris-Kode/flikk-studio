@@ -1406,6 +1406,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
     ];
+    tools.extend(super::stabilize::specs());
     // ---- tool groups (see `groups`)
     let index = groups::index(&tools);
     let keys: Vec<&str> = groups::GROUPS.iter().map(|g| groups::key(*g)).collect();

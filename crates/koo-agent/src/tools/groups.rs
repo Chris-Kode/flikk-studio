@@ -99,6 +99,7 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
             ToolCategory::Audio
         }
         "find_voices" => ToolCategory::Generate,
+        "get_shake" => ToolCategory::Transform,
         _ => spec.category?,
     })
 }
@@ -195,6 +196,12 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "smaller",
             "safe area",
             "layout",
+            "stabiliz",
+            "stabilis",
+            "shak",
+            "steady",
+            "handheld",
+            "jitter",
         ],
     ),
     (
