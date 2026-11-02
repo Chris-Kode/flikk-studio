@@ -1284,14 +1284,14 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_video",
             Some(Generate),
-            "Make a video with the provider the user set up (Seedance on fal): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, or after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat). It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Lengths, aspect ratios and resolutions depend on the model the user picked; one it can't make is refused with its limits before anything is spent.",
+            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, or after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat). It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
-                    "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`)"),
+                    "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`), whatever the model; they are renamed for it"),
                     "range": range("The timeline range it is for: sets its length (whole seconds), and where it is proposed"),
                     "duration": number("Whole seconds, when there is no `range`; left out, the model picks"),
-                    "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "Shape (default: the model picks, from the first frame when there is one); match the sequence"),
-                    "resolution": one_of(&["480p", "720p", "1080p"], "Default: the model's (720p)"),
+                    "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21", "2:1", "5:4", "4:5"], "Shape (default: the model picks, from the first frame when there is one); match the sequence"),
+                    "resolution": one_of(&["360p", "480p", "720p", "768p", "1080p", "4k"], "Default: the model's"),
                     "first_frame": string("Media id of a picture in the pool to start on"),
                     "first_frame_at": time("Or start on the program's frame at this time (to continue a shot)"),
                     "last_frame": string("Media id of a picture to end on; needs a first frame"),

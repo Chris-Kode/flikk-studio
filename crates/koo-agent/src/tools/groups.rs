@@ -309,6 +309,10 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "text to video",
             "image to video",
             "seedance",
+            "kling",
+            "minimax",
+            "hailuo",
+            "happy horse",
         ],
     ),
     (

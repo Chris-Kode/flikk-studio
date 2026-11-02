@@ -1,17 +1,18 @@
-//! fal (fal.ai): video, from ByteDance's Seedance models for now. Every
-//! call sends the key as `Authorization: Key <key>`. A video is made on
-//! fal's queue ([`queue`]); what goes in is [`video`]'s, and the files it
-//! follows are uploaded to fal's storage first ([`files`]).
+//! fal (fal.ai): video, from the models in [`models`] (Seedance, Kling,
+//! MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX). Every call
+//! sends the key as `Authorization: Key <key>`. A video is made on fal's
+//! queue ([`queue`]); what goes in is [`video`]'s, and the files it follows
+//! are uploaded to fal's storage first ([`files`]).
 
 mod files;
+mod models;
 mod queue;
 mod video;
 
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use koo_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ReferenceLimits,
-    VideoModel,
+    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -25,8 +26,7 @@ pub static PROVIDER: Provider = Provider {
     key_env: "FAL_KEY",
     offers: &[Offer {
         capability: Capability::Video,
-        // Each id is the start of its endpoints: `<id>/text-to-video`,
-        // `<id>/image-to-video`, `<id>/reference-to-video`.
+        // The ids and order of `models::VIDEO`, the default first.
         models: &[
             CloudModel {
                 id: "bytedance/seedance-2.0",
@@ -40,50 +40,41 @@ pub static PROVIDER: Provider = Provider {
                 id: "bytedance/seedance-2.5",
                 name: "Seedance 2.5",
             },
+            CloudModel {
+                id: "kling/v4",
+                name: "Kling 4.0",
+            },
+            CloudModel {
+                id: "fal-ai/kling-video/o3/pro",
+                name: "Kling O3 Pro",
+            },
+            CloudModel {
+                id: "minimax/h3-max",
+                name: "MiniMax H3 Max",
+            },
+            CloudModel {
+                id: "alibaba/wan-3.0",
+                name: "Wan 3.0",
+            },
+            CloudModel {
+                id: "alibaba/happy-horse/v1.1",
+                name: "Happy Horse 1.1",
+            },
+            CloudModel {
+                id: "google/gemini-omni-flash/v1.1",
+                name: "Gemini Omni Flash 1.1",
+            },
+            CloudModel {
+                id: "blackforestlabs/flux-3-max",
+                name: "FLUX 3 Max",
+            },
+            CloudModel {
+                id: "lightricks/ltx-2.5/pro",
+                name: "LTX 2.5 Pro",
+            },
         ],
     }],
     api: &Fal,
-};
-
-const ASPECTS: &[&str] = &["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
-
-const SEEDANCE_2: VideoModel = VideoModel {
-    name: "Seedance 2.0",
-    seconds: (4, 15),
-    aspects: ASPECTS,
-    resolutions: &["720p", "480p"],
-    frame_sets_aspect: false,
-    last_frame: true,
-    references: Some(ReferenceLimits {
-        images: 9,
-        videos: 3,
-        sounds: 3,
-        files: 12,
-        seconds: 15.0,
-    }),
-    audio: true,
-};
-
-const SEEDANCE_2_FAST: VideoModel = VideoModel {
-    name: "Seedance 2.0 Fast",
-    ..SEEDANCE_2
-};
-
-const SEEDANCE_2_5: VideoModel = VideoModel {
-    name: "Seedance 2.5",
-    seconds: (4, 30),
-    aspects: ASPECTS,
-    resolutions: &["720p", "1080p", "480p"],
-    frame_sets_aspect: true,
-    last_frame: true,
-    references: Some(ReferenceLimits {
-        images: 30,
-        videos: 10,
-        sounds: 10,
-        files: 50,
-        seconds: 30.0,
-    }),
-    audio: true,
 };
 
 pub struct Fal;
@@ -124,19 +115,13 @@ impl Api for Fal {
         stem: &Path,
         task: &GenerationTask,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
-        let spec = self
-            .video_model(model)
+        let model = models::find(model)
             .ok_or_else(|| CloudError::Unavailable(format!("{NAME} has no model {model}")))?;
-        video::run(key, model, spec, request, stem, task)
+        video::run(key, model, request, stem, task)
     }
 
     fn video_model(&self, model: &str) -> Option<&'static VideoModel> {
-        match model {
-            "bytedance/seedance-2.0" => Some(&SEEDANCE_2),
-            "bytedance/seedance-2.0/fast" => Some(&SEEDANCE_2_FAST),
-            "bytedance/seedance-2.5" => Some(&SEEDANCE_2_5),
-            _ => None,
-        }
+        models::find(model).map(|m| &m.spec)
     }
 }
 

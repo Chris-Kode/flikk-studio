@@ -685,14 +685,20 @@ not retried with Whisper.
   with the media id; allowed, it runs as a tool job and answers the same. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
 * **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
-  with the provider picked for video (Seedance 2.0, 2.0 Fast or 2.5 on
-  fal): from the prompt alone, from a first frame (a picture in the pool,
+  with the provider and model picked for video (on fal: Seedance 2.0, 2.0
+  Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse
+  1.1, Gemini Omni Flash 1.1, FLUX 3 Max, LTX 2.5 Pro): from the prompt alone, from a first frame (a picture in the pool,
   or the program at a time, grabbed with `compose::program` into
   `paths::cache()/frames` just before) to an optional last one, or after
   references (pictures, clips and sounds in the pool, which the prompt names
   `@Image1`, `@Video1`, `@Audio1`). Each model's `cloud::VideoModel` (its
   lengths, shapes, resolutions and reference limits) refuses what it can't
-  make before anything is spent. fal runs it on its queue
+  make before anything is spent. Models name their endpoints and fields
+  differently (`duration` as text or a number, `image_url` or
+  `start_image_url`, a word for "the model picks the shape"), so each is
+  an entry in `fal/models.rs` saying how it takes a request; references
+  named `@Image1` are renamed to what the model reads (`Image 1`,
+  `character1`, `<IMAGE_REF_0>`). fal runs it on its queue
   (`fal/queue.rs`), uploading the files it follows to fal's storage first;
   `cloud::GenerationTask` carries where it is (queued, running, coming
   down) to the media pool's row, which can stop it until it is made. It

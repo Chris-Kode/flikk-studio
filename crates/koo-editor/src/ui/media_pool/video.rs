@@ -84,7 +84,7 @@ impl VideoForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (min, max) = model.seconds;
+        let (min, max) = (model.shortest(), model.longest());
         let editor = state.read(cx);
         let in_out = editor
             .in_out
@@ -234,10 +234,9 @@ impl VideoForm {
         };
         let aspect = Self::picked(&self.aspect, cx);
         let resolution = Self::picked(&self.resolution, cx);
-        let seconds = self.length.read(cx).value().start().round();
         let request = GenerateRequest::Video {
             prompt,
-            length: Some(Time::from_secs_f64(seconds as f64)),
+            length: Some(Time::from_secs_f64(self.seconds(cx) as f64)),
             aspect: (aspect != AUTO && !aspect.is_empty()).then_some(aspect),
             resolution: (!resolution.is_empty()).then_some(resolution),
             first_frame,
@@ -246,6 +245,12 @@ impl VideoForm {
             audio: self.model.audio && self.audio,
         };
         Some((request, grabs))
+    }
+
+    /// The length the slider is at, as the model makes it.
+    fn seconds(&self, cx: &App) -> u32 {
+        let at = self.length.read(cx).value().start() as f64;
+        self.model.nearest_length(at)
     }
 
     /// Why the model can't make what the form asks, when it can't.
@@ -392,7 +397,7 @@ impl VideoForm {
 impl Render for VideoForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let seconds = self.length.read(cx).value().start();
+        let seconds = self.seconds(cx);
         let starts = self.starts(cx);
         let row = |name: &'static str, picker: &Picker| {
             h_flex().justify_between().text_sm().child(name).child(
@@ -420,7 +425,7 @@ impl Render for VideoForm {
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child(format!("{seconds:.0} s")),
+                                .child(format!("{seconds} s")),
                         ),
                     )
                     .child(Slider::new(&self.length)),
@@ -428,7 +433,9 @@ impl Render for VideoForm {
             .when(!(starts && self.model.frame_sets_aspect), |el| {
                 el.child(row("Aspect ratio", &self.aspect))
             })
-            .child(row("Resolution", &self.resolution))
+            .when(!self.model.resolutions.is_empty(), |el| {
+                el.child(row("Resolution", &self.resolution))
+            })
             .when(self.model.audio, |el| {
                 el.child(
                     h_flex().justify_between().text_sm().child("Sound").child(

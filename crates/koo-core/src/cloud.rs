@@ -286,11 +286,12 @@ pub enum VideoMode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoModel {
     pub name: &'static str,
-    /// Whole seconds, shortest and longest.
-    pub seconds: (u32, u32),
+    /// The whole seconds it makes, shortest first.
+    pub lengths: &'static [u32],
     /// Aspect ratios it takes, "16:9"…
     pub aspects: &'static [&'static str],
-    /// Its resolutions, the default first.
+    /// Its resolutions in lower case ("720p", "4k"), the default first;
+    /// none when it has no choice.
     pub resolutions: &'static [&'static str],
     /// A first frame sets the shape; an aspect ratio is ignored with one.
     pub frame_sets_aspect: bool,
@@ -316,6 +317,40 @@ pub struct ReferenceLimits {
 }
 
 impl VideoModel {
+    pub fn shortest(&self) -> u32 {
+        self.lengths.first().copied().unwrap_or(1)
+    }
+
+    pub fn longest(&self) -> u32 {
+        self.lengths.last().copied().unwrap_or(1)
+    }
+
+    /// The length it makes nearest `secs`.
+    pub fn nearest_length(&self, secs: f64) -> u32 {
+        self.lengths
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                (*a as f64 - secs)
+                    .abs()
+                    .total_cmp(&(*b as f64 - secs).abs())
+            })
+            .unwrap_or(1)
+    }
+
+    /// "4 to 15 s", or "6, 8 or 10 s".
+    fn lengths_text(&self) -> String {
+        let (first, last) = (self.shortest(), self.longest());
+        if self.lengths.len() as u32 == last - first + 1 {
+            return format!("{first} to {last} s");
+        }
+        let names: Vec<String> = self.lengths.iter().map(u32::to_string).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last} s", rest.join(", ")),
+            _ => format!("{} s", names.join("")),
+        }
+    }
+
     /// Why it can't make `request`, before any money is spent on it.
     pub fn check(&self, request: &GenerateRequest) -> CloudResult<()> {
         let GenerateRequest::Video {
@@ -338,10 +373,9 @@ impl VideoModel {
         };
         let name = self.name;
         if let Some(length) = length {
-            let (min, max) = self.seconds;
             let secs = length.as_secs_f64().round();
-            if secs < min as f64 || secs > max as f64 {
-                return refuse(format!("{name} makes {min} to {max} s of video"));
+            if !self.lengths.iter().any(|l| *l as f64 == secs) {
+                return refuse(format!("{name} makes {} of video", self.lengths_text()));
             }
         }
         if let Some(aspect) = aspect
@@ -354,12 +388,19 @@ impl VideoModel {
             ));
         }
         if let Some(resolution) = resolution
-            && !self.resolutions.contains(&resolution.as_str())
+            && !self
+                .resolutions
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(resolution))
         {
-            return refuse(format!(
-                "{name} makes {} video, not {resolution}",
-                self.resolutions.join(" or ")
-            ));
+            return refuse(if self.resolutions.is_empty() {
+                format!("{name} has no choice of resolution")
+            } else {
+                format!(
+                    "{name} makes {} video, not {resolution}",
+                    self.resolutions.join(" or ")
+                )
+            });
         }
         if last_frame.is_some() && first_frame.is_none() {
             return refuse("A last frame needs a first frame".into());
@@ -384,6 +425,9 @@ impl VideoModel {
         ];
         for (kind, most, what) in counts {
             let n = of(kind).count();
+            if n > 0 && most == 0 {
+                return refuse(format!("{name} doesn't follow {what}"));
+            }
             if n > most {
                 return refuse(format!(
                     "{name} follows at most {most} {what}; this has {n}"
