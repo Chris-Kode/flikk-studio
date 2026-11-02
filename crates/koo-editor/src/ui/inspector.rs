@@ -12,6 +12,7 @@ mod effects;
 mod generator;
 mod masks;
 mod param;
+mod speed;
 mod transition;
 
 pub(crate) use clip::sound_clip;
@@ -131,6 +132,7 @@ impl InspectorPanel {
             peak_target,
             picture_tab: match crate::demo::fx_view().as_deref() {
                 Some("effects") => PictureTab::Effects,
+                _ if crate::demo::speed::enabled() => PictureTab::Speed,
                 _ => PictureTab::default(),
             },
             text,

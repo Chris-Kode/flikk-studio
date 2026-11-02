@@ -38,6 +38,8 @@ const MODELS_NOTICE: &str = "models-missing";
 const SUBJECTS_POLL: Duration = Duration::from_millis(250);
 /// Key of the notice that subject masks need their model.
 const SUBJECTS_NOTICE: &str = "subjects-model";
+/// Key of the notice that optical flow needs its model.
+const FLOW_NOTICE: &str = "optical-flow-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
@@ -1325,6 +1327,24 @@ impl EditorState {
             cx.notify();
         }
         ready.is_ok()
+    }
+
+    /// When optical flow is picked without its model: a notice that leads
+    /// to Settings → Models (slowed frames are blended meanwhile).
+    pub fn optical_flow_picked(&mut self, cx: &mut Context<Self>) {
+        let Some(Err(e)) = self.services.interpolation.as_ref().map(|s| s.available()) else {
+            return;
+        };
+        self.notices.clear(FLOW_NOTICE);
+        self.notices.set(Notice {
+            key: FLOW_NOTICE.into(),
+            level: Level::Warning,
+            title: "Optical flow needs its model".into(),
+            items: Vec::new(),
+            detail: Some(e),
+            action: Some(NoticeAction::OpenModels),
+        });
+        cx.notify();
     }
 
     /// Mattes were made: draw again.
