@@ -23,6 +23,7 @@ use koo_core::audiofx::stretch::Stretch;
 use koo_core::audiofx::{self, Ramp};
 use koo_core::model::{Clip, ClipContent, MediaItem, Project, Property, TrackKind};
 use koo_core::services::{MediaService, PcmStream};
+use koo_core::speed::RampAudio;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange, TrackId};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -218,6 +219,30 @@ impl Voice {
     }
 }
 
+/// Where a ramped clip's source is when its stretch, starting at timeline
+/// time `from`, has made output frame `o`: input frames from there.
+fn ramp_stretch(clip: &Clip, from: Time, rate: u32) -> Stretch {
+    let clip = clip.clone();
+    let s0 = clip.to_source(from).unwrap_or(Time::ZERO).max(Time::ZERO);
+    let rate = rate as f64;
+    Stretch::mapped(
+        rate as u32,
+        Box::new(move |o| {
+            let t = from + Time::from_secs_f64(o / rate);
+            let s = clip.to_source(t).unwrap_or(s0);
+            (s - s0).as_secs_f64() * rate
+        }),
+    )
+}
+
+/// The source time at a media clip's start.
+fn clip_in(clip: &Clip) -> Time {
+    match &clip.content {
+        ClipContent::Media { source_in, .. } => *source_in,
+        _ => Time::ZERO,
+    }
+}
+
 /// One audio track: its spans, mix settings, effects and meter.
 struct Bus {
     id: TrackId,
@@ -353,13 +378,17 @@ impl Mixer {
     /// Open the voice for `source` at timeline time `at`.
     fn open(&self, source: &Source, at: Time) -> Option<Voice> {
         let clip = &source.clip;
+        if clip.is_ramped() && clip.retime.audio == RampAudio::Mute {
+            return None;
+        }
         let source_t = clip.to_source(at)?;
         // Handles before the media's first sample play as silence.
-        let lead = if source_t < Time::ZERO {
-            ((-source_t).as_secs_f64() / clip.speed * self.rate as f64).round() as usize
+        let lead_t = if source_t < Time::ZERO {
+            (clip.start + clip.timeline_offset(-clip_in(clip)) - at).max(Time::ZERO)
         } else {
-            0
+            Time::ZERO
         };
+        let lead = (lead_t.as_secs_f64() * self.rate as f64).round() as usize;
         let stream = self
             .media
             .audio(
@@ -372,7 +401,11 @@ impl Mixer {
         let chain = Chain::new(&clip.audio.effects, self.rate);
         Some(Voice {
             stream,
-            stretch: ((clip.speed - 1.).abs() > 1e-6).then(|| Stretch::new(clip.speed, self.rate)),
+            stretch: if clip.is_ramped() {
+                Some(ramp_stretch(clip, at + lead_t, self.rate))
+            } else {
+                ((clip.speed - 1.).abs() > 1e-6).then(|| Stretch::new(clip.speed, self.rate))
+            },
             discard: chain.latency(),
             chain,
             lead,

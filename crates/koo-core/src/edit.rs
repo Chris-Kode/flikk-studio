@@ -11,6 +11,7 @@ use crate::ids::*;
 use crate::model::*;
 use crate::ops::apply_all;
 use crate::ops::{Op, TrackProps};
+use crate::speed::{MAX_SPEED, MIN_SPEED, SpeedKey};
 use crate::time::{FLICKS_PER_SECOND, Time, TimeRange};
 use std::collections::HashMap;
 
@@ -332,6 +333,30 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             speed,
             ripple,
         } => set_speed(project, *clip, *speed, *ripple),
+        Command::SetSpeedRamp {
+            clip,
+            points,
+            keep_length,
+            ripple,
+        } => set_speed_ramp(project, *clip, points, *keep_length, *ripple),
+        Command::SetRetime {
+            clip,
+            interpolation,
+            audio,
+        } => {
+            let (_, c) = find_clip(tl, *clip)?;
+            if c.media().is_none() {
+                return Err(CoreError::Invalid("only media clips are retimed".into()));
+            }
+            update_clip(tl, *clip, |c| {
+                if let Some(i) = interpolation {
+                    c.retime.interpolation = *i;
+                }
+                if let Some(a) = audio {
+                    c.retime.audio = *a;
+                }
+            })
+        }
         Command::SetClipsEnabled { clips, enabled } => {
             update_clips(tl, clips, |c| c.enabled = *enabled)
         }
@@ -1155,6 +1180,14 @@ fn set_speed(project: &Project, id: ClipId, speed: f64, ripple: bool) -> Result<
     let mut c = clip.clone();
     c.speed = speed;
     c.duration = duration;
+    // A ramp keeps its shape at the new pace.
+    for k in &mut c.retime.keys {
+        k.at = k.at.scale(ratio);
+        k.speed = (k.speed * speed / clip.speed).clamp(MIN_SPEED, MAX_SPEED);
+    }
+    if c.is_ramped() {
+        c.settle_ramp();
+    }
     for k in &mut c.keyframes {
         k.at = k.at.scale(ratio);
     }
@@ -1168,6 +1201,92 @@ fn set_speed(project: &Project, id: ClipId, speed: f64, ripple: bool) -> Result<
     c.audio.fade_out = c.audio.fade_out.min(duration);
     let shift = if ripple {
         duration - clip.duration
+    } else {
+        Time::ZERO
+    };
+    let mut clips: Vec<Clip> = track.clips[..ix].to_vec();
+    clips.push(c);
+    clips.extend(track.clips[ix + 1..].iter().map(|c| Clip {
+        start: c.start + shift,
+        ..c.clone()
+    }));
+    Ok(ops(diff_track(track, clips)))
+}
+
+/// Give a media clip a speed ramp (see [`Command::SetSpeedRamp`]). The
+/// source it plays stays; keyframes stretch with its length.
+fn set_speed_ramp(
+    project: &Project,
+    id: ClipId,
+    points: &[[f64; 2]],
+    keep_length: bool,
+    ripple: bool,
+) -> Result<Plan> {
+    let tl = &project.timeline;
+    let (track, clip) = find_clip(tl, id)?;
+    editable_track(tl, track.id)?;
+    if clip.media().is_none() {
+        return Err(CoreError::Invalid("only media clips change speed".into()));
+    }
+    let mut points = crate::speed::clean_points(points).map_err(CoreError::Invalid)?;
+    let source = clip.source_length().as_secs_f64();
+    let duration = clip.duration.as_secs_f64().max(1e-9);
+    let flat = points.windows(2).all(|w| (w[0][1] - w[1][1]).abs() < 1e-9);
+    let mut c = clip.clone();
+    let length = if points.len() < 2 || flat {
+        // One speed again: the one given, else what the clip averages.
+        c.retime.keys.clear();
+        c.speed = match points.first() {
+            Some(p) if !keep_length => p[1],
+            _ => clip.speed,
+        };
+        Time::from_secs_f64(source / c.speed)
+    } else {
+        let mut m = crate::speed::shape_mean(&points);
+        if keep_length {
+            let scale = (source / duration) / m;
+            for p in &mut points {
+                p[1] = (p[1] * scale).clamp(MIN_SPEED, MAX_SPEED);
+            }
+            m = crate::speed::shape_mean(&points);
+        }
+        let length = Time::from_secs_f64(source / m.max(MIN_SPEED));
+        c.retime.keys = points
+            .iter()
+            .map(|[u, s]| SpeedKey {
+                at: length.scale(*u),
+                speed: *s,
+            })
+            .collect();
+        length
+    };
+    let length = length.max(min_len(tl));
+    let ratio = length.as_secs_f64() / duration;
+    for k in &mut c.keyframes {
+        k.at = k.at.scale(ratio);
+    }
+    for e in &mut c.effects {
+        e.scale_keyframes(ratio);
+    }
+    for m in &mut c.masks {
+        m.scale_keyframes(ratio);
+    }
+    let ix = clip_index(track, id);
+    let mut end = length;
+    if !ripple && let Some(next) = track.clips.get(ix + 1) {
+        end = end.min(next.start - clip.start);
+    }
+    c.duration = length;
+    let mut c = if end < length {
+        with_duration(&c, end)
+    } else {
+        c
+    };
+    c.settle_ramp();
+    c.audio.fade_in = c.audio.fade_in.min(c.duration);
+    c.audio.fade_out = c.audio.fade_out.min(c.duration);
+    let shift = if ripple {
+        c.duration - clip.duration
     } else {
         Time::ZERO
     };
@@ -1473,7 +1592,7 @@ pub fn media_duration(project: &Project, id: MediaId) -> Option<Time> {
 fn room_before(clip: &Clip) -> Option<Time> {
     match &clip.content {
         ClipContent::Media { source_in, .. } => {
-            Some((*source_in).max(Time::ZERO).scale(1.0 / clip.speed))
+            Some(-clip.timeline_offset(-(*source_in).max(Time::ZERO)))
         }
         _ => None,
     }
@@ -1489,9 +1608,8 @@ fn room_after(project: &Project, clip: &Clip) -> Option<Time> {
         return None;
     };
     media_duration(project, *media).map(|d| {
-        (d - *source_in - clip.duration.scale(clip.speed))
-            .max(Time::ZERO)
-            .scale(1.0 / clip.speed)
+        let left = (d - *source_in - clip.source_length()).max(Time::ZERO);
+        (clip.timeline_offset(clip.source_length() + left) - clip.duration).max(Time::ZERO)
     })
 }
 
@@ -1561,6 +1679,9 @@ pub fn with_duration(clip: &Clip, duration: Time) -> Clip {
         for m in &mut c.masks {
             m.keep_until(duration);
         }
+    }
+    if c.is_ramped() {
+        c.settle_ramp();
     }
     c.audio.fade_in = c.audio.fade_in.min(duration);
     c.audio.fade_out = c.audio.fade_out.min(duration);
@@ -1710,7 +1831,7 @@ fn segments(clips: &[Clip], range: TimeRange) -> Vec<Segment<'_>> {
             } => SegmentKey::Media {
                 media: *media,
                 stream: *audio_stream,
-                offset: *source_in - (c.start - range.start).scale(c.speed),
+                offset: *source_in - c.source_offset(c.start - range.start),
                 speed: c.speed.to_bits(),
             },
             other => SegmentKey::Other(other),
@@ -1774,7 +1895,9 @@ pub fn trim_start(clip: &Clip, at: Time) -> Clip {
     c.start = at;
     c.duration = clip.duration - offset;
     match &mut c.content {
-        ClipContent::Media { source_in, .. } => *source_in = *source_in + offset.scale(clip.speed),
+        ClipContent::Media { source_in, .. } => {
+            *source_in = *source_in + clip.source_offset(offset)
+        }
         ClipContent::Generator { fx } => fx.shift_keyframes(-offset),
         ClipContent::Caption { words, .. } => {
             for w in words {
@@ -1804,6 +1927,16 @@ pub fn trim_start(clip: &Clip, at: Time) -> Clip {
             })
             .collect()
     };
+    if clip.is_ramped() {
+        c.retime.keys = if offset > Time::ZERO {
+            crate::speed::slice(&clip.retime.keys, offset, clip.duration)
+        } else {
+            let mut keys = clip.retime.keys.clone();
+            keys.iter_mut().for_each(|k| k.at = k.at - offset);
+            keys
+        };
+        c.settle_ramp();
+    }
     c.audio.fade_in = c.audio.fade_in.min(c.duration);
     c.audio.fade_out = c.audio.fade_out.min(c.duration);
     c

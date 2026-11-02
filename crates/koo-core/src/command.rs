@@ -425,6 +425,31 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- speed ramps
+    /// Make a media clip's speed change over it: `points` are (position
+    /// 0..1 over the clip, speed), straight between them; fewer than two
+    /// (or all one speed) play it at one speed again. The clip plays the
+    /// same source, so its length follows the ramp, unless `keep_length`,
+    /// which scales the speeds to fit. Without ripple the clip stops at the
+    /// next clip. See [`crate::speed`].
+    SetSpeedRamp {
+        clip: ClipId,
+        points: Vec<[f64; 2]>,
+        #[serde(default)]
+        keep_length: bool,
+        #[serde(default)]
+        ripple: bool,
+    },
+    /// How a media clip shows the moments between source frames, and what
+    /// its audio does under a ramp; `None` leaves it as it is.
+    SetRetime {
+        clip: ClipId,
+        #[serde(default)]
+        interpolation: Option<crate::speed::Interpolation>,
+        #[serde(default)]
+        audio: Option<crate::speed::RampAudio>,
+    },
 }
 
 impl Command {
@@ -491,6 +516,8 @@ impl Command {
             | SetTrackLocked { .. }
             | PlaceClips { .. }
             | SetSpeed { .. }
+            | SetSpeedRamp { .. }
+            | SetRetime { .. }
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. }

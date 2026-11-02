@@ -27,6 +27,8 @@ segment = ["dep:ort", "dep:serde_json"]
 # with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
 # only.
 mlx = ["dep:mlx-rs"]
+# Frames between frames for smooth slow motion (RIFE), run by ONNX Runtime.
+interpolate = ["dep:ort"]
 
 [dependencies]
 anyhow.workspace = true

@@ -10,11 +10,13 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
 use koo_core::model::{MediaItem, Project};
 use koo_core::services::{Frame, Services};
+use koo_core::speed::Waiting;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Make every matte the subject masks over `range` show (tracking them
@@ -106,6 +108,10 @@ impl<'a> Frames<'a> {
             project,
             services: Services {
                 lettering: None,
+                // Every frame between source frames is made, not blended.
+                interpolation: services.interpolation.clone().map(|s| {
+                    Arc::new(Waiting(s)) as Arc<dyn koo_core::services::InterpolationService>
+                }),
                 ..services.clone()
             },
             spec,

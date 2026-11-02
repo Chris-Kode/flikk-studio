@@ -1220,6 +1220,8 @@ fn services(cloud: &Arc<koo_cloud::Cloud>) -> Services {
         fx,
         html,
         subjects,
+        interpolation: Some(Arc::new(koo_analysis::LocalInterpolation::new())
+            as Arc<dyn koo_core::services::InterpolationService>),
         // Made with the caption styles, see `EditorState::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn koo_core::cloud::GenerationService>),
@@ -1327,7 +1329,12 @@ impl EditorState {
 
     /// Mattes were made: draw again.
     fn poll_subjects(&mut self, cx: &mut Context<Self>) {
-        let version = self.services.subjects.as_ref().map_or(0, |s| s.version());
+        let version = self.services.subjects.as_ref().map_or(0, |s| s.version())
+            + self
+                .services
+                .interpolation
+                .as_ref()
+                .map_or(0, |s| s.version());
         if version != self.subjects_version {
             self.subjects_version = version;
             cx.notify();
