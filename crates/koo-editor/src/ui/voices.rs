@@ -42,6 +42,12 @@ pub enum Start {
     Describe {
         description: String,
     },
+    /// The agent's `design`, named `name`, already designing: the user
+    /// hears the takes and keeps one.
+    Design {
+        design: VoiceDesign,
+        name: String,
+    },
     /// Clone from `files`, named `name`.
     Clone {
         files: Vec<PathBuf>,
@@ -250,6 +256,17 @@ impl VoicesDialog {
                 this.page = Page::Describe;
                 this.description
                     .update(cx, |d, cx| d.set_value(description, window, cx));
+            }
+            Start::Design { design, name } => {
+                this.page = Page::Describe;
+                this.name.update(cx, |n, cx| n.set_value(name, window, cx));
+                this.description
+                    .update(cx, |d, cx| d.set_value(design.description, window, cx));
+                if let Some(text) = design.text {
+                    this.sample_text
+                        .update(cx, |t, cx| t.set_value(text, window, cx));
+                }
+                cx.defer_in(window, |this, window, cx| this.design(window, cx));
             }
             Start::Clone { files, name } => {
                 this.page = Page::Clone;

@@ -2,11 +2,15 @@
 //! change; keeping a voice in the user's library once it is made, added or
 //! used, so it is listed and heard without a request; renaming and deleting
 //! it on the account and in the library; and the recording of one speaker
-//! that a clone or a search for similar voices hears.
+//! that a clone or a search for similar voices hears; the sample an
+//! approval card plays before the user decides.
 
-use super::EditorState;
+use super::{ApprovalOutcome, EditorState};
 use gpui_kit::*;
-use koo_core::cloud::{GenerationService, Reading, Voice, VoiceOrigin};
+use koo_agent::tools::ApprovalRequest;
+use koo_core::cloud::{
+    self, CloudError, GenerateRequest, GenerationService, Reading, Voice, VoiceOrigin,
+};
 use koo_core::library::{self, SavedVoice};
 use koo_core::model::{MediaItem, Project};
 use koo_core::query::TimelineWord;
@@ -40,7 +44,118 @@ impl AccountVoices {
     }
 }
 
+/// How a voice can be heard.
+pub enum VoiceSample {
+    Here(MediaItem),
+    Fetching,
+    /// Fetched on asking.
+    Remote(Voice),
+}
+
+/// The voice approval `request` adds or reads with, and where it can be
+/// heard when the agent listed it.
+pub fn approval_voice(request: &ApprovalRequest) -> Option<(String, Option<String>)> {
+    let voice = match request.tool.as_str() {
+        "add_voice" => request.args.get("voice")?.as_str()?.to_owned(),
+        "generate_audio" => match koo_agent::tools::generate::from_json(&request.args)?.0 {
+            GenerateRequest::Voiceover { reading, .. } => reading.voice,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let url = request
+        .args
+        .get("sample")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Some((voice, url))
+}
+
 impl EditorState {
+    /// How `voice` can be heard: its sample in the library or fetched
+    /// already, on its way, or where to fetch it from (`url`, else the
+    /// account's list); `None` when it can't.
+    pub fn voice_sample(&self, voice: &str, url: Option<&str>) -> Option<VoiceSample> {
+        if let Some(provider) = self.voice_provider()
+            && let Some(item) = self
+                .library
+                .voice_of(&provider, voice)
+                .and_then(SavedVoice::sample_item)
+        {
+            return Some(VoiceSample::Here(item));
+        }
+        match self.heard_voices.get(voice) {
+            Some(Some(item)) => return Some(VoiceSample::Here(item.clone())),
+            Some(None) => return Some(VoiceSample::Fetching),
+            None => {}
+        }
+        let listed = self
+            .account_voices
+            .voices
+            .iter()
+            .flatten()
+            .find(|v| v.id == voice);
+        let sample = url
+            .map(str::to_owned)
+            .or_else(|| listed.and_then(|v| v.sample.clone()))?;
+        Some(VoiceSample::Remote(Voice {
+            id: voice.to_owned(),
+            name: listed.map_or_else(|| voice.to_owned(), |v| v.name.clone()),
+            sample: Some(sample),
+            ..Voice::default()
+        }))
+    }
+
+    /// Fetch the sample of `voice`, off the UI thread, then play it.
+    pub fn hear_voice(&mut self, voice: Voice, cx: &mut Context<Self>) {
+        let Some(generation) = self.generation() else {
+            return;
+        };
+        let media = self.services.media.clone();
+        let id = voice.id.clone();
+        self.heard_voices.insert(id.clone(), None);
+        let fetch = cx.background_executor().spawn(async move {
+            let path = generation.voice_sample(&voice)?;
+            Ok::<_, CloudError>(cloud::sample_item(path, media.as_deref()))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(item) => {
+                        this.toggle_source(&item, cx);
+                        this.heard_voices.insert(id, Some(item));
+                    }
+                    Err(e) => {
+                        this.heard_voices.remove(&id);
+                        this.status = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The user kept `voice` in the Voices dialog that approving design
+    /// request `id` opened: tell the agent which.
+    pub fn settle_design(&mut self, id: u64, voice: &Voice, cx: &mut Context<Self>) {
+        let Some(pending) = self.agent.resolve_approval(id) else {
+            return;
+        };
+        self.agent.report_outcome(
+            id,
+            format!(
+                "approved: {}; the user heard the takes and kept voice {} (“{}”); read with it in generate_audio",
+                pending.request.summary, voice.id, voice.name
+            ),
+        );
+        self.settled
+            .push((pending, ApprovalOutcome::Done(voice.name.clone())));
+        cx.notify();
+    }
+
     pub fn generation(&self) -> Option<Arc<dyn GenerationService>> {
         self.services.generation.clone()
     }

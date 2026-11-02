@@ -724,7 +724,13 @@ not retried with Whisper.
   library first, with how each reads, or searches the Voice Library with
   `library` and filters; `add_voice` and `design_voice` (Generate media,
   so approved unless allowed) add or design one and keep it in the library.
-  Cloning is not a tool: it needs the speaker's consent, so the prompt
+  Their approval cards are heard first: `find_voices` remembers where each
+  voice listed can be heard and the request carries it, so the card of an
+  `add_voice` or a voiceover plays the voice's sample (the library's copy
+  when it has one). Approving a design opens the Voices dialog on the
+  agent's description, designing; the user hears the takes and keeps one
+  (or any other voice), which settles the request, and closing the dialog
+  leaves it waiting. Cloning is not a tool: it needs the speaker's consent, so the prompt
   sends the user to the dialog.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
