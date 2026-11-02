@@ -5,7 +5,7 @@
 //! (`GET /catalog/apis/{api_id}?expand=inputs`) gives it. The provider's
 //! catalog lists the same ids, in the same order, the default first.
 
-use koo_core::cloud::{ReferenceLimits, VideoModel};
+use koo_core::cloud::{ReferenceLimits, VideoModel, VideoSound};
 
 /// One model: what it can make, and how to ask for it.
 pub struct PikaVideo {
@@ -149,7 +149,7 @@ const SEEDANCE_2: VideoModel = VideoModel {
         files: 12,
         seconds: 15.0,
     }),
-    audio: true,
+    audio: VideoSound::Switch,
 };
 
 /// Seedance 2.0, 2.0 Fast, 2.0 Mini or 2.5, at these endpoints.
@@ -188,7 +188,7 @@ const HAPPY_HORSE: VideoModel = VideoModel {
         files: 9,
         seconds: 0.0,
     }),
-    audio: false,
+    audio: VideoSound::None,
 };
 
 const fn happy_horse(text: &'static str, image: &'static str, reference: &'static str) -> Family {
@@ -226,7 +226,7 @@ const WAN_3: VideoModel = VideoModel {
         files: 20,
         seconds: 30.0,
     }),
-    audio: true,
+    audio: VideoSound::Switch,
 };
 
 const fn wan_3(text: &'static str, image: &'static str, reference: &'static str) -> Family {
@@ -270,7 +270,7 @@ pub const VIDEO: &[PikaVideo] = &[
                 files: 12,
                 seconds: 15.0,
             }),
-            audio: true,
+            audio: VideoSound::Always,
         },
         family: Family::H3,
     },
@@ -284,7 +284,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: true,
             last_frame: true,
             references: None,
-            audio: false,
+            audio: VideoSound::None,
         },
         family: Family::V25,
     },
@@ -355,7 +355,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: true,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Always,
         },
         family: Family::Hosted(Hosted {
             text: "kling/kling-4.0/text-to-video",
@@ -381,7 +381,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: true,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Switch,
         },
         family: Family::Hosted(Hosted {
             text: "kling/kling-3.0/text-to-video",
@@ -407,7 +407,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: true,
             last_frame: false,
             references: None,
-            audio: true,
+            audio: VideoSound::Always,
         },
         family: Family::Hosted(Hosted {
             text: "kling/kling-3.0-turbo/text-to-video",
@@ -439,7 +439,7 @@ pub const VIDEO: &[PikaVideo] = &[
                 files: 12,
                 seconds: 15.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         family: Family::Hosted(Hosted {
             text: "minimax/h3/text-to-video",
@@ -468,7 +468,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: true,
             last_frame: false,
             references: None,
-            audio: false,
+            audio: VideoSound::None,
         },
         family: Family::Hosted(Hosted {
             text: "minimax/hailuo-2.3/text-to-video",
@@ -543,7 +543,7 @@ pub const VIDEO: &[PikaVideo] = &[
                 files: 6,
                 seconds: 0.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         family: Family::Hosted(Hosted {
             text: "google/gemini-omni-flash/text-to-video",
@@ -572,7 +572,7 @@ pub const VIDEO: &[PikaVideo] = &[
             frame_sets_aspect: false,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Switch,
         },
         family: Family::Hosted(Hosted {
             text: "black-forest-labs/flux-3-video/text-to-video",
@@ -604,7 +604,7 @@ pub const VIDEO: &[PikaVideo] = &[
                 files: 3,
                 seconds: 0.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         family: Family::Hosted(Hosted {
             text: "x-ai/grok-imagine-video/text-to-video",

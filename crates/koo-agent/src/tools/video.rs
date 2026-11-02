@@ -151,7 +151,11 @@ pub fn parse(
         first_frame,
         last_frame,
         references,
-        audio: sound && args.opt_bool("audio")?.unwrap_or(true),
+        // As the model will make it: some always have sound, some never.
+        audio: {
+            let wanted = sound && args.opt_bool("audio")?.unwrap_or(true);
+            model.map_or(wanted, |m| m.makes_sound(wanted))
+        },
     };
     if let Some(model) = model {
         model

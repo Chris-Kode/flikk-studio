@@ -22,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_agent::tools::video::FrameGrab;
-use koo_core::cloud::{Capability, GenerateRequest, VideoModel, VideoReference};
+use koo_core::cloud::{Capability, GenerateRequest, VideoModel, VideoReference, VideoSound};
 use koo_core::model::{MediaItem, MediaKind};
 use koo_core::{MediaId, Time};
 
@@ -149,7 +149,7 @@ impl VideoForm {
             length,
             aspect,
             resolution,
-            audio: model.audio && sound,
+            audio: sound,
             model,
             _subscriptions,
         }
@@ -243,7 +243,7 @@ impl VideoForm {
             first_frame,
             last_frame,
             references,
-            audio: self.model.audio && self.audio,
+            audio: self.model.makes_sound(self.audio),
         };
         Some((request, grabs))
     }
@@ -437,7 +437,7 @@ impl Render for VideoForm {
             .when(!self.model.resolutions.is_empty(), |el| {
                 el.child(row("Resolution", &self.resolution))
             })
-            .when(self.model.audio, |el| {
+            .when(self.model.audio == VideoSound::Switch, |el| {
                 el.child(
                     h_flex().justify_between().text_sm().child("Sound").child(
                         Switch::new("video-audio")

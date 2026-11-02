@@ -720,7 +720,10 @@ not retried with Whisper.
   opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
   some models): the media pool's form starts its Sound switch from it, and
-  with it off the agent's videos are made silent whatever it asks.
+  with it off the agent's videos are made silent whatever it asks. Each
+  model's `cloud::VideoSound` says whether it makes sound at all, always
+  (no switch: Pika H3 Flex, Kling 4.0, Kling 3.0 Turbo on Pika), or on a
+  switch; only the last are made silent.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

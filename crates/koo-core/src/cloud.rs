@@ -302,8 +302,18 @@ pub struct VideoModel {
     pub last_frame: bool,
     /// What it follows; `None` when it takes no references.
     pub references: Option<ReferenceLimits>,
-    /// Makes sound with the picture.
-    pub audio: bool,
+    /// Whether it makes sound with the picture.
+    pub audio: VideoSound,
+}
+
+/// Whether a video model makes sound, and whether that can be turned off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoSound {
+    None,
+    /// Always, with no switch.
+    Always,
+    /// When asked; off makes it silent (and on some models, cheaper).
+    Switch,
 }
 
 /// How many references a video model follows, and how long their clips and
@@ -320,6 +330,15 @@ pub struct ReferenceLimits {
 }
 
 impl VideoModel {
+    /// Whether a video it makes has sound, when sound is `wanted`.
+    pub fn makes_sound(&self, wanted: bool) -> bool {
+        match self.audio {
+            VideoSound::None => false,
+            VideoSound::Always => true,
+            VideoSound::Switch => wanted,
+        }
+    }
+
     pub fn shortest(&self) -> u32 {
         self.lengths.first().copied().unwrap_or(1)
     }

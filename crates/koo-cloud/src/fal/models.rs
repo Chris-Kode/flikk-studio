@@ -4,7 +4,7 @@
 //! [`VideoModel`]; the provider's catalog lists the same ids, in the same
 //! order, the default first.
 
-use koo_core::cloud::{ReferenceLimits, VideoModel};
+use koo_core::cloud::{ReferenceLimits, VideoModel, VideoSound};
 
 /// One model: what it can make, and how to ask for it.
 pub struct FalVideo {
@@ -144,7 +144,7 @@ const SEEDANCE_2_SPEC: VideoModel = VideoModel {
         files: 12,
         seconds: 15.0,
     }),
-    audio: true,
+    audio: VideoSound::Switch,
 };
 
 pub const VIDEO: &[FalVideo] = &[
@@ -217,7 +217,7 @@ pub const VIDEO: &[FalVideo] = &[
                 files: 50,
                 seconds: 30.0,
             }),
-            audio: true,
+            audio: VideoSound::Switch,
         },
         text: Endpoint {
             id: "bytedance/seedance-2.5/text-to-video",
@@ -251,7 +251,7 @@ pub const VIDEO: &[FalVideo] = &[
             frame_sets_aspect: true,
             last_frame: true,
             references: None,
-            audio: false,
+            audio: VideoSound::None,
         },
         text: Endpoint {
             id: "kling/v4/text-to-video",
@@ -285,7 +285,7 @@ pub const VIDEO: &[FalVideo] = &[
                 files: 4,
                 seconds: 0.0,
             }),
-            audio: true,
+            audio: VideoSound::Switch,
         },
         text: Endpoint {
             id: "fal-ai/kling-video/o3/pro/text-to-video",
@@ -330,7 +330,7 @@ pub const VIDEO: &[FalVideo] = &[
                 files: 12,
                 seconds: 15.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         text: Endpoint {
             id: "minimax/h3-max/text-to-video",
@@ -366,7 +366,7 @@ pub const VIDEO: &[FalVideo] = &[
             frame_sets_aspect: false,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Switch,
         },
         text: Endpoint {
             id: "alibaba/wan-3.0/text-to-video",
@@ -405,7 +405,7 @@ pub const VIDEO: &[FalVideo] = &[
                 files: 9,
                 seconds: 0.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         text: Endpoint {
             id: "alibaba/happy-horse/v1.1/text-to-video",
@@ -447,7 +447,7 @@ pub const VIDEO: &[FalVideo] = &[
                 files: 13,
                 seconds: 30.0,
             }),
-            audio: false,
+            audio: VideoSound::None,
         },
         text: Endpoint {
             id: "google/gemini-omni-flash/v1.1/text-to-video",
@@ -483,7 +483,7 @@ pub const VIDEO: &[FalVideo] = &[
             frame_sets_aspect: false,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Switch,
         },
         text: Endpoint {
             id: "blackforestlabs/flux-3-max/text-to-video",
@@ -511,7 +511,7 @@ pub const VIDEO: &[FalVideo] = &[
             frame_sets_aspect: false,
             last_frame: true,
             references: None,
-            audio: true,
+            audio: VideoSound::Switch,
         },
         text: Endpoint {
             id: "lightricks/ltx-2.5/text-to-video/pro",
