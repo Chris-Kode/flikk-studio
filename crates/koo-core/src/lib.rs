@@ -31,6 +31,7 @@ pub mod library;
 pub mod mask;
 pub mod memory;
 pub mod model;
+pub mod music_fit;
 pub mod ops;
 pub mod paths;
 pub mod query;

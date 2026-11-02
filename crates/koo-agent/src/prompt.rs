@@ -34,7 +34,8 @@ first downbeat, where it gets louder or softer, and (silence). \
 `search_sounds` finds a sound by description or by example, `get_music` \
 lists downbeats (every beat on request), and `view_audio` draws up to 30 s as a \
 spectrogram when an exact edge matters. Read the script before you judge \
-anything you would hear.
+anything you would hear. To make a song end with the video, use `fit_music` \
+rather than cutting or fading it by hand.
 
 Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or \
 frames \"f:1234\" at the sequence rate; use timecode or frames when a cut \

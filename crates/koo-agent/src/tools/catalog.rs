@@ -913,6 +913,23 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "fit_music",
+            Some(Audio),
+            "Propose a song fitted to a length so it ends on its real ending exactly when wanted: bars are skipped or repeated where they sound alike, on phrase boundaries, with short crossfades. Default target: the end of the other tracks. Returns each skip and loop. Needs the song analysed.",
+            object(
+                json!({
+                    "clip": string("Music clip id on an audio track (default: the only one)"),
+                    "end": time("Timeline time the song should end at"),
+                    "duration": time("Length from the clip's start"),
+                    "range": range("Timeline range the song should fill, starting at its start"),
+                    "loops": boolean("Repeat sections to make it longer (default true)"),
+                    "crossfade_ms": number("Crossfade at each edit (default 30)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "normalize",
             Some(Audio),
             "Measure clips and propose gains that bring each to a loudness target.",

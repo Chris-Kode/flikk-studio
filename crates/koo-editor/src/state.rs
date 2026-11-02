@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod music_fit;
 mod source;
 pub mod voices;
 
