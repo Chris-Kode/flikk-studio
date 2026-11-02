@@ -149,6 +149,40 @@ panics fails without stopping the queue.
   join. The transcript panel's word delete and the agent's `cut_words` use
   it; the agent's `blade` and `ripple_delete` move a cut that falls on a word
   into the nearest pause and say so (`snap: false` turns it off).
+* **Fixing words** (`koo-core/src/respeak*`): words typed over others in
+  the transcript are said in the speaker's voice and cut in where the old
+  ones were. `respeak::fix` takes the cuts either side of them from
+  `Speech::around` (as a word delete places them), the rest of their
+  sentence (back to the end of the one before, on to its own end, in that
+  voice or in words fixed before) and up to 50 words either side as
+  context, and the quietest pauses between words within 20 s for room
+  tone. The provider reads the whole sentence with the new words in it,
+  the context as `previous_text`/`next_text`, so the delivery fits;
+  `respeak::make` times the take's words (`AnalysisService::time_script`:
+  as a voiceover's, the aligner or the edges measured on the levels), cuts
+  the new words out with up to 80 ms before and 150 ms after (half the
+  pause to the next word at most), brings them to the speaker's speech
+  level in the original sentence (20 ms frames within 25 dB of the
+  loudest) and its tilt (a one-pole split at 1.5 kHz, the high band moved
+  by the ratio of high to low energy, at most ×4), lays the longest pause
+  found under them looped with 50 ms equal-power crossfades, and pads them
+  to the pauses the old words had before and after. The result is a WAV in
+  `paths::generated()` (with its `.json`), a voiceover item whose script is
+  the new words, so analysis times them and the transcript shows them, in
+  italics as every voiceover's words. The take goes to `cache/respeak/`
+  and is deleted once used. `Command::ReplaceSpeech` cuts it in: on the
+  speech's track the range goes and the new file plays there with a 10 ms
+  fade at both joins (in the pauses), keeping the replaced clip's gain and
+  audio effects; shorter, the rest ripples as a delete of the range's end
+  would; longer, everything after moves on every unlocked track, the
+  picture over the range slows to fill it, other audio leaves a gap and
+  titles and captions over its end last longer; the same source heard on
+  another audio track is cut out of the range. One undo step; a `Fix`
+  finds its words again by clip and source time when the timeline moved
+  while the provider read. Words in a retimed clip, or on a picture
+  track only, are refused. A source with clips on audio tracks is now read
+  for words there only (`query::words_in_range`), so the old words don't
+  come back from the picture over them.
 * **Queries** (`koo-core/src/query.rs`): topmost clip at a time, sample
   points, transcript↔timeline word mapping, typed timestamp and chat
   reference resolution, effective style rules.
@@ -241,7 +275,8 @@ the effect of its earlier calls.
   `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
   frame, `t-<key>.mattes` per tracked subject), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log).
+  activity log), `respeak/` (a provider's takes of a fixed sentence, until
+  the words are cut out of them).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -637,7 +672,7 @@ not retried with Whisper.
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 82 in the catalog (80 plus
+* **Tools** (`koo-agent/src/tools/`): 83 in the catalog (81 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -772,6 +807,24 @@ not retried with Whisper.
   (or any other voice), which settles the request, and closing the dialog
   leaves it waiting. Cloning is not a tool: it needs the speaker's consent, so the prompt
   sends the user to the dialog.
+* **Fixing words:** in the transcript, Retype… (the selection's menu, or
+  Enter) turns the selected words into an editor; Enter or the mic button
+  says what is typed in the speaker's voice (`ui/transcript/retype.rs`,
+  `state/respeak.rs`). The voice is the library voice linked to that
+  speaker (`SavedVoice::speakers`: fingerprint and speaker id); without
+  one, the Voices dialog opens on cloning theirs from what they say in the
+  recording, and the voice kept there, cloned or found, is linked and
+  used. The user's click is their leave to spend the credits; the request
+  runs as a row of the media pool, which shows it fail, and lands as the
+  user's edits (the item in the Voiceover Generated bin, then the cut).
+  The agent's `replace_words` (`tools/respeak.rs`, Generate) takes the
+  words by the times they start (`from`, `to`, checked against `words`),
+  the new `text` and, without a linked voice, a `voice` from
+  `find_voices`; it can't clone. Asked each time, the approval card plays
+  the voice; approving makes the words off the UI thread
+  (`approve::Started::Respeak`), adds them to the pool and proposes the
+  `ReplaceSpeech` in the chat's set; allowed, it runs as a tool job
+  (`JobDone::Respoken`) and proposes the same.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
   provider was asked) and, where analysis left vectors, by how they sound;
@@ -940,7 +993,7 @@ see:
 | `KOOEDITOR_DEMO_SELECTION` | `clips`, `transition` | A selection |
 | `KOOEDITOR_DEMO_CHAT` | any | Chat references |
 | `KOOEDITOR_DEMO_CHAT_PICKER` | `@query` | The composer's `@` list, open |
-| `KOOEDITOR_DEMO_VIEW` | `captions` | The transcript's captions view |
+| `KOOEDITOR_DEMO_VIEW` | `captions`, `retype` | The transcript's captions view, or typing over two words |
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
@@ -963,7 +1016,7 @@ there.
 | M2 inspector, M4 proxies | `koo-media`, `ui/media_pool*` |
 | M3 analysis | `koo-analysis`, `koo-models` |
 | E1, E2 timeline and tools | `ui/timeline*`, `koo-core/src/edit.rs` |
-| E3 transcript editing | `ui/transcript*`, `koo-core/src/query.rs`, `cuts.rs` |
+| E3 transcript editing | `ui/transcript*`, `koo-core/src/query.rs`, `cuts.rs`; fixing words: `koo-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
@@ -1009,6 +1062,20 @@ there.
   library's query and reply fields are from memory where its reference
   pages would not load, and whether Eleven v4 reads designed and instantly
   cloned voices as well as the provider's own is unheard.
+* Fixing words was checked here end to end with ffmpeg's flite voice
+  standing in for the provider (a take louder and brighter than the
+  original): the words, context, cuts, level and tilt match, room tone,
+  the `ReplaceSpeech` layout (same length, longer with the picture slowed,
+  shorter with a ripple) and undo. No ElevenLabs request has run: whether
+  Eleven v4 takes `previous_text`/`next_text` is unknown (a refusal naming
+  them is retried without), and how well an instant clone matches the
+  speaker in a single word is unheard. Without the aligner downloaded here
+  the take's words were timed by the levels only. The match is a level and
+  a tilt, not a full EQ or reverb match; the picture is not re-synced to
+  the new words (lips keep moving as they did), and a word longer than
+  the old one slows the picture under it, which shows on a long insert.
+  Words in retimed clips can't be fixed. The new words appear in the
+  transcript once their analysis finishes (a few seconds).
 * CPU fallbacks (no GPU adapter) are slow in debug builds; use release
   builds on machines without a GPU.
 * Off macOS, subject tracking runs on the CPU (ONNX Runtime's CPU

@@ -254,7 +254,8 @@ pub struct TimelineWord {
 
 /// Words heard under timeline `range`, in timeline order. Audio tracks are
 /// read first; the same source word reached through a linked video clip at
-/// the same time is listed once.
+/// the same time is listed once, and a source with clips on audio tracks
+/// is read there only.
 pub fn words_in_range(
     project: &Project,
     range: TimeRange,
@@ -269,11 +270,22 @@ pub fn words_in_range(
     let mut cache: HashMap<MediaId, Option<Arc<Analysis>>> = HashMap::new();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
+    // A source whose sound is laid on audio tracks is heard there only:
+    // its picture alone says nothing (speech replaced under it, say).
+    let heard: HashSet<MediaId> = tl
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .flat_map(|t| t.clips.iter().filter_map(Clip::media))
+        .collect();
     for track in tracks {
         for clip in track.clips.iter().filter(|c| c.range().overlaps(&range)) {
             let (Some(media), Some(source)) = (clip.media(), clip.source_range()) else {
                 continue;
             };
+            if track.kind != TrackKind::Audio && heard.contains(&media) {
+                continue;
+            }
             let found = cache.entry(media).or_insert_with(|| {
                 project
                     .media(media)

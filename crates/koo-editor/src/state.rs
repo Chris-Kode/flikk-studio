@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod respeak;
 mod source;
 pub mod voices;
 
@@ -1726,6 +1727,30 @@ impl EditorState {
                                 this.refresh_voices(cx);
                                 ApprovalOutcome::Done("Voice kept in the library".into())
                             }
+                            Err(e) => {
+                                this.agent.report_failure(
+                                    id,
+                                    format!("approved but failed: {summary}: {e:#}"),
+                                );
+                                ApprovalOutcome::Failed(format!("{e:#}"))
+                            }
+                        };
+                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                            entry.1 = outcome;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                ApprovalOutcome::Working
+            }
+            Ok(approve::Started::Respeak(work)) => {
+                let task = cx.background_executor().spawn(async move { work() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        let outcome = match result {
+                            Ok(made) => this.place_respoken(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
                                     id,

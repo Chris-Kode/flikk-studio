@@ -86,6 +86,7 @@ pub fn parse(project: &Project, args: &Args) -> ToolResultOf<(GenerateRequest, O
                     voice,
                 },
                 text: prompt,
+                context: None,
             }
         }
         other => {

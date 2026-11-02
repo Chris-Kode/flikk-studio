@@ -218,6 +218,18 @@ pub trait AnalysisService: Send + Sync {
             "Sound search is not available in this build.".into(),
         ))
     }
+    /// The words of `script`, said in the file at `path`, with where each
+    /// is said there: as a voiceover's words are timed. Slow: it decodes
+    /// the file and runs the aligner when it is downloaded.
+    fn time_script(
+        &self,
+        _path: &Path,
+        _script: &str,
+    ) -> ServiceResult<Vec<crate::analysis::Word>> {
+        Err(ServiceError(
+            "Timing a script is not available in this build.".into(),
+        ))
+    }
 }
 
 /// A subject mask as [`SubjectService`] sees it: the media under it, and

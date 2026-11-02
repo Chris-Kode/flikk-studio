@@ -111,6 +111,23 @@ impl<'p> Speech<'p> {
         merged
     }
 
+    /// The cuts either side of `words[first..=last]`, all in one clip: in
+    /// the pause before the first (keeping it) and before the word after
+    /// the last (taking the pause after them), as [`Speech::removals`]
+    /// places them.
+    pub fn around(&self, words: &[TimelineWord], first: usize, last: usize) -> Option<(Cut, Cut)> {
+        let (a, b) = (words.get(first)?, words.get(last)?);
+        let clip = a.clip;
+        if b.clip != clip || first > last {
+            return None;
+        }
+        let prev = words[..first].iter().rev().find(|w| w.clip == clip);
+        let next = words[last + 1..].iter().find(|w| w.clip == clip);
+        let start = self.between(prev, Some(a))?;
+        let end = self.between(Some(b), next)?;
+        (start.at < end.at).then_some((start, end))
+    }
+
     /// Where a cut wanted at `t` should go when `t` falls on a word or too
     /// close to one: the nearer of the cuts before and after that word.
     /// `None` when `t` is clear of every word.

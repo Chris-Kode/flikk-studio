@@ -23,7 +23,7 @@ use crate::audiofx::AudioFx;
 use crate::cloud::{self, Capability, GenerationInfo, Reading, VoiceOrigin};
 use crate::command::Command;
 use crate::fx::{FxAsset, FxInstance, FxRef};
-use crate::ids::{ClipId, EffectId, FxId, LibraryId, MediaId};
+use crate::ids::{ClipId, EffectId, FxId, LibraryId, MediaId, SpeakerId};
 use crate::model::{Fingerprint, Grade, MediaInfo, MediaItem, MediaKind, Project};
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -116,8 +116,21 @@ pub struct SavedVoice {
     /// The sample's length and format, to play it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_info: Option<MediaInfo>,
+    /// Speakers in recordings whose voice it is: words fixed in what they
+    /// said are read with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speakers: Vec<VoiceSpeaker>,
     #[serde(skip)]
     pub path: PathBuf,
+}
+
+/// A speaker of one recording, as its analysis numbers them; `None` when
+/// voices weren't told apart in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceSpeaker {
+    pub fingerprint: Fingerprint,
+    #[serde(default)]
+    pub speaker: Option<SpeakerId>,
 }
 
 fn default_stability() -> f32 {
@@ -212,6 +225,13 @@ impl Library {
 
     pub fn voice(&self, id: LibraryId) -> Option<&SavedVoice> {
         self.voices.iter().find(|v| v.id == id)
+    }
+
+    /// `provider`'s saved voice that `who` speaks with.
+    pub fn voice_of_speaker(&self, provider: &str, who: &VoiceSpeaker) -> Option<&SavedVoice> {
+        self.voices
+            .iter()
+            .find(|v| v.provider == provider && v.speakers.contains(who))
     }
 
     /// The saved voice that is `provider`'s `voice`.
@@ -783,6 +803,7 @@ impl SavedVoice {
             similarity: Reading::SIMILARITY,
             sample: None,
             sample_info: None,
+            speakers: Vec::new(),
             path: PathBuf::new(),
         }
     }
@@ -861,6 +882,9 @@ pub fn save_voice(
             stored.sample = e.sample.clone();
             stored.sample_info = e.sample_info.clone();
         }
+        if stored.speakers.is_empty() {
+            stored.speakers = e.speakers.clone();
+        }
     }
     if let Some(item) = sample {
         let sample = item.path.as_path();
@@ -911,6 +935,30 @@ pub fn set_voice_reading(voice: &SavedVoice, reading: &Reading) -> Result<SavedV
         similarity: reading.similarity,
         ..voice.clone()
     })
+}
+
+/// Remember that `who` speaks with library voice `voice`, and with no
+/// other.
+pub fn link_speaker(lib: &Library, voice: LibraryId, who: &VoiceSpeaker) -> Result<()> {
+    if lib.voice(voice).is_none() {
+        return Err("that voice is not in the library".into());
+    }
+    for v in &lib.voices {
+        let has = v.speakers.contains(who);
+        if has == (v.id == voice) {
+            continue;
+        }
+        let mut speakers = v.speakers.clone();
+        speakers.retain(|s| s != who);
+        if v.id == voice {
+            speakers.push(who.clone());
+        }
+        write_voice(&SavedVoice {
+            speakers,
+            ..v.clone()
+        })?;
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------- shared

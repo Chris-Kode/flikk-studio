@@ -32,6 +32,7 @@
 mod align;
 mod cache;
 mod ffmpeg;
+mod script;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -344,6 +345,10 @@ impl AnalysisService for LocalAnalysis {
 
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>> {
         self.shared.cached(fingerprint)
+    }
+
+    fn time_script(&self, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
+        script::time(&self.shared, path, script)
     }
 
     fn silences(&self, item: &MediaItem, min: Time) -> ServiceResult<Vec<TimeRange>> {

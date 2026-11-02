@@ -1305,6 +1305,23 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "replace_words",
+            Some(Generate),
+            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: unless they allowed it, each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
+            object(
+                json!({
+                    "from": time("Start of the first word to replace, as the transcript gives it"),
+                    "to": time("Start of the last word to replace (default: just the first)"),
+                    "words": string("The words replaced, as the transcript has them, to check"),
+                    "text": string("What is said instead, as the speaker would say it, with punctuation"),
+                    "voice": string("A voice id from find_voices, when none is linked to the speaker"),
+                    "voice_name": string("Its name, for the approval card"),
+                    "reason": reason()
+                }),
+                &["from", "text"],
+            ),
+        ),
+        spec(
             "find_voices",
             Some(ReadProject),
             "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",

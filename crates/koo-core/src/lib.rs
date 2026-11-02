@@ -34,6 +34,7 @@ pub mod model;
 pub mod ops;
 pub mod paths;
 pub mod query;
+pub mod respeak;
 pub mod scopes;
 pub mod services;
 pub mod subject;

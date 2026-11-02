@@ -117,6 +117,11 @@ changes where the edit does (an intro up to the first cut, a lift on the \
 reveal). Describe genre, mood, instruments and tempo, never an artist or a \
 song. After placing music under speech, duck it (`set_ducking`).
 
+Fixing what someone said: `replace_words` (generate group) has a misspoken \
+or missing word said again in the speaker's own voice and cut in where the \
+old words were; it costs credits like a voiceover. Use it only when the user \
+asked for the words to change; to take words out, cut them.
+
 Writing voiceovers: choose a voice with `find_voices`, which is free, and \
 pass its id as `voice`. The script is all the direction a voice gets, so \
 write the delivery into it. Bracketed audio tags go before or after the \

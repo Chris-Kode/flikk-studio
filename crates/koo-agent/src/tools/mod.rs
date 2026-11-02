@@ -17,6 +17,7 @@ mod layout;
 mod masks;
 mod preview;
 mod read;
+pub mod respeak;
 mod sounds;
 pub mod video;
 mod view;
@@ -132,6 +133,13 @@ pub enum JobDone {
     Generated {
         item: Box<koo_core::model::MediaItem>,
         placement: Option<generate::Placement>,
+        summary: String,
+    },
+    /// Words said again for a fix, to add to the pool and cut in on the UI
+    /// thread.
+    Respoken {
+        item: Box<koo_core::model::MediaItem>,
+        fix: Box<koo_core::respeak::Fix>,
         summary: String,
     },
 }
@@ -285,6 +293,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "find_voices" => voices::find_voices(ctx, &args),
         "add_voice" => voices::serve_add(ctx, &args),
         "design_voice" => voices::serve_design(ctx, &args),
+        "replace_words" => respeak::serve(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }

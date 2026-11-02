@@ -163,6 +163,16 @@ pub fn request(
                 super::video::request_json(&request, &grabs, placement.as_ref()),
             )
         }
+        "replace_words" => {
+            let (fix, reading) = super::respeak::parse(ctx, args)?;
+            (
+                super::respeak::summary(&fix, &reading),
+                super::voices::with_sample(
+                    super::respeak::request_json(&fix, &reading),
+                    &reading.voice,
+                ),
+            )
+        }
         "add_voice" => {
             super::voices::check_available(ctx)?;
             let adding = super::voices::parse_add(args)?;
