@@ -17,9 +17,10 @@ mod spectrogram;
 mod waveform;
 
 pub use probe::media_kind;
-pub use proxy::proxy_path;
+pub use proxy::{proxy_path, proxy_path_for};
 
 use decode::FrameCache;
+use koo_core::hdr;
 use koo_core::model::{Fingerprint, MediaInfo, MediaItem};
 use koo_core::services::{
     AudioPictureRequest, Collage, CollageRequest, Frame, FrameStream, MediaService, PcmStream,
@@ -29,7 +30,7 @@ use koo_core::time::{Time, TimeRange};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// [`MediaService`] backed by the `ffmpeg` and `ffprobe` binaries.
 pub struct FfmpegMedia {
@@ -37,6 +38,8 @@ pub struct FfmpegMedia {
     ffprobe: PathBuf,
     frames: Mutex<FrameCache>,
     peaks: Mutex<HashMap<(Fingerprint, u32), Arc<waveform::Peaks>>>,
+    /// How this FFmpeg maps HDR to SDR, found on first use.
+    tone_method: OnceLock<hdr::Method>,
 }
 
 impl FfmpegMedia {
@@ -72,6 +75,7 @@ impl FfmpegMedia {
             ffprobe,
             frames: Mutex::new(FrameCache::default()),
             peaks: Mutex::new(HashMap::new()),
+            tone_method: OnceLock::new(),
         })
     }
 
@@ -79,6 +83,26 @@ impl FfmpegMedia {
         let mut c = command(&self.ffmpeg);
         c.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         c
+    }
+
+    /// The filters mapping HDR pictures to SDR with this FFmpeg; `None`
+    /// without a mapping.
+    fn tone_filters(&self, mapping: Option<&hdr::Mapping>) -> ServiceResult<Option<String>> {
+        let Some(mapping) = mapping else {
+            return Ok(None);
+        };
+        let method = *self.tone_method.get_or_init(|| {
+            let out = command(&self.ffmpeg)
+                .args(["-hide_banner", "-filters"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            hdr::Method::from_filters(&out)
+        });
+        mapping
+            .filters(method)
+            .map(Some)
+            .map_err(|e| err("tone map", e))
     }
 
     /// `item.info`, or a fresh probe when the pool hasn't stored one yet.

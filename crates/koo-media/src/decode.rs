@@ -4,6 +4,7 @@
 //! the frame size, so rotation and pixel aspect never have to be predicted.
 
 use crate::{FfmpegMedia, err, is_still_image, proxy, secs_arg, stderr_tail};
+use koo_core::hdr::{self, Mapping};
 use koo_core::model::{MediaItem, MediaKind};
 use koo_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use koo_core::time::{Rate, Time};
@@ -17,7 +18,8 @@ use std::sync::{Arc, Mutex};
 
 const FRAME_CACHE_BYTES: usize = 96 << 20;
 
-type FrameKey = (PathBuf, i64, u32);
+/// File, frame start (-1: the first frame), width, and the tone mapping.
+type FrameKey = (PathBuf, i64, u32, Option<String>);
 
 /// Least recently used decoded frames, bounded by total pixel bytes.
 #[derive(Default)]
@@ -60,7 +62,7 @@ pub(crate) fn frame(
     max_width: u32,
 ) -> ServiceResult<Frame> {
     if item.kind == MediaKind::Image {
-        return still(media, &item.path, None, max_width);
+        return still(media, &item.path, None, max_width, None);
     }
     let info = media.info(item)?;
     let rate = info.video.as_ref().map(|v| v.rate).unwrap_or_default();
@@ -69,20 +71,28 @@ pub(crate) fn frame(
     if info.duration > Time::ZERO {
         t = t.min((info.duration - rate.frame_duration()).max(Time::ZERO));
     }
-    still(media, &video_source(item), Some((t, rate)), max_width)
+    let (path, tone) = video_source(media, item)?;
+    still(media, &path, Some((t, rate)), max_width, tone.as_deref())
 }
 
 /// The frame of the file at `path` that is showing at a time, on a file of
-/// the given rate; cached. `None` decodes the first frame.
+/// the given rate; cached. `None` decodes the first frame. `tone` maps HDR
+/// to SDR (see [`koo_core::hdr`]).
 pub(crate) fn still(
     media: &FfmpegMedia,
     path: &Path,
     at: Option<(Time, Rate)>,
     max_width: u32,
+    tone: Option<&str>,
 ) -> ServiceResult<Frame> {
     let at = at.filter(|_| !is_still_image(path));
     let start = at.map(|(t, rate)| t.floor_to_frame(rate));
-    let key = (path.to_path_buf(), start.map_or(-1, |t| t.0), max_width);
+    let key = (
+        path.to_path_buf(),
+        start.map_or(-1, |t| t.0),
+        max_width,
+        tone.map(str::to_string),
+    );
     if let Some(frame) = media.frames.lock().unwrap().get(&key) {
         return Ok(frame);
     }
@@ -91,13 +101,13 @@ pub(crate) fn still(
     let seek = at.map(|(t, rate)| {
         (t.floor_to_frame(rate) - Time(rate.frame_duration().0 / 2)).max(Time::ZERO)
     });
-    let mut frame = decode_one(media, path, seek, max_width)?;
+    let mut frame = decode_one(media, path, seek, max_width, tone)?;
     // Variable-rate files can end short of their reported duration.
     if frame.is_none()
         && let Some(t) = seek.filter(|t| *t > Time::ZERO)
     {
         let earlier = (t - Time::from_millis(1000)).max(Time::ZERO);
-        frame = decode_one(media, path, Some(earlier), max_width)?;
+        frame = decode_one(media, path, Some(earlier), max_width, tone)?;
     }
     let frame = frame.ok_or_else(|| {
         ServiceError(format!(
@@ -115,6 +125,7 @@ fn decode_one(
     path: &Path,
     t: Option<Time>,
     max_width: u32,
+    tone: Option<&str>,
 ) -> ServiceResult<Option<Frame>> {
     let mut cmd = media.ffmpeg();
     if let Some(t) = t {
@@ -123,7 +134,8 @@ fn decode_one(
     }
     cmd.arg("-i")
         .arg(path)
-        .args(["-map", "0:v:0", "-frames:v", "1", "-vf", &scale(max_width)]);
+        .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
+        .arg(tone_then(tone, scale(max_width)));
     pam_output(&mut cmd);
     let out = cmd.output().map_err(|e| err("ffmpeg", e))?;
     if !out.status.success() {
@@ -136,13 +148,35 @@ fn decode_one(
     read_pam(&mut out.stdout.as_slice()).map_err(|e| err("decode", e))
 }
 
-/// The proxy when one exists on disk, else the source.
-pub(crate) fn video_source(item: &MediaItem) -> PathBuf {
-    item.proxy
-        .clone()
-        .or_else(|| item.fingerprint.as_ref().map(proxy::proxy_path))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| item.path.clone())
+/// The proxy when one exists on disk, else the source with the filters
+/// that map it from HDR, if it needs them. An HDR item's proxy is made
+/// already mapped, so only the one for its current tone map will do.
+pub(crate) fn video_source(
+    media: &FfmpegMedia,
+    item: &MediaItem,
+) -> ServiceResult<(PathBuf, Option<String>)> {
+    let expected = proxy::proxy_path_for(item);
+    let proxy = if hdr::hdr_of(item).is_some() {
+        expected
+    } else {
+        item.proxy.clone().or(expected)
+    };
+    if let Some(proxy) = proxy.filter(|p| p.is_file()) {
+        return Ok((proxy, None));
+    }
+    Ok((
+        item.path.clone(),
+        media.tone_filters(Mapping::of(item).as_ref())?,
+    ))
+}
+
+/// The tone mapping, if any, then `filters`. Mapping before scaling keeps
+/// the picture the render graph makes, which maps then scales.
+pub(crate) fn tone_then(tone: Option<&str>, filters: String) -> String {
+    match tone {
+        Some(tone) => format!("{tone},{filters}"),
+        None => filters,
+    }
 }
 
 /// Fit to `max_width` on square pixels, never upscaling; even sizes.
@@ -221,16 +255,18 @@ pub(crate) fn playback(
     max_width: u32,
 ) -> ServiceResult<Box<dyn FrameStream>> {
     if item.kind == MediaKind::Image {
-        let frame = still(media, &item.path, None, max_width)?;
+        let frame = still(media, &item.path, None, max_width, None)?;
         return Ok(Box::new(StillStream(Some((from, frame)))));
     }
     let info = media.info(item)?;
     let rate = info.video.as_ref().map(|v| v.rate).unwrap_or_default();
     let fd = rate.frame_duration();
     let first = from.max(Time::ZERO).floor_to_frame(rate);
+    let (path, tone) = video_source(media, item)?;
     let mut stream = FfmpegFrames {
         ffmpeg: media.ffmpeg(),
-        path: video_source(item),
+        path,
+        tone,
         rate,
         first,
         max_width,
@@ -256,6 +292,8 @@ impl FrameStream for StillStream {
 struct FfmpegFrames {
     ffmpeg: Command,
     path: PathBuf,
+    /// HDR → SDR filters for an original file.
+    tone: Option<String>,
     rate: Rate,
     first: Time,
     max_width: u32,
@@ -278,7 +316,7 @@ impl FfmpegFrames {
             "setpts=PTS-STARTPTS,fps=fps={}/{}:round=near,{}",
             self.rate.num,
             self.rate.den,
-            scale(self.max_width)
+            tone_then(self.tone.as_deref(), scale(self.max_width))
         );
         cmd.args(["-ss", &secs_arg(seek)])
             .arg("-i")

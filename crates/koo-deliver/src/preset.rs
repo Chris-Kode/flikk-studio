@@ -244,6 +244,12 @@ impl RenderSettings {
         if matches!(self.container, Container::Mp4 | Container::Mov) {
             push(&["-movflags", "+faststart"]);
         }
+        if self.video.is_some() {
+            // HDR sources are mapped to SDR (`koo_core::hdr`): say so. Last,
+            // so hardware encodes (`hw_codec_args`) keep it too.
+            push(&["-color_primaries", "bt709", "-color_trc", "bt709"]);
+            push(&["-colorspace", "bt709"]);
+        }
         args
     }
 }

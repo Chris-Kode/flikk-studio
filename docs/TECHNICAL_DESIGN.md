@@ -279,7 +279,37 @@ the effect of its earlier calls.
   `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
   (optical flow frames, raw RGBA, `<key>.rgba`), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below).
+  activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below),
+  `hdr/` (tone-mapping tables). An HDR item's proxy is
+  `proxies/<fp>-<mapping>.mp4` (below).
+* **HDR** (`koo-core/src/hdr.rs`): probing marks a video stream whose
+  transfer is PQ (`smpte2084`: HDR10, Dolby Vision) or HLG (`arib-std-b67`:
+  iPhone and Android HLG, the base layer of Dolby Vision 8.4) with an `Hdr`
+  (primaries, matrix, range, bit depth, the peak from MaxCLL or the
+  mastering display, read off the first frame, and a Dolby Vision profile);
+  the pool badges it "HDR". Each item's `ToneMap` (Auto by default, or Off;
+  an exposure in stops and a peak in nits, set by `Command::SetToneMap` from
+  the inspector's Color tab or the agent's `set_tone_map`) gives a
+  `Mapping`, whose filters go on every decode of the original file (frames,
+  playback, proxies, collages, which use the default tone map) and on every
+  segment the render graph opens, mapped before any scaling so the viewer
+  and the export match. The source's light (PQ absolute; HLG on a 1,000 nit
+  display, system gamma per channel as zimg does) is divided by the nits
+  that land on SDR white (100, halved per stop of exposure), taken from
+  BT.2020 to BT.709 primaries, and FFmpeg's Möbius curve (knee 0.3, `desat`
+  0) brings the source's peak (PQ: its metadata, else 1,000; HLG: 1,000) to
+  white on the brightest channel; BT.1886's inverse encodes it. The output
+  is BT.709 limited-range 10-bit 4:4:4, tagged so, and exports are tagged
+  BT.709. With `zscale` and `tonemap` in the installed FFmpeg (`ffmpeg
+  -filters`, checked once per process) zimg does it; otherwise the same
+  steps are baked into a 65³ `.cube` over the BT.2020 signal
+  (`cache/hdr/`) and applied with `lut3d` (`KOOEDITOR_TONEMAP=lut` forces
+  this). Proxies of HDR items are made already mapped, one per mapping;
+  changing an item's tone map starts its proxy again (the pool's poll), and
+  until it exists the original is decoded and mapped. Frames between source
+  frames (optical flow) are made from mapped pictures, proxy or original,
+  and keyed by the mapping; the render cache's globals hold the method, and
+  its clip keys the item's tone map. Hardware encodes keep the BT.709 tags.
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -891,7 +921,7 @@ on the UI thread and run it off it:
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 86 in the catalog (84 plus
+* **Tools** (`koo-agent/src/tools/`): 87 in the catalog (85 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -1147,6 +1177,9 @@ available to them.
   tempo an `asendcmd` script in the work folder moves every 50 ms of
   timeline; the viewer's stretch reads its grains where the ramp has the
   source (`Stretch::mapped`). Muted ramps leave the clip out.
+* **HDR** sources go through the same tone mapping as in the viewer (§6),
+  after the segment's trim and before its grade; composited ranges get it
+  from the media engine. Video outputs are tagged BT.709.
 * **Composited ranges** (`composed.rs`): ranges that need the compositor
   (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
   anchor, corner pins, masks, retimed or ramped media;
@@ -1242,6 +1275,7 @@ see:
 | `KOOEDITOR_DEMO_STABILIZE` | seconds | A shaky clip made with FFmpeg, stabilized and selected; `KOOEDITOR_DEMO_STABILIZE_MODE` = `off`, `locked` or `none` |
 | `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
 | `KOOEDITOR_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
+| `KOOEDITOR_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
@@ -1277,6 +1311,7 @@ there.
 | Render cache | `koo-editor/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `koo-store/src/render_cache.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
+| HDR tone mapping | `koo-core/src/hdr.rs`, `koo-media` probe, decode, proxy, `koo-deliver` graph, `ui/inspector/tone_map.rs`, `ui/media_pool/hdr.rs`, `set_tone_map` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
 | S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
 
@@ -1405,6 +1440,20 @@ there.
   clip (or a ripple) renders the moved range again. Playback's disk reads
   and QOI decoding were not measured here at real time on a GPU machine
   (no GPU in the cloud containers), nor on macOS or Windows.
+* HDR tone mapping was checked on FFmpeg-made PQ and HLG clips only
+  (`zscale` from SDR test sources, x265 with HDR10 metadata): against the
+  viewer's frames, exports match about as well as SDR exports do (41 dB),
+  and the LUT and zimg methods agree to 51–54 dB on smooth pictures (about
+  30 dB on saturated hard edges, where the 65³ table is coarse). Real phone
+  footage (iPhone Dolby Vision 8.4 HLG, Android HLG, Samsung HDR10+) was not
+  tried, nor were Dolby Vision profile 5 files (IPT, no backward-compatible
+  base layer: they still look wrong), dynamic HDR10+ metadata (ignored), HDR
+  stills (AVIF, HEIC; not mapped) or `libplacebo`/`tonemap_vaapi` (not used:
+  they need a GPU device). Items imported before this keep no `Hdr` until
+  they are imported again. A proxy's file name holds the mapping but not the
+  method, so a proxy made with zimg is used after a switch to the LUT.
+  Collages always show the default tone map. Playing HDR footage before its
+  proxy exists maps it at full resolution, which is slow for 4K on a CPU.
 
 ### Analysis accuracy
 

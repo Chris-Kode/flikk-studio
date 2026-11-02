@@ -201,6 +201,7 @@ pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     }
 }
 

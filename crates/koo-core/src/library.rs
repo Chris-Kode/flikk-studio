@@ -647,6 +647,7 @@ impl Sound {
             tags: self.tags.clone(),
             proxy: None,
             generated: self.generated.clone(),
+            tone_map: Default::default(),
         }
     }
 }
@@ -805,6 +806,7 @@ impl SavedVoice {
             tags: Vec::new(),
             proxy: None,
             generated: None,
+            tone_map: Default::default(),
         })
     }
 

@@ -14,6 +14,7 @@ mod masks;
 mod param;
 mod speed;
 mod stabilize;
+mod tone_map;
 mod transition;
 
 pub(crate) use clip::sound_clip;

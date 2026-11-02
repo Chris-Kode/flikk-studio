@@ -58,6 +58,8 @@ impl Globals {
             services.stabilizer.is_some() as u8,
         ]);
         h.update(koo_models::Task::Segmentation.model().id.as_bytes());
+        // HDR media look slightly different through zimg and the LUT.
+        h.update(&[koo_deliver::ffmpeg::tone_method() as u8]);
         hash_json(&mut h, styles);
         Self(*h.finalize().as_bytes())
     }

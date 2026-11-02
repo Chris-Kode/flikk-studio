@@ -96,6 +96,7 @@ impl Place {
                 "collages",
                 "upload",
                 "mattes",
+                "hdr",
                 "interpolated",
             ]
             .iter()

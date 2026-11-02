@@ -878,6 +878,21 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "set_tone_map",
+            Some(Color),
+            "Propose how an HDR media item (`list_media` shows `hdr`) is mapped to SDR Rec.709, for every clip of it; the viewer and the export follow. `auto` (the default) tone maps it; `off` shows the raw signal, grey and washed out. `exposure` brightens or darkens before the curve; `peak` is the brightest the source is taken to get (lower keeps more contrast and clips highlights). Omitted fields keep their value.",
+            object(
+                json!({
+                    "media": string("Media id"),
+                    "mode": one_of(&["auto", "off"], "Tone mapping"),
+                    "exposure": number("Stops, -3..3, 0 = neutral"),
+                    "peak": number("Source peak in nits, 200..10000; 0 = from the file's metadata"),
+                    "reason": reason()
+                }),
+                &["media"],
+            ),
+        ),
+        spec(
             "copy_grade",
             Some(Color),
             "Propose copying one clip's grade to others.",

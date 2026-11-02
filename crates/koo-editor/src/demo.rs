@@ -11,6 +11,7 @@
 
 mod compose;
 mod engines;
+mod hdr;
 mod person;
 pub mod speed;
 mod stabilize;
@@ -67,6 +68,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
     let picks = timeline_fx(&mut demo.project);
+    hdr::seed(&mut demo.project, demo.ids.selected);
     speed::seed(&mut demo.project, demo.ids.selected);
     let analysis = interview_analysis(&demo);
     let jobs = vec![
@@ -349,6 +351,7 @@ fn project() -> Demo {
         tags: vec!["brand".into()],
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     };
 
     let mut titles = Track::new(TrackKind::Title, "T1");
@@ -784,6 +787,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
                 height: 1080,
                 rate: Rate::FPS_30,
                 codec: "h264".into(),
+                hdr: None,
             }),
             audio: vec![AudioStream {
                 index: 1,
@@ -798,6 +802,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
         tags: tags.iter().map(|t| t.to_string()).collect(),
         proxy: None,
         generated: None,
+        tone_map: Default::default(),
     }
 }
 

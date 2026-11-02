@@ -4,6 +4,7 @@
 //! provider.
 
 mod generate;
+mod hdr;
 pub(crate) mod import;
 mod thumbs;
 mod video;
@@ -71,6 +72,8 @@ pub struct MediaPoolPanel {
     jobs: Vec<JobStatus>,
     /// Proxy creation progress, written from background threads.
     proxies: Arc<Mutex<HashMap<MediaId, f32>>>,
+    /// HDR proxies already looked for, by path (see `hdr.rs`).
+    hdr_proxies: std::collections::HashSet<std::path::PathBuf>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -155,6 +158,7 @@ impl MediaPoolPanel {
             thumbs: Thumbs::default(),
             jobs: Vec::new(),
             proxies: Arc::default(),
+            hdr_proxies: Default::default(),
             _subscriptions,
             _poll,
         }
@@ -169,6 +173,7 @@ impl MediaPoolPanel {
             .as_ref()
             .map(|a| a.jobs())
             .unwrap_or_default();
+        self.refresh_hdr_proxies(cx);
         let proxying = !self.proxies.lock().unwrap().is_empty();
         if jobs != self.jobs || proxying {
             self.jobs = jobs;
@@ -621,6 +626,7 @@ impl MediaPoolPanel {
                     (None, MediaKind::Image) => d.child(IconName::Frame),
                     (None, MediaKind::Video) => d,
                 })
+                .children(hdr::badge(item, cx))
                 .children(progress.map(|p| progress_bar(p, cx)))
                 .when(offline, |d| {
                     d.child(
@@ -732,6 +738,7 @@ impl MediaPoolPanel {
                 head.push(format!("{}×{}", v.width, v.height));
                 head.push(format!("{:.2} fps", v.rate.fps()).replace(".00", ""));
                 head.push(v.codec.clone());
+                head.extend(v.hdr.as_ref().map(|h| h.describe()));
             }
             if !info.container.is_empty() {
                 head.push(info.container.clone());

@@ -125,6 +125,10 @@ fn key(request: &Between<'_>) -> (u64, String) {
     h.write(&request.at.to_bits().to_le_bytes());
     h.write(&request.a.1.width.to_le_bytes());
     h.write(&request.a.1.height.to_le_bytes());
+    // HDR frames look as their tone map makes them (`koo_core::hdr`).
+    if let Some(mapping) = koo_core::hdr::Mapping::of(request.item) {
+        h.write(mapping.key().as_bytes());
+    }
     (h.0, folder)
 }
 
