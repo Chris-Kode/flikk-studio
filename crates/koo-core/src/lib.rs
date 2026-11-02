@@ -37,6 +37,7 @@ pub mod query;
 pub mod scopes;
 pub mod services;
 pub mod subject;
+pub mod sync;
 pub mod time;
 
 pub use error::{CoreError, Result};

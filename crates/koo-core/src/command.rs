@@ -425,6 +425,28 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- sync by sound (see [`crate::sync`])
+    /// Move each follower, with the clips linked to it (a video and its
+    /// sound), to where its sound meets the reference's, retimed by its
+    /// drift; to another track of its kind (or a new one) where it would
+    /// overlap. Disable the sound clips in `mute`.
+    SyncClips {
+        reference: ClipId,
+        followers: Vec<crate::sync::plan::SyncedClip>,
+        #[serde(default)]
+        mute: Vec<ClipId>,
+    },
+    /// Lay pool items on the timeline in sync: `reference` from `at`, each
+    /// follower on a track of its own where its sound meets it; the sound
+    /// of the items in `mute` placed disabled.
+    PlaceSynced {
+        at: Time,
+        reference: MediaId,
+        followers: Vec<crate::sync::plan::SyncedMedia>,
+        #[serde(default)]
+        mute: Vec<MediaId>,
+    },
 }
 
 impl Command {
@@ -494,7 +516,9 @@ impl Command {
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. }
-            | SetFormat { .. } => ToolCategory::EditTimeline,
+            | SetFormat { .. }
+            | SyncClips { .. }
+            | PlaceSynced { .. } => ToolCategory::EditTimeline,
             SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }
