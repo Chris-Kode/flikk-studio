@@ -9,18 +9,21 @@ use crate::graph::{Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use koo_core::compose::{self, Pictures, Streams};
 use koo_core::model::{MediaItem, Project};
-use koo_core::services::{Frame, Services};
+use koo_core::services::{Frame, PersonRef, Services};
+use koo_core::speed::Waiting;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Make every matte the subject masks over `range` show (tracking them
-/// when they track), before frames are composed; `progress` gets 0..1.
-/// Whether there was any to make. Fails when a subject cannot be found
-/// (the model is missing).
+/// when they track), and the person masks' frames in it, before frames
+/// are composed; `progress` gets 0..1. Whether there was any to make.
+/// Fails when a subject or the people cannot be found (the model is
+/// missing).
 pub(crate) fn find_subjects(
     project: &Project,
     range: TimeRange,
@@ -49,14 +52,45 @@ pub(crate) fn find_subjects(
             !service.status(*r).complete(track)
         })
         .collect();
-    let n = subjects.len() as f32;
+    // Person masks: the frames of their clips the range shows.
+    let people: Vec<PersonRef> = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.mix.mute)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.range().overlaps(&range))
+        .flat_map(|c| {
+            c.masks.iter().filter(|m| m.enabled).filter_map(move |m| {
+                let whole = compose::person_ref(project, c, m)?;
+                let (from, to) = (range.start.max(c.start), range.end.min(c.end()));
+                let (a, b) = (c.to_source(from)?, c.to_source(to)?);
+                Some(PersonRef {
+                    range: TimeRange::new(a.min(b), a.max(b)),
+                    ..whole
+                })
+            })
+        })
+        .filter(|r| {
+            let s = service.person_status(*r);
+            s.error.is_some() || s.tracked < s.frames
+        })
+        .collect();
+    let n = (subjects.len() + people.len()) as f32;
     for (i, r) in subjects.iter().enumerate() {
         let part = |p: f32| progress((i as f32 + p) / n);
         service
             .complete(*r, &part, cancel)
             .map_err(|e| anyhow!("subject mask {}: {e}", short(r.mask)))?;
     }
-    Ok(!subjects.is_empty())
+    for (i, r) in people.iter().enumerate() {
+        let i = subjects.len() + i;
+        let part = |p: f32| progress((i as f32 + p) / n);
+        service
+            .complete_person(*r, &part, cancel)
+            .map_err(|e| anyhow!("person mask {}: {e}", short(r.mask)))?;
+    }
+    Ok(!subjects.is_empty() || !people.is_empty())
 }
 
 fn short(id: impl std::fmt::Display) -> String {
@@ -106,6 +140,10 @@ impl<'a> Frames<'a> {
             project,
             services: Services {
                 lettering: None,
+                // Every frame between source frames is made, not blended.
+                interpolation: services.interpolation.clone().map(|s| {
+                    Arc::new(Waiting(s)) as Arc<dyn koo_core::services::InterpolationService>
+                }),
                 ..services.clone()
             },
             spec,

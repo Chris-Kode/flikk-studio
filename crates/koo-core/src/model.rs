@@ -8,6 +8,7 @@ use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
 use crate::mask::Mask;
+use crate::speed::Retime;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -418,6 +419,9 @@ pub struct Clip {
     /// [`crate::mask`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masks: Vec<Mask>,
+    /// Speed ramp and frame interpolation (see [`crate::speed`]).
+    #[serde(default, skip_serializing_if = "Retime::is_default")]
+    pub retime: Retime,
 }
 
 impl Clip {
@@ -439,6 +443,7 @@ impl Clip {
             transition_in: None,
             transition_out: None,
             masks: Vec::new(),
+            retime: Retime::default(),
         }
     }
 
@@ -451,11 +456,12 @@ impl Clip {
     }
 
     /// Timeline time → source time for media clips (PRD E8), honouring
-    /// [`Clip::speed`]. Times outside the clip map onto its handles.
+    /// [`Clip::speed`] and its ramp. Times outside the clip map onto its
+    /// handles.
     pub fn to_source(&self, t: Time) -> Option<Time> {
         match &self.content {
             ClipContent::Media { source_in, .. } => {
-                Some(*source_in + (t - self.start).scale(self.speed))
+                Some(*source_in + self.source_offset(t - self.start))
             }
             _ => None,
         }
@@ -465,7 +471,7 @@ impl Clip {
     pub fn to_timeline(&self, source_t: Time) -> Option<Time> {
         match &self.content {
             ClipContent::Media { source_in, .. } => {
-                let t = self.start + (source_t - *source_in).scale(1.0 / self.speed);
+                let t = self.start + self.timeline_offset(source_t - *source_in);
                 self.range().contains(t).then_some(t)
             }
             _ => None,

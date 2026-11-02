@@ -16,6 +16,25 @@ pub trait Pictures {
     /// `clip`. Before the first and after the last frame of the source,
     /// that edge frame (transitions read past the clip's handles).
     fn frame(&mut self, clip: ClipId, item: &MediaItem, t: Time) -> Option<Frame>;
+    /// The frame showing at source time `t` and the one after it, with
+    /// their source times, for frames between them (smooth slow motion).
+    fn pair(
+        &mut self,
+        clip: ClipId,
+        item: &MediaItem,
+        t: Time,
+    ) -> Option<((Time, Frame), (Time, Frame))> {
+        let fd = frame_length(item)?;
+        let a = Time(t.max(Time::ZERO).0 / fd.0 * fd.0);
+        let b = a + fd;
+        // Read mid-frame, clear of rounding at the edges.
+        let half = Time(fd.0 / 2);
+        let fa = self.frame(clip, item, a + half)?;
+        let fb = self
+            .frame(clip, item, b + half)
+            .unwrap_or_else(|| fa.clone());
+        Some(((a, fa), (b, fb)))
+    }
     /// Called after each composed frame.
     fn finish(&mut self) {}
 }
@@ -39,6 +58,15 @@ impl Pictures for Stills {
     }
 }
 
+/// A video's frame length, from its probed rate.
+pub fn frame_length(item: &MediaItem) -> Option<Time> {
+    if item.kind == MediaKind::Image {
+        return None;
+    }
+    let fd = item.info.as_ref()?.video.as_ref()?.rate.frame_duration();
+    (fd > Time::ZERO).then_some(fd)
+}
+
 /// Larger forward jumps than this reopen a stream instead of decoding up.
 const MAX_SKIP: f64 = 1.5;
 /// Frames a stream decodes ahead of the compositor.
@@ -50,6 +78,9 @@ struct Open {
     /// Source time of the last frame read.
     position: Option<Time>,
     frame: Option<Frame>,
+    /// The frame read before `frame`, and its source time: frames between
+    /// two source frames read both again and again.
+    prev: Option<(Time, Frame)>,
     /// The decoder has no more frames: hold the last one.
     ended: bool,
 }
@@ -115,14 +146,22 @@ impl Pictures for Streams {
                     stream,
                     position: None,
                     frame: None,
+                    prev: None,
                     ended: false,
                 },
             );
         }
         let o = self.open.get_mut(&clip)?;
+        if let (Some(p), Some((at, f))) = (o.position, &o.prev)
+            && *at <= t
+            && t < p
+        {
+            return Some(f.clone());
+        }
         while !o.ended && (o.frame.is_none() || o.position.is_some_and(|p| p + fd <= t)) {
             match o.stream.next_frame() {
                 Ok(Some((at, f))) => {
+                    o.prev = o.position.zip(o.frame.take());
                     o.position = Some(at);
                     o.frame = Some(f);
                 }

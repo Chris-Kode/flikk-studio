@@ -4,7 +4,7 @@
 
 use koo_core::command::Command;
 use koo_core::cuts::FADE;
-use koo_core::model::{ClipContent, Project, TrackKind};
+use koo_core::model::{Project, TrackKind};
 use koo_core::services::AnalysisService;
 use koo_core::{MediaId, Time, TimeRange};
 use std::collections::HashMap;
@@ -64,16 +64,12 @@ impl SilenceCache {
                 sound.push(clip.range());
                 continue;
             };
-            let ClipContent::Media { source_in, .. } = &clip.content else {
+            if clip.media().is_none() {
                 continue;
-            };
+            }
             let mut quiet: Vec<TimeRange> = silences
                 .iter()
-                .filter_map(|s| {
-                    let start = clip.start + (s.start - *source_in);
-                    let end = clip.start + (s.end - *source_in);
-                    TimeRange::new(start, end).intersect(&clip.range())
-                })
+                .filter_map(|s| clip.source_to_timeline_range(*s).intersect(&clip.range()))
                 .collect();
             quiet.sort_by_key(|r| r.start);
             sound.extend(subtract(clip.range(), &quiet));

@@ -2,13 +2,14 @@
 //! and caption/timeline/still exports.
 
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -16,7 +17,8 @@ use koo_core::Rate;
 use koo_core::memory::{CaptionStyle, Presets};
 use koo_core::model::Project;
 use koo_deliver::{
-    LoudnessTarget, RenderJob, RenderQueue, RenderRequest, RenderSettings, RenderState, VideoCodec,
+    Encoder, LoudnessTarget, RenderJob, RenderQueue, RenderRequest, RenderSettings, RenderState,
+    VideoCodec,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -76,6 +78,8 @@ pub struct DeliverPanel {
     output: Option<PathBuf>,
     loudness: bool,
     burn_captions: bool,
+    /// For H.264 and HEVC; saved for the user.
+    encoder: Encoder,
     polling: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -136,6 +140,14 @@ impl DeliverPanel {
                 },
             ),
         ];
+        // Which hardware encoders work, found off the UI thread.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async { koo_deliver::hw::probe() })
+                .await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
         // Shared with the chat, so renders the agent queues show up here.
         let queue = state.read(cx).render_queue.clone();
         Self {
@@ -149,6 +161,7 @@ impl DeliverPanel {
             output: None,
             loudness: false,
             burn_captions: true,
+            encoder: saved_encoder(),
             polling: false,
             _subscriptions,
         }
@@ -225,6 +238,7 @@ impl DeliverPanel {
         }
         settings.loudness = self.loudness.then(|| self.loudness_target());
         settings.burn_captions = settings.video.is_some() && self.burn_captions;
+        settings.encoder = self.encoder;
         Ok(settings)
     }
 
@@ -353,6 +367,41 @@ impl DeliverPanel {
         .detach();
     }
 
+    fn set_encoder(&mut self, encoder: Encoder, cx: &mut Context<Self>) {
+        self.encoder = encoder;
+        crate::persistence::with_store(|s| s.save_render_encoder(encoder.key()));
+        cx.notify();
+    }
+
+    /// Auto, Hardware, Software, for presets a hardware encoder can take.
+    fn render_encoder(&self, preset: &RenderSettings, cx: &mut Context<Self>) -> ButtonGroup {
+        let codec = preset.hardware_codec().map(|(codec, _)| codec);
+        let probe = koo_deliver::hw::probed();
+        let found = probe
+            .zip(codec)
+            .and_then(|(p, codec)| p.best(codec))
+            .map(|e| e.api.label());
+        // Known to be missing only once the probe is done.
+        let missing = probe.is_some() && found.is_none();
+        ButtonGroup::new("encoder")
+            .outline()
+            .small()
+            .children(Encoder::ALL.iter().map(|&e| {
+                Button::new(e.key())
+                    .label(e.label())
+                    .selected(e == self.encoder)
+                    .when(e == Encoder::Hardware && missing, |b| b.disabled(true))
+                    .when_some(found.filter(|_| e != Encoder::Software), |b, api| {
+                        b.tooltip(api)
+                    })
+            }))
+            .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
+                if let Some(&ix) = clicked.first() {
+                    this.set_encoder(Encoder::ALL[ix], cx);
+                }
+            }))
+    }
+
     fn render_job(&self, job: &RenderJob, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, red, green) = (theme.muted_foreground, theme.red, theme.green);
@@ -440,6 +489,10 @@ impl Render for DeliverPanel {
         let preset = &self.presets[self.preset];
         let custom = preset.name == RenderSettings::custom().name;
         let has_video = preset.video.is_some();
+        let encoder = preset
+            .hardware_codec()
+            .is_some()
+            .then(|| self.render_encoder(preset, cx));
         let output = self.output(cx);
         let output_name: SharedString = output
             .file_name()
@@ -471,6 +524,7 @@ impl Render for DeliverPanel {
                         .children(self.custom.iter().map(|i| Input::new(i).small())),
                 )
             })
+            .when_some(encoder, |el, group| el.child(group))
             .child(
                 v_flex()
                     .gap_2()
@@ -573,6 +627,14 @@ fn parse_rate(text: &str) -> Option<Rate> {
         num: (fps * 1000.0).round() as u32,
         den: 1000,
     })
+}
+
+/// The encoder the user picked last, else Auto.
+pub(crate) fn saved_encoder() -> Encoder {
+    crate::persistence::with_store(|s| s.render_encoder())
+        .flatten()
+        .and_then(|k| Encoder::parse(&k))
+        .unwrap_or_default()
 }
 
 /// Movies (macOS), Videos (Windows), else the home folder.

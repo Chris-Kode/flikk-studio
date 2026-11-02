@@ -14,7 +14,8 @@
 //! lanes where crossfades overlap), mixed, then track volume, pan and track
 //! effects; optional ducking via `sidechaincompress` keyed by the dialogue
 //! tracks, the mix, and optional `loudnorm`. A span trims its source with
-//! handles, retimes it with `atempo`, runs the clip effects
+//! handles, retimes it with `atempo` (under a speed ramp, stages whose
+//! tempo an `asendcmd` script moves every 50 ms), runs the clip effects
 //! ([`crate::audio_fx`]) and one `volume` expression for gain or volume
 //! keyframes, fades and equal-power crossfade ramps, following
 //! `koo_core::audiofx` like the viewer's mixer.
@@ -30,6 +31,7 @@ use anyhow::{Context as _, Result, bail};
 use koo_core::audiofx::{self, Span};
 use koo_core::memory::CaptionStyle;
 use koo_core::model::{Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind};
+use koo_core::speed::RampAudio;
 use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{Rate, Time, TimeRange, TrackId};
 use std::collections::HashMap;
@@ -716,15 +718,26 @@ impl Builder<'_> {
         if !item.path.exists() {
             bail!("media offline: {}", item.path.display());
         }
+        if clip.is_ramped() && clip.retime.audio == RampAudio::Mute {
+            return Ok(None);
+        }
         let sr = self.spec.sample_rate;
         let speed = clip.speed.clamp(0.01, 100.0);
         let length = samples as f64 / sr as f64;
         // Source time at the segment start; before 0 is silence.
-        let src = source_in.as_secs_f64() + (start - clip.start).as_secs_f64() * speed;
-        let lead = (-src / speed).max(0.0);
+        let src = clip.to_source(start).unwrap_or(*source_in).as_secs_f64();
+        let mut lead = (-src / speed).max(0.0);
         let s0 = src.max(0.0);
         // A little extra source so atempo's output never runs short.
-        let s1 = s0 + (length - lead).max(0.0) * speed + 0.1 * speed;
+        let mut s1 = s0 + (length - lead).max(0.0) * speed + 0.1 * speed;
+        let ramp = clip.is_ramped().then(|| {
+            let at = |t: Time| clip.to_source(t).map_or(0.0, |s| s.as_secs_f64());
+            let zero = clip.start + clip.timeline_offset(-*source_in);
+            lead = (zero - start).as_secs_f64().clamp(0.0, length);
+            let end = start + Time::from_secs_f64(length);
+            s1 = at(end).max(s0) + 0.1 * clip.speed_at(end - clip.start);
+            ramp_tempo(clip, start + Time::from_secs_f64(lead), end, s0)
+        });
         let mut f = vec![format!(
             "amovie={}:seek_point={}{}",
             escape_path(&item.path),
@@ -736,7 +749,10 @@ impl Builder<'_> {
         f.push(format!(
             "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
         ));
-        f.extend(atempo(speed));
+        match ramp {
+            Some(steps) => f.extend(self.ramp_atempo(&steps, work_dir)?),
+            None => f.extend(atempo(speed)),
+        }
         let lead_samples = (lead * sr as f64).round() as i64;
         if lead_samples > 0 {
             f.push(format!("adelay=delays={lead_samples}S:all=1"));
@@ -771,6 +787,59 @@ impl audio_fx::Sink for Builder<'_> {
     fn push(&mut self, chain: String) {
         self.chains.push(chain);
     }
+}
+
+impl Builder<'_> {
+    /// `atempo` stages whose tempo follows `steps` (source seconds from
+    /// the segment's start, speed), driven by an `asendcmd` script in
+    /// `work_dir`. Enough stages that each stays at 0.5 or more.
+    fn ramp_atempo(&mut self, steps: &[(f64, f64)], work_dir: &Path) -> Result<Vec<String>> {
+        let slowest = steps.iter().map(|s| s.1).fold(1.0f64, f64::min);
+        let stages = if slowest < 0.5 {
+            (slowest.ln() / 0.5f64.ln()).ceil() as i32
+        } else {
+            1
+        }
+        .max(1);
+        let tempo = |speed: f64| speed.clamp(0.01, 100.0).powf(1.0 / stages as f64);
+        let names: Vec<String> = (0..stages).map(|_| self.label("ramp")).collect();
+        let mut script = String::new();
+        for (at, speed) in steps {
+            let v = num(tempo(*speed));
+            let cmds: Vec<String> = names
+                .iter()
+                .map(|n| format!("atempo@{n} tempo {v}"))
+                .collect();
+            let _ = writeln!(script, "{} {};", num(*at), cmds.join(", "));
+        }
+        let path = work_dir.join(format!("{}.cmd", names[0]));
+        std::fs::write(&path, script).context("could not write the speed ramp's tempo script")?;
+        let first = steps.first().map_or(1.0, |s| s.1);
+        let mut f = vec![format!("asendcmd=f={}", escape_path(&path))];
+        f.extend(
+            names
+                .iter()
+                .map(|n| format!("atempo@{n}=tempo={}", num(tempo(first)))),
+        );
+        Ok(f)
+    }
+}
+
+/// Every 50 ms of timeline from `from` to `to`, where the ramped `clip`'s
+/// source is then (seconds from `s0`) and its speed.
+fn ramp_tempo(clip: &Clip, from: Time, to: Time, s0: f64) -> Vec<(f64, f64)> {
+    let step = Time::from_millis(50);
+    let mut out = Vec::new();
+    let mut t = from;
+    loop {
+        let at = clip.to_source(t).map_or(0.0, |s| s.as_secs_f64()) - s0;
+        out.push((at.max(0.0), clip.speed_at(t - clip.start)));
+        if t >= to {
+            break;
+        }
+        t = (t + step).min(to);
+    }
+    out
 }
 
 /// `atempo` stages for `speed` (each stage takes 0.5..100).

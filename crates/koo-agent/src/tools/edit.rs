@@ -138,20 +138,11 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "set_transform" => return set_transform(ctx, args, &reason),
         "set_mask" => return super::masks::set_mask(ctx, args, &reason),
         "remove_mask" => super::masks::remove_mask(ctx, args)?,
+        "remove_background" => super::masks::remove_background(ctx, args)?,
         "place" => return super::layout::place(ctx, args, &reason),
         "animate" => super::layout::animate(ctx, args)?,
 
-        "set_speed" => {
-            let speed = args.f64("speed")?;
-            if !(0.01..=100.0).contains(&speed) {
-                return Err(ToolError("`speed` is 0.01..100 (1 = normal)".into()));
-            }
-            vec![Command::SetSpeed {
-                clip: clip_id(ctx.project(), args.str("clip")?)?,
-                speed,
-                ripple: args.opt_bool("ripple")?.unwrap_or(false),
-            }]
-        }
+        "set_speed" => super::speed::set_speed(ctx, args)?,
         "set_clips_enabled" => vec![Command::SetClipsEnabled {
             clips: some_clips(ctx, args)?,
             enabled: args
