@@ -313,6 +313,7 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "minimax",
             "hailuo",
             "happy horse",
+            "pika",
         ],
     ),
     (

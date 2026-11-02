@@ -937,7 +937,8 @@ pub enum Stage {
 
 impl Stage {
     /// Whether it can still be stopped: a provider follows it, and it isn't
-    /// made yet (what is made is paid for, and kept).
+    /// made yet (what is made is paid for, and kept). See also
+    /// [`GenerationTask::can_stop`], for a provider that can't stop one.
     pub fn can_stop(self) -> bool {
         matches!(self, Self::Queued(_) | Self::Running)
     }
@@ -953,6 +954,7 @@ pub struct GenerationTask(Arc<TaskState>);
 struct TaskState {
     stage: Mutex<Stage>,
     cancelled: AtomicBool,
+    unstoppable: AtomicBool,
 }
 
 impl GenerationTask {
@@ -962,6 +964,17 @@ impl GenerationTask {
 
     pub fn report(&self, stage: Stage) {
         *self.0.stage.lock().unwrap_or_else(|e| e.into_inner()) = stage;
+    }
+
+    /// Said by a provider that follows it but has no way to stop it: it
+    /// runs to the end, and is paid for.
+    pub fn unstoppable(&self) {
+        self.0.unstoppable.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether stopping it now would stop it.
+    pub fn can_stop(&self) -> bool {
+        !self.0.unstoppable.load(Ordering::Relaxed) && self.stage().can_stop()
     }
 
     /// Ask the provider to stop it; what is already made is kept.

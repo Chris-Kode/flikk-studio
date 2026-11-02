@@ -17,7 +17,7 @@ const INLINE: u64 = 8 << 20;
 
 /// A URL fal can read `path` from.
 pub fn url(key: &str, path: &Path) -> CloudResult<String> {
-    let mime = mime(path);
+    let mime = http::media_mime(path);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -33,7 +33,7 @@ pub fn url(key: &str, path: &Path) -> CloudResult<String> {
         let json = reply.json()?;
         if let (Some(upload), Some(file)) = (json["upload_url"].as_str(), json["file_url"].as_str())
         {
-            let put = http::put_file(upload, path, mime)?;
+            let put = http::put_file(upload, path, &[("content-type", mime)])?;
             if put.ok() {
                 return Ok(file.to_owned());
             }
@@ -61,28 +61,4 @@ fn inline(path: &Path, mime: &str) -> CloudResult<String> {
     let bytes = std::fs::read(path).map_err(fail)?;
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{data}"))
-}
-
-/// The media type of a picture, clip or sound, by its extension.
-fn mime(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        Some("bmp") => "image/bmp",
-        Some("tif" | "tiff") => "image/tiff",
-        Some("heic") => "image/heic",
-        Some("heif") => "image/heif",
-        Some("mp4" | "m4v") => "video/mp4",
-        Some("mov") => "video/quicktime",
-        Some("webm") => "video/webm",
-        Some("mkv") => "video/x-matroska",
-        _ => http::audio_mime(path),
-    }
 }

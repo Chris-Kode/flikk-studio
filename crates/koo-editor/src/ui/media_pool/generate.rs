@@ -258,7 +258,7 @@ impl MediaPoolPanel {
                 let stage = g.task.stage();
                 let running = g.failed.is_none();
                 // A provider that follows it can stop it; one request can't.
-                let action = if running && stage.can_stop() {
+                let action = if running && g.task.can_stop() {
                     let stopping = g.task.cancelled();
                     Button::new(("generation-stop", id as usize))
                         .ghost()

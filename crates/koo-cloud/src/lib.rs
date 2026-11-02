@@ -17,6 +17,7 @@ mod elevenlabs;
 mod fal;
 mod http;
 mod keys;
+mod pika;
 
 pub use keys::{KeySource, Keys};
 
@@ -29,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Every provider the editor knows.
-pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER, &fal::PROVIDER];
+pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER, &fal::PROVIDER, &pika::PROVIDER];
 
 /// One provider as the user sees it.
 pub struct Provider {

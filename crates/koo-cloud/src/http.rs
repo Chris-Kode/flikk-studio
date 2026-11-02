@@ -161,18 +161,26 @@ pub fn put(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
 }
 
 /// A PUT of the file at `path` as the whole body, read as it is sent: an
-/// upload to a URL that was handed out for it.
-pub fn put_file(url: &str, path: &Path, mime: &str) -> Result<Reply, CloudError> {
+/// upload to a URL that was handed out for it, with the `headers` it was
+/// handed out with (its media type, at least). Its length is added when
+/// they don't carry it.
+pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
     let size = std::fs::metadata(path)
         .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?
         .len();
+    let sized = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
     with_retries(true, || {
         let file = std::fs::File::open(path)?;
-        agent()
-            .put(url)
-            .header("content-type", mime)
-            .header("content-length", size.to_string())
-            .send(SendBody::from_owned_reader(file))
+        let mut request = agent().put(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if !sized {
+            request = request.header("content-length", size.to_string());
+        }
+        request.send(SendBody::from_owned_reader(file))
     })
 }
 
@@ -292,6 +300,30 @@ fn boundary() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     )
+}
+
+/// The media type of a picture, clip or sound, by its extension.
+pub fn media_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("tif" | "tiff") => "image/tiff",
+        Some("heic") => "image/heic",
+        Some("heif") => "image/heif",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        _ => audio_mime(path),
+    }
 }
 
 /// The media type of an audio file, by its extension.
