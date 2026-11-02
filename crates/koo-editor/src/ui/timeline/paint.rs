@@ -1,5 +1,6 @@
 //! Everything right of the track headers is one canvas: ruler, lanes, clips,
-//! waveforms, markers, the change-set overlay, silence bands and the playhead.
+//! waveforms, markers, the change-set overlay, silence bands, the render bar
+//! and the playhead.
 //! `Scene` is a snapshot taken in `render`, so painting never touches state.
 
 use super::layout::{self, RULER_HEIGHT, Row, Viewport};
@@ -28,6 +29,9 @@ pub struct Colors {
     pub marker: Hsla,
     pub protected: Hsla,
     pub selection: Hsla,
+    /// Render bar: frames on disk, and frames still to compose.
+    pub cached: Hsla,
+    pub uncached: Hsla,
 }
 
 impl Colors {
@@ -48,6 +52,8 @@ impl Colors {
             marker: theme.blue_light,
             protected: theme.warning,
             selection: theme.foreground,
+            cached: theme.success,
+            uncached: theme.danger,
         }
     }
 
@@ -141,6 +147,8 @@ pub struct Scene {
     pub drop: Option<DropHint>,
     pub marquee: Option<Marquee>,
     pub colors: Colors,
+    /// Which compositor ranges the background render has on disk.
+    pub render: Option<Arc<crate::render_cache::Status>>,
 }
 
 impl Scene {
@@ -816,6 +824,18 @@ fn paint_ruler(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &
     let x_of = |t: Time| left + px(vp.x(t));
 
     window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
+        // The render bar, along the top edge.
+        for (range, cached) in scene.render.iter().flat_map(|s| &s.runs) {
+            let (a, b) = (x_of(range.start), x_of(range.end));
+            if b < ruler.origin.x || a > ruler.right() {
+                continue;
+            }
+            let color = if *cached { c.cached } else { c.uncached };
+            window.paint_quad(fill(
+                Bounds::new(point(a, ruler.origin.y), size((b - a).max(px(1.)), px(2.))),
+                color.opacity(0.8),
+            ));
+        }
         if let Some(r) = scene.in_out {
             let (a, b) = (x_of(r.start), x_of(r.end));
             window.paint_quad(fill(

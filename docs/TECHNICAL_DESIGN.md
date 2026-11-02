@@ -241,7 +241,7 @@ the effect of its earlier calls.
   `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
   frame, `t-<key>.mattes` per tracked subject), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log).
+  activity log), `frames/<ab>/<key>.qoi` (the render cache, below).
 * **Viewer** (`ui/viewer*`): each playback stream reads 4 frames ahead on its
   own thread (`compose/pictures.rs`); the player submits frame N+1 before
   reading N back and drops to 1/2 or 1/4 resolution when frames cost more
@@ -259,6 +259,61 @@ the effect of its earlier calls.
   the object, Shift: a new subject), a click on a point takes it away, and
   points drag. Cached frames are dropped when the subjects' version moves,
   so mattes show as they are made.
+
+### Render cache
+
+`koo-editor/src/render_cache*` keeps heavy frames on disk so playback stays
+real time however heavy the edit (Resolve's smart cache, Premiere's render
+bar).
+
+* **What is rendered:** the ranges `compose::needs_compositor` picks
+  (effects, generators, HTML generators, transitions, masks, subject masks,
+  retimed media…), drawn by `compose::submit_program` like the viewer and
+  the export, at the sequence's shape with a 720 short side (smaller
+  sequences at their own size), masks cut (not tinted).
+* **Keys** (`render_cache/key.rs`): the timeline is cut at every clip and
+  transition edge on the tracks that show; each piece that needs the
+  compositor is a span hashed (BLAKE3) over serialized state: the clips
+  shown there and the clips touching them (transitions draw from them),
+  their tracks, their media items (fingerprint, path, info, proxy), the
+  timeline without its tracks, markers and ducking, the project's FX
+  programs, the caption styles, the frame size, which engines are wired,
+  the subject model, the app version and a format number. A frame's key is
+  its span's hash and its index. Serialized values go through
+  `serde_json::Value`, whose maps sort their keys. Only fields known not to
+  draw are left out (clip audio, name and colour; track name and lock; bins
+  and tags), so a property added to a clip, track or the timeline later is
+  in the key without being listed. An edit changes the keys of the frames
+  it changes and no others; nothing is invalidated, frames no longer asked
+  for age out.
+* **Store** (`render_cache/store.rs`): `cache/frames/<ab>/<key>.qoi`, a
+  magic, the key and a lossless QOI picture (BGRA), written to a temporary
+  file and renamed. An in-memory index (read from the folder on first use,
+  ordered by modified time, which reads touch) evicts the least recently
+  used past the size limit. A file that is missing or does not decode, or
+  whose key does not match, is dropped and the frame composed live.
+* **Background render** (`render_cache.rs`, `render_cache/worker.rs`):
+  `EditorState.render` polls 4 times a second. 200 ms after the shown
+  project (`display_project`: a previewed draft or a drag included) last
+  changed it is planned and measured off the UI thread; 1.5 s after the
+  last play, scrub or edit a worker thread renders the spans not on disk,
+  from the playhead on, then from the start, pipelined as in playback. Any
+  play, playhead move or edit drops the worker, which stops after the frame
+  in hand. A span waits (retried every 5 s) while its media is offline or
+  its subject masks' mattes are still being made, so a frame is only kept
+  as it will finally look. A stale or cancelled render can only write
+  frames under the keys of what it drew, so it never shows a wrong frame.
+* **Reading:** playback (`viewer/player.rs`) takes a frame from the
+  in-memory cache, else from disk when the cached frame is at least three
+  quarters of the viewer's width, else composes it; paused frames and
+  render-ahead use disk frames at least as wide as the viewer. A source
+  item in the viewer, a zoomed viewer and tinted masks always compose.
+* **Render bar:** a 2 px strip along the top of the ruler: `theme.success`
+  over cached frames, `theme.danger` over frames still to render; nothing
+  where no compositor is needed.
+* **Settings → Storage:** the "Render cache" row shows its size, opens and
+  clears its folder, sets the size limit (2–50 GB, 10 by default) and turns
+  background rendering off (`RenderCacheSettings` in the store's `meta`).
 
 ## 7. Analysis and models
 
@@ -906,7 +961,8 @@ the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
 Storage (what the user-data folder holds, with Clear for previews,
-subject mattes among them, and analysis results). The FX code editor replaces
+subject mattes among them, analysis results and the render cache, whose
+row also sets its size limit and turns background rendering off). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -972,6 +1028,7 @@ there.
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
 | D1 render | `koo-deliver`, `ui/deliver.rs` |
+| Render cache | `koo-editor/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `koo-store/src/render_cache.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
@@ -1032,6 +1089,16 @@ there.
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
   makes the first debug build take minutes instead of hours.
+
+* Render cache: keys cover the project and the editor's styles, not files
+  read by path behind them (an image parameter's file or a LUT changed in
+  place, analysis data kept outside the project): such a change shows only
+  after the cache is cleared. Built-in shaders and templates are keyed by
+  the app version, so a development build that changes one keeps showing
+  old frames until cleared. Frames are keyed by absolute time, so moving a
+  clip (or a ripple) renders the moved range again. Playback's disk reads
+  and QOI decoding were not measured here at real time on a GPU machine
+  (no GPU in the cloud containers), nor on macOS or Windows.
 
 ### Analysis accuracy
 

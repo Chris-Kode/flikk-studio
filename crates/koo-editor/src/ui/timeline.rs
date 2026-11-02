@@ -1746,6 +1746,7 @@ impl TimelinePanel {
             drop: self.drop,
             marquee,
             colors,
+            render: self.state.read(cx).render.status(),
         };
 
         if let Some(media) = media {

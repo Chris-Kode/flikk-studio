@@ -38,3 +38,7 @@ opt-level = 3
 
 [profile.dev.package.miniz_oxide]
 opt-level = 3
+
+# Cached frames (koo-editor's render cache) are QOI pictures, read during playback.
+[profile.dev.package.qoi]
+opt-level = 3
