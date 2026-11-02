@@ -69,6 +69,11 @@ pub fn generated() -> PathBuf {
     sub("generated")
 }
 
+/// Pictures the agent took from the web for the pool.
+pub fn web() -> PathBuf {
+    sub("web")
+}
+
 /// API keys, owner-only, where the system has no credential store.
 pub fn credentials() -> PathBuf {
     let _ = std::fs::create_dir_all(home());

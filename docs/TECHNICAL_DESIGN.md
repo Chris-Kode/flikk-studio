@@ -1107,7 +1107,11 @@ on the UI thread and run it off it:
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
-  search. An "Image generation" switch, shown for Codex (off by default,
+  search. Both read pages as text only, so the same switch lists the `koo`
+  tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
+  25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
+  the original under `paths::web()` and adds it to the pool's "Web Images"
+  bin as the user's edit. An "Image generation" switch, shown for Codex (off by default,
   overridable per project), sets Codex's `features.image_generation`, which
   Codex itself turns on by default. `codex exec` does not report its
   pictures, so the host watches `$CODEX_HOME/generated_images/<thread>/`

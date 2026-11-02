@@ -576,16 +576,31 @@ impl AgentHost {
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
                     Some(turn) => {
-                        let list = tools::list(bus, role_of(&turn.author), Some(&turn.groups));
+                        let list = tools::list(
+                            bus,
+                            role_of(&turn.author),
+                            Some(&turn.groups),
+                            turn.settings.web,
+                        );
                         turn.usage.listed = list.len();
                         turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
                         reply.tools(list);
                     }
-                    None => reply.tools(tools::list(bus, self.role, None)),
+                    None => reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        self.external.settings.web,
+                    )),
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, self.role, None));
+                    reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        self.external.settings.web,
+                    ));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     self.collect_images(bus, services);
@@ -696,6 +711,7 @@ impl AgentHost {
                         &summary,
                     )
                 }
+                JobDone::Fetched { item, done } => tools::web::finish(bus, *item, *done),
                 JobDone::Respoken { item, fix, summary } => {
                     let author = match origin {
                         Origin::Turn => self
