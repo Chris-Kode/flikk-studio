@@ -25,11 +25,13 @@ pub mod beats;
 #[cfg(any(feature = "aligner", feature = "sounds"))]
 mod bpe;
 mod download;
+pub mod interpolation;
 #[cfg(any(
     feature = "aligner",
     feature = "diarizer",
     feature = "sounds",
-    feature = "segment"
+    feature = "segment",
+    feature = "interpolate"
 ))]
 mod onnx;
 pub mod segmentation;
@@ -90,11 +92,14 @@ pub enum Task {
     SoundSearch,
     /// Subject masks: not part of analysis.
     Segmentation,
+    /// Optical flow slow motion: not part of analysis.
+    FrameInterpolation,
 }
 
 impl Task {
-    /// In the order analysis runs them, then subject masks.
-    pub const ALL: [Task; 8] = [
+    /// In the order analysis runs them, then subject masks and optical
+    /// flow.
+    pub const ALL: [Task; 9] = [
         Task::VoiceActivity,
         Task::Transcription,
         Task::WordTiming,
@@ -103,6 +108,7 @@ impl Task {
         Task::Beats,
         Task::SoundSearch,
         Task::Segmentation,
+        Task::FrameInterpolation,
     ];
 
     pub fn label(self) -> &'static str {
@@ -115,6 +121,7 @@ impl Task {
             Task::Beats => "Beats",
             Task::SoundSearch => "Sound search",
             Task::Segmentation => "Subject masks",
+            Task::FrameInterpolation => "Optical flow",
         }
     }
 
@@ -129,6 +136,7 @@ impl Task {
             Task::Beats => beats::MODELS,
             Task::SoundSearch => sound_search::MODELS,
             Task::Segmentation => segmentation::MODELS,
+            Task::FrameInterpolation => interpolation::MODELS,
         }
     }
 

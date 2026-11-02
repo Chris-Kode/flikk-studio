@@ -61,6 +61,9 @@ impl Colors {
     }
 }
 
+/// Clip time → source played since the clip's start.
+pub type Warp = Arc<dyn Fn(Time) -> Time>;
+
 pub struct ClipScene {
     pub range: TimeRange,
     pub label: SharedString,
@@ -76,6 +79,9 @@ pub struct ClipScene {
     /// Being dragged: drawn faded at its old place.
     pub lifted: bool,
     pub peaks: Option<Arc<Vec<f32>>>,
+    /// Retimed: clip time → source played since its start, which `peaks`
+    /// span.
+    pub warp: Option<Warp>,
     /// Filmstrip tiles: x offset from the clip start, width, image.
     pub tiles: Vec<(f32, f32, Arc<RenderImage>)>,
     pub fade_in: Time,
@@ -664,7 +670,11 @@ fn paint_waveform(
     while x < x1 {
         let from = Time((len.0 as f64 * (x / width) as f64) as i64);
         let to = Time((len.0 as f64 * ((x + step) / width) as f64) as i64);
-        let p = waveform::peak(peaks, len, from, to).clamp(0., 1.);
+        let p = match &clip.warp {
+            Some(warp) => waveform::peak(peaks, warp(len), warp(from), warp(to)),
+            None => waveform::peak(peaks, len, from, to),
+        }
+        .clamp(0., 1.);
         tops.push((rect.origin.x + px(x), p));
         x += step;
     }

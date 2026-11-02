@@ -8,7 +8,10 @@
 //! enabled clip under the playhead, or the transition covering it:
 //!
 //! 1. **Picture**: a media frame at the clip's source time
-//!    ([`Clip::to_source`], so speed is honoured), an overlay asset, or a
+//!    ([`Clip::to_source`], so speed and ramps are honoured; slowed clips
+//!    show the moment between two source frames as their
+//!    [`Interpolation`] says: the two mixed, or the optical flow frame
+//!    from [`Services::interpolation`] once made), an overlay asset, or a
 //!    generator ([`FxService::generate`] for GLSL, [`HtmlService::frame`]
 //!    for HTML) laid out at the output size.
 //! 2. **Grade**: the clip's, then for media the timeline's
@@ -62,18 +65,20 @@ mod pictures;
 
 pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
-pub use pictures::{Pictures, Stills, Streams, overlay_item};
+pub use pictures::{Pictures, Stills, Streams, frame_length, overlay_item};
 
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
 use crate::grade;
 use crate::ids::{ClipId, MaskId};
 use crate::model::{
-    BlendMode, Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind, Transform,
+    BlendMode, Clip, ClipContent, Grade, MediaItem, MediaKind, Project, Property, Track, TrackKind,
+    Transform,
 };
 use crate::services::{
-    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, SubjectRef,
-    Surface,
+    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services,
+    SubjectRef, Surface,
 };
+use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
 use crate::time::{Time, TimeRange};
 use batch::CpuBatch;
@@ -379,7 +384,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                                         | Property::AnchorY
                                 )
                         })
-                        || (c.media().is_some() && (c.speed - 1.0).abs() > 1e-9)
+                        || (c.media().is_some() && c.is_retimed())
                 })
     })
 }
@@ -535,6 +540,14 @@ fn lettering_layer(
     Some((l, place))
 }
 
+/// A frame between two source frames.
+enum Tween {
+    /// Ready to show.
+    Made(Frame),
+    /// Two frames to mix, by how far from the first.
+    Mix(Frame, Frame, f32),
+}
+
 struct Ctx<'a, 'b> {
     project: &'a Project,
     services: &'a Services,
@@ -670,7 +683,12 @@ impl Ctx<'_, '_> {
                 if item.kind == MediaKind::Audio {
                     return None;
                 }
-                let frame = self.pictures.frame(clip.id, item, clip.to_source(t)?)?;
+                let source = clip.to_source(t)?;
+                let tween = self.tween(clip, item, t, source);
+                let frame = match &tween {
+                    Some(Tween::Made(frame) | Tween::Mix(frame, ..)) => frame.clone(),
+                    None => self.pictures.frame(clip.id, item, source)?,
+                };
                 let refines = clip
                     .masks
                     .iter()
@@ -678,7 +696,16 @@ impl Ctx<'_, '_> {
                 if refines {
                     self.guide = Some(frame.clone());
                 }
-                self.upload(&frame, &grades)?
+                match tween {
+                    Some(Tween::Mix(a, b, at)) => {
+                        let a = self.upload(&a, &grades)?;
+                        match self.upload(&b, &grades) {
+                            Some(b) => self.batch.mix(a, b, at).unwrap_or(a),
+                            None => a,
+                        }
+                    }
+                    _ => self.upload(&frame, &grades)?,
+                }
             }
             ClipContent::Overlay { asset, .. } => {
                 let item = overlay_item(clip.id, asset);
@@ -726,6 +753,46 @@ impl Ctx<'_, '_> {
                     .unwrap_or(surface)
             })),
         }
+    }
+
+    /// What a slowed `clip` shows at timeline time `t` (source time
+    /// `source`) between two source frames, as its [`Interpolation`] says:
+    /// `None` to show the frame there as it is.
+    fn tween(&mut self, clip: &Clip, item: &MediaItem, t: Time, source: Time) -> Option<Tween> {
+        let mode = clip.retime.interpolation;
+        if mode == Interpolation::Nearest
+            || item.kind == MediaKind::Image
+            || clip.speed_at(t - clip.start) >= 1.0 - 1e-9
+        {
+            return None;
+        }
+        let ((ta, a), (tb, b)) = self.pictures.pair(clip.id, item, source)?;
+        let span = (tb - ta).as_secs_f64();
+        if span <= 0.0 {
+            return None;
+        }
+        let at = ((source - ta).as_secs_f64() / span).clamp(0.0, 1.0) as f32;
+        let step = (at * BETWEEN_STEPS).round() / BETWEEN_STEPS;
+        if step <= 0.0 {
+            return Some(Tween::Made(a));
+        }
+        if step >= 1.0 {
+            return Some(Tween::Made(b));
+        }
+        if mode == Interpolation::OpticalFlow
+            && let Some(service) = &self.services.interpolation
+        {
+            let request = Between {
+                item,
+                a: (ta, &a),
+                b: (tb, &b),
+                at: step,
+            };
+            if let Some(made) = service.between(&request, false) {
+                return Some(Tween::Made(made));
+            }
+        }
+        Some(Tween::Mix(a, b, at))
     }
 
     /// `frame` graded by `grades` (on the CPU), in the batch.

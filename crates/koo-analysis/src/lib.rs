@@ -32,6 +32,7 @@
 mod align;
 mod cache;
 mod ffmpeg;
+mod interpolation;
 #[cfg(feature = "sounds")]
 mod sounds;
 pub mod speakers;
@@ -61,6 +62,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
+pub use interpolation::LocalInterpolation;
 pub use subjects::LocalSubjects;
 
 /// Items analyzed at once. Each already keeps several cores busy, and the
@@ -239,6 +241,9 @@ impl LocalAnalysis {
         if cfg!(feature = "subjects") {
             tasks.push(ModelTask::Segmentation);
         }
+        if cfg!(feature = "interpolation") {
+            tasks.push(ModelTask::FrameInterpolation);
+        }
         tasks
     }
 
@@ -261,6 +266,8 @@ impl LocalAnalysis {
                 ModelTask::SoundSearch => steps.sound_search(),
                 // Subject masks, not analysis.
                 ModelTask::Segmentation => false,
+                // Optical flow slow motion, not analysis.
+                ModelTask::FrameInterpolation => false,
             })
             .collect()
     }

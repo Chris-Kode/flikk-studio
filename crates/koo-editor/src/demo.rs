@@ -9,6 +9,7 @@
 
 mod compose;
 mod engines;
+pub mod speed;
 
 use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
@@ -62,6 +63,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
     let picks = timeline_fx(&mut demo.project);
+    speed::seed(&mut demo.project, demo.ids.selected);
     let analysis = interview_analysis(&demo);
     let jobs = vec![
         job(&demo.project.media[0], JobState::Done),

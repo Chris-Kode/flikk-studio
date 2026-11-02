@@ -286,6 +286,33 @@ pub trait SubjectService: Send + Sync {
     fn version(&self) -> u64;
 }
 
+/// Two neighbouring source frames of a video and a moment between them,
+/// for [`InterpolationService::between`].
+#[derive(Clone, Copy, Debug)]
+pub struct Between<'a> {
+    pub item: &'a MediaItem,
+    /// The earlier frame and its source time.
+    pub a: (Time, &'a Frame),
+    /// The next one and its source time.
+    pub b: (Time, &'a Frame),
+    /// How far from `a` to `b`, 0..1, in steps of
+    /// [`crate::speed::BETWEEN_STEPS`].
+    pub at: f32,
+}
+
+/// Frames made between two source frames along the motion (optical flow,
+/// `koo-analysis`), kept by fingerprint, frames, moment and size.
+pub trait InterpolationService: Send + Sync {
+    /// Whether the model is here; why not otherwise.
+    fn available(&self) -> Result<(), String>;
+    /// The frame between, when it is made. Otherwise starts making it and
+    /// returns `None`, or with `wait` (renders) makes it now; `None` when
+    /// it cannot be made.
+    fn between(&self, request: &Between<'_>, wait: bool) -> Option<Frame>;
+    /// Counts frames made, so views know to draw again.
+    fn version(&self) -> u64;
+}
+
 /// One evaluated FX program: what to run, its parameter values and clock.
 /// Build `values` with [`crate::fx::FxInstance::values_at`].
 #[derive(Clone, Copy, Debug)]
@@ -724,6 +751,8 @@ pub struct Services {
     pub generation: Option<Arc<dyn crate::cloud::GenerationService>>,
     /// Finds and follows the objects subject masks keep.
     pub subjects: Option<Arc<dyn SubjectService>>,
+    /// Makes frames between source frames for smooth slow motion.
+    pub interpolation: Option<Arc<dyn InterpolationService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -737,6 +766,7 @@ impl std::fmt::Debug for Services {
             .field("lettering", &self.lettering.is_some())
             .field("generation", &self.generation.is_some())
             .field("subjects", &self.subjects.is_some())
+            .field("interpolation", &self.interpolation.is_some())
             .finish()
     }
 }

@@ -136,26 +136,26 @@ impl Clip {
         out
     }
 
-    /// Where a source range lands on the timeline through this clip's speed,
-    /// unclamped (it may lie outside the clip).
+    /// Where a source range lands on the timeline through this clip's speed
+    /// (and ramp), unclamped (it may lie outside the clip).
     pub fn source_to_timeline_range(&self, source: TimeRange) -> TimeRange {
         let source_in = match &self.content {
             ClipContent::Media { source_in, .. } => *source_in,
             _ => Time::ZERO,
         };
-        let inv = 1.0 / self.speed;
         TimeRange::new(
-            self.start + (source.start - source_in).scale(inv),
-            self.start + (source.end - source_in).scale(inv),
+            self.start + self.timeline_offset(source.start - source_in),
+            self.start + self.timeline_offset(source.end - source_in),
         )
     }
 
-    /// Source range this clip plays, for media clips (`duration × speed`).
+    /// Source range this clip plays, for media clips (`duration × speed`,
+    /// or what its ramp plays).
     pub fn source_range(&self) -> Option<TimeRange> {
         match &self.content {
             ClipContent::Media { source_in, .. } => Some(TimeRange::new(
                 *source_in,
-                *source_in + self.duration.scale(self.speed),
+                *source_in + self.source_length(),
             )),
             _ => None,
         }

@@ -37,6 +37,7 @@ pub mod paths;
 pub mod query;
 pub mod scopes;
 pub mod services;
+pub mod speed;
 pub mod subject;
 pub mod time;
 
