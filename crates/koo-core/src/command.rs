@@ -426,6 +426,44 @@ pub enum Command {
         bins: Vec<Bin>,
     },
 
+    // ---- audio: fit music to a length (see [`crate::music_fit`])
+    /// Replace a music clip by `segments` of its source back to back from
+    /// `at`, an equal-power `crossfade` ending on each join, and `fade_out`
+    /// on the last.
+    FitMusic {
+        clip: ClipId,
+        at: Time,
+        segments: Vec<TimeRange>,
+        #[serde(default)]
+        crossfade: Time,
+        #[serde(default)]
+        fade_out: Time,
+    },
+    // ---- speed ramps
+    /// Make a media clip's speed change over it: `points` are (position
+    /// 0..1 over the clip, speed), straight between them; fewer than two
+    /// (or all one speed) play it at one speed again. The clip plays the
+    /// same source, so its length follows the ramp, unless `keep_length`,
+    /// which scales the speeds to fit. Without ripple the clip stops at the
+    /// next clip. See [`crate::speed`].
+    SetSpeedRamp {
+        clip: ClipId,
+        points: Vec<[f64; 2]>,
+        #[serde(default)]
+        keep_length: bool,
+        #[serde(default)]
+        ripple: bool,
+    },
+    /// How a media clip shows the moments between source frames, and what
+    /// its audio does under a ramp; `None` leaves it as it is.
+    SetRetime {
+        clip: ClipId,
+        #[serde(default)]
+        interpolation: Option<crate::speed::Interpolation>,
+        #[serde(default)]
+        audio: Option<crate::speed::RampAudio>,
+    },
+
     // ---- speech (E3)
     /// Say other words in place of the speech in `range` of `track` (cut
     /// to cut, in the pauses around it): `media`, a whole recording of
@@ -506,6 +544,8 @@ impl Command {
             | SetTrackLocked { .. }
             | PlaceClips { .. }
             | SetSpeed { .. }
+            | SetSpeedRamp { .. }
+            | SetRetime { .. }
             | SetClipsEnabled { .. }
             | RenameClip { .. }
             | SetClipColor { .. }
@@ -527,7 +567,8 @@ impl Command {
             | SetTrackMix { .. }
             | SetDucking { .. }
             | SetPlaylist { .. }
-            | SetAudioEffects { .. } => ToolCategory::Audio,
+            | SetAudioEffects { .. }
+            | FitMusic { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
             AddEffect { .. }
             | SetEffect { .. }

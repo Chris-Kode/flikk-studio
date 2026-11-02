@@ -31,12 +31,15 @@ pub mod library;
 pub mod mask;
 pub mod memory;
 pub mod model;
+pub mod music_fit;
 pub mod ops;
 pub mod paths;
+pub mod person;
 pub mod query;
 pub mod respeak;
 pub mod scopes;
 pub mod services;
+pub mod speed;
 pub mod subject;
 pub mod time;
 

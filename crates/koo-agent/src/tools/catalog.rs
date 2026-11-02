@@ -524,15 +524,20 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_speed",
             Some(EditTimeline),
-            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed.",
+            "Propose retiming a media clip: 2 plays twice as fast (the clip gets shorter), 0.5 half speed. A ramp (or preset) changes the speed over the clip; the clip plays the same source, so its length follows unless keep_length. Slowed frames repeat, blend, or are made by optical flow. Retimes one clip: give a video's linked audio clip the same call.",
             object(
                 json!({
                     "clip": string("Clip id"),
-                    "speed": number("1 = normal, 0.01–100"),
+                    "speed": number("1 = normal, 0.01–100; on a ramped clip, ends the ramp. With preset: the base speed (default the clip's)"),
+                    "ramp": curve("Speed ramp [[position 0..1 over the clip, speed], …], straight between points; [] ends it"),
+                    "preset": one_of(&["ramp_in", "ramp_out", "hero", "bullet", "montage"], "Ready-made ramp: ramp_in slow→fast, ramp_out fast→slow, hero fast-slow-fast, bullet near-frozen middle, montage fast and slow by turns"),
+                    "keep_length": boolean("Scale the ramp's speeds so the clip keeps its length"),
+                    "interpolation": one_of(&["nearest", "blend", "optical_flow"], "Frames between source frames when slowed: repeat (default), blend, or optical flow (RIFE; blended until made or without the model)"),
+                    "ramp_audio": one_of(&["stretch", "mute"], "Audio under a ramp: follows the speed, pitch kept (default), or muted"),
                     "ripple": boolean("Move later clips to follow the new length (default false: stop at the next clip)"),
                     "reason": reason()
                 }),
-                &["clip", "speed"],
+                &["clip"],
             ),
         ),
         spec(
@@ -705,7 +710,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "set_mask",
             Some(Transform),
-            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for people and objects. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
+            "Propose a mask on a picture clip (video, image, overlay, generator), a change to one given by `mask`, or with `remove` take `mask` (or `all` masks) away. A mask keeps (or with `invert` cuts away) the inside of a shape, applied before the clip is placed and blended. Shapes live in the picture's own coordinates, so they follow its transform. Several masks combine in order: add unites, subtract cuts away, intersect keeps the overlap. With `at`, the shape is keyframed there (key it at two times to animate it); without, the static shape changes. Only the values given change. Not for captions or titles.\n\nA `subject` shape (video and image clips from the pool) keeps an object a segmentation model finds from `include` points on it, `exclude` points off it and a `box` around it, on the frame at `at` (default: the clip's middle); its edge is exact, so prefer it for objects and for one person among several. A `person` shape keeps every person in every frame with soft hair edges and no prompt (`edge` 0..1 eases the edge onto the picture's); `remove_background` adds it to several clips at once. The result says what it kept; `exclude` what it took by mistake, `include` what it missed (each list given replaces that frame's own). `track: true` follows the object through the clip in the background; a prompt at another `at` corrects it where it drifts.",
             examples(
                 object(
                     json!({
@@ -724,7 +729,8 @@ pub fn catalog() -> Vec<ToolSpec> {
                                 "smooth": boolean("A curve through the points instead of straight lines (default false)"),
                                 "include": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points on the object" },
                                 "exclude": { "type": "array", "items": numbers(2, "[x, y]"), "description": "Subject: points not on it" },
-                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" }
+                                "box": { "type": ["array", "null"], "items": { "type": "number" }, "description": "Subject: [left, top, right, bottom] around it" },
+                                "edge": number("Person: 0..1, how much the edge follows the picture's own (hair); default 0.5")
                             }
                         },
                         "space": one_of(&["picture", "frame"], "picture (default): fractions of the picture; frame: pixels of the frame at `at` (or the clip's middle), mapped onto the picture where it is then"),
@@ -752,6 +758,31 @@ pub fn catalog() -> Vec<ToolSpec> {
                     { "clip": "3f9a1c2e", "mask": "c41e7a02", "shape": { "exclude": [[1420, 610]] }, "space": "frame", "at": "0:04.000", "reason": "Leave out the chair it took" },
                     { "clip": "3f9a1c2e", "shape": { "type": "subject", "box": [880, 120, 1460, 1080] }, "space": "frame", "invert": true, "track": true, "reason": "Everything but the dancer, for a background effect" },
                     { "clip": "3f9a1c2e", "remove": true, "all": true, "reason": "Back to the full picture" }
+                ]),
+            ),
+        ),
+        spec(
+            "remove_background",
+            Some(Transform),
+            "Propose cutting the background away from behind the people in video and image clips, no green screen: each clip gets a person mask (a matting model finds every person in every frame, hair edges soft), or its own is changed. `keep: background` cuts the people away instead. Layers under the clip show through; the mask combines with the clip's other masks, effects and blend mode. With `restore`, the clips' person masks are taken away. People are found in the background as frames are shown; renders wait for them. For one object, or one person among several, use set_mask with a `subject` shape.",
+            examples(
+                object(
+                    json!({
+                        "clips": strings("Clip ids"),
+                        "keep": one_of(&["people", "background"], "What stays (default people)"),
+                        "edge": number("0..1, how much the edge follows the picture's own, for hair (default 0.5)"),
+                        "feather": number("Soft edge width, as a fraction of the picture's height (e.g. 0.01)"),
+                        "expansion": number("Grow (or shrink, below 0) the edge, as a fraction of the picture's height (e.g. -0.005 to trim a halo)"),
+                        "restore": boolean("Take the clips' person masks away"),
+                        "reason": reason()
+                    }),
+                    &["clips"],
+                ),
+                json!([
+                    { "clips": ["3f9a1c2e"], "reason": "Put the presenter over the slides" },
+                    { "clips": ["3f9a1c2e", "8c21d0b7"], "expansion": -0.004, "reason": "Trim the light halo round her hair" },
+                    { "clips": ["3f9a1c2e"], "keep": "background", "reason": "Blur only the background: the copy above keeps the person" },
+                    { "clips": ["3f9a1c2e"], "restore": true, "reason": "Back to the full picture" }
                 ]),
             ),
         ),
@@ -910,6 +941,23 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({ "track": string("Audio track name or id"), "at": time("Timeline seconds"), "songs": strings("Media ids in order"), "reason": reason() }),
                 &["track", "at", "songs"],
+            ),
+        ),
+        spec(
+            "fit_music",
+            Some(Audio),
+            "Propose a song fitted to a length so it ends on its real ending exactly when wanted: bars are skipped or repeated where they sound alike, on phrase boundaries, with short crossfades. Default target: the end of the other tracks. Returns each skip and loop. Needs the song analysed.",
+            object(
+                json!({
+                    "clip": string("Music clip id on an audio track (default: the only one)"),
+                    "end": time("Timeline time the song should end at"),
+                    "duration": time("Length from the clip's start"),
+                    "range": range("Timeline range the song should fill, starting at its start"),
+                    "loops": boolean("Repeat sections to make it longer (default true)"),
+                    "crossfade_ms": number("Crossfade at each edit (default 30)"),
+                    "reason": reason()
+                }),
+                &[],
             ),
         ),
         spec(
@@ -1213,7 +1261,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Deliver),
             "Ask the user to approve a render.",
             object(
-                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)") }),
+                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)"), "encoder": one_of(&["auto", "hardware", "software"], "H.264/HEVC encoder (default: the user's choice in Deliver)") }),
                 &["preset"],
             ),
         ),

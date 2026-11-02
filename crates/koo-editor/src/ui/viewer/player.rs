@@ -11,10 +11,12 @@
 //! preview resolution ([`Quality`]); full-resolution frames go into the
 //! viewer's [`FrameCache`], and cached frames are shown without composing.
 //! [`Player::render_ahead`] runs the same loop over the frames after a
-//! paused playhead, only filling the cache.
+//! paused playhead, only filling the cache. Frames the background render
+//! put on disk ([`crate::render_cache`]) are read instead of composed.
 
 use super::PlayKey;
 use super::cache::SharedCache;
+use crate::render_cache::{self, Globals, Plan};
 use gpui_kit::RenderImage;
 use koo_core::Time;
 use koo_core::compose::{self, Pending, Streams};
@@ -55,6 +57,10 @@ struct Job {
     project: Arc<Project>,
     key: PlayKey,
     cache: SharedCache,
+    /// What the frames on disk share, when they can stand in.
+    disk: Option<Globals>,
+    /// Their plan, made on the thread.
+    plan: Option<Arc<Plan>>,
 }
 
 impl Player {
@@ -68,6 +74,7 @@ impl Player {
         key: PlayKey,
         cache: SharedCache,
         shift: Arc<AtomicU8>,
+        disk: Option<Globals>,
     ) -> Self {
         let shared = Arc::new(Shared::default());
         shared.target.store(from.0, Ordering::Relaxed);
@@ -77,6 +84,8 @@ impl Player {
             project,
             key,
             cache,
+            disk,
+            plan: None,
         };
         let _ = thread::Builder::new()
             .name("koo-player".into())
@@ -92,6 +101,7 @@ impl Player {
         frames: std::ops::Range<i64>,
         key: PlayKey,
         cache: SharedCache,
+        disk: Option<Globals>,
     ) -> Self {
         let shared = Arc::new(Shared::default());
         let worker = shared.clone();
@@ -100,6 +110,8 @@ impl Player {
             project,
             key,
             cache,
+            disk,
+            plan: None,
         };
         let _ = thread::Builder::new()
             .name("koo-render-ahead".into())
@@ -156,6 +168,29 @@ enum InFlight<'a> {
 }
 
 impl Job {
+    fn plan(&mut self) {
+        self.plan = self
+            .disk
+            .map(|globals| render_cache::plan_for(&self.project, globals));
+    }
+
+    /// Frame `frame` from disk, when it is there and large enough: up to a
+    /// third smaller than the viewer is fine while playing.
+    fn disk_image(&self, frame: i64) -> Option<Arc<RenderImage>> {
+        let plan = self.plan.as_ref()?;
+        let width = plan.size.0;
+        (self.key.width <= width + width / 3)
+            .then(|| render_cache::image(plan, frame))
+            .flatten()
+    }
+
+    fn on_disk(&self, frame: i64) -> bool {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.key(frame))
+            .is_some_and(|k| render_cache::store().contains(&k))
+    }
+
     /// Start frame `frame`: from the cache, or composed at
     /// `width >> shift`.
     fn begin<'a>(
@@ -172,6 +207,9 @@ impl Job {
                 .ok()
                 .and_then(|mut c| c.get(self.key, frame))
         {
+            return InFlight::Cached(image);
+        }
+        if cache_hits && let Some(image) = self.disk_image(frame) {
             return InFlight::Cached(image);
         }
         let started = Instant::now();
@@ -221,7 +259,8 @@ impl Job {
     }
 }
 
-fn play(shared: Arc<Shared>, job: Job, mut quality: Quality) {
+fn play(shared: Arc<Shared>, mut job: Job, mut quality: Quality) {
+    job.plan();
     let rate = job.project.timeline.settings.rate;
     let budget = rate.frame_duration().as_secs_f64();
     let mut streams = Streams::new(job.services.media.clone(), job.key.width, rate);
@@ -255,7 +294,8 @@ fn play(shared: Arc<Shared>, job: Job, mut quality: Quality) {
     }
 }
 
-fn ahead(shared: Arc<Shared>, job: Job, frames: std::ops::Range<i64>) {
+fn ahead(shared: Arc<Shared>, mut job: Job, frames: std::ops::Range<i64>) {
+    job.plan();
     let rate = job.project.timeline.settings.rate;
     let mut streams = Streams::new(job.services.media.clone(), job.key.width, rate);
     let mut flight: Option<InFlight> = None;
@@ -263,7 +303,8 @@ fn ahead(shared: Arc<Shared>, job: Job, frames: std::ops::Range<i64>) {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
-        let cached = job.cache.lock().is_ok_and(|c| c.contains(job.key, frame));
+        let cached =
+            job.cache.lock().is_ok_and(|c| c.contains(job.key, frame)) || job.on_disk(frame);
         if cached {
             continue;
         }

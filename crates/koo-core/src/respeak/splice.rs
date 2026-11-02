@@ -303,8 +303,13 @@ fn held(mut m: Clip, range: TimeRange, delta: Time) -> Clip {
     let ratio = (span + delta.0 as f64) / span;
     m.start = range.start + (m.start - range.start).scale(ratio);
     let duration = m.duration.scale(ratio);
-    m.speed /= ratio;
+    m.speed = (m.speed / ratio).max(crate::speed::MIN_SPEED);
     m.duration = duration;
+    // A ramp keeps its shape, slower by the same ratio.
+    for k in &mut m.retime.keys {
+        k.at = k.at.scale(ratio);
+        k.speed = (k.speed / ratio).max(crate::speed::MIN_SPEED);
+    }
     for k in &mut m.keyframes {
         k.at = k.at.scale(ratio);
     }

@@ -104,10 +104,11 @@ pub fn request(
         "queue_render" => {
             let preset = args.str("preset")?;
             let range = args.range_or_all("range", project)?;
-            (
-                format!("Render {preset} ({range})"),
-                json!({ "preset": preset, "range": range_json(range) }),
-            )
+            let mut json = json!({ "preset": preset, "range": range_json(range) });
+            if let Some(encoder) = args.opt_str("encoder")? {
+                json["encoder"] = json!(encoder);
+            }
+            (format!("Render {preset} ({range})"), json)
         }
         "save_fx_to_library" => {
             let asset = super::fx::fx_asset(project, args.str("fx")?, None)?;

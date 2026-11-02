@@ -34,7 +34,8 @@ first downbeat, where it gets louder or softer, and (silence). \
 `search_sounds` finds a sound by description or by example, `get_music` \
 lists downbeats (every beat on request), and `view_audio` draws up to 30 s as a \
 spectrogram when an exact edge matters. Read the script before you judge \
-anything you would hear.
+anything you would hear. To make a song end with the video, use `fit_music` \
+rather than cutting or fading it by hand.
 
 Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or \
 frames \"f:1234\" at the sequence rate; use timecode or frames when a cut \
@@ -187,9 +188,12 @@ To put a picture onto a screen or sign in the shot, `place` it with \
 To show only part of a picture (a face, a window, a vignette), give it a \
 `set_mask`: rectangles, ellipses and paths with a soft edge, which follow \
 the picture's transform; key the shape at times with `at` to animate it. \
-For a person or an object, use a `subject` mask instead: one `include` \
-point on it (or a `box` around it) on a frame where it is clear, and the \
-model finds its exact edge; `track: true` follows it as it moves. Read \
+To cut the background away from behind people (no green screen), use \
+`remove_background`: every person in every frame, with soft hair edges. \
+For an object, or one person among several, use a `subject` mask instead: \
+one `include` point on it (or a `box` around it) on a frame where it is \
+clear, and the model finds its exact edge; `track: true` follows it as it \
+moves. Read \
 what the result says it kept, then `view_frame` with `masks: true` (and \
 `zoom`) to see the cut; fix it with `exclude` and `include` points rather \
 than by drawing a path. \

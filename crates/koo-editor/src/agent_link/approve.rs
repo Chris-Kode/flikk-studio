@@ -73,6 +73,11 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         "queue_render" => {
             let mut settings = preset(str_arg(args, "preset")?);
             settings.range = args.get("range").and_then(range);
+            settings.encoder = args
+                .get("encoder")
+                .and_then(Value::as_str)
+                .and_then(koo_deliver::Encoder::parse)
+                .unwrap_or_else(crate::ui::deliver::saved_encoder);
             let output = free_output(inputs.project, settings.extension());
             let id = inputs.queue.enqueue(RenderRequest {
                 project: inputs.project.clone(),
@@ -371,6 +376,8 @@ fn preset(name: &str) -> RenderSettings {
                 RenderSettings::prores_422_hq()
             } else if key.contains("wav") || key.contains("audio") {
                 RenderSettings::wav()
+            } else if key.contains("hevc") || key.contains("265") {
+                RenderSettings::hevc_4k30()
             } else if key.contains("4k") || key.contains("2160") {
                 RenderSettings::h264_4k30()
             } else if key.contains("30") {

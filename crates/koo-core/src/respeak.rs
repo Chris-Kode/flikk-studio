@@ -127,7 +127,7 @@ impl Fix {
         let crate::model::ClipContent::Media { source_in, .. } = &clip.content else {
             return None;
         };
-        if track.id != self.track || (clip.speed - 1.0).abs() > 1e-9 {
+        if track.id != self.track || clip.is_retimed() {
             return None;
         }
         let start = clip.start + (self.source.start - *source_in);
@@ -207,8 +207,8 @@ pub fn fix(
     if track.locked {
         return Err(format!("{} is locked.", track.name));
     }
-    if (clip.speed - 1.0).abs() > 1e-9 {
-        return Err("Those words are in a retimed clip.".into());
+    if clip.is_retimed() {
+        return Err("Those words are in a sped-up, slowed or ramped clip.".into());
     }
     let crate::model::ClipContent::Media { audio_stream, .. } = &clip.content else {
         return Err("Those words aren't in a recording.".into());
