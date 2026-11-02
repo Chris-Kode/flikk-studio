@@ -1,5 +1,7 @@
-//! Pika (dev.pika.art): video, from Pika's own models in [`models`] (Pika
-//! H3 Flex, Pika 2.5 with Pikaframes). Every call sends the key as
+//! Pika (dev.pika.art): video, from the models in [`models`]: Pika's own
+//! (Pika H3 Flex, Pika 2.5 with Pikaframes) and the other vendors' Pika
+//! hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni
+//! Flash, FLUX, Grok Imagine). Every call sends the key as
 //! `X-API-Key`. A video is made as a media job ([`jobs`]); what goes in is
 //! [`video`]'s, and the files it follows are uploaded to Pika first
 //! ([`files`]). See `docs/pika.md`.
@@ -37,6 +39,70 @@ pub static PROVIDER: Provider = Provider {
             CloudModel {
                 id: "pika/pika-2.5",
                 name: "Pika 2.5",
+            },
+            CloudModel {
+                id: "bytedance/seedance-2.0",
+                name: "Seedance 2.0",
+            },
+            CloudModel {
+                id: "bytedance/seedance-2.0-fast",
+                name: "Seedance 2.0 Fast",
+            },
+            CloudModel {
+                id: "bytedance/seedance-2.0-mini",
+                name: "Seedance 2.0 Mini",
+            },
+            CloudModel {
+                id: "bytedance/seedance-2.5",
+                name: "Seedance 2.5",
+            },
+            CloudModel {
+                id: "kling/kling-4.0",
+                name: "Kling 4.0",
+            },
+            CloudModel {
+                id: "kling/kling-3.0",
+                name: "Kling 3.0",
+            },
+            CloudModel {
+                id: "kling/kling-3.0-turbo",
+                name: "Kling 3.0 Turbo",
+            },
+            CloudModel {
+                id: "minimax/h3",
+                name: "MiniMax H3",
+            },
+            CloudModel {
+                id: "minimax/hailuo-2.3",
+                name: "Hailuo 2.3",
+            },
+            CloudModel {
+                id: "alibaba/wan3.0-video",
+                name: "Wan 3.0",
+            },
+            CloudModel {
+                id: "alibaba/wan3.0-video-prime",
+                name: "Wan 3.0 Prime",
+            },
+            CloudModel {
+                id: "alibaba/happyhorse-1.1",
+                name: "Happy Horse 1.1",
+            },
+            CloudModel {
+                id: "alibaba/happyhorse-1.0",
+                name: "Happy Horse 1.0",
+            },
+            CloudModel {
+                id: "google/gemini-omni-flash",
+                name: "Gemini Omni Flash",
+            },
+            CloudModel {
+                id: "black-forest-labs/flux-3-video",
+                name: "FLUX 3",
+            },
+            CloudModel {
+                id: "x-ai/grok-imagine-video",
+                name: "Grok Imagine Video",
             },
         ],
     }],

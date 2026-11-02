@@ -3,8 +3,9 @@
 Pika's developer API (the "Pika API Club", <https://dev.pika.art/>) is now a
 paid, prepaid aggregator: one key reaches Pika's own models and about 170
 operations from other vendors (Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs
-and more). The editor uses it as a video provider for **Pika's own models**
-only; the other vendors' models are on fal already.
+and more). The editor uses it as a video provider for Pika's own models and
+the other vendors' video models that fit its video request (see "What the
+editor uses").
 
 Read on 2026-11-02 from `llms.txt`, the per-operation specifications, the
 public catalog and `openapi.json` (links at the end). The catalog's
@@ -149,11 +150,47 @@ $0.02–0.09 per second by resolution.
   clip), Pikaffects (`image-to-video`, `video-to-video`: named effects);
 - Pika Dynamic Captions, Video Compose, Video Merge, and the Pika audio
   models (music, SFX, speech, soundtrack);
-- every other vendor's model on the same API;
 - webhooks, idempotency keys, quotes, spend reports.
 
-These either edit media the editor's video request has no field for, or
-duplicate what fal and ElevenLabs already do here.
+These edit media the editor's video request has no field for, or duplicate
+what ElevenLabs already does here.
+
+## Other vendors' video models
+
+Each is at `POST /v1/media/{vendor}/{model}/{function}`, with its own fields
+(the catalog's `input_schema` is the reference; `pika/models.rs` records
+how each takes a request).
+
+| Model | Text / first frame / references | Length | Aspect field | Resolutions | First / last frame fields | References | Sound |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Seedance 2.0 (`bytedance/seedance-2.0`) | text, image, reference-to-video | 4–15 or `"auto"` (required) | `ratio`: 1:1, 4:3, 3:4, 16:9, 9:16, 21:9, `adaptive` | 480p, 720p, 1080p, 4k (required) | `image_url`, `end_image_url` | `image_urls` 9, `video_urls` 3, `audio_urls` 3; clips and sounds 2–15 s, 15 s per kind | `generate_audio` |
+| Seedance 2.0 Fast, 2.0 Mini | same | same | same | 480p, 720p (default) | same | same | same |
+| Seedance 2.5 (`bytedance/seedance-2.5`) | same | 4–30 or `"auto"` | same (a plain string on image-to-video) | 480p, 720p (default), 1080p | same | 30 images, 10 videos, 10 sounds; 2–30 s, 30 s per kind; also `draft`, `omni_reference_task_type` (edit/extend) | same |
+| Kling 4.0 (`kling/kling-4.0`) | text, image, omni-video | 3–30 | `aspect_ratio`: 21:9, 16:9, 9:16, 1:1 (text, omni) | 720p, 1080p | `image_url`, `last_frame_url`, `middle_frame_urls` | omni `contents`: `{type, url, id}` items cited `@id`; no stated limits | always |
+| Kling 3.0 | text, image, omni-video | 3–15 | `aspect_ratio`: 16:9, 9:16, 1:1 | 720p, 1080p, 4k | `image_url`, `last_frame_url`; `elements` | omni `contents` | `audio`: `native`/`off` |
+| Kling 3.0 Turbo | text, image | 3–15 | as 3.0 (text) | 720p, 1080p | `image_url` | — | always |
+| MiniMax H3 (`minimax/h3`) | text, image, reference-to-video | 4–15 | `ratio` (text, reference) | `768P`, `2K` (default) | `first_frame_image`, `last_frame_image` | `image_urls` 9, `video_urls` 3, `audio_urls` 3, cited `Image 1`, `Video 1`, `Audio 1`; clips 15 s together | — |
+| Hailuo 2.3 (`minimax/hailuo-2.3`) | text, image | 6 or 10 (1080p: 6 only) | none | 768p, 1080p | `first_frame_image` | — | — |
+| Wan 3.0, Wan 3.0 Prime (`alibaba/wan3.0-video[-prime]`) | text, image, omni-video | 2–30 or `"auto"` | `ratio`: `adaptive`, 16:9, 4:3, 1:1, 3:4, 9:16 | 480p, 720p, 1080p (default) | `first_frame_url`, `last_frame_url` | `reference_image_urls` 10, `reference_video_urls` 5, `reference_audio_urls` 5; also `file_url`, `web_url` | `audio` |
+| Happy Horse 1.0, 1.1 (`alibaba/happyhorse-1.x`) | text, image, reference-to-video | 3–15 | `ratio`: 16:9, 9:16, 1:1, 4:3, 3:4, 4:5, 5:4, 9:21, 21:9 | `720P`, `1080P` (default) | `image_url` | `reference_image_urls` 1–9 | — |
+| Gemini Omni Flash (`google/gemini-omni-flash`) | text, image, reference-to-video | 3–10 (0: the model picks) | `aspect_ratio`: 16:9, 9:16 | none | `image_urls` (1–2: start, end) | `image_urls` 1–6 | — |
+| FLUX 3 (`black-forest-labs/flux-3-video`) | text, image | 5–20 or `"auto"` | `aspect_ratio`: `auto`, 21:9, 2:1, 16:9, 4:3, 1:1, 3:4, 9:16 | 720p, 1080p | `keyframes: [{image_url, at_s?}]` (1–10) | — | `generate_audio` |
+| Grok Imagine Video (`x-ai/grok-imagine-video`) | text, image, reference-to-video | 1–15 | `aspect_ratio`: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3 | 480p, 720p | `image_url` | `reference_image_urls` 1–3 | — |
+
+Not offered, because the editor's video request needs both text and image to
+video and always sends a length:
+
+- Veo 3.1 and Veo 3.1 Fast: text-to-video only (with up to 3 reference
+  images at 8 s), plus video extension;
+- Veo 3.1 Lite, Hailuo 2.3 Fast, Grok Imagine Video 1.5: image-to-video only;
+- Gemini Omni 1.1 Flash: no length field;
+- the other video operations: video-to-video, video extension, draft
+  finishing, motion control, avatars and lip sync, upscaling.
+
+Kling's omni-video references are left out: Pika states no limits for them.
+Most models' references are cited `@Image1`, `@Video1`, `@Audio1`, as Pika's
+specifications say for every reference model; MiniMax H3's fields say
+`Image 1`, so the editor's tags are rewritten for it.
 
 ## What the editor uses
 
@@ -163,12 +200,26 @@ duplicate what fal and ElevenLabs already do here.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pika H3 Flex (`pika/pika-h3-flex`, default) | text-to-video | image-to-video | image-to-video | reference-to-video (9 pictures, 3 clips, 3 sounds, 12 in all, 15 s per kind) | 5–15 s | the 11 ratios above | 768p, 480p, 1080p, 2k, 4k | always |
 | Pika 2.5 (`pika/pika-2.5`) | text-to-video | image-to-video (the picture sets the shape) | Pikaframes, one transition | — | 5 or 10 s | `5:2`, `16:9`, `4:3`, `1:1`, `4:5`, `9:16` (text) | 1080p, 720p, 480p (720p or 1080p between two frames) | none |
+| Seedance 2.0, 2.0 Fast, 2.0 Mini, 2.5 | ✓ | ✓ | ✓ | ✓ | as above | without `adaptive` | as above | switch |
+| Kling 4.0, 3.0 | ✓ | ✓ (sets the shape) | ✓ | — | as above | as above | as above | 4.0 always, 3.0 switch |
+| Kling 3.0 Turbo | ✓ | ✓ (sets the shape) | — | — | 3–15 s | as above | 720p, 1080p | always |
+| MiniMax H3 | ✓ | ✓ (sets the shape) | ✓ | ✓ | 4–15 s | as above | 2k, 768p | — |
+| Hailuo 2.3 | ✓ | ✓ | — | — | 6 or 10 s | — | 768p, 1080p | — |
+| Wan 3.0, Wan 3.0 Prime | ✓ | ✓ | ✓ | ✓ (omni-video) | 2–30 s | without `adaptive` | 1080p, 720p, 480p | switch |
+| Happy Horse 1.1, 1.0 | ✓ | ✓ | — | pictures | 3–15 s | as above | 1080p, 720p | — |
+| Gemini Omni Flash | ✓ | ✓ | ✓ | pictures | 3–10 s | 16:9, 9:16 | none | — |
+| FLUX 3 | ✓ | ✓ | ✓ (two keyframes) | — | 5–20 s | without `auto` | 720p, 1080p | switch |
+| Grok Imagine Video | ✓ | ✓ | — | pictures | 1–15 s | as above | 720p, 480p | — |
 
-- The prompt is sent as written; `rewrite`, `seed` and `output_mode` keep
-  Pika's defaults. No length or shape asked for leaves the field out.
+- The prompt is sent as written (for MiniMax H3, with its reference tags
+  rewritten); `rewrite`, `seed`, `draft`, `watermark` and the like keep
+  their defaults. No shape asked for leaves the field out; no length leaves
+  it out too, or sends `"auto"` where the model takes it (Seedance requires
+  one). The resolution is always sent, in the case the model spells it.
 - Before anything is uploaded or spent, `VideoModel::check` and
   `pika/video.rs` refuse what Pika would: references that are only sounds,
-  clips or sounds under 2 s, 480p between two frames on Pika 2.5.
+  clips or sounds under 2 s (H3 Flex, Seedance), 480p between two frames on
+  Pika 2.5, over 6 s at 1080p on Hailuo 2.3.
 - Files are uploaded with `POST /v1/media/uploads` and a signed `PUT`.
 - The job is polled every 3 s, as queued or running; it can't be stopped, so
   the media pool shows no stop button for it. It is followed for at most
@@ -178,7 +229,14 @@ duplicate what fal and ElevenLabs already do here.
 ## Verified
 
 - Every field, enum and limit above against the live catalog
-  (`/catalog/apis/pika/…?expand=inputs`) and `openapi.json`.
+  (`/catalog/apis/…?expand=inputs`) and `openapi.json`, with a script: each
+  model's lengths, shapes, resolutions (and their case and default),
+  reference limits and the fields its frames, references and sound go in.
+- Pika validates a submit's body before its key, so a made-up key checks a
+  request's fields for free: every model's text-to-video request, at each
+  resolution with its shortest and longest length, with each shape and with
+  none, is accepted (401). That is how Hailuo 2.3's 6 s limit at 1080p was
+  found; it is in no schema.
 - With a made-up key: `401 {"message":"Invalid API key"}` on
   `/billing/balance`, submit, uploads and job reads (`"missing API key"` with
   none); a submit with `duration: 30` answers `422 {"message":"duration:

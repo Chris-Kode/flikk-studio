@@ -688,7 +688,8 @@ not retried with Whisper.
   with the provider and model picked for video (on fal: Seedance 2.0, 2.0
   Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse
   1.1, Gemini Omni Flash 1.1, FLUX 3 Max, LTX 2.5 Pro; on Pika: Pika H3
-  Flex and Pika 2.5): from the prompt alone, from a first frame (a picture in the pool,
+  Flex and Pika 2.5, and Seedance, Kling, MiniMax H3, Hailuo, Wan, Happy
+  Horse, Gemini Omni Flash, FLUX and Grok Imagine as Pika hosts them): from the prompt alone, from a first frame (a picture in the pool,
   or the program at a time, grabbed with `compose::program` into
   `paths::cache()/frames` just before) to an optional last one, or after
   references (pictures, clips and sounds in the pool, which the prompt names
@@ -702,7 +703,8 @@ not retried with Whisper.
   `character1`, `<IMAGE_REF_0>`). fal runs it on its queue
   (`fal/queue.rs`), uploading the files it follows to fal's storage first;
   Pika runs it as a media job (`pika/jobs.rs`, `docs/pika.md`) after
-  uploading to Pika, and sends a last frame on Pika 2.5 to Pikaframes.
+  uploading to Pika, each model an entry in `pika/models.rs` as on fal, and
+  sends a last frame on Pika 2.5 to Pikaframes.
   `cloud::GenerationTask` carries where it is (queued, running, coming
   down) to the media pool's row, which can stop it until it is made where
   the provider can stop it (fal can; Pika can't, so its job is marked

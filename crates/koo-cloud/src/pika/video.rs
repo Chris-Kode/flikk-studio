@@ -2,14 +2,16 @@
 //! needs, in its family's fields, made as a job, and the file it made
 //! fetched next to the others.
 //!
-//! H3 Flex names references in the prompt as the editor does (`@Image1`,
-//! `@Video1`, `@Audio1`, counted by kind in the order sent), so the prompt
-//! goes as it is.
+//! Most models name references in the prompt as the editor does
+//! (`@Image1`, `@Video1`, `@Audio1`, counted by kind in the order sent);
+//! for the others they are renamed (`Image 1`).
 
-use super::models::{self, Family, PikaVideo};
+use super::models::{self, Family, Frames, Hosted, PikaVideo, Switch};
 use super::{NAME, files, jobs};
 use crate::http;
-use koo_core::cloud::{CloudError, CloudResult, GenerateRequest, GenerationTask, Stage, VideoMode};
+use koo_core::cloud::{
+    CloudError, CloudResult, GenerateRequest, GenerationTask, Stage, VideoMode, VideoModel,
+};
 use koo_core::model::MediaKind;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -25,7 +27,6 @@ pub fn run(
         prompt,
         length,
         aspect,
-        resolution,
         first_frame,
         last_frame,
         references,
@@ -42,13 +43,7 @@ pub fn run(
     };
     let spec = &model.spec;
     let mode = request.video_mode().unwrap_or(VideoMode::Text);
-    // The spelling the model takes of the resolution asked for, else its
-    // default.
-    let resolution = resolution
-        .as_deref()
-        .and_then(|r| spec.resolutions.iter().find(|s| s.eq_ignore_ascii_case(r)))
-        .or(spec.resolutions.first())
-        .copied();
+    let resolution = request_resolution(request, spec);
     let secs = length.map(|l| l.as_secs_f64().round() as u32);
     let mut input = Map::new();
     let mut put = |field: &str, value: Value| {
@@ -58,7 +53,13 @@ pub fn run(
         put("prompt", json!(prompt));
     }
     if let Some(resolution) = resolution {
-        put("resolution", json!(resolution));
+        let upper = matches!(&model.family, Family::Hosted(h) if h.upper_resolution);
+        let value = if upper {
+            resolution.to_ascii_uppercase()
+        } else {
+            resolution.to_owned()
+        };
+        put("resolution", json!(value));
     }
     let path = match (&model.family, mode) {
         (Family::H3, _) => {
@@ -163,6 +164,17 @@ pub fn run(
         (Family::V25, VideoMode::Reference) => {
             return refuse(format!("{} doesn't follow references", spec.name));
         }
+        (Family::Hosted(hosted), _) => {
+            hosted_input(key, hosted, spec, request, &mut put, task)?;
+            match mode {
+                VideoMode::Text => hosted.text,
+                VideoMode::Image => hosted.image,
+                VideoMode::Reference => hosted.reference.ok_or_else(|| CloudError::BadPrompt {
+                    message: format!("{} doesn't follow references", spec.name),
+                    suggestion: None,
+                })?,
+            }
+        }
     };
     let job = jobs::run(key, path, &Value::Object(input), task)?;
     let video = &job["output"]["video"];
@@ -177,6 +189,173 @@ pub fn run(
     // A download URL of its own: the key doesn't go with it.
     http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
     Ok((path, None))
+}
+
+/// The fields of another vendor's model, past the prompt and resolution.
+fn hosted_input(
+    key: &str,
+    hosted: &Hosted,
+    spec: &VideoModel,
+    request: &GenerateRequest,
+    put: &mut impl FnMut(&str, Value),
+    task: &GenerationTask,
+) -> CloudResult<()> {
+    let GenerateRequest::Video {
+        prompt,
+        length,
+        aspect,
+        first_frame,
+        last_frame,
+        references,
+        audio,
+        ..
+    } = request
+    else {
+        return Ok(());
+    };
+    let name = spec.name;
+    let mode = request.video_mode().unwrap_or(VideoMode::Text);
+    let resolution = request_resolution(request, spec);
+    for (at, longest) in hosted.longest_at {
+        if let Some(l) = length
+            && Some(*at) == resolution
+            && l.as_secs_f64().round() as u32 > *longest
+        {
+            return Err(CloudError::BadPrompt {
+                message: format!("{name} makes at most {longest} s of video at {at}"),
+                suggestion: None,
+            });
+        }
+    }
+    match (length, hosted.auto_length) {
+        (Some(l), _) => put("duration", json!(l.as_secs_f64().round() as u32)),
+        (None, Some(word)) => put("duration", json!(word)),
+        (None, None) => {}
+    }
+    // A first frame sets the shape on an endpoint with no field for it.
+    if let (Some(field), Some(aspect)) = (hosted.aspect, aspect)
+        && !(mode == VideoMode::Image && spec.frame_sets_aspect)
+    {
+        put(field, json!(aspect));
+    }
+    match &hosted.audio {
+        Some(Switch::Bool(field)) => put(field, json!(audio)),
+        Some(Switch::Word(field, on, off)) => put(field, json!(if *audio { on } else { off })),
+        None => {}
+    }
+    match mode {
+        VideoMode::Text => {}
+        VideoMode::Image => {
+            let mut urls = Vec::new();
+            for frame in first_frame.iter().chain(last_frame) {
+                task.check()?;
+                urls.push(files::url(key, frame)?);
+            }
+            match &hosted.frames {
+                Frames::Fields(start, end) => {
+                    let mut urls = urls.into_iter();
+                    if let Some(url) = urls.next() {
+                        put(start, json!(url));
+                    }
+                    if let Some(url) = urls.next().filter(|_| !end.is_empty()) {
+                        put(end, json!(url));
+                    }
+                }
+                Frames::List(field) => put(field, json!(urls)),
+                Frames::Keyframes => {
+                    let frames: Vec<Value> =
+                        urls.iter().map(|url| json!({ "image_url": url })).collect();
+                    put("keyframes", Value::Array(frames));
+                }
+            }
+        }
+        VideoMode::Reference => {
+            let short = references.iter().find(|r| {
+                r.kind != MediaKind::Image
+                    && r.length
+                        .is_some_and(|l| l.as_secs_f64() < hosted.shortest_clip - 0.05)
+            });
+            if short.is_some() {
+                return Err(CloudError::BadPrompt {
+                    message: format!(
+                        "{name} follows clips and sounds of {} s or more",
+                        hosted.shortest_clip
+                    ),
+                    suggestion: None,
+                });
+            }
+            let lists = &hosted.references;
+            for (kind, field) in [
+                (MediaKind::Image, lists.images),
+                (MediaKind::Video, lists.videos),
+                (MediaKind::Audio, lists.sounds),
+            ] {
+                let mut urls = Vec::new();
+                for reference in references.iter().filter(|r| r.kind == kind) {
+                    task.check()?;
+                    urls.push(Value::String(files::url(key, &reference.path)?));
+                }
+                if urls.is_empty() {
+                    continue;
+                }
+                if field.is_empty() {
+                    return Err(CloudError::BadPrompt {
+                        message: format!("{name} doesn't follow these references"),
+                        suggestion: None,
+                    });
+                }
+                put(field, Value::Array(urls));
+            }
+            if lists.spaced {
+                put("prompt", json!(spaced(prompt)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The resolution asked for, as the model spells it, else its default.
+fn request_resolution(request: &GenerateRequest, spec: &VideoModel) -> Option<&'static str> {
+    let asked = match request {
+        GenerateRequest::Video { resolution, .. } => resolution.as_deref(),
+        _ => None,
+    };
+    asked
+        .and_then(|r| spec.resolutions.iter().find(|s| s.eq_ignore_ascii_case(r)))
+        .or(spec.resolutions.first())
+        .copied()
+}
+
+/// `prompt` with the editor's reference tags (`@Image1`, `@Video2`,
+/// `@Audio1`) written `Image 1`, `Video 2`, `Audio 1`.
+fn spaced(prompt: &str) -> String {
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let tag = ["Image", "Video", "Audio"].into_iter().find_map(|kind| {
+            let digits = after
+                .strip_prefix(kind)?
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .count();
+            (digits > 0).then_some((kind, digits))
+        });
+        match tag {
+            Some((kind, digits)) => {
+                let end = kind.len() + digits;
+                out.push_str(&format!("{kind} {}", &after[kind.len()..end]));
+                rest = &after[end..];
+            }
+            None => {
+                out.push('@');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The extension of the file Pika made, from its type; mp4 when it doesn't
