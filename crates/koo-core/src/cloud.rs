@@ -1,5 +1,6 @@
 //! Work an online provider does instead of this machine: transcription (in
-//! place of the local speech models), music, sound effects and voiceovers.
+//! place of the local speech models), music, sound effects, voiceovers and
+//! video.
 //! What can be done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
 //! and the interfaces the editor calls ([`SpeechService`],
 //! [`GenerationService`]). `koo-cloud` implements them for each provider it
@@ -13,6 +14,8 @@ use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Something a provider can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -23,14 +26,16 @@ pub enum Capability {
     Music,
     SoundEffects,
     Voiceover,
+    Video,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 4] = [
+    pub const ALL: [Capability; 5] = [
         Self::Transcription,
         Self::Music,
         Self::SoundEffects,
         Self::Voiceover,
+        Self::Video,
     ];
 
     pub fn label(self) -> &'static str {
@@ -39,6 +44,7 @@ impl Capability {
             Self::Music => "Music",
             Self::SoundEffects => "Sound effects",
             Self::Voiceover => "Voiceover",
+            Self::Video => "Video",
         }
     }
 
@@ -66,6 +72,9 @@ pub struct CloudSettings {
     pub choices: BTreeMap<Capability, ProviderChoice>,
     /// Id of the voice that last read a voiceover.
     pub voice: Option<String>,
+    /// Videos are made without sound, which costs less on some models. The
+    /// media pool's form starts from it; the agent keeps to it.
+    pub silent_video: bool,
 }
 
 impl CloudSettings {
@@ -111,6 +120,9 @@ pub enum CloudError {
     },
     #[error("{0}")]
     Failed(String),
+    /// The user stopped it before it was made.
+    #[error("Stopped")]
+    Cancelled,
 }
 
 impl CloudError {
@@ -175,7 +187,7 @@ pub trait SpeechService: Send + Sync {
 
 // --------------------------------------------------------------- generation
 
-/// Music, a sound effect or a voiceover to make.
+/// Music, a sound effect, a voiceover or a video to make.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GenerateRequest {
@@ -203,6 +215,266 @@ pub enum GenerateRequest {
         text: String,
         reading: Reading,
     },
+    /// From a description alone, from a first frame (image to video), or
+    /// after references (reference to video); see [`VideoMode`].
+    Video {
+        /// What happens, the camera, the look. With references it names
+        /// them by kind and place: `@Image1`, `@Video2`, `@Audio1`.
+        prompt: String,
+        /// Whole seconds; `None` lets the model choose.
+        #[serde(default)]
+        length: Option<Time>,
+        /// "16:9", "9:16"…; `None` lets the model choose (a first frame's
+        /// shape, when there is one).
+        #[serde(default)]
+        aspect: Option<String>,
+        /// "720p"; `None` takes the model's default.
+        #[serde(default)]
+        resolution: Option<String>,
+        /// The picture it starts on.
+        #[serde(default)]
+        first_frame: Option<PathBuf>,
+        /// The picture it ends on; only with a first frame.
+        #[serde(default)]
+        last_frame: Option<PathBuf>,
+        /// Pictures, clips and sounds it follows (a character, a style, a
+        /// motion, a beat); not with a first frame.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<VideoReference>,
+        /// Sound made with it, where the model makes sound.
+        #[serde(default = "sound_on")]
+        audio: bool,
+    },
+}
+
+fn sound_on() -> bool {
+    true
+}
+
+/// A file a video follows. The prompt names it by kind and place among
+/// that kind: the second picture is `@Image2`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoReference {
+    pub kind: MediaKind,
+    pub path: PathBuf,
+    /// How long a clip or a sound runs, when known.
+    #[serde(default)]
+    pub length: Option<Time>,
+}
+
+impl VideoReference {
+    /// What the prompt calls the `n`th (from 1) of its kind: "@Image2".
+    pub fn tag(kind: MediaKind, n: usize) -> String {
+        let what = match kind {
+            MediaKind::Image => "Image",
+            MediaKind::Video => "Video",
+            MediaKind::Audio => "Audio",
+        };
+        format!("@{what}{n}")
+    }
+}
+
+/// How a video is made, by what its request carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoMode {
+    Text,
+    /// From a first frame, to a last one when there is one.
+    Image,
+    /// After references.
+    Reference,
+}
+
+/// What one video model can make, so a request is checked before it costs
+/// anything.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoModel {
+    pub name: &'static str,
+    /// The whole seconds it makes, shortest first.
+    pub lengths: &'static [u32],
+    /// Aspect ratios it takes, "16:9"…
+    pub aspects: &'static [&'static str],
+    /// Its resolutions in lower case ("720p", "4k"), the default first;
+    /// none when it has no choice.
+    pub resolutions: &'static [&'static str],
+    /// A first frame sets the shape; an aspect ratio is ignored with one.
+    pub frame_sets_aspect: bool,
+    /// Ends on a picture of its own, after a first frame.
+    pub last_frame: bool,
+    /// What it follows; `None` when it takes no references.
+    pub references: Option<ReferenceLimits>,
+    /// Whether it makes sound with the picture.
+    pub audio: VideoSound,
+}
+
+/// Whether a video model makes sound, and whether that can be turned off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoSound {
+    None,
+    /// Always, with no switch.
+    Always,
+    /// When asked; off makes it silent (and on some models, cheaper).
+    Switch,
+}
+
+/// How many references a video model follows, and how long their clips and
+/// sounds run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReferenceLimits {
+    pub images: usize,
+    pub videos: usize,
+    pub sounds: usize,
+    /// Of every kind together.
+    pub files: usize,
+    /// Seconds the clips run together, and the sounds together.
+    pub seconds: f64,
+}
+
+impl VideoModel {
+    /// Whether a video it makes has sound, when sound is `wanted`.
+    pub fn makes_sound(&self, wanted: bool) -> bool {
+        match self.audio {
+            VideoSound::None => false,
+            VideoSound::Always => true,
+            VideoSound::Switch => wanted,
+        }
+    }
+
+    pub fn shortest(&self) -> u32 {
+        self.lengths.first().copied().unwrap_or(1)
+    }
+
+    pub fn longest(&self) -> u32 {
+        self.lengths.last().copied().unwrap_or(1)
+    }
+
+    /// The length it makes nearest `secs`.
+    pub fn nearest_length(&self, secs: f64) -> u32 {
+        self.lengths
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                (*a as f64 - secs)
+                    .abs()
+                    .total_cmp(&(*b as f64 - secs).abs())
+            })
+            .unwrap_or(1)
+    }
+
+    /// "4 to 15 s", or "6, 8 or 10 s".
+    fn lengths_text(&self) -> String {
+        let (first, last) = (self.shortest(), self.longest());
+        if self.lengths.len() as u32 == last - first + 1 {
+            return format!("{first} to {last} s");
+        }
+        let names: Vec<String> = self.lengths.iter().map(u32::to_string).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last} s", rest.join(", ")),
+            _ => format!("{} s", names.join("")),
+        }
+    }
+
+    /// Why it can't make `request`, before any money is spent on it.
+    pub fn check(&self, request: &GenerateRequest) -> CloudResult<()> {
+        let GenerateRequest::Video {
+            length,
+            aspect,
+            resolution,
+            first_frame,
+            last_frame,
+            references,
+            ..
+        } = request
+        else {
+            return Ok(());
+        };
+        let refuse = |message: String| {
+            Err(CloudError::BadPrompt {
+                message,
+                suggestion: None,
+            })
+        };
+        let name = self.name;
+        if let Some(length) = length {
+            let secs = length.as_secs_f64().round();
+            if !self.lengths.iter().any(|l| *l as f64 == secs) {
+                return refuse(format!("{name} makes {} of video", self.lengths_text()));
+            }
+        }
+        if let Some(aspect) = aspect
+            && !(first_frame.is_some() && self.frame_sets_aspect)
+            && !self.aspects.contains(&aspect.as_str())
+        {
+            return refuse(format!(
+                "{name} makes {} video, not {aspect}",
+                self.aspects.join(", ")
+            ));
+        }
+        if let Some(resolution) = resolution
+            && !self
+                .resolutions
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(resolution))
+        {
+            return refuse(if self.resolutions.is_empty() {
+                format!("{name} has no choice of resolution")
+            } else {
+                format!(
+                    "{name} makes {} video, not {resolution}",
+                    self.resolutions.join(" or ")
+                )
+            });
+        }
+        if last_frame.is_some() && first_frame.is_none() {
+            return refuse("A last frame needs a first frame".into());
+        }
+        if last_frame.is_some() && !self.last_frame {
+            return refuse(format!("{name} doesn't end on a given frame"));
+        }
+        if references.is_empty() {
+            return Ok(());
+        }
+        if first_frame.is_some() {
+            return refuse("A video follows references or starts on a frame, not both".into());
+        }
+        let Some(limits) = self.references else {
+            return refuse(format!("{name} doesn't follow references"));
+        };
+        let of = |kind: MediaKind| references.iter().filter(move |r| r.kind == kind);
+        let counts = [
+            (MediaKind::Image, limits.images, "pictures"),
+            (MediaKind::Video, limits.videos, "clips"),
+            (MediaKind::Audio, limits.sounds, "sounds"),
+        ];
+        for (kind, most, what) in counts {
+            let n = of(kind).count();
+            if n > 0 && most == 0 {
+                return refuse(format!("{name} doesn't follow {what}"));
+            }
+            if n > most {
+                return refuse(format!(
+                    "{name} follows at most {most} {what}; this has {n}"
+                ));
+            }
+            let secs: f64 = of(kind)
+                .filter_map(|r| r.length)
+                .map(Time::as_secs_f64)
+                .sum();
+            if kind != MediaKind::Image && secs > limits.seconds + 0.05 {
+                return refuse(format!(
+                    "{name} follows {what} of {:.0} s together at most; these run {secs:.1} s",
+                    limits.seconds
+                ));
+            }
+        }
+        if references.len() > limits.files {
+            return refuse(format!(
+                "{name} follows at most {} files; this has {}",
+                limits.files,
+                references.len()
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Who reads a voiceover, and how.
@@ -247,13 +519,29 @@ impl GenerateRequest {
             Self::Music { .. } => Capability::Music,
             Self::SoundEffect { .. } => Capability::SoundEffects,
             Self::Voiceover { .. } => Capability::Voiceover,
+            Self::Video { .. } => Capability::Video,
         }
     }
 
     pub fn prompt(&self) -> &str {
         match self {
-            Self::Music { prompt, .. } | Self::SoundEffect { prompt, .. } => prompt,
+            Self::Music { prompt, .. }
+            | Self::SoundEffect { prompt, .. }
+            | Self::Video { prompt, .. } => prompt,
             Self::Voiceover { text, .. } => text,
+        }
+    }
+
+    /// How a video is made; `None` for anything else.
+    pub fn video_mode(&self) -> Option<VideoMode> {
+        match self {
+            Self::Video { references, .. } if !references.is_empty() => Some(VideoMode::Reference),
+            Self::Video {
+                first_frame: Some(_),
+                ..
+            } => Some(VideoMode::Image),
+            Self::Video { .. } => Some(VideoMode::Text),
+            _ => None,
         }
     }
 
@@ -270,7 +558,9 @@ impl GenerateRequest {
             Self::Music { sections, .. } if !sections.is_empty() => {
                 Some(sections.iter().fold(Time::ZERO, |t, s| t + s.length))
             }
-            Self::Music { length, .. } | Self::SoundEffect { length, .. } => *length,
+            Self::Music { length, .. }
+            | Self::SoundEffect { length, .. }
+            | Self::Video { length, .. } => *length,
             Self::Voiceover { .. } => None,
         }
     }
@@ -286,6 +576,7 @@ impl GenerateRequest {
             Self::Music { .. } => "Music",
             Self::SoundEffect { .. } => "Sound effect",
             Self::Voiceover { .. } => "Voiceover",
+            Self::Video { .. } => "Video",
         };
         match self.length() {
             Some(t) => format!("{what}, {:.0} s: {}", t.as_secs_f64(), self.prompt()),
@@ -652,14 +943,100 @@ pub enum VoiceOrigin {
     Account,
 }
 
+/// Where a generation is, as its provider tells it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Stage {
+    /// Sent, or made in one request that can't be followed or stopped.
+    #[default]
+    Starting,
+    /// Waiting its turn; how many are ahead of it, when the provider says.
+    Queued(Option<u32>),
+    /// Being made.
+    Running,
+    /// The file coming down, 0..1.
+    Downloading(f32),
+}
+
+impl Stage {
+    /// Whether it can still be stopped: a provider follows it, and it isn't
+    /// made yet (what is made is paid for, and kept). See also
+    /// [`GenerationTask::can_stop`], for a provider that can't stop one.
+    pub fn can_stop(self) -> bool {
+        matches!(self, Self::Queued(_) | Self::Running)
+    }
+}
+
+/// One generation while it runs: where it is, and whether the user stopped
+/// it. Clones share it: the thread making it reports, the UI reads and
+/// stops.
+#[derive(Clone, Debug, Default)]
+pub struct GenerationTask(Arc<TaskState>);
+
+#[derive(Debug, Default)]
+struct TaskState {
+    stage: Mutex<Stage>,
+    cancelled: AtomicBool,
+    unstoppable: AtomicBool,
+}
+
+impl GenerationTask {
+    pub fn stage(&self) -> Stage {
+        *self.0.stage.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn report(&self, stage: Stage) {
+        *self.0.stage.lock().unwrap_or_else(|e| e.into_inner()) = stage;
+    }
+
+    /// Said by a provider that follows it but has no way to stop it: it
+    /// runs to the end, and is paid for.
+    pub fn unstoppable(&self) {
+        self.0.unstoppable.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether stopping it now would stop it.
+    pub fn can_stop(&self) -> bool {
+        !self.0.unstoppable.load(Ordering::Relaxed) && self.stage().can_stop()
+    }
+
+    /// Ask the provider to stop it; what is already made is kept.
+    pub fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// [`CloudError::Cancelled`] once stopped, for a provider between
+    /// steps.
+    pub fn check(&self) -> CloudResult<()> {
+        if self.cancelled() {
+            Err(CloudError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub trait GenerationService: Send + Sync {
     /// The provider doing `capability`, as the user knows it, when one is
     /// picked and has what it needs.
     fn provider_for(&self, capability: Capability) -> Option<String>;
     /// Provider id ("elevenlabs") doing voiceovers, when one is picked.
     fn voice_provider(&self) -> Option<String>;
-    /// Make `request` into a new file in `dir`. Slow: minutes for music.
-    fn generate(&self, request: &GenerateRequest, dir: &Path) -> CloudResult<Generated>;
+    /// What the model picked for video can make, when one is.
+    fn video_model(&self) -> Option<VideoModel>;
+    /// Whether videos are made with sound, as the user set it.
+    fn video_sound(&self) -> bool;
+    /// Make `request` into a new file in `dir`, reporting to `task` and
+    /// stopping when it is cancelled. Slow: minutes for music and video.
+    fn generate(
+        &self,
+        request: &GenerateRequest,
+        dir: &Path,
+        task: &GenerationTask,
+    ) -> CloudResult<Generated>;
     /// The voices of the provider doing voiceovers. Slow: a request.
     fn voices(&self) -> CloudResult<Vec<Voice>>;
     /// A sample of `voice` on disk, fetched the first time. Slow: a request.
@@ -695,6 +1072,7 @@ pub fn generated_bin(item: &MediaItem) -> &'static str {
     match item.generated.as_deref().map(|g| g.capability) {
         Some(Capability::SoundEffects) => "Sound Effects Generated",
         Some(Capability::Voiceover) => "Voiceover Generated",
+        Some(Capability::Video) => "Video Generated",
         _ => "Music Generated",
     }
 }
@@ -705,10 +1083,14 @@ pub fn media_item(
     generated: &Generated,
     media: Option<&dyn crate::services::MediaService>,
 ) -> MediaItem {
+    let kind = match generated.info.capability {
+        Capability::Video => MediaKind::Video,
+        _ => MediaKind::Audio,
+    };
     MediaItem {
         id: MediaId::new(),
         path: generated.path.clone(),
-        kind: MediaKind::Audio,
+        kind,
         fingerprint: media.and_then(|m| m.fingerprint(&generated.path).ok()),
         info: media.and_then(|m| m.probe(&generated.path).ok()),
         bin: None,

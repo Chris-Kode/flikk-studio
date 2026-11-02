@@ -149,6 +149,97 @@ pub fn delete(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> 
     })
 }
 
+/// A PUT with no body: asks a server to stop something.
+pub fn put(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
+    with_retries(true, || {
+        let mut request = agent().put(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.send_empty()
+    })
+}
+
+/// A PUT of the file at `path` as the whole body, read as it is sent: an
+/// upload to a URL that was handed out for it, with the `headers` it was
+/// handed out with (its media type, at least). Its length is added when
+/// they don't carry it.
+pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
+    let size = std::fs::metadata(path)
+        .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?
+        .len();
+    let sized = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    with_retries(true, || {
+        let file = std::fs::File::open(path)?;
+        let mut request = agent().put(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if !sized {
+            request = request.header("content-length", size.to_string());
+        }
+        request.send(SendBody::from_owned_reader(file))
+    })
+}
+
+/// Fetch `url` into `path` (through a `.part` file), without holding it in
+/// memory; `progress` gets 0..1 when the server says how long it is.
+pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), CloudError> {
+    let fail =
+        |e: std::io::Error| CloudError::Failed(format!("could not write {}: {e}", path.display()));
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
+    let mut waits = BACKOFF.iter();
+    let outcome = loop {
+        let attempt = (|| -> Result<Result<(), CloudError>, ureq::Error> {
+            let response = agent().get(url).call()?;
+            let status = response.status().as_u16();
+            if !(200..300).contains(&status) {
+                return Ok(Err(CloudError::Failed(format!(
+                    "the file could not be fetched ({status})"
+                ))));
+            }
+            let total = response
+                .headers()
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            let mut reader = response.into_body().into_reader();
+            let mut file = std::fs::File::create(&part)?;
+            let mut buf = vec![0; 1 << 16];
+            let mut got = 0u64;
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut file, &buf[..n])?;
+                got += n as u64;
+                if let Some(total) = total.filter(|t| *t > 0) {
+                    progress((got as f32 / total as f32).min(1.0));
+                }
+            }
+            file.sync_all()?;
+            Ok(Ok(()))
+        })();
+        match (attempt, waits.next()) {
+            (Ok(result), _) => break result,
+            (Err(_), Some(secs)) => std::thread::sleep(Duration::from_secs(*secs)),
+            (Err(e), None) => break Err(network(e)),
+        }
+    };
+    match outcome {
+        Ok(()) => std::fs::rename(&part, path).map_err(fail),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
+}
+
 /// A file in a [`post_form`]: its field, path and media type.
 pub type FormFile<'a> = (&'a str, &'a Path, &'a str);
 
@@ -209,6 +300,30 @@ fn boundary() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     )
+}
+
+/// The media type of a picture, clip or sound, by its extension.
+pub fn media_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("tif" | "tiff") => "image/tiff",
+        Some("heic") => "image/heic",
+        Some("heif") => "image/heif",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        _ => audio_mime(path),
+    }
 }
 
 /// The media type of an audio file, by its extension.

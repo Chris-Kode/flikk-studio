@@ -10,7 +10,7 @@ use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
 use koo_core::bus::{Author, CommandBus};
 use koo_core::cloud::{self, Capability, CloudError, GenerateRequest, MusicSection, Reading};
 use koo_core::command::{Command, InsertMode};
-use koo_core::model::{MediaItem, Project, TrackKind};
+use koo_core::model::{MediaItem, MediaKind, Project, TrackKind};
 use koo_core::{MediaId, Time, TimeRange, TrackId};
 use serde_json::{Value, json};
 
@@ -174,17 +174,17 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail(unavailable(&request));
     }
     let media = ctx.services.media.clone();
-    let job: Job =
-        Box::new(
-            move || match generation.generate(&request, &koo_core::paths::generated()) {
-                Ok(made) => JobDone::Generated {
-                    item: Box::new(koo_core::cloud::media_item(&made, media.as_deref())),
-                    placement,
-                    summary: request.summary(),
-                },
-                Err(e) => JobDone::Done(Done::error(error_text(&e))),
+    let job: Job = Box::new(move || {
+        let task = cloud::GenerationTask::default();
+        match generation.generate(&request, &koo_core::paths::generated(), &task) {
+            Ok(made) => JobDone::Generated {
+                item: Box::new(koo_core::cloud::media_item(&made, media.as_deref())),
+                placement,
+                summary: request.summary(),
             },
-        );
+            Err(e) => JobDone::Done(Done::error(error_text(&e))),
+        }
+    });
     Ok(Step::Job(job))
 }
 
@@ -256,15 +256,20 @@ pub fn finish(
 pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, String> {
     let id = item.id;
     let bin = cloud::generated_bin(&item);
+    let label = match item.kind {
+        MediaKind::Video => "Generate video",
+        _ => "Generate audio",
+    };
     let commands = cloud::pool_commands(bus.project(), item, bin);
-    bus.execute_shared(commands, "Generate audio")
+    bus.execute_shared(commands, label)
         .map(|_| id)
         .map_err(|e| e.to_string())
 }
 
 /// Propose `media` on the timeline as `placement` says, as `author`: on its
-/// track, else on an audio track with nothing over that time, else on a new
-/// one. What happened, for the model.
+/// track, else on a track of its kind with nothing over that time, else on
+/// a new one. A video with sound puts its sound on an audio track the same
+/// way. What happened, for the model.
 pub fn propose_placement(
     bus: &mut CommandBus,
     author: &Author,
@@ -273,63 +278,96 @@ pub fn propose_placement(
     reason: &str,
 ) -> Result<String, String> {
     let project = bus.view_for(author);
-    let length = project
-        .media(media)
-        .and_then(|m| m.info.as_ref())
+    let item = project.media(media).ok_or("the file is not in the pool")?;
+    let info = item.info.as_ref();
+    let length = info
         .map(|i| i.duration)
         .filter(|d| *d > Time::ZERO)
         .ok_or("the length of the file could not be read")?;
+    let video = item.kind == MediaKind::Video;
+    let sound = video && info.is_some_and(|i| !i.audio.is_empty());
     let span = TimeRange::new(placement.at, placement.at + length);
-    let free = placement.track.or_else(|| {
-        project
-            .timeline
-            .tracks
-            .iter()
-            .filter(|t| t.kind == TrackKind::Audio && !t.locked)
-            .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&span)))
-            .map(|t| t.id)
-    });
-    let before: Vec<TrackId> = project.timeline.tracks.iter().map(|t| t.id).collect();
-    let execute = |bus: &mut CommandBus, command: Command| -> Result<(), String> {
-        bus.execute(command, author.clone(), reason)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    let insert = |bus: &mut CommandBus, track| {
+        bus.execute(
+            Command::InsertClip {
+                media,
+                source: TimeRange::new(Time::ZERO, length),
+                track,
+                at: placement.at,
+                mode: InsertMode::Overwrite,
+            },
+            author.clone(),
+            reason,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     };
-    let track = match free {
+    let kind = if video {
+        TrackKind::Video
+    } else {
+        TrackKind::Audio
+    };
+    let track = match placement.track {
         Some(track) => track,
-        None => {
-            execute(
-                bus,
-                Command::AddTrack {
-                    kind: TrackKind::Audio,
-                    index: before.len(),
-                    name: "Generated".into(),
-                },
-            )?;
-            bus.view_for(author)
-                .timeline
-                .tracks
-                .iter()
-                .find(|t| !before.contains(&t.id))
-                .map(|t| t.id)
-                .ok_or("could not add an audio track")?
-        }
+        None => free_track(bus, author, kind, span, reason)?,
     };
-    execute(
-        bus,
-        Command::InsertClip {
-            media,
-            source: TimeRange::new(Time::ZERO, length),
-            track,
-            at: placement.at,
-            mode: InsertMode::Overwrite,
-        },
-    )?;
-    let text = format!(
-        "Proposed it over {:.3}–{:.3} s on track {}.",
+    insert(bus, track)?;
+    let mut text = format!(
+        "Proposed it over {:.3}–{:.3} s on track {}",
         span.start.as_secs_f64(),
         span.end.as_secs_f64(),
         short(track)
     );
+    if sound {
+        let audio = free_track(bus, author, TrackKind::Audio, span, reason)?;
+        insert(bus, audio)?;
+        text.push_str(&format!(", its sound on track {}", short(audio)));
+    }
+    text.push('.');
     Ok(text)
+}
+
+/// An unlocked track of `kind` with nothing over `span`, else a new one
+/// (proposed as `author`): a video track on top, an audio track at the
+/// bottom.
+fn free_track(
+    bus: &mut CommandBus,
+    author: &Author,
+    kind: TrackKind,
+    span: TimeRange,
+    reason: &str,
+) -> Result<TrackId, String> {
+    let project = bus.view_for(author);
+    let free = project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| t.kind == kind && !t.locked)
+        .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&span)))
+        .map(|t| t.id);
+    if let Some(track) = free {
+        return Ok(track);
+    }
+    let before: Vec<TrackId> = project.timeline.tracks.iter().map(|t| t.id).collect();
+    let index = match kind {
+        TrackKind::Audio => before.len(),
+        _ => 0,
+    };
+    bus.execute(
+        Command::AddTrack {
+            kind,
+            index,
+            name: "Generated".into(),
+        },
+        author.clone(),
+        reason,
+    )
+    .map_err(|e| e.to_string())?;
+    bus.view_for(author)
+        .timeline
+        .tracks
+        .iter()
+        .find(|t| !before.contains(&t.id))
+        .map(|t| t.id)
+        .ok_or_else(|| format!("could not add a {} track", crate::args::kind_name(kind)))
 }

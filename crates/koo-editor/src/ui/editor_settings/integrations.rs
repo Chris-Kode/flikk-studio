@@ -9,6 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, h_flex, v_flex,
 };
@@ -244,6 +245,9 @@ impl IntegrationsTab {
                 if let Some(left) = account.credits_left() {
                     parts.push(format!("{} credits left", thousands(left)));
                 }
+                if let Some(balance) = &account.balance {
+                    parts.push(format!("{balance} left"));
+                }
                 Some(
                     h_flex()
                         .gap_2()
@@ -354,7 +358,15 @@ impl Render for IntegrationsTab {
             .enumerate()
             .map(|(ix, &p)| self.render_provider(ix, p, cx).into_any_element())
             .collect();
-        let rows: Vec<_> = self
+        let video_picked = self
+            .state
+            .read(cx)
+            .cloud
+            .settings()
+            .provider(Capability::Video)
+            .is_some();
+        let sound = self.state.read(cx).video_sound();
+        let mut rows: Vec<_> = self
             .doers
             .iter()
             .map(|(capability, select)| {
@@ -381,6 +393,24 @@ impl Render for IntegrationsTab {
                     .into_any_element()
             })
             .collect();
+        if video_picked {
+            let at = self
+                .doers
+                .iter()
+                .position(|(c, _)| *c == Capability::Video)
+                .map_or(rows.len(), |i| i + 1);
+            let state = self.state.clone();
+            rows.insert(
+                at,
+                row("Video sound", cx)
+                    .child(Switch::new("video-sound").small().checked(sound).on_click(
+                        move |on: &bool, _, cx| {
+                            state.update(cx, |s, cx| s.set_video_sound(*on, cx))
+                        },
+                    ))
+                    .into_any_element(),
+            );
+        }
         v_flex()
             .id("integrations")
             .size_full()

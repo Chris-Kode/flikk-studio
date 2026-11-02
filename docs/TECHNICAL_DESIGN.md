@@ -17,7 +17,7 @@ described here, update the section in the same commit.
      koo-media (FFmpeg)   koo-analysis + koo-models (Whisper, ONNX)                  │ TCP 127.0.0.1
      koo-gpu (wgpu FX)    koo-html (headless Chromium)                               │ + token
      koo-store (.koo files, SQLite)   koo-deliver (render, export)                   ▼
-     koo-cloud (online providers: ElevenLabs)
+     koo-cloud (online providers: ElevenLabs, fal, Pika)
                                  claude -p / codex exec ──stdio──▶ koo-mcp (or `koo-editor mcp`)
                                  external MCP clients  ──stdio──▶ koo-editor mcp ── bridge.json
 ```
@@ -53,7 +53,7 @@ described here, update the section in the same commit.
 | `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, and their matte cache | core, models |
 | `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
-| `koo-cloud` | Online providers (ElevenLabs): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
+| `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
 | `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
 | `koo-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
 | `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
@@ -91,8 +91,8 @@ which the editor hands it (`AnalysisService::configure`).
 | Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) and voices (`.koovoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`koo-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
-| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
-| API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`) wins | Never in the database, `.koo` files or logs |
+| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.koo` files or logs |
 
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
@@ -684,6 +684,46 @@ not retried with Whisper.
   proposes the placement into the chat's set and answers the waiting call
   with the media id; allowed, it runs as a tool job and answers the same. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
+* **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
+  with the provider and model picked for video (on fal: Seedance 2.0, 2.0
+  Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse
+  1.1, Gemini Omni Flash 1.1, FLUX 3 Max, LTX 2.5 Pro; on Pika: Pika H3
+  Flex and Pika 2.5, and Seedance, Kling, MiniMax H3, Hailuo, Wan, Happy
+  Horse, Gemini Omni Flash, FLUX and Grok Imagine as Pika hosts them): from the prompt alone, from a first frame (a picture in the pool,
+  or the program at a time, grabbed with `compose::program` into
+  `paths::cache()/frames` just before) to an optional last one, or after
+  references (pictures, clips and sounds in the pool, which the prompt names
+  `@Image1`, `@Video1`, `@Audio1`). Each model's `cloud::VideoModel` (its
+  lengths, shapes, resolutions and reference limits) refuses what it can't
+  make before anything is spent. Models name their endpoints and fields
+  differently (`duration` as text or a number, `image_url` or
+  `start_image_url`, a word for "the model picks the shape"), so each is
+  an entry in `fal/models.rs` saying how it takes a request; references
+  named `@Image1` are renamed to what the model reads (`Image 1`,
+  `character1`, `<IMAGE_REF_0>`). fal runs it on its queue
+  (`fal/queue.rs`), uploading the files it follows to fal's storage first;
+  Pika runs it as a media job (`pika/jobs.rs`, `docs/pika.md`) after
+  uploading to Pika, each model an entry in `pika/models.rs` as on fal, and
+  sends a last frame on Pika 2.5 to Pikaframes.
+  `cloud::GenerationTask` carries where it is (queued, running, coming
+  down) to the media pool's row, which can stop it until it is made where
+  the provider can stop it (fal can; Pika can't, so its job is marked
+  `unstoppable` once taken). It
+  lands in the "Video Generated" bin and, with `at` or `range`, is proposed
+  on a video track free over its length (else a new one on top), its sound
+  on an audio track beside it. The media pool's Video form makes the same
+  request, starting on a pool picture or the frame at the playhead. However
+  a generated item reaches the pool (the media pool, an approval, or an
+  agent job the editor sees on its next pump), `analyze_generated` queues it
+  once: a video like footage when the analysis models are ready, a
+  voiceover when transcripts are on. Items already in a project when it
+  opens are left as they were. Settings → Integrations has a "Video sound"
+  switch under Video (`CloudSettings::silent_video`; sound costs more on
+  some models): the media pool's form starts its Sound switch from it, and
+  with it off the agent's videos are made silent whatever it asks. Each
+  model's `cloud::VideoSound` says whether it makes sound at all, always
+  (no switch: Pika H3 Flex, Kling 4.0, Kling 3.0 Turbo on Pika), or on a
+  switch; only the last are made silent.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

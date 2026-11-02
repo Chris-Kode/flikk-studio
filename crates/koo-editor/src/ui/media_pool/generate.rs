@@ -1,7 +1,7 @@
 //! Generate: music or a sound effect from a description, made by the
 //! provider set in Settings → Integrations, landing in the Music Generated
 //! or Sound Effects Generated bin. Music runs as long as In/Out when they
-//! are set.
+//! are set. A row for each generation running (any kind) shows where it is.
 
 use super::MediaPoolPanel;
 use crate::state::EditorState;
@@ -17,7 +17,7 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::*;
-use koo_core::cloud::{Capability, CloudError, GenerateRequest};
+use koo_core::cloud::{Capability, CloudError, GenerateRequest, Stage};
 use koo_core::time::Time;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -255,6 +255,30 @@ impl MediaPoolPanel {
                             .into_any_element()
                     }
                 };
+                let stage = g.task.stage();
+                let running = g.failed.is_none();
+                // A provider that follows it can stop it; one request can't.
+                let action = if running && g.task.can_stop() {
+                    let stopping = g.task.cancelled();
+                    Button::new(("generation-stop", id as usize))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Square)
+                        .tooltip("Stop")
+                        .disabled(stopping)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.stop_generation(id, cx))
+                        }))
+                } else {
+                    Button::new(("generation-dismiss", id as usize))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .disabled(running)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.dismiss_generation(id, cx))
+                        }))
+                };
                 h_flex()
                     .h(px(28.))
                     .px_2()
@@ -263,19 +287,22 @@ impl MediaPoolPanel {
                     .text_color(theme.muted_foreground)
                     .child(lead)
                     .child(div().flex_1().min_w_0().truncate().child(summary))
-                    .child(
-                        Button::new(("generation-dismiss", id as usize))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .disabled(g.failed.is_none())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.dismiss_generation(id, cx))
-                            })),
-                    )
+                    .children(running.then(|| stage_label(stage)).flatten())
+                    .child(action)
                     .into_any_element()
             })
             .collect()
+    }
+}
+
+/// Where a running generation is, when there is more to say than the
+/// spinner does: its place in the queue, or how much has come down.
+fn stage_label(stage: Stage) -> Option<String> {
+    match stage {
+        Stage::Queued(Some(ahead)) if ahead > 0 => Some(format!("Queued · {ahead}")),
+        Stage::Queued(_) => Some("Queued".into()),
+        Stage::Downloading(f) => Some(format!("{:.0}%", f * 100.)),
+        Stage::Starting | Stage::Running => None,
     }
 }
 

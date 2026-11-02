@@ -13,8 +13,8 @@ mod voices;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use koo_core::cloud::{
-    Capability, CloudError, CloudResult, Designed, GenerateRequest, Heard, SpeechRequest, Voice,
-    VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
+    Capability, CloudError, CloudResult, Designed, GenerateRequest, GenerationTask, Heard,
+    SpeechRequest, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -104,6 +104,7 @@ impl Api for ElevenLabs {
             plan: json["tier"].as_str().map(str::to_owned),
             credits_used: json["character_count"].as_u64(),
             credits_limit: json["character_limit"].as_u64(),
+            balance: None,
         })
     }
 
@@ -123,11 +124,15 @@ impl Api for ElevenLabs {
         model: &str,
         request: &GenerateRequest,
         stem: &Path,
+        _task: &GenerationTask,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
         match request {
             GenerateRequest::Music { .. } => music::run(key, model, request, stem),
             GenerateRequest::SoundEffect { .. } => sound::run(key, model, request, stem),
             GenerateRequest::Voiceover { .. } => speech::run(key, model, request, stem),
+            GenerateRequest::Video { .. } => Err(CloudError::Unavailable(format!(
+                "{NAME} doesn't make video"
+            ))),
         }
     }
 

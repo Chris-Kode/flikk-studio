@@ -18,6 +18,7 @@ mod masks;
 mod preview;
 mod read;
 mod sounds;
+pub mod video;
 mod view;
 pub mod voices;
 
@@ -280,6 +281,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "find_sounds" => sounds::find(ctx, &args),
         "use_library_sound" => sounds::use_sound(ctx, &args),
         "generate_audio" => generate::serve(ctx, &args),
+        "generate_video" => video::serve(ctx, &args),
         "find_voices" => voices::find_voices(ctx, &args),
         "add_voice" => voices::serve_add(ctx, &args),
         "design_voice" => voices::serve_design(ctx, &args),

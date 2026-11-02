@@ -14,21 +14,23 @@
 //! it through the catalog.
 
 mod elevenlabs;
+mod fal;
 mod http;
 mod keys;
+mod pika;
 
 pub use keys::{KeySource, Keys};
 
 use koo_core::cloud::{
     Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest, Generated,
-    GenerationInfo, GenerationService, Heard, SpeechRequest, SpeechService, Voice, VoiceClone,
-    VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
+    GenerationInfo, GenerationService, GenerationTask, Heard, SpeechRequest, SpeechService,
+    VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Every provider the editor knows.
-pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER];
+pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER, &fal::PROVIDER, &pika::PROVIDER];
 
 /// One provider as the user sees it.
 pub struct Provider {
@@ -82,13 +84,16 @@ pub fn providers_for(capability: Capability) -> impl Iterator<Item = &'static Pr
         .filter(move |p| p.offer(capability).is_some())
 }
 
-/// What a key's account has: its plan and credits.
+/// What a key's account has: its plan and credits, or the money left on
+/// it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Account {
     /// "creator"; `None` when the key may not read it.
     pub plan: Option<String>,
     pub credits_used: Option<u64>,
     pub credits_limit: Option<u64>,
+    /// What is left to spend, as the provider counts it: "$12.40".
+    pub balance: Option<String>,
 }
 
 impl Account {
@@ -113,16 +118,24 @@ pub trait Api: Sync {
         Err(CloudError::Unavailable("not offered".into()))
     }
 
-    /// Make `request` into `<stem>.<extension it picks>`; the file written
-    /// and the credits it cost.
+    /// Make `request` into `<stem>.<extension it picks>`, reporting to
+    /// `task` and stopping when it is cancelled, where the provider can; the
+    /// file written and the credits it cost.
     fn generate(
         &self,
         _key: &str,
         _model: &str,
         _request: &GenerateRequest,
         _stem: &Path,
+        _task: &GenerationTask,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
         Err(CloudError::Unavailable("not offered".into()))
+    }
+
+    /// What video model `model` can make; only for providers offering
+    /// video.
+    fn video_model(&self, _model: &str) -> Option<&'static VideoModel> {
+        None
     }
 
     /// The voices voiceovers can use with `key`.
@@ -283,14 +296,33 @@ impl GenerationService for Cloud {
         self.keys.get(provider).map(|_| provider.name.to_owned())
     }
 
-    fn generate(&self, request: &GenerateRequest, dir: &Path) -> CloudResult<Generated> {
+    fn video_sound(&self) -> bool {
+        !lock(&self.settings).silent_video
+    }
+
+    fn video_model(&self) -> Option<VideoModel> {
+        let (provider, model) = self.picked(Capability::Video)?;
+        provider.api.video_model(model.id).cloned()
+    }
+
+    fn generate(
+        &self,
+        request: &GenerateRequest,
+        dir: &Path,
+        task: &GenerationTask,
+    ) -> CloudResult<Generated> {
         let capability = request.capability();
         let (provider, model) = self.require(capability)?;
         let key = self.key(provider)?;
+        if let Some(video) = provider.api.video_model(model.id) {
+            video.check(request)?;
+        }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;
         let stem = free_stem(dir, request);
-        let (path, cost) = provider.api.generate(&key, model.id, request, &stem)?;
+        let (path, cost) = provider
+            .api
+            .generate(&key, model.id, request, &stem, task)?;
         let info = GenerationInfo {
             capability,
             provider: provider.id.to_owned(),
@@ -394,6 +426,7 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> PathBuf {
         GenerateRequest::Music { .. } => "music",
         GenerateRequest::SoundEffect { .. } => "sfx",
         GenerateRequest::Voiceover { .. } => "voiceover",
+        GenerateRequest::Video { .. } => "video",
     };
     let words: Vec<String> = request
         .prompt()
