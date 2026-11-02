@@ -15,9 +15,11 @@ pub mod generate;
 pub mod groups;
 mod layout;
 mod masks;
+mod music;
 mod preview;
 mod read;
 mod sounds;
+mod speed;
 mod stabilize;
 pub mod video;
 mod view;
@@ -288,6 +290,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "design_voice" => voices::serve_design(ctx, &args),
         "stabilize" => stabilize::stabilize(ctx, &args),
         "get_shake" => stabilize::get_shake(ctx, &args),
+        "fit_music" => music::fit_music(ctx, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),
     }

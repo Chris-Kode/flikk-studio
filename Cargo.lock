@@ -3772,6 +3772,7 @@ name = "koo-editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "cpal",
  "gpui-kit",
  "image",
@@ -3785,6 +3786,7 @@ dependencies = [
  "koo-media",
  "koo-models",
  "koo-store",
+ "qoi",
  "serde",
  "serde_json",
  "uuid",

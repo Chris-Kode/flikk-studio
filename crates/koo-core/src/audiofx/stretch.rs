@@ -5,6 +5,8 @@
 //! `k` is read near input position `k · hop · speed`, shifted within
 //! ±10 ms to the offset that best continues the previous grain (highest
 //! normalized cross-correlation), so waveforms line up and pitch stays put.
+//! Under a speed ramp ([`Stretch::mapped`]) grain `k` is read where the
+//! ramp has the source at that output time instead.
 
 use std::collections::VecDeque;
 
@@ -12,8 +14,12 @@ use std::collections::VecDeque;
 /// (0 at the end).
 pub type Pull<'a> = dyn FnMut(&mut [f32]) -> usize + 'a;
 
+/// Output frame → input frame, for a speed that changes.
+pub type Map = Box<dyn Fn(f64) -> f64 + Send>;
+
 pub struct Stretch {
     speed: f64,
+    map: Option<Map>,
     /// Grain length in frames.
     n: usize,
     /// Output hop, n / 2.
@@ -43,6 +49,7 @@ impl Stretch {
             .collect();
         Self {
             speed: speed.clamp(0.01, 100.0),
+            map: None,
             n,
             hop: n / 2,
             tol: (0.01 * rate) as usize,
@@ -54,6 +61,24 @@ impl Stretch {
             prev: None,
             acc: vec![0.0; n * 2],
             ready: VecDeque::new(),
+        }
+    }
+
+    /// A stretch whose speed changes: output frame `o` reads near input
+    /// frame `map(o)` (rising).
+    pub fn mapped(rate: u32, map: Map) -> Self {
+        Self {
+            map: Some(map),
+            ..Self::new(1.0, rate)
+        }
+    }
+
+    /// Input frame grain `k` is read near.
+    fn nominal(&self, k: u64) -> u64 {
+        let out = k as f64 * self.hop as f64;
+        match &self.map {
+            Some(map) => map(out).max(0.0).round() as u64,
+            None => (out * self.speed).round() as u64,
         }
     }
 
@@ -97,7 +122,7 @@ impl Stretch {
 
     fn grain(&mut self, pull: &mut Pull) {
         let (n, hop) = (self.n as u64, self.hop as u64);
-        let nominal = (self.k as f64 * hop as f64 * self.speed).round() as u64;
+        let nominal = self.nominal(self.k);
         let lo = nominal.saturating_sub(self.tol as u64).max(self.base);
         let hi = nominal + self.tol as u64;
         self.fill(hi.max(nominal) + n, pull);
@@ -149,8 +174,7 @@ impl Stretch {
         self.prev = Some(pos);
         self.k += 1;
         // Drop input no later grain or template can reach.
-        let next = ((self.k as f64 * hop as f64 * self.speed).round() as u64)
-            .saturating_sub(self.tol as u64);
+        let next = self.nominal(self.k).saturating_sub(self.tol as u64);
         let keep = next.min(pos + hop);
         if keep > self.base {
             let drop = ((keep - self.base) as usize).min(self.input.len() / 2);

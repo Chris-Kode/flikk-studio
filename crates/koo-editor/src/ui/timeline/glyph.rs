@@ -43,6 +43,8 @@ pub enum Glyph {
     MaskOverlay,
     /// Two beamed notes: music.
     Note,
+    /// A bust inside corner brackets: the people cut out of the picture.
+    Person,
 }
 
 /// A `size`-square element drawing `glyph` in `color`.
@@ -344,6 +346,28 @@ pub fn paint_glyph(glyph: Glyph, bounds: Bounds<Pixels>, color: Hsla, window: &m
                 lines(&[a, b], false, window);
             }
             lines(&[(8., 3.), (8., 13.)], false, window);
+        }
+        Glyph::Person => {
+            circle(8., 6.2, 2.4, true, window);
+            fill(
+                &[
+                    (3.8, 13.5),
+                    (4.6, 10.9),
+                    (6.3, 9.5),
+                    (9.7, 9.5),
+                    (11.4, 10.9),
+                    (12.2, 13.5),
+                ],
+                window,
+            );
+            for corner in [
+                [(1.5, 5.), (1.5, 2.), (4.5, 2.)],
+                [(11.5, 2.), (14.5, 2.), (14.5, 5.)],
+                [(14.5, 11.), (14.5, 14.), (11.5, 14.)],
+                [(4.5, 14.), (1.5, 14.), (1.5, 11.)],
+            ] {
+                lines(&corner, false, window);
+            }
         }
         Glyph::Pen => {
             lines(

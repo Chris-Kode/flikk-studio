@@ -62,6 +62,8 @@ pub enum MaskField {
     Rotation,
     /// Rectangles.
     Roundness,
+    /// People: how much the edge follows the picture's.
+    Edge,
 }
 
 impl MaskField {
@@ -76,6 +78,7 @@ impl MaskField {
                 MaskShape::Rectangle { rotation_deg, .. } | MaskShape::Ellipse { rotation_deg, .. },
             ) => *rotation_deg,
             (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => *roundness,
+            (Self::Edge, MaskShape::Person { edge }) => *edge,
             _ => 0.0,
         }
     }
@@ -93,6 +96,7 @@ impl MaskField {
             (Self::Roundness, MaskShape::Rectangle { roundness, .. }) => {
                 *roundness = v.clamp(0.0, 1.0)
             }
+            (Self::Edge, MaskShape::Person { edge }) => *edge = v.clamp(0.0, 1.0),
             _ => {}
         }
     }
@@ -160,6 +164,7 @@ impl Key {
                 MaskField::Opacity => s("Opacity", 0., 100., 1., 0, 100., 1.),
                 MaskField::Rotation => s("Rotation", -180., 180., 0.5, 1, 1., 0.),
                 MaskField::Roundness => s("Round", 0., 100., 1., 0, 100., 0.),
+                MaskField::Edge => s("Edge", 0., 100., 1., 0, 100., 0.5),
             },
             Key::TransitionDuration => s("Duration", 0.1, 5., 0.05, 2, 1., 1.),
             Key::Exposure => s("Exposure", -4., 4., 0.01, 2, 1., 0.),

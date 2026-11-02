@@ -563,6 +563,35 @@ impl Plan {
     }
 }
 
+impl Plan {
+    /// The correction at source time `t` between two frames, for a
+    /// moment made between them (a slowed clip that blends or flows):
+    /// theirs, taken in proportion.
+    pub fn between(&self, t: Time) -> Warp {
+        let secs = t.as_secs_f64();
+        let i = self.times.partition_point(|x| *x <= secs + 1e-4);
+        if i == 0 || i >= self.times.len() {
+            return self.at(t);
+        }
+        let (a, b) = (self.warps[i - 1], self.warps[i]);
+        let (ta, tb) = (self.times[i - 1], self.times[i]);
+        let f = if tb > ta {
+            ((secs - ta) / (tb - ta)).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let mix = |x: f32, y: f32| x + (y - x) * f;
+        Warp {
+            scale: mix(a.scale, b.scale),
+            rotation_deg: mix(a.rotation_deg, b.rotation_deg),
+            position: [
+                mix(a.position[0], b.position[0]),
+                mix(a.position[1], b.position[1]),
+            ],
+        }
+    }
+}
+
 /// `values` smoothed by a Gaussian cut at `reach` samples (σ = reach / 2),
 /// the ends held.
 fn gaussian_within(values: &[f64], reach: usize) -> Vec<f64> {
@@ -706,18 +735,26 @@ pub fn plan(
     Some(plan)
 }
 
-/// The correction `clip` draws its picture with at timeline time `t`;
-/// `None` when it is not stabilized or its path is not measured yet
-/// (measuring it then starts).
+/// The correction `clip` draws its picture with at timeline time `t`
+/// (with `between`, a moment between two source frames: see
+/// [`Plan::between`]); `None` when it is not stabilized or its path is
+/// not measured yet (measuring it then starts). Source times follow the
+/// clip's speed and ramp ([`Clip::to_source`]).
 pub fn correction(
     project: &crate::model::Project,
     services: &Services,
     clip: &Clip,
     t: Time,
+    between: bool,
 ) -> Option<Warp> {
     let stabilizer = services.stabilizer.as_deref()?;
     let (item, range) = source(project, clip)?;
     let plan = plan(stabilizer, clip, item, range)?;
-    let warp = plan.at(clip.to_source(t)?);
+    let source = clip.to_source(t)?;
+    let warp = if between {
+        plan.between(source)
+    } else {
+        plan.at(source)
+    };
     (!warp.is_identity()).then_some(warp)
 }

@@ -23,6 +23,7 @@ use koo_core::command::Command;
 use koo_core::compose::Shape;
 use koo_core::mask::{Mask, MaskShape, MaskState};
 use koo_core::model::Project;
+use koo_core::person::PersonMatte;
 use koo_core::subject::{Matte, Subject, SubjectPoint, SubjectPrompt};
 use koo_core::{ClipId, MaskId, Rate, Time};
 
@@ -96,11 +97,17 @@ pub(super) struct Subjects {
     pub frame: Option<(Time, Rate)>,
     /// The mattes of the clip's subject masks there, those made.
     pub mattes: Vec<(MaskId, Matte)>,
+    /// The mattes of its person masks there, those made.
+    pub people: Vec<(MaskId, PersonMatte)>,
 }
 
 impl Subjects {
     fn matte(&self, id: MaskId) -> Option<&Matte> {
         self.mattes.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
+    }
+
+    fn person(&self, id: MaskId) -> Option<&PersonMatte> {
+        self.people.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
     }
 
     /// `mask`'s prompt on this frame.
@@ -202,7 +209,7 @@ fn box_corners(state: &MaskState, aspect: f32) -> Option<[[f32; 2]; 4]> {
             size,
             rotation_deg,
         } => (center, size, rotation_deg),
-        MaskShape::Path { .. } | MaskShape::Subject => return None,
+        MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Person { .. } => return None,
     };
     let (s, c) = rotation.to_radians().sin_cos();
     let (hw, hh) = (size[0] * aspect / 2.0, size[1] / 2.0);
@@ -565,6 +572,9 @@ impl MaskEditor {
             let state = mask.state_at(at);
             let hit = match state.shape {
                 MaskShape::Subject => subjects.matte(mask.id).is_some_and(|m| m.contains(uv)),
+                MaskShape::Person { .. } => {
+                    subjects.person(mask.id).is_some_and(|m| m.contains(uv))
+                }
                 _ => {
                     let poly: Vec<Point<Pixels>> = state
                         .shape
@@ -577,7 +587,7 @@ impl MaskEditor {
             };
             if hit {
                 self.selected = Some(mask.id);
-                let edit = if state.shape == MaskShape::Subject {
+                let edit = if matches!(state.shape, MaskShape::Subject | MaskShape::Person { .. }) {
                     Edit::Select
                 } else {
                     Edit::Move
@@ -646,7 +656,7 @@ impl MaskEditor {
                         *center = [(m[0] + o[0]) / 2.0, (m[1] + o[1]) / 2.0];
                         *size = [local[0].abs() / aspect, local[1].abs()];
                     }
-                    MaskShape::Path { .. } | MaskShape::Subject => {}
+                    MaskShape::Path { .. } | MaskShape::Subject | MaskShape::Person { .. } => {}
                 }
             }
             Edit::Feather => {

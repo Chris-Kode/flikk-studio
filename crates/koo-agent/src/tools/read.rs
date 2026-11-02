@@ -89,6 +89,22 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
     if clip.speed != 1.0 {
         v["speed"] = json!(clip.speed);
     }
+    if clip.is_ramped() {
+        let d = clip.duration.as_secs_f64().max(1e-9);
+        v["ramp"] = json!(
+            clip.retime
+                .keys
+                .iter()
+                .map(|k| [(k.at.as_secs_f64() / d * 1000.0).round() / 1000.0, k.speed])
+                .collect::<Vec<_>>()
+        );
+        if clip.retime.audio != koo_core::speed::RampAudio::Stretch {
+            v["ramp_audio"] = json!("mute");
+        }
+    }
+    if clip.retime.interpolation != koo_core::speed::Interpolation::Nearest {
+        v["interpolation"] = json!(clip.retime.interpolation.key());
+    }
     if !clip.effects.is_empty() {
         v["effects"] = clip
             .effects

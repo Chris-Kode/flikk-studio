@@ -8,7 +8,10 @@
 //! enabled clip under the playhead, or the transition covering it:
 //!
 //! 1. **Picture**: a media frame at the clip's source time
-//!    ([`Clip::to_source`], so speed is honoured), an overlay asset, or a
+//!    ([`Clip::to_source`], so speed and ramps are honoured; slowed clips
+//!    show the moment between two source frames as their
+//!    [`Interpolation`] says: the two mixed, or the optical flow frame
+//!    from [`Services::interpolation`] once made), an overlay asset, or a
 //!    generator ([`FxService::generate`] for GLSL, [`HtmlService::frame`]
 //!    for HTML) laid out at the output size. A stabilized media frame is
 //!    moved, turned and zoomed inside its own frame by the correction of
@@ -23,7 +26,9 @@
 //! 4. **Masks**: the clip's masks, drawn in the picture's own uv
 //!    ([`crate::mask::raster`]), multiply its alpha ([`FxBatch::mask`]).
 //!    Subject masks are drawn from their mattes at the source time
-//!    ([`subject_mattes`]), refined onto the decoded frame's edges. With
+//!    ([`subject_mattes`]), refined onto the decoded frame's edges; person
+//!    masks from theirs ([`person_mattes`]), eased onto the same frame's
+//!    edges by their `edge` amount. With
 //!    [`MaskView::Tinted`] the picture stays whole and what the masks cut
 //!    away is tinted over it instead, for editing them.
 //! 5. **Transform** and **blend**: fitted inside the canvas (as the export
@@ -64,18 +69,21 @@ mod pictures;
 
 pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
-pub use pictures::{Pictures, Stills, Streams, overlay_item};
+pub use pictures::{Pictures, Stills, Streams, frame_length, overlay_item};
 
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
 use crate::grade;
 use crate::ids::{ClipId, MaskId};
 use crate::model::{
-    BlendMode, Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind, Transform,
+    BlendMode, Clip, ClipContent, Grade, MediaItem, MediaKind, Project, Property, Track, TrackKind,
+    Transform,
 };
+use crate::person::PersonMatte;
 use crate::services::{
-    Frame, FxBatch, FxCall, Lettered, PendingFrame, PixelOrder, Placement, Services, SubjectRef,
-    Surface,
+    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, Placement,
+    Services, SubjectRef, Surface,
 };
+use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
 use crate::time::{Time, TimeRange};
 use batch::CpuBatch;
@@ -174,6 +182,54 @@ pub fn subject_mattes(
         .filter_map(|m| {
             let subject = subject_ref(project, clip, m)?;
             Some((m.id, service.matte(subject, source)?))
+        })
+        .collect()
+}
+
+/// The person mask `mask` of `clip`, as [`SubjectService`] sees it: on
+/// media from the pool.
+///
+/// [`SubjectService`]: crate::services::SubjectService
+pub fn person_ref<'a>(
+    project: &'a Project,
+    clip: &'a Clip,
+    mask: &'a crate::mask::Mask,
+) -> Option<PersonRef<'a>> {
+    let ClipContent::Media { media, .. } = &clip.content else {
+        return None;
+    };
+    if !mask.is_person() {
+        return None;
+    }
+    let item = project.media(*media)?;
+    let (a, b) = (clip.to_source(clip.start)?, clip.to_source(clip.end())?);
+    Some(PersonRef {
+        mask: mask.id,
+        item,
+        range: TimeRange::new(a.min(b), a.max(b)),
+    })
+}
+
+/// The mattes of `clip`'s enabled person masks at timeline time `t`, those
+/// made so far.
+pub fn person_mattes(
+    project: &Project,
+    services: &Services,
+    clip: &Clip,
+    t: Time,
+) -> Vec<(MaskId, PersonMatte)> {
+    let Some(service) = &services.subjects else {
+        return Vec::new();
+    };
+    let Some(source) = clip.to_source(t) else {
+        return Vec::new();
+    };
+    clip.masks
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let person = person_ref(project, clip, m)?;
+            Some((m.id, service.person(person, source)?))
         })
         .collect()
 }
@@ -382,7 +438,7 @@ pub fn needs_compositor(project: &Project, range: TimeRange) -> bool {
                                         | Property::AnchorY
                                 )
                         })
-                        || (c.media().is_some() && (c.speed - 1.0).abs() > 1e-9)
+                        || (c.media().is_some() && c.is_retimed())
                 })
     })
 }
@@ -538,6 +594,14 @@ fn lettering_layer(
     Some((l, place))
 }
 
+/// A frame between two source frames.
+enum Tween {
+    /// Ready to show.
+    Made(Frame),
+    /// Two frames to mix, by how far from the first.
+    Mix(Frame, Frame, f32),
+}
+
 struct Ctx<'a, 'b> {
     project: &'a Project,
     services: &'a Services,
@@ -640,9 +704,11 @@ impl Ctx<'_, '_> {
         let (mw, mh) = crate::mask::raster_size((w, h));
         let aspect = w.max(1) as f32 / h.max(1) as f32;
         let mattes = subject_mattes(self.project, self.services, clip, t);
+        let people = person_mattes(self.project, self.services, clip, t);
         let subjects = crate::mask::SubjectMattes {
             mattes: &mattes,
             picture: self.guide.as_ref(),
+            people: &people,
         };
         crate::mask::raster(&clip.masks, t - clip.start, aspect, mw, mh, &subjects)
     }
@@ -673,16 +739,31 @@ impl Ctx<'_, '_> {
                 if item.kind == MediaKind::Audio {
                     return None;
                 }
-                let frame = self.pictures.frame(clip.id, item, clip.to_source(t)?)?;
+                let source = clip.to_source(t)?;
+                let tween = self.tween(clip, item, t, source);
+                let frame = match &tween {
+                    Some(Tween::Made(frame) | Tween::Mix(frame, ..)) => frame.clone(),
+                    None => self.pictures.frame(clip.id, item, source)?,
+                };
                 let refines = clip
                     .masks
                     .iter()
-                    .any(|m| m.enabled && m.picks().is_some_and(|s| s.refine));
+                    .any(|m| m.enabled && (m.picks().is_some_and(|s| s.refine) || m.is_person()));
                 if refines {
                     self.guide = Some(frame.clone());
                 }
-                let picture = self.upload(&frame, &grades)?;
-                self.stabilized(clip, t, picture)
+                let between = tween.is_some();
+                let picture = match tween {
+                    Some(Tween::Mix(a, b, at)) => {
+                        let a = self.upload(&a, &grades)?;
+                        match self.upload(&b, &grades) {
+                            Some(b) => self.batch.mix(a, b, at).unwrap_or(a),
+                            None => a,
+                        }
+                    }
+                    _ => self.upload(&frame, &grades)?,
+                };
+                self.stabilized(clip, t, between, picture)
             }
             ClipContent::Overlay { asset, .. } => {
                 let item = overlay_item(clip.id, asset);
@@ -733,9 +814,12 @@ impl Ctx<'_, '_> {
     }
 
     /// `picture` with `clip`'s stabilization at `t` drawn into its own
-    /// frame ([`crate::stabilize`]); as it is when there is none (yet).
-    fn stabilized(&mut self, clip: &Clip, t: Time, picture: Surface) -> Surface {
-        let Some(warp) = crate::stabilize::correction(self.project, self.services, clip, t) else {
+    /// frame ([`crate::stabilize`]), `between` source frames when it shows
+    /// a moment made between them; as it is when there is none (yet).
+    fn stabilized(&mut self, clip: &Clip, t: Time, between: bool, picture: Surface) -> Surface {
+        let Some(warp) =
+            crate::stabilize::correction(self.project, self.services, clip, t, between)
+        else {
             return picture;
         };
         let size = self.batch.size(picture);
@@ -748,6 +832,46 @@ impl Ctx<'_, '_> {
         self.batch
             .composite(size.0, size.1, [0; 4], &[(picture, place)])
             .unwrap_or(picture)
+    }
+
+    /// What a slowed `clip` shows at timeline time `t` (source time
+    /// `source`) between two source frames, as its [`Interpolation`] says:
+    /// `None` to show the frame there as it is.
+    fn tween(&mut self, clip: &Clip, item: &MediaItem, t: Time, source: Time) -> Option<Tween> {
+        let mode = clip.retime.interpolation;
+        if mode == Interpolation::Nearest
+            || item.kind == MediaKind::Image
+            || clip.speed_at(t - clip.start) >= 1.0 - 1e-9
+        {
+            return None;
+        }
+        let ((ta, a), (tb, b)) = self.pictures.pair(clip.id, item, source)?;
+        let span = (tb - ta).as_secs_f64();
+        if span <= 0.0 {
+            return None;
+        }
+        let at = ((source - ta).as_secs_f64() / span).clamp(0.0, 1.0) as f32;
+        let step = (at * BETWEEN_STEPS).round() / BETWEEN_STEPS;
+        if step <= 0.0 {
+            return Some(Tween::Made(a));
+        }
+        if step >= 1.0 {
+            return Some(Tween::Made(b));
+        }
+        if mode == Interpolation::OpticalFlow
+            && let Some(service) = &self.services.interpolation
+        {
+            let request = Between {
+                item,
+                a: (ta, &a),
+                b: (tb, &b),
+                at: step,
+            };
+            if let Some(made) = service.between(&request, false) {
+                return Some(Tween::Made(made));
+            }
+        }
+        Some(Tween::Mix(a, b, at))
     }
 
     /// `frame` graded by `grades` (on the CPU), in the batch.
