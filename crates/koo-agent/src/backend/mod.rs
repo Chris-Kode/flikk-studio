@@ -61,9 +61,19 @@ pub enum BackendEvent {
     /// The backend's session id; persist it to resume the chat.
     Session(String),
     TextDelta(String),
+    /// One of the backend's own tools began; a [`BackendEvent::Tool`] with
+    /// the same `key` follows when it ends.
+    ToolStarted {
+        key: String,
+        tool: &'static str,
+        args: serde_json::Value,
+        summary: String,
+    },
     /// One of the backend's own tools ran, named the same for every
-    /// backend. The `koo` tools are reported where they are served.
+    /// backend. The `koo` tools are reported where they are served. `key`
+    /// is that of its [`BackendEvent::ToolStarted`], if there was one.
     Tool {
+        key: Option<String>,
         tool: &'static str,
         args: serde_json::Value,
         summary: String,

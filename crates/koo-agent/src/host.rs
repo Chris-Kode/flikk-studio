@@ -99,9 +99,12 @@ struct Turn {
     usage: Usage,
     /// Set when Codex may generate images.
     images: Option<ImageWatch>,
+    /// The backend's own tool calls still running: their key and call id.
+    web_calls: HashMap<String, u64>,
 }
 
-type JobResult = (Origin, Reply, String, Value, JobDone);
+/// A finished job, with the call id its start was shown under.
+type JobResult = (Origin, Reply, String, Value, JobDone, u64);
 
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
@@ -124,6 +127,8 @@ pub struct AgentHost {
     /// (the turn ended), told to the agent on its next turn.
     outcomes: Vec<String>,
     external: External,
+    /// Id of the next call shown while it runs.
+    next_call: u64,
 }
 
 impl Default for AgentHost {
@@ -150,6 +155,7 @@ impl AgentHost {
             held: HashMap::new(),
             outcomes: Vec::new(),
             external: External::default(),
+            next_call: 1,
         }
     }
 
@@ -404,6 +410,7 @@ impl AgentHost {
             usage: Usage::new(picked, groups.clone()),
             groups,
             images,
+            web_calls: HashMap::new(),
         });
     }
 
@@ -446,23 +453,44 @@ impl AgentHost {
                         self.events.push(AgentEvent::TextDelta { text });
                     }
                 }
+                BackendEvent::ToolStarted {
+                    key,
+                    tool,
+                    args,
+                    summary,
+                } => {
+                    if !turn.cancelled {
+                        let call = self.next_call;
+                        self.next_call += 1;
+                        turn.web_calls.insert(key, call);
+                        self.events.push(AgentEvent::ToolStarted {
+                            call,
+                            entry: started(tool.into(), args, summary, call),
+                        });
+                    }
+                }
                 BackendEvent::Tool {
+                    key,
                     tool,
                     args,
                     summary,
                     ok,
                 } => {
                     if !turn.cancelled {
-                        self.events.push(AgentEvent::Activity {
-                            entry: ActivityEntry {
-                                at: now(),
-                                tool: tool.into(),
-                                args,
-                                summary,
-                                images: Vec::new(),
-                                excerpts: Vec::new(),
-                                ok,
-                            },
+                        let entry = ActivityEntry {
+                            at: now(),
+                            tool: tool.into(),
+                            args,
+                            summary,
+                            images: Vec::new(),
+                            excerpts: Vec::new(),
+                            ok,
+                            running: None,
+                        };
+                        let call = key.and_then(|k| turn.web_calls.remove(&k));
+                        self.events.push(match call {
+                            Some(call) => AgentEvent::ToolFinished { call, entry },
+                            None => AgentEvent::Activity { entry },
                         });
                     }
                 }
@@ -524,6 +552,7 @@ impl AgentHost {
                     images,
                     excerpts: Vec::new(),
                     ok,
+                    running: None,
                 },
             });
         }
@@ -576,16 +605,31 @@ impl AgentHost {
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
                     Some(turn) => {
-                        let list = tools::list(bus, role_of(&turn.author), Some(&turn.groups));
+                        let list = tools::list(
+                            bus,
+                            role_of(&turn.author),
+                            Some(&turn.groups),
+                            turn.settings.web,
+                        );
                         turn.usage.listed = list.len();
                         turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
                         reply.tools(list);
                     }
-                    None => reply.tools(tools::list(bus, self.role, None)),
+                    None => reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        self.external.settings.web,
+                    )),
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, self.role, None));
+                    reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        self.external.settings.web,
+                    ));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     self.collect_images(bus, services);
@@ -604,7 +648,7 @@ impl AgentHost {
                             &mut turn.usage.loaded,
                             &args,
                         );
-                        self.finish_call(origin, reply, tool, args, done);
+                        self.finish_call(origin, reply, tool, args, done, None);
                         continue;
                     }
                     let mut ctx = ToolCtx {
@@ -618,7 +662,9 @@ impl AgentHost {
                         memory: &self.memory,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
-                        Step::Done(done) => self.finish_call(origin, reply, tool, args, *done),
+                        Step::Done(done) => {
+                            self.finish_call(origin, reply, tool, args, *done, None)
+                        }
                         Step::Job(job) => {
                             turn.jobs += 1;
                             self.spawn_job(origin, reply, tool, args, job);
@@ -640,7 +686,9 @@ impl AgentHost {
                         memory: &self.memory,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
-                        Step::Done(done) => self.finish_call(origin, reply, tool, args, *done),
+                        Step::Done(done) => {
+                            self.finish_call(origin, reply, tool, args, *done, None)
+                        }
                         Step::Job(job) => {
                             self.external.jobs += 1;
                             self.spawn_job(origin, reply, tool, args, job);
@@ -651,17 +699,31 @@ impl AgentHost {
         }
     }
 
-    fn spawn_job(&self, origin: Origin, reply: Reply, tool: String, args: Value, job: tools::Job) {
+    /// Run `job` off-thread, shown in the chat while it runs.
+    fn spawn_job(
+        &mut self,
+        origin: Origin,
+        reply: Reply,
+        tool: String,
+        args: Value,
+        job: tools::Job,
+    ) {
+        let call = self.next_call;
+        self.next_call += 1;
+        self.events.push(AgentEvent::ToolStarted {
+            call,
+            entry: started(tool.clone(), args.clone(), String::new(), call),
+        });
         let tx = self.jobs_tx.clone();
         std::thread::spawn(move || {
             let out = job();
-            let _ = tx.send((origin, reply, tool, args, out));
+            let _ = tx.send((origin, reply, tool, args, out, call));
         });
     }
 
     fn drain_jobs(&mut self, bus: &mut CommandBus, services: &Services) {
         let results: Vec<_> = self.jobs_rx.try_iter().collect();
-        for (origin, reply, tool, args, out) in results {
+        for (origin, reply, tool, args, out, call) in results {
             match origin {
                 Origin::Turn => {
                     if let Some(turn) = self.turn.as_mut() {
@@ -696,6 +758,7 @@ impl AgentHost {
                         &summary,
                     )
                 }
+                JobDone::Fetched { item, done } => tools::web::finish(bus, *item, *done),
                 JobDone::Respoken { item, fix, summary } => {
                     let author = match origin {
                         Origin::Turn => self
@@ -756,7 +819,7 @@ impl AgentHost {
                     }
                 }
             };
-            self.finish_call(origin, reply, tool, args, done);
+            self.finish_call(origin, reply, tool, args, done, Some(call));
         }
     }
 
@@ -773,7 +836,17 @@ impl AgentHost {
         close_open_sets(bus, &external_author(), None, &mut self.events);
     }
 
-    fn finish_call(&mut self, origin: Origin, reply: Reply, tool: String, args: Value, done: Done) {
+    /// Answer a call and show it; `call` is the id its start was shown
+    /// under, if it was.
+    fn finish_call(
+        &mut self,
+        origin: Origin,
+        reply: Reply,
+        tool: String,
+        args: Value,
+        done: Done,
+        call: Option<u64>,
+    ) {
         let ok = !done.result.is_error;
         if origin == Origin::Turn
             && let Some(turn) = self.turn.as_mut()
@@ -794,18 +867,35 @@ impl AgentHost {
             }
             None => reply.result(done.result),
         }
-        self.events.push(AgentEvent::Activity {
-            entry: ActivityEntry {
-                at: now(),
-                tool,
-                args,
-                summary: done.summary,
-                images: done.images,
-                excerpts: done.excerpts,
-                ok,
-            },
+        let entry = ActivityEntry {
+            at: now(),
+            tool,
+            args,
+            summary: done.summary,
+            images: done.images,
+            excerpts: done.excerpts,
+            ok,
+            running: None,
+        };
+        self.events.push(match call {
+            Some(call) => AgentEvent::ToolFinished { call, entry },
+            None => AgentEvent::Activity { entry },
         });
         self.events.extend(done.events);
+    }
+}
+
+/// The row of a call that is still running.
+fn started(tool: String, args: Value, summary: String, call: u64) -> ActivityEntry {
+    ActivityEntry {
+        at: now(),
+        tool,
+        args,
+        summary,
+        images: Vec::new(),
+        excerpts: Vec::new(),
+        ok: true,
+        running: Some(call),
     }
 }
 

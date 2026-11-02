@@ -1146,15 +1146,18 @@ impl EditorState {
                 AgentEvent::Question { text, choices } => self.push_agent(text, choices),
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => {
-                    // A voice the agent was allowed to add or design went
-                    // to the library.
-                    if entry.ok && matches!(entry.tool.as_str(), "add_voice" | "design_voice") {
-                        self.reload_library(cx);
-                        self.refresh_voices(cx);
-                    }
+                    self.tool_done(&entry, cx);
                     self.push_tool(entry)
                 }
-                AgentEvent::TurnDone => self.save_chat(),
+                AgentEvent::ToolStarted { entry, .. } => self.push_tool(entry),
+                AgentEvent::ToolFinished { call, entry } => {
+                    self.tool_done(&entry, cx);
+                    self.finish_tool(call, entry)
+                }
+                AgentEvent::TurnDone => {
+                    self.stop_tools();
+                    self.save_chat()
+                }
                 AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => self.status = Some(message),
             }
@@ -1181,6 +1184,39 @@ impl EditorState {
             tools: vec![],
             at: now(),
         });
+    }
+
+    fn tool_done(&mut self, entry: &ActivityEntry, cx: &mut Context<Self>) {
+        // A voice the agent was allowed to add or design went to the
+        // library.
+        if entry.ok && matches!(entry.tool.as_str(), "add_voice" | "design_voice") {
+            self.reload_library(cx);
+            self.refresh_voices(cx);
+        }
+    }
+
+    /// Put `entry` where call `call` was shown running. A call no longer
+    /// shown (its turn was stopped, or another chat is open) is dropped.
+    fn finish_tool(&mut self, call: u64, entry: ActivityEntry) {
+        let row = self
+            .chat
+            .iter_mut()
+            .rev()
+            .flat_map(|m| m.tools.iter_mut())
+            .find(|t| t.running == Some(call));
+        if let Some(row) = row {
+            *row = entry;
+        }
+    }
+
+    /// Calls still shown running when the turn ends were stopped with it.
+    fn stop_tools(&mut self) {
+        for row in self.chat.iter_mut().flat_map(|m| m.tools.iter_mut()) {
+            if row.running.take().is_some() {
+                row.ok = false;
+                row.summary = "Stopped".into();
+            }
+        }
     }
 
     /// Calls in a row stack into one message; anything else in between

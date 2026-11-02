@@ -3716,10 +3716,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "image",
  "koo-core",
  "png 0.18.1",
  "serde",
  "serde_json",
+ "ureq",
  "uuid",
 ]
 

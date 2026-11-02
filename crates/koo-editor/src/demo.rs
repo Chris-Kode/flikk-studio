@@ -683,6 +683,7 @@ fn tools(now: i64) -> Vec<ActivityEntry> {
         images: vec![],
         excerpts: vec![],
         ok: true,
+        running: None,
     };
     vec![
         entry(

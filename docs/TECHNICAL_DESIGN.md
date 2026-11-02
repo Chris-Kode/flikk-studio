@@ -1107,7 +1107,11 @@ on the UI thread and run it off it:
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
-  search. An "Image generation" switch, shown for Codex (off by default,
+  search. Both read pages as text only, so the same switch lists the `koo`
+  tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
+  25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
+  the original under `paths::web()` and adds it to the pool's "Web Images"
+  bin as the user's edit. An "Image generation" switch, shown for Codex (off by default,
   overridable per project), sets Codex's `features.image_generation`, which
   Codex itself turns on by default. `codex exec` does not report its
   pictures, so the host watches `$CODEX_HOME/generated_images/<thread>/`
@@ -1309,7 +1313,10 @@ on the UI thread and run it off it:
 * **Chat** (`ui/chat*`): sessions per project in
   `paths::projects()/<project>.chats.json`, each resuming its own backend
   conversation (`agent/sessions.json`). Tool calls stack into one card per
-  run. The change-set card sits above the composer, once per set however
+  run. A call that runs off-thread (a `koo` job, or the backend's own web
+  search and fetch) shows with a spinner from `AgentEvent::ToolStarted`
+  until its `ToolFinished` replaces it; one still running when the turn ends
+  is marked Stopped. The change-set card sits above the composer, once per set however
   many turns grew it, and stays with its outcome until the next message;
   it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Recipes run as
   `/name key=value …` (seven built-ins: rough-cut, dead-time, teaser,

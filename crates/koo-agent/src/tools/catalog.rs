@@ -367,6 +367,18 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::web::TOOL,
+            Some(View),
+            "Look at a picture on the web: a PNG, JPEG, GIF or WebP address, such as an <img> src or a page's og:image (reading a page gives you its text only). With `add`, it also goes into the pool's Web Images bin to use like any other picture; add only what the user asked for.",
+            object(
+                json!({
+                    "url": string("Address of the picture itself, not the page"),
+                    "add": boolean("Also add it to the pool")
+                }),
+                &["url"],
+            ),
+        ),
+        spec(
             "get_layout",
             Some(View),
             "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform (values off their neutral default), whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",

@@ -27,6 +27,7 @@ mod sync;
 pub mod video;
 mod view;
 pub mod voices;
+pub mod web;
 
 pub use catalog::{ToolSpec, catalog};
 
@@ -140,6 +141,12 @@ pub enum JobDone {
         placement: Option<generate::Placement>,
         summary: String,
     },
+    /// A picture from the web to add to the pool on the UI thread, with
+    /// what the call returns.
+    Fetched {
+        item: Box<koo_core::model::MediaItem>,
+        done: Box<Done>,
+    },
     /// Words said again for a fix, to add to the pool and cut in on the UI
     /// thread.
     Respoken {
@@ -165,15 +172,18 @@ impl From<Done> for Step {
 /// Tools the author may see: categories that are not `Off`, and only the
 /// role's own kinds of tools. With `groups` (the editor's own turns), only
 /// the core tools and those groups, plus `load_tools` and `run_tool` for the
-/// rest; without (external clients), every tool.
+/// rest; without (external clients), every tool. `view_web_image` only
+/// with `web`.
 pub fn list(
     bus: &CommandBus,
     role: AgentRole,
     groups: Option<&BTreeSet<ToolCategory>>,
+    web: bool,
 ) -> Vec<Value> {
     catalog()
         .iter()
         .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
+        .filter(|t| web || t.name != web::TOOL)
         .filter(|t| match groups {
             Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
             None => t.name != groups::LOAD_TOOLS && t.name != groups::RUN_TOOL,
@@ -287,6 +297,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "get_scopes" => preview::get_scopes(ctx, &args),
         "preview_fx" => preview::preview_fx(ctx, &args),
         "measure_loudness" => view::measure_loudness(ctx, &args),
+        web::TOOL => web::serve(ctx, &args),
 
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),

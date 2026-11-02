@@ -29,7 +29,7 @@ pub const LOAD_TOOLS: &str = "load_tools";
 pub const RUN_TOOL: &str = "run_tool";
 
 /// Listed on every turn: reading, looking, listening and cutting.
-pub const CORE: [&str; 20] = [
+pub const CORE: [&str; 21] = [
     "get_timeline",
     "get_selection",
     "list_media",
@@ -43,6 +43,7 @@ pub const CORE: [&str; 20] = [
     "get_audio",
     "view_range",
     "view_frame",
+    super::web::TOOL,
     "blade",
     "ripple_delete",
     "cut_words",
