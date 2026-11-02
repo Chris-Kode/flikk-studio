@@ -135,6 +135,11 @@ panics fails without stopping the queue.
   opacity and invert, combined in order by add, subtract or intersect, each
   keyframable as a whole. Captions and titles take no masks or corner pins:
   renders burn them in with ASS, which cannot draw them.
+* **Stabilization** (`Clip::stabilization`, `koo-core/src/stabilize.rs`):
+  on, a smoothness (0..1), Smooth or Locked, and a crop (Auto zoom or
+  None); off by default and left out of `.koo` files until set, so older
+  files open unchanged. `Command::SetStabilization` sets it on video
+  clips (see §7, "Stabilization").
 * **Subject masks** (`MaskShape::Subject`, `koo-core/src/subject.rs`): the
   mask keeps the object its `Subject`'s prompts pick: on some source
   frames, clicks on the object (or off it) and a box, in picture uv, so
@@ -208,7 +213,8 @@ the effect of its earlier calls.
   above the controls vertical apps draw.
 * **Program frame** (`koo_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
-  generator) → clip grade, then timeline grade → effect stack → masks (a
+  generator) → stabilization (a stabilized clip's frame moved, turned and
+  zoomed inside its own frame by its correction) → clip grade, then timeline grade → effect stack → masks (a
   coverage raster multiplied into alpha; a subject's matte at the source
   time drawn into it, see "Subject masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
@@ -238,7 +244,7 @@ the effect of its earlier calls.
   marked). Derived files are written atomically.
 * Cache layout under `paths::cache()`: `proxies/<fp>.mp4`,
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
-  `<fp>.vectors`, `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
+  `<fp>.vectors`, `analysis/<fp>.motion` (camera paths), `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
   frame, `t-<key>.mattes` per tracked subject), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
   activity log).
@@ -597,6 +603,67 @@ not retried with Whisper.
   its matte yet is left out of the raster; layout bounds a picture by its
   subjects' mattes.
 
+### Stabilization
+
+* **Measuring** (`koo-analysis/src/motion.rs`, `LocalStabilizer`, Rust
+  alone, no model): frames are read once in order through the media
+  engine (the proxy when there is one) at most 320 px wide, in grey, with
+  half- and quarter-size copies. Each frame is compared with the one
+  before: the whole picture at quarter size for its overall move (±8 px
+  there), then a 10 × 6 grid of 16 px blocks, those with texture both ways
+  (the structure tensor's smaller eigenvalue), found again by least
+  absolute difference at half size around that move and refined at full
+  size to a fraction of a pixel (a parabola through the neighbours). A
+  move and turn are fitted to the blocks by RANSAC (200 rounds, 1 px)
+  and refined by least squares on the blocks that agree, so a subject
+  that moves on its own is left out; with too few agreeing (under 4, or a
+  third) or a turn over 3°, the median move stands in. Scale is not
+  fitted: shake hardly zooms between frames, and a fitted zoom was mostly
+  noise that the correction then added back. The path
+  (`stabilize::CameraPath`: each frame's time and its step from the one
+  before) goes to `cache/analysis/<fp>.motion`, so Settings → Storage
+  clears it with the analysis results; paths already read stay in memory
+  for the session. It runs as a job on its own `JobQueue` (one at a
+  time), listed by `Stabilizer::jobs`, with the inspector showing its
+  progress; renders measure the paths they need first
+  (`composed::measure_motion`, part of the progress), and the agent's
+  `get_shake` waits for it. About 1 s per minute of 30 fps footage in a
+  release build here.
+* **Correcting** (`koo-core/src/stabilize.rs`, `Plan`): the steps over the
+  source range the clip shows add up into the camera's pose per frame
+  (where frame 0's centre went, its turn), composed exactly as
+  similarities. Smooth runs a Gaussian over each part of the pose
+  (σ = 0.12 s × 25^smoothness, so 0.12–3 s), each end reflected through a
+  line fitted to the σ frames there, so a pan carries on and the first
+  frames are smoothed too; Locked holds the mean pose. Each frame is moved
+  from where the camera was to where the target puts it (W = S ∘ C⁻¹).
+  With Auto zoom the picture is zoomed in by the least that hides the
+  edges on every frame of the range (one zoom for the clip, so it does
+  not pump), at most 1.4 ×; frames that would need more get only the part
+  of their correction that fits (binary search), eased by a running
+  minimum then a Gaussian no wider, so the path stays smooth and still
+  under the zoom. Plans are kept for the last 24 clip settings and
+  ranges. The compositor draws the frame's correction into the picture's
+  own frame before its effects, masks and the clip's transform
+  (`compose::Ctx::stabilized`, an extra composite in the same batch), so
+  the viewer, the agent's views and composited renders
+  (`needs_compositor` is true for a stabilized clip) draw it alike. Until
+  its path is measured, a clip shows unstabilized, and asks for it.
+* **Checked here** on a 6 s 1280 × 720 clip made with FFmpeg (a still
+  with a sine-and-random crop jitter of ±20 px, a slow pan, a ±1°
+  wobble and a picture moving across it): the steps matched the known
+  moves to about a pixel and the turns to 0.0005 rad; its shake score
+  (the RMS of what is left of the path once moves slower than 0.25 s are
+  taken out, in percent of the frame width, plus the turn) went from 1.9
+  to 0.13 (Smooth, zoom 1.11), 0.13 (Locked) and 0.09 (no crop), and a
+  still clip scores 0.00.
+* **Agent:** `stabilize` (Transform) proposes it, the values not given
+  kept, and starts measuring; `get_shake` (with the transform group)
+  measures when it has to and gives each clip's score, its label (steady
+  under 0.25, slightly shaky, shaky, very shaky over 2), the jitter in
+  percent and degrees, and the zoom its settings (or the default ones)
+  would take; `get_clip` shows the settings.
+
 ## 8. Agent
 
 * **Backends** (`koo-agent/src/backend/`): Claude runs as
@@ -637,7 +704,7 @@ not retried with Whisper.
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 82 in the catalog (80 plus
+* **Tools** (`koo-agent/src/tools/`): 84 in the catalog (82 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -944,6 +1011,7 @@ see:
 | `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
 | `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
 | `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
+| `KOOEDITOR_DEMO_STABILIZE` | seconds | A shaky clip made with FFmpeg, stabilized and selected; `KOOEDITOR_DEMO_STABILIZE_MODE` = `off`, `locked` or `none` |
 | `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
@@ -967,6 +1035,7 @@ there.
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
+| Stabilization | `koo-core/src/stabilize.rs`, `compose.rs`, `koo-analysis/src/motion.rs`, `ui/inspector/stabilize.rs`, `tools/stabilize.rs`, `koo-deliver/src/composed.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
@@ -1032,6 +1101,19 @@ there.
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
   makes the first debug build take minutes instead of hours.
+
+* Stabilization was checked on FFmpeg-made shake only (a fractal still
+  jittered by crop and rotate), not on real handheld footage: rolling
+  shutter wobble, motion blur, low light, a subject filling the frame or a
+  fast pan past the search (about 10 % of the width a frame) are
+  unmeasured, and the correction is a similarity, so it cannot remove
+  rolling-shutter skew. Scale is not measured, so a shaky zoom is not
+  steadied. Subject masks are drawn from mattes of the unstabilized
+  frame, so on a stabilized clip they sit off by the correction; shape
+  masks follow the stabilized picture. Clearing analysis results in
+  Settings → Storage leaves paths already read in memory until the
+  editor restarts. Not run on a GPU here (lavapipe and the CPU
+  compositor only), nor on macOS or Windows.
 
 ### Analysis accuracy
 
