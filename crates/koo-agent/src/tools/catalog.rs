@@ -2,7 +2,7 @@
 //! seconds; strings like "1:02.500", timecode "00:01:02:30" and frames
 //! "f:3750" are accepted too.
 
-use super::{groups, layout, masks};
+use super::{depth, groups, layout, masks};
 use koo_core::audiofx::AudioFxKind;
 use koo_core::cloud;
 use koo_core::command::ToolCategory;
@@ -1348,6 +1348,37 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "name": string("What to call the voice")
                 }),
                 &["description", "name"],
+            ),
+        ),
+        // ---- depth
+        spec(
+            "add_depth_effect",
+            Some(Effects),
+            "Propose a depth-aware effect on video or image clips from the pool, read from each frame's depth map (relative distance: 0 nearest, 1 farthest). lens_blur: blurs by distance, keeping `focus` sharp over `range`, `blur` in pixels (focus it on a point with set_depth_focus; keyframe `focus` with set_effect_keyframe for a rack focus). fog: haze of color `tint` thickening with `density` past distance `start`. camera: a camera move over the clip with parallax, the 3D Ken Burns look for stills and short clips: `motion` Dolly (in; out with negative `amount`), Zoom (dolly zoom about `focus`), Orbit or Pan (along `angle` degrees), `amount` -1..1. Returns each new effect's `@effect clip/effect` reference. For depth masks use set_mask's `depth` shape.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "effect": one_of(&depth::EFFECTS.map(|(n, _)| n), "Which effect"),
+                    "params": params("Parameter name → value; omitted ones keep their defaults"),
+                    "reason": reason()
+                }),
+                &["clips", "effect"],
+            ),
+        ),
+        spec(
+            "set_depth_focus",
+            Some(Effects),
+            "Propose focusing a clip's lens_blur (or a camera move's pivot) on what is at `point` of the picture at `at`: the distance there becomes its `focus`. With `key`, or when `focus` is already keyframed, it is keyed at `at`; focus at two times for a rack focus. Waits for the frame's depth map.",
+            object(
+                json!({
+                    "clip": string("Clip id"),
+                    "effect": string("Effect id or `@effect clip/effect` (default: the clip's first lens_blur or camera)"),
+                    "point": numbers(2, "[x, y], fractions of the picture from its top-left"),
+                    "at": time("Timeline time of the frame (default: the clip's middle)"),
+                    "key": boolean("Keyframe the focus at `at` (default: only when it already has keyframes)"),
+                    "reason": reason()
+                }),
+                &["clip", "point"],
             ),
         ),
         // ---- conversation

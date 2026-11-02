@@ -707,7 +707,7 @@ not retried with Whisper.
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
   search.
-* **Tools** (`koo-agent/src/tools/`): 84 in the catalog (82 plus
+* **Tools** (`koo-agent/src/tools/`): 86 in the catalog (84 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -738,6 +738,12 @@ not retried with Whisper.
   left and how long that takes here. `get_clip` lists a subject's prompts
   on the timeline and how far it is tracked. The prompt steers the agent to
   subjects for people and objects, and to check with `view_frame` `masks`.
+* **Depth:** `add_depth_effect` (`tools/depth.rs`) puts a `lens_blur`,
+  `fog` or `camera` on clips and says when depth maps cannot be made yet;
+  `set_depth_focus` focuses a clip's lens blur (or a camera's pivot) on
+  what is at a point of the picture at `at`: it makes that frame's map off
+  the UI thread, then proposes the focus, keyed at `at` with `key` or when
+  it already has keyframes. Depth masks are `set_mask`'s `depth` shape.
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
   changes on cue), a sound effect (up to 30 s, optionally looping) or a
@@ -1041,7 +1047,7 @@ there.
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
-| Depth maps, depth effects and masks | `koo-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `koo-gpu` (`wrap.rs`, `batch.rs`), `koo-models/src/depth/`, `koo-analysis/src/depth*`, `koo-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs` |
+| Depth maps, depth effects and masks | `koo-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `koo-gpu` (`wrap.rs`, `batch.rs`), `koo-models/src/depth/`, `koo-analysis/src/depth*`, `koo-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
 | C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
