@@ -1230,7 +1230,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Deliver),
             "Ask the user to approve a render.",
             object(
-                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)") }),
+                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)"), "encoder": one_of(&["auto", "hardware", "software"], "H.264/HEVC encoder (default: the user's choice in Deliver)") }),
                 &["preset"],
             ),
         ),

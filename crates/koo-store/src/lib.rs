@@ -12,6 +12,7 @@
 //! offset and a limit, so the agent never has to load a whole profile.
 
 mod autosave;
+mod deliver;
 mod facts;
 mod notes;
 mod profiles;

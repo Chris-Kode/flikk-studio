@@ -929,8 +929,25 @@ available to them.
   render.
 * **Queue** (`queue.rs`): jobs run one after another with progress from
   `-progress pipe:1`, can be cancelled and never overwrite a file.
-* **Presets:** 1080p60, 1080p30 and 4K30 H.264, ProRes 422 HQ, WAV and
-  Custom, sized by the short side so they keep the sequence's shape
+* **Hardware encoding** (`hw.rs`): H.264 and HEVC go to VideoToolbox
+  (macOS), NVENC, Quick Sync, VA-API (Linux) or AMF (Windows) when the
+  installed FFmpeg lists the encoder (`ffmpeg -encoders`) and a five-frame
+  trial encode with the render's own arguments succeeds. The probe runs
+  once per session, the trials in parallel (about 0.1 s here), off the UI
+  thread. The preset's CRF maps to each encoder's rate control: NVENC
+  `-rc vbr -cq`, Quick Sync `-global_quality`, VA-API and AMF constant QP,
+  one step below the CRF; VideoToolbox an average bitrate from the CRF,
+  size and rate (its constant quality is Apple silicon only). Frames are
+  converted to 4:2:0 by swscale as for libx264, so the matrix and colour
+  tags match; VA-API then `hwupload`s at the end of the graph. Composited
+  ranges pipe RGBA into the same graph, so they encode on hardware too.
+  The Deliver workspace's Encoder choice (Auto, Hardware, Software) is
+  saved per user (`Store::render_encoder`); Auto falls back to libx264 /
+  libx265 when the hardware encode fails, Hardware fails instead. The
+  agent's `queue_render` takes an optional `encoder`, else the user's
+  choice.
+* **Presets:** 1080p60, 1080p30 and 4K30 H.264, 4K30 HEVC (x265 CRF 22),
+  ProRes 422 HQ, WAV and Custom, sized by the short side so they keep the sequence's shape
   ("1080p" is 1080 × 1920 for 9:16).
 * **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
 
@@ -1017,7 +1034,7 @@ there.
 | K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
 | Fit music to length | `koo-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
-| D1 render | `koo-deliver`, `ui/deliver.rs` |
+| D1 render | `koo-deliver`, `ui/deliver.rs`; hardware encoders `koo-deliver/src/hw.rs` |
 | AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
 | V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
@@ -1074,6 +1091,14 @@ there.
 * The SAM 2.1 graphs come from a third party's Hugging Face repository
   (pinned to a commit); a mirror under the project's own account would
   keep them reachable.
+* Hardware encoding has run on no real hardware encoder: this container
+  has no GPU, so the probe found none (its FFmpeg 6.1 lists NVENC, Quick
+  Sync and VA-API; the trials fail as they should). The fallback and the
+  NVENC argument path (graph, piped composited frames, audio) were checked
+  with a stand-in `KOOEDITOR_FFMPEG` that accepts `h264_nvenc`; VideoToolbox
+  and AMF are written from FFmpeg's encoder options, VA-API's `hwupload`
+  tail only parsed. The CRF-to-QP/bitrate mapping is not measured against
+  libx264 (no VMAF runs), nor the speed-up.
 * ONNX Runtime adds about 25 MB to the binary, and the first build
   downloads it (from pyke's CDN). Its build script unpacks the archive very
   slowly when unoptimized; `CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=3`
