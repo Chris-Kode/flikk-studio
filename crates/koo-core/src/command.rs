@@ -425,6 +425,20 @@ pub enum Command {
     SetBins {
         bins: Vec<Bin>,
     },
+
+    // ---- audio: fit music to a length (see [`crate::music_fit`])
+    /// Replace a music clip by `segments` of its source back to back from
+    /// `at`, an equal-power `crossfade` ending on each join, and `fade_out`
+    /// on the last.
+    FitMusic {
+        clip: ClipId,
+        at: Time,
+        segments: Vec<TimeRange>,
+        #[serde(default)]
+        crossfade: Time,
+        #[serde(default)]
+        fade_out: Time,
+    },
 }
 
 impl Command {
@@ -511,7 +525,8 @@ impl Command {
             | SetTrackMix { .. }
             | SetDucking { .. }
             | SetPlaylist { .. }
-            | SetAudioEffects { .. } => ToolCategory::Audio,
+            | SetAudioEffects { .. }
+            | FitMusic { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
             AddEffect { .. }
             | SetEffect { .. }

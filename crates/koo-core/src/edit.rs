@@ -325,6 +325,13 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             remove_keyframe(tl, *clip, *property, *at)
         }
         Command::SetPlaylist { track, at, songs } => set_playlist(project, *track, *at, songs),
+        Command::FitMusic {
+            clip,
+            at,
+            segments,
+            crossfade,
+            fade_out,
+        } => crate::music_fit::plan_command(project, *clip, *at, segments, *crossfade, *fade_out),
 
         Command::PlaceClips { clips, mode } => place_clips(project, clips, *mode),
         Command::SetSpeed {
