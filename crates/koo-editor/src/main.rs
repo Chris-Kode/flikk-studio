@@ -39,6 +39,7 @@ fn main() {
         .run(|cx| {
             gpui_kit::init(cx);
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            ui::kit::init(cx);
             app::bind_keys(cx);
             ui::chat::init(cx);
             cx.on_app_quit(|_| async {

@@ -8,6 +8,7 @@ pub mod code_editor;
 pub mod deliver;
 pub mod editor_settings;
 pub mod inspector;
+pub mod kit;
 pub mod lettering;
 pub mod library;
 pub mod media_pool;
