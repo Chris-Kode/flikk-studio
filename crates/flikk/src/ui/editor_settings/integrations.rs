@@ -6,8 +6,8 @@
 use super::{page, row, section_label};
 use crate::state::{Check, EditorState};
 use crate::ui::kit::{
-    Button, Icon, IconName, Input, ScrollableElement as _, Select, SelectEvent, SelectState,
-    Spinner, Switch, h_flex, theme as t, v_flex,
+    Badge, Button, Icon, IconName, Input, ScrollableElement as _, Select, SelectEvent, SelectState,
+    Spinner, Switch, Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_cloud::{KeySource, PROVIDERS, Provider};
 use flikk_core::cloud::Capability;
@@ -18,12 +18,16 @@ use std::collections::HashMap;
 
 /// The label column of the page's rows.
 const LABEL_W: f32 = 150.;
+/// The actions after a key: Replace and remove, or Save, end on one edge.
+const ACTIONS_W: f32 = 96.;
 
 pub struct IntegrationsTab {
     state: Entity<EditorState>,
     /// A key field per provider, in `PROVIDERS` order, with the
     /// placeholder last given it.
     keys: Vec<(Entity<InputState>, String)>,
+    /// Per provider, whether its stored key is being replaced.
+    replacing: Vec<bool>,
     /// Per capability, who does it.
     doers: Vec<(Capability, Entity<SelectState<SharedString>>)>,
     /// Per capability, the models of the provider picked (by its id).
@@ -52,17 +56,21 @@ impl IntegrationsTab {
         let mut subscriptions = vec![cx.observe(&state, |_, _, cx| cx.notify())];
         let keys: Vec<_> = PROVIDERS
             .iter()
-            .map(|&provider| {
+            .enumerate()
+            .map(|(ix, _)| {
                 let input = cx.new(|cx| InputState::new(window, cx).masked(true));
                 subscriptions.push(cx.subscribe_in(
                     &input,
                     window,
-                    move |this, input, event: &InputEvent, window, cx| {
-                        if matches!(event, InputEvent::PressEnter { .. }) {
-                            this.save_key(provider, input, window, cx);
-                        } else if matches!(event, InputEvent::Change) {
+                    move |this, input, event: &InputEvent, window, cx| match event {
+                        InputEvent::PressEnter { .. } => this.save_key(ix, window, cx),
+                        InputEvent::Change => cx.notify(),
+                        // Leaving the field empty keeps the stored key.
+                        InputEvent::Blur if input.read(cx).value().trim().is_empty() => {
+                            this.replacing[ix] = false;
                             cx.notify();
                         }
+                        _ => {}
                     },
                 ));
                 (input, String::new())
@@ -101,6 +109,7 @@ impl IntegrationsTab {
             .collect();
         Self {
             state,
+            replacing: vec![false; keys.len()],
             keys,
             doers,
             models: HashMap::new(),
@@ -108,42 +117,67 @@ impl IntegrationsTab {
         }
     }
 
-    fn save_key(
-        &mut self,
-        provider: &'static Provider,
-        input: &Entity<InputState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The page is shown again: drop a replacement left half typed and
+    /// check the keys anew.
+    pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (ix, replacing) in self.replacing.iter_mut().enumerate() {
+            if std::mem::take(replacing) {
+                self.keys[ix]
+                    .0
+                    .update(cx, |i, cx| i.set_value("", window, cx));
+            }
+        }
+        self.state.update(cx, |s, cx| s.refresh_accounts(cx));
+    }
+
+    fn save_key(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.keys[ix].0.clone();
         let key = input.read(cx).value().trim().to_owned();
         if key.is_empty() {
             return;
         }
         input.update(cx, |i, cx| i.set_value("", window, cx));
+        self.replacing[ix] = false;
         self.state
-            .update(cx, |s, cx| s.set_api_key(provider, key, cx));
+            .update(cx, |s, cx| s.set_api_key(PROVIDERS[ix], key, cx));
+    }
+
+    fn replace_key(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.replacing[ix] = true;
+        self.keys[ix].0.update(cx, |i, cx| i.focus(window, cx));
+        cx.notify();
+    }
+
+    fn cancel_replace(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.replacing[ix] = false;
+        self.keys[ix]
+            .0
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        cx.notify();
     }
 
     /// Keep each list on what is picked now (a first key turns generation
     /// on), and the model lists on the provider picked.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for ((input, shown), &provider) in self.keys.iter_mut().zip(PROVIDERS) {
+        for (ix, &provider) in PROVIDERS.iter().enumerate() {
             let status = self.state.read(cx).provider_status(provider);
             // A key read after the page opened is checked as it shows.
             if status.has_key() && status.check == Check::Unchecked {
                 let state = self.state.clone();
                 cx.defer(move |cx| state.update(cx, |s, cx| s.check_account(provider, cx)));
             }
-            let placeholder = match status.key {
-                Some(KeySource::Environment) => format!("Set by {}", provider.key_env),
-                Some(KeySource::Stored) => "••••••••••••••••".to_owned(),
-                _ => "API key".to_owned(),
+            if status.key != Some(KeySource::Stored) {
+                self.replacing[ix] = false;
+            }
+            let placeholder = if self.replacing[ix] {
+                "New API key"
+            } else {
+                "API key"
             };
-            if *shown != placeholder {
-                input.update(cx, |i, cx| {
-                    i.set_placeholder(placeholder.clone(), window, cx)
-                });
-                *shown = placeholder;
+            let (input, shown) = &mut self.keys[ix];
+            if shown != placeholder {
+                input.update(cx, |i, cx| i.set_placeholder(placeholder, window, cx));
+                *shown = placeholder.to_owned();
             }
         }
         let settings = self.state.read(cx).cloud.settings();
@@ -194,6 +228,8 @@ impl IntegrationsTab {
         }
     }
 
+    /// One line per provider: its name, then what is known of its key or
+    /// the field to type one, then its actions.
     fn render_provider(
         &self,
         ix: usize,
@@ -203,124 +239,208 @@ impl IntegrationsTab {
         let status = self.state.read(cx).provider_status(provider);
         let input = self.keys[ix].0.clone();
         let typed = !input.read(cx).value().trim().is_empty();
+        let stored = status.key == Some(KeySource::Stored);
         let from_env = status.key == Some(KeySource::Environment);
-        let state_line: Option<(AnyElement, bool)> = match &status.check {
-            Check::Unchecked => None,
-            Check::Checking => Some((Spinner::new().size(px(12.)).into_any_element(), false)),
-            Check::Valid(account) => {
-                let mut parts = Vec::new();
-                if let Some(plan) = &account.plan {
-                    parts.push(plan_label(plan));
-                }
-                if let Some(left) = account.credits_left() {
-                    parts.push(format!("{} credits left", thousands(left)));
-                }
-                if let Some(balance) = &account.balance {
-                    parts.push(format!("{balance} left"));
-                }
-                Some((
-                    h_flex()
-                        .gap(px(6.))
-                        .child(Icon::new(IconName::CircleCheck).size(px(13.)).color(t::OK))
-                        .when(!parts.is_empty(), |el| el.child(parts.join(" · ")))
-                        .into_any_element(),
-                    false,
-                ))
-            }
-            Check::Failed(message) => Some((
-                h_flex()
-                    .gap(px(6.))
-                    .min_w_0()
-                    .child(Icon::new(IconName::CircleAlert).size(px(13.)).color(t::ERR))
-                    .child(div().truncate().child(message.clone()))
-                    .into_any_element(),
-                true,
-            )),
+        let replacing = self.replacing[ix] && stored;
+        let editing = replacing || (!status.has_key() && status.check != Check::Checking);
+        let (failure, retry) = match &status.check {
+            Check::Failed { message, retry } => (Some(message.clone()), *retry),
+            _ => (None, false),
         };
         let keys_url = provider.keys_url;
+
+        let name = h_flex()
+            .w(px(LABEL_W))
+            .flex_none()
+            .h(px(26.))
+            .gap(px(2.))
+            .font_weight(FontWeight::MEDIUM)
+            .child(provider.name)
+            .when(editing || (failure.is_some() && !retry), |el| {
+                el.child(
+                    Button::new(("integration-keys", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .tooltip("Get an API key")
+                        .on_click(move |_, _, cx| cx.open_url(keys_url)),
+                )
+            });
+
+        let middle = if editing {
+            // A key the credential store would not keep.
+            let unsaved = failure.clone().filter(|_| !status.has_key());
+            div()
+                .child(
+                    Input::new(&input)
+                        .mask_toggle()
+                        .when_some(unsaved, |i, message| {
+                            i.suffix(
+                                div()
+                                    .id(("integration-unsaved", ix))
+                                    .child(
+                                        Icon::new(IconName::CircleAlert)
+                                            .size(px(13.))
+                                            .color(t::ERR),
+                                    )
+                                    .tooltip(Tooltip::text(message)),
+                            )
+                        }),
+                )
+                .into_any_element()
+        } else {
+            match &status.check {
+                Check::Unchecked => div().into_any_element(),
+                Check::Checking => h_flex()
+                    .gap(px(6.))
+                    .child(Spinner::new().size(px(12.)))
+                    .child("Checking…")
+                    .into_any_element(),
+                Check::Valid(account) => {
+                    let mut parts = Vec::new();
+                    if let Some(plan) = &account.plan {
+                        parts.push(plan_label(plan));
+                    }
+                    if let Some(left) = account.credits_left() {
+                        parts.push(format!("{} credits left", thousands(left)));
+                    }
+                    if let Some(balance) = &account.balance {
+                        parts.push(format!("{balance} left"));
+                    }
+                    let summary = if parts.is_empty() {
+                        "Connected".to_owned()
+                    } else {
+                        parts.join(" · ")
+                    };
+                    h_flex()
+                        .id(("integration-status", ix))
+                        .min_w_0()
+                        .gap(px(6.))
+                        .cursor_pointer()
+                        .child(Icon::new(IconName::CircleCheck).size(px(13.)).color(t::OK))
+                        .child(div().truncate().child(summary))
+                        .tooltip(Tooltip::text("Check again"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.check_account(provider, cx))
+                        }))
+                        .into_any_element()
+                }
+                Check::Failed { message, retry } => {
+                    let shown = if *retry {
+                        "Couldn't check the key".to_owned()
+                    } else {
+                        message.clone()
+                    };
+                    h_flex()
+                        .id(("integration-status", ix))
+                        .min_w_0()
+                        .gap(px(6.))
+                        .text_color(t::T1)
+                        .child(
+                            Icon::new(IconName::CircleAlert)
+                                .size(px(13.))
+                                .color(if *retry { t::WARN } else { t::ERR }),
+                        )
+                        .child(div().truncate().child(shown))
+                        .tooltip(Tooltip::text(message.clone()))
+                        .into_any_element()
+                }
+            }
+        };
+
+        let actions = if editing {
+            h_flex()
+                .gap(px(4.))
+                .when(replacing, |el| {
+                    el.child(
+                        Button::new(("integration-cancel", ix))
+                            .ghost()
+                            .icon(IconName::X)
+                            .tooltip("Keep the current key")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.cancel_replace(ix, window, cx)
+                            })),
+                    )
+                })
+                .child(
+                    Button::new(("integration-save", ix))
+                        .label("Save")
+                        .when(!replacing, |b| b.w(px(ACTIONS_W)))
+                        .disabled(!typed)
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.save_key(ix, window, cx)),
+                        ),
+                )
+                .into_any_element()
+        } else if from_env {
+            h_flex()
+                .gap(px(6.))
+                .when(retry, |el| el.child(self.retry_button(ix, provider, cx)))
+                .child(Badge::new(provider.key_env).mono())
+                .into_any_element()
+        } else if retry {
+            self.retry_button(ix, provider, cx).into_any_element()
+        } else {
+            let rejected = failure.is_some();
+            h_flex()
+                .gap(px(4.))
+                .when(stored, |el| {
+                    el.child(
+                        Button::new(("integration-replace", ix))
+                            .label("Replace")
+                            .when(!rejected, |b| b.ghost())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.replace_key(ix, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(("integration-remove", ix))
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .tooltip("Remove key")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.remove_api_key(provider, cx))
+                            })),
+                    )
+                })
+                .into_any_element()
+        };
+
         h_flex()
             .flex_none()
-            .items_start()
+            .h(px(46.))
             .gap(px(12.))
-            .py(px(10.))
             .border_b_1()
             .border_color(t::LN)
+            .child(name)
             .child(
                 h_flex()
-                    .w(px(LABEL_W))
-                    .flex_none()
-                    .h(px(26.))
-                    .gap(px(2.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(provider.name)
-                    .child(
-                        Button::new(("integration-keys", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ExternalLink)
-                            .tooltip("Get an API key")
-                            .on_click(move |_, _, cx| cx.open_url(keys_url)),
-                    ),
-            )
-            .child(
-                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&input).mask_toggle().disabled(from_env)),
-                            )
-                            .child(
-                                Button::new(("integration-save", ix))
-                                    .label("Save")
-                                    .disabled(!typed || from_env)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let input = this.keys[ix].0.clone();
-                                        this.save_key(provider, &input, window, cx)
-                                    })),
-                            )
-                            .when(status.key == Some(KeySource::Stored), |el| {
-                                el.child(
-                                    Button::new(("integration-remove", ix))
-                                        .ghost()
-                                        .icon(IconName::Trash)
-                                        .tooltip("Remove key")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.state
-                                                .update(cx, |s, cx| s.remove_api_key(provider, cx))
-                                        })),
-                                )
-                            }),
-                    )
-                    .children(state_line.map(|(line, failed)| {
-                        h_flex()
-                            .h(px(18.))
-                            .mt(px(6.))
-                            .gap(px(6.))
-                            .justify_between()
-                            .text_size(px(11.))
-                            .text_color(if failed { t::T1 } else { t::T2 })
-                            .child(line)
-                            .when(status.has_key(), |el| {
-                                el.child(
-                                    Button::new(("integration-check", ix))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::RefreshCw)
-                                        .tooltip("Check again")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.state
-                                                .update(cx, |s, cx| s.check_account(provider, cx))
-                                        })),
-                                )
-                            })
-                    })),
+                    .text_color(t::T2)
+                    .child(div().flex_1().min_w_0().child(middle)),
             )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .min_w(px(ACTIONS_W))
+                    .justify_end()
+                    .child(actions),
+            )
+    }
+
+    fn retry_button(
+        &self,
+        ix: usize,
+        provider: &'static Provider,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(("integration-retry", ix))
+            .label("Try again")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state.update(cx, |s, cx| s.check_account(provider, cx))
+            }))
     }
 }
 

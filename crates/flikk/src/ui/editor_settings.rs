@@ -107,6 +107,9 @@ impl EditorSettings {
         this.update(cx, |this, cx| {
             this.tab = tab.unwrap_or(this.tab);
             this.storage.update(cx, |s, cx| s.measure(cx));
+            if this.tab == SettingsTab::Integrations {
+                this.integrations.update(cx, |i, cx| i.reopen(window, cx));
+            }
             cx.notify();
         });
         let view = this.clone();
@@ -121,10 +124,12 @@ impl EditorSettings {
         });
     }
 
-    fn show(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+    fn show(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
-        if tab == SettingsTab::Storage {
-            self.storage.update(cx, |s, cx| s.measure(cx));
+        match tab {
+            SettingsTab::Storage => self.storage.update(cx, |s, cx| s.measure(cx)),
+            SettingsTab::Integrations => self.integrations.update(cx, |i, cx| i.reopen(window, cx)),
+            _ => {}
         }
         cx.notify();
     }
@@ -136,7 +141,7 @@ impl EditorSettings {
         match tab {
             SettingsTab::Integrations => flikk_cloud::PROVIDERS
                 .iter()
-                .any(|&p| matches!(s.provider_status(p).check, Check::Failed(_)))
+                .any(|&p| matches!(s.provider_status(p).check, Check::Failed { .. }))
                 .then(|| {
                     div()
                         .size(px(6.))
@@ -192,7 +197,7 @@ impl EditorSettings {
                     .text_color(if on { t::T1 } else { t::T2 })
                     .when(on, |el| el.bg(t::HV))
                     .when(!on, |el| el.hover(|s| s.bg(t::HV).text_color(t::T1)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.show(tab, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.show(tab, window, cx)))
                     .child(Icon::new(tab.icon()).size(px(14.)).color(if on {
                         t::AC
                     } else {

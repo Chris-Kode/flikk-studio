@@ -44,7 +44,32 @@ pub enum Check {
     Unchecked,
     Checking,
     Valid(Account),
-    Failed(String),
+    /// What went wrong, and whether checking again may help: the provider
+    /// was out of reach or busy, not refusing the key.
+    Failed {
+        message: String,
+        retry: bool,
+    },
+}
+
+impl Check {
+    fn from_account(result: Result<Account, CloudError>) -> Self {
+        match result {
+            Ok(account) => Self::Valid(account),
+            Err(e) => Self::Failed {
+                message: e.to_string(),
+                retry: !e.needs_settings(),
+            },
+        }
+    }
+
+    /// The credential store could not keep or drop a key.
+    fn store_failed(message: String) -> Self {
+        Self::Failed {
+            message,
+            retry: false,
+        }
+    }
 }
 
 /// Music, a sound effect, a voiceover or a video being made from the media
@@ -96,6 +121,21 @@ impl EditorState {
             return;
         }
         self.providers.entry(provider.id).or_default().check = Check::Checking;
+        self.read_account(provider, cx);
+    }
+
+    /// Check every key checked before again, showing the last result until
+    /// the new one comes in.
+    pub fn refresh_accounts(&mut self, cx: &mut Context<Self>) {
+        for &provider in flikk_cloud::PROVIDERS {
+            let status = self.provider_status(provider);
+            if status.has_key() && matches!(status.check, Check::Valid(_) | Check::Failed { .. }) {
+                self.read_account(provider, cx);
+            }
+        }
+    }
+
+    fn read_account(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
         let cloud = self.cloud.clone();
         let check = cx
             .background_executor()
@@ -103,10 +143,7 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let result = check.await;
             let _ = this.update(cx, |this, cx| {
-                this.providers.entry(provider.id).or_default().check = match result {
-                    Ok(account) => Check::Valid(account),
-                    Err(e) => Check::Failed(e.to_string()),
-                };
+                this.providers.entry(provider.id).or_default().check = Check::from_account(result);
                 cx.notify();
             });
         })
@@ -135,12 +172,9 @@ impl EditorState {
                 match result {
                     Ok((source, account)) => {
                         status.key = Some(source);
-                        status.check = match account {
-                            Ok(account) => Check::Valid(account),
-                            Err(e) => Check::Failed(e.to_string()),
-                        };
+                        status.check = Check::from_account(account);
                     }
-                    Err(e) => status.check = Check::Failed(e),
+                    Err(e) => status.check = Check::store_failed(e),
                 }
                 if matches!(status.check, Check::Valid(_)) {
                     for capability in [
@@ -178,7 +212,7 @@ impl EditorState {
                         key: Some(source),
                         check: match result {
                             Ok(()) => Check::Unchecked,
-                            Err(e) => Check::Failed(e),
+                            Err(e) => Check::store_failed(e),
                         },
                     },
                 );
