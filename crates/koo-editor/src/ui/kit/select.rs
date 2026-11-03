@@ -386,6 +386,7 @@ impl<T: SelectItem> RenderOnce for Select<T> {
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
+                                .w_full()
                                 .h(row_h)
                                 .px(px(8.))
                                 .rounded(t::RADIUS_SM)
@@ -411,6 +412,7 @@ impl<T: SelectItem> RenderOnce for Select<T> {
                     })
                     .collect()
             })
+            .w_full()
             .h(row_h * count.min(VISIBLE_ROWS) as f32)
             .track_scroll(&s.scroll)
         };

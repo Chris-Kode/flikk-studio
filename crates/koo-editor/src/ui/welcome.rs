@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_store::project_file::{self, EXTENSION};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 /// What the page asks the window to do.
@@ -200,7 +201,13 @@ impl Welcome {
     }
 
     fn actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let big = |b: Button| b.h(px(38.)).w_full().justify_start().px(px(14.));
+        let big = |b: Button| {
+            b.h(px(38.))
+                .w_full()
+                .justify_start()
+                .px(px(14.))
+                .text_size(px(13.))
+        };
         v_flex()
             .gap(px(8.))
             .child(big(Button::new("welcome-new")
@@ -226,15 +233,20 @@ impl Welcome {
         let dropping = self.dropping.as_ref();
         let (title, hint): (SharedString, SharedString) = match dropping {
             Some(paths) => {
-                let files = paths.len();
-                let name = match paths.as_slice() {
-                    [one] => one
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    _ => format!("{files} items"),
+                let hint = match paths.as_slice() {
+                    [one] => {
+                        let name = one
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        match std::fs::read_dir(one) {
+                            Ok(dir) => format!("{name} · {} files", dir.count()),
+                            Err(_) => name,
+                        }
+                    }
+                    many => format!("{} items", many.len()),
                 };
-                ("Drop to create a project".into(), name.into())
+                ("Drop to create a project".into(), hint.into())
             }
             None => (
                 "Drop a folder of footage".into(),
@@ -249,15 +261,17 @@ impl Welcome {
             .items_center()
             .justify_center()
             .gap(px(10.))
-            .h(px(300.))
+            .flex_1()
+            .min_h(px(210.))
+            .mt(px(16.))
             .rounded(t::RADIUS_LG)
             .border_1()
             .border_dashed()
-            .border_color(if on { t::AC } else { t::LN_DASHED })
+            .border_color(if on { t::AC } else { t::LN_CTL })
             .bg(if on {
-                t::alpha(t::AC, 0.06)
+                t::alpha(t::AC, 0.06).into()
             } else {
-                t::alpha(t::G, 0.)
+                pattern_slash(t::alpha(t::T1, 0.012), 8., 8.)
             })
             .on_drag_move(
                 cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -283,7 +297,7 @@ impl Welcome {
                     .border_color(if on { t::AC } else { t::LN })
                     .bg(if on { t::AC_WASH } else { t::R1 })
                     .text_color(if on { t::AC } else { t::T2 })
-                    .child(Icon::new(IconName::FolderDown).size(px(16.))),
+                    .child(Icon::new(IconName::FolderDown).size(px(20.))),
             )
             .child(
                 div()
@@ -314,13 +328,13 @@ impl Welcome {
             .flex()
             .items_center()
             .gap(px(14.))
-            .h(px(74.))
+            .py(px(8.))
             .px(px(10.))
-            .rounded(t::RADIUS_LG)
+            .rounded(px(6.))
             .border_1()
-            .border_color(if selected { t::LN } else { t::alpha(t::G, 0.) })
-            .when(selected, |row| row.bg(t::R1))
-            .when(!selected, |row| row.hover(|s| s.bg(t::alpha(t::R1, 0.6))))
+            .border_color(t::alpha(t::T1, if selected { 0.05 } else { 0. }))
+            .when(selected, |row| row.bg(t::HV))
+            .when(!selected, |row| row.hover(|s| s.bg(t::R1)))
             .cursor_pointer()
             .text_size(px(11.))
             .text_color(t::T3)
@@ -329,13 +343,13 @@ impl Welcome {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(4.))
+                    .gap(px(3.))
                     .child(
                         name.text_size(px(13.))
                             .font_weight(FontWeight::MEDIUM)
                             .truncate(),
                     )
-                    .child(detail.text_size(px(10.)).truncate()),
+                    .child(detail.text_size(px(11.)).truncate()),
             )
             .child(trailing)
     }
@@ -348,10 +362,10 @@ impl Welcome {
             .items_center()
             .justify_center()
             .w(px(104.))
-            .h(px(58.))
+            .h(px(58.5))
             .rounded(t::RADIUS_SM)
             .border_1()
-            .border_color(t::LN)
+            .border_color(t::alpha(t::T1, 0.06))
             .bg(t::R1)
             .text_color(t::T3)
             .child(Icon::new(icon).size(px(18.)))
@@ -383,13 +397,13 @@ impl Welcome {
         let tile = Self::tile(IconName::Clapperboard).children(r.duration.clone().map(|d| {
             div()
                 .absolute()
-                .right(px(4.))
-                .bottom(px(4.))
-                .px(px(4.))
-                .rounded(px(3.))
-                .bg(t::alpha(t::G, 0.8))
+                .right(px(3.))
+                .bottom(px(3.))
+                .px(px(3.))
+                .rounded(px(2.))
+                .bg(t::alpha(t::hex(0x000000), 0.67))
                 .font_family(t::mono())
-                .text_size(px(10.))
+                .text_size(px(9.))
                 .text_color(t::T1)
                 .child(d)
         }));
@@ -411,7 +425,7 @@ impl Welcome {
         let trailing = if r.missing {
             v_flex()
                 .items_end()
-                .gap(px(4.))
+                .gap(px(3.))
                 .child(
                     Button::new(("welcome-locate", ix))
                         .ghost()
@@ -425,7 +439,7 @@ impl Welcome {
         } else {
             v_flex()
                 .items_end()
-                .gap(px(4.))
+                .gap(px(3.))
                 .children(r.saved.map(|s| div().text_color(t::T2).child(when(s))))
                 .child(
                     h_flex()
@@ -455,12 +469,12 @@ impl Welcome {
         v_flex()
             .flex_1()
             .min_w_0()
-            .gap(px(10.))
+            .gap(px(8.))
             .child(
                 h_flex()
-                    .h(px(28.))
+                    .h(px(32.))
                     .px(px(10.))
-                    .gap(px(6.))
+                    .gap(px(8.))
                     .child(
                         div()
                             .text_size(px(13.))
@@ -470,15 +484,19 @@ impl Welcome {
                     .child(
                         div()
                             .font_family(t::mono())
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .text_color(t::T3)
                             .child(rows.len().to_string()),
                     )
                     .child(div().flex_1())
                     .child(
-                        div()
-                            .w(px(220.))
-                            .child(Input::new(&self.search).small().search().kbd("/")),
+                        div().w(px(220.)).child(
+                            Input::new(&self.search)
+                                .search()
+                                .kbd("/")
+                                .bg(t::P)
+                                .rounded(t::RADIUS),
+                        ),
                     ),
             )
             .child({
@@ -513,46 +531,81 @@ impl Render for Welcome {
             .id("welcome")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            .relative()
             .size_full()
             .flex()
+            .items_center()
             .justify_center()
-            .pt(px(210.))
             .bg(t::G)
+            .child(glow())
             .child(
                 h_flex()
                     .w(px(1080.))
                     .max_w_full()
+                    .mt(px(-20.))
                     .px(px(24.))
-                    .items_start()
+                    .items_stretch()
                     .gap(px(56.))
                     .child(
                         v_flex()
                             .w(px(340.))
                             .flex_none()
-                            .gap(px(24.))
                             .child(
-                                v_flex()
-                                    .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .text_size(px(30.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Flikk"),
-                                    )
-                                    .child(
-                                        div()
-                                            .font_family(t::mono())
-                                            .text_size(px(11.))
-                                            .text_color(t::T3)
-                                            .child(version),
-                                    ),
+                                div()
+                                    .text_size(px(30.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Flikk"),
                             )
-                            .child(self.actions(cx))
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .font_family(t::mono())
+                                    .text_color(t::T3)
+                                    .child(version),
+                            )
+                            .child(div().mt(px(32.)).child(self.actions(cx)))
                             .child(self.drop_zone(cx)),
                     )
                     .child(self.recent(cx)),
             )
     }
+}
+
+/// The faint light falling from the top centre of the page.
+fn glow() -> impl IntoElement {
+    static GLOW: LazyLock<Arc<RenderImage>> = LazyLock::new(|| {
+        // An ellipse 60 % wide and 50 % high around the top centre, from
+        // `#16161A` to the window colour at 70 % of the way out.
+        let (w, h) = (160usize, 100usize);
+        let (from, to) = (t::hex(0x16161A), t::G);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = (x as f32 + 0.5) / w as f32 - 0.5;
+                let dy = (y as f32 + 0.5) / h as f32;
+                let d = ((dx / 0.6).powi(2) + (dy / 0.5).powi(2)).sqrt();
+                let k = (d / 0.7).min(1.);
+                let mix = |a: f32, b: f32| ((a + (b - a) * k) * 255.).round() as u8;
+                bgra.extend_from_slice(&[
+                    mix(from.b, to.b),
+                    mix(from.g, to.g),
+                    mix(from.r, to.r),
+                    255,
+                ]);
+            }
+        }
+        let buffer =
+            image::RgbaImage::from_raw(w as u32, h as u32, bgra).expect("buffer matches its size");
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+    });
+    canvas(
+        |_, _, _| {},
+        |bounds, _, window, _| {
+            let _ = window.paint_image(bounds, bounds, Corners::default(), GLOW.clone(), 0, false);
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// `path` with the home folder as `~`.

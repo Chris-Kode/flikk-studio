@@ -272,6 +272,7 @@ impl KooEditor {
                                 .pl(px(6.))
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::MEDIUM)
+                                .text_color(t::T2)
                                 .child("Flikk"),
                         )
                         .child(div().flex_1())
