@@ -29,14 +29,20 @@ impl RenderOnce for ColorField {
         let s = self.state.read(cx);
         let color = s.displayed_color().unwrap_or(hsla(0., 0., 1., 1.));
         let (hex, sliders) = (s.hex_input().clone(), s.sliders().clone());
-        let swatch = Button::new(self.id.clone()).ghost().xsmall().child(
-            div()
-                .size(px(12.))
-                .rounded(px(3.))
-                .border_1()
-                .border_color(t::alpha(t::ON_AC, 0.2))
-                .bg(color),
-        );
+        // As narrow as the chip, so a half-row field still fits `#RRGGBB`.
+        let swatch = Button::new(self.id.clone())
+            .ghost()
+            .xsmall()
+            .w(px(14.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(12.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(t::alpha(t::ON_AC, 0.2))
+                    .bg(color),
+            );
         let picker = Popover::new(self.id)
             .trigger(swatch)
             .content(move |_, _, _| {
