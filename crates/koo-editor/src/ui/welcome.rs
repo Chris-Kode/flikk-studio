@@ -537,7 +537,7 @@ impl Render for Welcome {
                                         div()
                                             .text_size(px(30.))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Koo Editor"),
+                                            .child("Flikk"),
                                     )
                                     .child(
                                         div()

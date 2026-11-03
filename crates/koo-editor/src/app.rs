@@ -272,7 +272,7 @@ impl KooEditor {
                                 .pl(px(6.))
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .child("Koo Editor"),
+                                .child("Flikk"),
                         )
                         .child(div().flex_1())
                         .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)));
