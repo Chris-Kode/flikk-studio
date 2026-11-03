@@ -41,9 +41,18 @@ pub const LN: Rgba = hex(0x232327);
 pub const LN_HV: Rgba = hex(0x34343A);
 /// Unchecked checkbox and radio border.
 pub const LN_CTL: Rgba = hex(0x3A3A41);
+/// Hovered unchecked checkbox and radio border.
+pub const LN_CTL_HV: Rgba = hex(0x55555D);
+/// Dashed drop-zone outline.
+pub const LN_DASHED: Rgba = hex(0x2E2E34);
+/// Switch track when off, and hovered.
+pub const SW: Rgba = hex(0x2C2C31);
+pub const SW_HV: Rgba = hex(0x38383E);
 /// Tooltip surface and its border.
 pub const TIP: Rgba = hex(0x202024);
 pub const TIP_LN: Rgba = hex(0x2C2C31);
+/// The scrim behind a modal dialog.
+pub const SCRIM: Rgba = hexa(0x000000A6);
 
 /// Primary text.
 pub const T1: Rgba = hex(0xEDEDEF);

@@ -310,3 +310,10 @@ impl RenderOnce for Button {
             .children(self.trailing.map(|name| Icon::new(name).size(px(11.))))
     }
 }
+
+impl Button {
+    /// The id the menus and popovers it opens key their state by.
+    pub(crate) fn element_id(&self) -> &ElementId {
+        &self.id
+    }
+}
