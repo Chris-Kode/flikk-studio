@@ -4,9 +4,9 @@ use koo_core::model::{Timeline, TrackKind};
 use koo_core::{Rate, Time, TrackId};
 use std::collections::HashMap;
 
-pub const HEADER_WIDTH: f32 = 150.;
-pub const RULER_HEIGHT: f32 = 26.;
-pub const TOOLBAR_HEIGHT: f32 = 34.;
+pub const HEADER_WIDTH: f32 = 180.;
+pub const RULER_HEIGHT: f32 = 24.;
+pub const TOOLBAR_HEIGHT: f32 = 30.;
 /// Distance in px within which a drag snaps to a candidate time.
 pub const SNAP_PX: f32 = 8.;
 /// Distance in px from a clip edge that starts a trim instead of a move.
@@ -21,10 +21,24 @@ pub const MAX_ROW_HEIGHT: f32 = 160.;
 
 pub fn row_height(kind: TrackKind) -> f32 {
     match kind {
-        TrackKind::Video => 44.,
+        TrackKind::Video => 46.,
         TrackKind::Overlay => 36.,
         TrackKind::Audio => 40.,
-        TrackKind::Title | TrackKind::Caption => 26.,
+        TrackKind::Title => 32.,
+        TrackKind::Caption => 26.,
+    }
+}
+
+/// A clip's box inside its lane: 3 px clear above and below.
+pub const CLIP_INSET: f32 = 3.;
+
+/// Where a clip's filmstrip sits under its name: offset from the clip's
+/// top and height. Short clips run it behind the name.
+pub fn filmstrip(clip_height: f32) -> (f32, f32) {
+    if clip_height >= 30. {
+        (15., clip_height - 16.)
+    } else {
+        (1., clip_height - 2.)
     }
 }
 
@@ -172,7 +186,7 @@ pub fn ticks(px_per_sec: f32, rate: Rate) -> Ticks {
     }
 }
 
-/// Ruler label: `M:SS`, `H:MM:SS`, or with `:FF` frames when zoomed in.
+/// Ruler label: `MM:SS`, `H:MM:SS`, or with `:FF` frames when zoomed in.
 pub fn ruler_label(t: Time, rate: Rate, frames: bool) -> String {
     let fps = rate.rounded_fps() as i64;
     let total = t.to_frame(rate).max(0);
@@ -181,7 +195,7 @@ pub fn ruler_label(t: Time, rate: Rate, frames: bool) -> String {
     let base = if h > 0 {
         format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{m}:{s:02}")
+        format!("{m:02}:{s:02}")
     };
     if frames {
         format!("{base}:{f:02}")

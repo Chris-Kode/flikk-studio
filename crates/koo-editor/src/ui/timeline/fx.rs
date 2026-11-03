@@ -2,7 +2,7 @@
 //! stores it) and where FX library drops land.
 
 use koo_core::command::Edge;
-use koo_core::fx::{self, FxRef, PlacedTransition, TransitionAlign};
+use koo_core::fx::{self, PlacedTransition, TransitionAlign};
 use koo_core::model::{Clip, Track, TrackKind};
 use koo_core::{ClipId, Time, TimeRange};
 
@@ -27,7 +27,6 @@ pub enum Place {
 pub struct Placed {
     /// The clip edge that stores it (`transition_in` = start).
     pub owner: (ClipId, Edge),
-    pub fx: FxRef,
     /// The cut, or the clip edge.
     pub at: Time,
     pub range: TimeRange,
@@ -83,7 +82,6 @@ pub fn placed(track: &Track) -> Vec<Placed> {
             };
             Some(Placed {
                 owner,
-                fx: p.transition.fx.fx.clone(),
                 at: p.at,
                 range: p.range,
                 place,

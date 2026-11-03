@@ -3,16 +3,17 @@
 //! Clips, media, FX and transcript words dropped on it, and references
 //! other panels queue with "Add to chat", become chips too.
 
+use super::chips::{chip, mark_element};
 use super::recipes;
-use super::refs::{self, RefKind, Reference};
+use super::refs::{self, Mark, RefKind, Reference};
 use crate::state::EditorState;
-use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InlineToken, InputEvent, InputToken, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+use crate::ui::kit::popover::surface;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, Icon, IconName, Kbd, PopupMenuItem, ScrollableElement as _,
+    Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
+use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
+use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::{AgentModel, Backend, ModelChoice, effort_label};
@@ -65,6 +66,17 @@ impl Suggestion {
         match self {
             Self::Reference(r) => Some(r.kind),
             Self::Special { .. } | Self::Recipe { .. } => None,
+        }
+    }
+
+    fn mark(&self, project: &koo_core::model::Project) -> Option<Mark> {
+        match self {
+            Self::Reference(r) => Some(r.kind.mark(project, &r.token_text())),
+            Self::Special { kind, refs, .. } => {
+                let token = refs.first().map_or("", |(text, _)| text.as_str());
+                Some(kind.mark(project, token))
+            }
+            Self::Recipe { .. } => None,
         }
     }
 }
@@ -177,6 +189,28 @@ impl Composer {
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Whether typing goes into the message.
+    pub fn has_focus(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).has_selection_focus(window, cx)
+    }
+
+    /// Type `@` at the cursor, which opens the reference list.
+    fn start_reference(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            let value = input.value();
+            let cursor = input.cursor().min(value.len());
+            if value[..cursor]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace())
+            {
+                input.insert(" ", window, cx);
+            }
+            input.insert("@", window, cx);
+            input.focus(window, cx);
+        });
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -324,8 +358,8 @@ impl Composer {
         let model_picker = Button::new("chat-model")
             .label(model_text)
             .ghost()
-            .xsmall()
-            .dropdown_caret(true)
+            .small()
+            .trailing_icon(IconName::ChevronDown)
             .tooltip("Model")
             .dropdown_menu_with_anchor(Anchor::BottomLeft, {
                 let (state, choice) = (state.clone(), choice.clone());
@@ -351,11 +385,8 @@ impl Composer {
                     };
                     let mut menu = menu
                         .max_h(px(360.))
-                        .scrollable(true)
+                        .item(PopupMenuItem::label("Model"))
                         .item(item("Default".into(), None));
-                    if !models.is_empty() {
-                        menu = menu.separator();
-                    }
                     for m in &models {
                         menu = menu.item(item(m.label.clone(), Some(m.id.clone())));
                     }
@@ -372,10 +403,11 @@ impl Composer {
             });
         let effort_picker = (!efforts.is_empty()).then(|| {
             Button::new("chat-effort")
+                .icon(IconName::Brain)
                 .label(effort_text)
                 .ghost()
-                .xsmall()
-                .dropdown_caret(true)
+                .small()
+                .trailing_icon(IconName::ChevronDown)
                 .tooltip("Thinking")
                 .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                     let item = |label: String, effort: Option<String>| {
@@ -387,7 +419,9 @@ impl Composer {
                                 set_choice(&state, backend, cx, move |c| c.effort = effort)
                             })
                     };
-                    let mut menu = menu.item(item("Auto".into(), None)).separator();
+                    let mut menu = menu
+                        .item(PopupMenuItem::label("Thinking"))
+                        .item(item("Auto".into(), None));
                     for effort in &efforts {
                         menu = menu.item(item(effort_label(effort), Some(effort.clone())));
                     }
@@ -396,70 +430,49 @@ impl Composer {
         });
         h_flex()
             .min_w_0()
-            .gap_0p5()
+            .gap(px(2.))
             .child(model_picker)
             .children(effort_picker)
     }
 
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggestions.as_ref()?;
-        let theme = cx.theme();
+        let project = self.state.read(cx).bus.project();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, item) in s.items.iter().enumerate() {
             if starts_group(&s.items, ix)
                 && let Some(kind) = item.group()
             {
                 rows.push(
-                    div()
+                    v_flex()
                         .flex_none()
-                        .px_2()
-                        .pt_1p5()
-                        .pb_0p5()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(kind.title())
+                        .when(ix > 0, |el| {
+                            el.child(div().h(px(1.)).mx(px(-4.)).my(px(4.)).bg(t::LN))
+                        })
+                        .child(
+                            div()
+                                .px(px(8.))
+                                .pt(px(2.))
+                                .pb(px(3.))
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t::T3)
+                                .child(kind.title()),
+                        )
                         .into_any_element(),
                 );
             }
-            let (icon, label, detail) = match item {
-                Suggestion::Reference(r) => {
-                    (Some(r.kind.icon()), r.label.clone(), r.detail.clone())
-                }
-                Suggestion::Special {
-                    kind,
-                    label,
-                    detail,
-                    ..
-                } => (Some(kind.icon()), label.clone(), detail.clone()),
-                Suggestion::Recipe { name, title } => (None, format!("/{name}"), title.clone()),
-            };
+            let selected = ix == s.selected;
             let row = h_flex()
                 .id(("suggestion", ix))
                 .flex_none()
-                .h(px(28.))
-                .px_2()
-                .gap_2()
-                .rounded(theme.radius)
-                .text_sm()
-                .when(ix == s.selected, |el| el.bg(theme.accent))
-                .hover(|el| el.bg(theme.accent))
+                .h(px(26.))
+                .px(px(8.))
+                .gap(px(8.))
+                .rounded(t::RADIUS)
                 .cursor_pointer()
-                .when_some(icon, |el, icon| {
-                    el.child(
-                        Icon::new(icon)
-                            .size_3p5()
-                            .flex_none()
-                            .text_color(theme.muted_foreground),
-                    )
-                })
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(detail),
-                )
+                .when(selected, |el| el.bg(t::HV))
+                .hover(|el| el.bg(t::HV))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
@@ -467,60 +480,159 @@ impl Composer {
                         this.accept(ix, window, cx)
                     }),
                 );
+            let row = match item {
+                Suggestion::Recipe { name, title } => row
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(82.))
+                            .font_family(t::mono())
+                            .text_size(px(11.))
+                            .child(format!("/{name}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t::T2)
+                            .child(title.clone()),
+                    )
+                    .when(selected, |el| el.child(Kbd::new("Tab"))),
+                Suggestion::Reference(Reference { label, detail, .. })
+                | Suggestion::Special { label, detail, .. } => row
+                    .children(item.mark(project).map(|m| mark_element(m, px(8.), px(12.))))
+                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(t::mono())
+                            .text_size(px(10.))
+                            .text_color(t::T3)
+                            .child(detail.clone()),
+                    )
+                    .when(selected, |el| el.child(Kbd::new("Enter"))),
+            };
             rows.push(row.into_any_element());
         }
         Some(
             deferred(
-                v_flex()
-                    .id("suggestions")
+                surface()
                     .absolute()
                     .bottom_full()
                     .left_0()
                     .right_0()
-                    .mb_1()
-                    .p_1()
-                    .max_h(px(300.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.list_scroll)
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .text_color(theme.popover_foreground)
-                    .shadow_lg()
-                    .children(rows),
+                    .mb(px(6.))
+                    .overflow_hidden()
+                    .child(
+                        v_flex()
+                            .id("suggestions")
+                            .max_h(px(300.))
+                            .p(px(4.))
+                            .track_scroll(&self.list_scroll)
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
+                    .vertical_scrollbar(&self.list_scroll),
             )
             .with_priority(1),
         )
     }
+
+    /// While something is dragged over the composer: the dashed target it
+    /// drops into, inserting chips.
+    fn render_drop_target(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show = |s: StyleRefinement| s.opacity(1.);
+        v_flex()
+            .absolute()
+            .inset_0()
+            .justify_center()
+            .items_center()
+            .gap(px(6.))
+            .rounded(t::RADIUS)
+            .border_1()
+            .border_dashed()
+            .border_color(t::AC)
+            .bg(t::alpha(t::AC, 0.08))
+            .text_color(t::AC)
+            .font_weight(FontWeight::MEDIUM)
+            .opacity(0.)
+            .drag_over::<RefDrag>(move |s, _, _, _| show(s))
+            .drag_over::<MediaDrag>(move |s, _, _, _| show(s))
+            .drag_over::<FxDrag>(move |s, _, _, _| show(s))
+            .drag_over::<AudioFxDrag>(move |s, _, _, _| show(s))
+            .drag_over::<SoundDrag>(move |s, _, _, _| show(s))
+            .on_drop(cx.listener(|this, drag: &RefDrag, window, cx| {
+                this.insert_refs(drag.refs.clone(), window, cx)
+            }))
+            .on_drop(cx.listener(|this, drag: &MediaDrag, window, cx| {
+                let token = format!("@media {}", drag.media);
+                this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+            }))
+            .on_drop(cx.listener(|this, drag: &SoundDrag, window, cx| {
+                let media = this.state.update(cx, |s, cx| {
+                    crate::ui::library::shared::use_sound(s, drag.sound, cx)
+                });
+                let Some(media) = media else {
+                    return;
+                };
+                let token = format!("@media {media}");
+                this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+            }))
+            .on_drop(cx.listener(|this, drag: &FxDrag, window, cx| {
+                let Some(fx) = drag.program(&this.state, cx) else {
+                    return;
+                };
+                let token = format!("@fx {fx}");
+                this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+            }))
+            .on_drop(cx.listener(|this, drag: &AudioFxDrag, window, cx| {
+                let token = format!("@audiofx {}", drag.kind.name());
+                this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+            }))
+            .child(Icon::new(IconName::MessageSquarePlus).size(px(18.)))
+            .child("Add to chat")
+    }
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.state.read(cx).agent_busy();
         let empty = self.input.read(cx).value().trim().is_empty();
-        let theme = cx.theme();
-        let (ring, drop) = (theme.ring, theme.accent.opacity(0.4));
+        let focused = self.has_focus(window, cx);
         let action = if busy {
-            Button::new("stop")
-                .icon(IconName::Square)
-                .small()
-                .tooltip("Stop")
+            div()
+                .id("stop")
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(24.))
+                .rounded(t::RADIUS)
+                .bg(t::T1)
+                .cursor_pointer()
+                .hover(|s| s.bg(t::T2))
+                .tooltip(Tooltip::text("Stop"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.cancel_agent(cx));
                 }))
+                .child(div().size(px(8.)).rounded(px(1.5)).bg(t::G))
+                .into_any_element()
         } else {
             Button::new("send")
                 .icon(IconName::ArrowUp)
                 .small()
-                .primary()
+                .w(px(24.))
+                .h(px(24.))
+                .when(!empty, |b| b.primary())
                 .disabled(empty)
                 .tooltip("Send")
                 .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                .into_any_element()
         };
+        let state = self.state.clone();
         div()
             .relative()
-            .p_2()
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &SuggestUp, _, cx| {
                 if !this.move_selection(-1, cx) {
@@ -547,66 +659,56 @@ impl Render for Composer {
             }))
             .child(
                 v_flex()
-                    .rounded(theme.radius_lg)
+                    .relative()
+                    .gap(px(4.))
+                    .pt(px(8.))
+                    .px(px(8.))
+                    .pb(px(6.))
+                    .rounded(t::RADIUS)
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .drag_over::<RefDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
-                    .drag_over::<MediaDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
-                    .drag_over::<FxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
-                    .drag_over::<AudioFxDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
-                    .drag_over::<SoundDrag>(move |s, _, _, _| s.border_color(ring).bg(drop))
-                    .on_drop(cx.listener(|this, drag: &RefDrag, window, cx| {
-                        this.insert_refs(drag.refs.clone(), window, cx)
-                    }))
-                    .on_drop(cx.listener(|this, drag: &MediaDrag, window, cx| {
-                        let token = format!("@media {}", drag.media);
-                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
-                    }))
-                    .on_drop(cx.listener(|this, drag: &SoundDrag, window, cx| {
-                        let media = this.state.update(cx, |s, cx| {
-                            crate::ui::library::shared::use_sound(s, drag.sound, cx)
-                        });
-                        let Some(media) = media else {
-                            return;
-                        };
-                        let token = format!("@media {media}");
-                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
-                    }))
-                    .on_drop(cx.listener(|this, drag: &FxDrag, window, cx| {
-                        let Some(fx) = drag.program(&this.state, cx) else {
-                            return;
-                        };
-                        let token = format!("@fx {fx}");
-                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
-                    }))
-                    .on_drop(cx.listener(|this, drag: &AudioFxDrag, window, cx| {
-                        let token = format!("@audiofx {}", drag.kind.name());
-                        this.insert_refs(vec![(token, drag.name.clone())], window, cx)
-                    }))
+                    .border_color(if focused { t::AC } else { t::LN })
+                    .bg(t::G)
+                    .when(focused, |el| el.shadow(t::field_ring(t::AC)))
+                    .when(!focused, |el| el.hover(|s| s.border_color(t::LN_HV)))
                     .child(
                         Textarea::new(&self.input)
-                            .appearance(false)
-                            .text_sm()
-                            .px_1()
-                            .pt_1()
-                            .token(|token, _, _| {
-                                let chip = InputToken::new(token);
-                                match RefKind::of_token(token.token().text()) {
-                                    Some(kind) => chip.icon(kind.icon()),
-                                    None => chip,
-                                }
+                            .bare()
+                            .min_h(px(36.))
+                            .line_height(px(20.))
+                            .px(px(2.))
+                            .token(move |token, _, cx| {
+                                let text = token.token().text();
+                                let mark = RefKind::of_token(text)
+                                    .map(|k| k.mark(state.read(cx).bus.project(), text));
+                                chip(mark, token.token().label().clone())
+                                    .h(token.line_height().min(px(18.)))
+                                    .max_w(token.available_width())
+                                    .when(token.is_selected(), |el| {
+                                        el.bg(t::alpha(t::AC, 0.3)).border_color(t::AC)
+                                    })
+                                    .when(token.is_disabled(), |el| el.opacity(0.5))
                             }),
                     )
                     .child(
                         h_flex()
-                            .px_1p5()
-                            .pb_1p5()
-                            .gap_2()
-                            .justify_between()
+                            .gap(px(2.))
+                            .child(
+                                Button::new("chat-at")
+                                    .icon(IconName::AtSign)
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Reference")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_reference(window, cx)
+                                    })),
+                            )
                             .child(self.render_model_pickers(cx))
+                            .child(div().flex_1())
                             .child(action),
-                    ),
+                    )
+                    .when(cx.has_active_drag(), |el| {
+                        el.child(self.render_drop_target(cx))
+                    }),
             )
             .children(self.render_suggestions(cx))
     }

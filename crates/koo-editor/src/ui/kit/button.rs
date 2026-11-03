@@ -212,7 +212,10 @@ impl ParentElement for Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let h = self.size.height();
-        let square = self.label.is_none() && self.children.is_empty() && self.kbd.is_none();
+        // An icon's children are marks over it, such as an `Indicator`.
+        let square = self.label.is_none()
+            && self.kbd.is_none()
+            && (self.children.is_empty() || self.icon.is_some());
         let (pad, gap, text, icon) = match self.size {
             Size::Md => (px(10.), px(6.), px(12.), px(13.)),
             Size::Sm => (px(8.), px(5.), px(11.), px(13.)),

@@ -14,24 +14,18 @@ mod reveal;
 mod tools;
 
 use crate::state::EditorState;
-use crate::ui::timeline::glyph::{Glyph, glyph};
-use composer::{Composer, ComposerEvent};
-use gpui_kit::component::bubble::{Bubble, BubbleVariant};
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::message::{Message, MessageAlignment, MessageContent};
-use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::TextView;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    WindowExt as _, h_flex, v_flex,
+use crate::ui::kit::{
+    Button, DialogExt as _, Icon, IconName, Kbd, Panel, PanelHeader, ScrollableElement as _,
+    Spinner, Tooltip, h_flex, theme as t, v_flex,
 };
+use composer::{Composer, ComposerEvent};
+use gpui_kit::base::{TextView, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::ChatRole;
 use koo_core::{ChangeItemId, ChangeSetId};
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// `text` with every reference token replaced by `@` and its label, for
 /// places that show a message as plain text (chat titles).
@@ -44,7 +38,6 @@ pub(crate) fn plain_text(text: &str, project: &koo_core::model::Project) -> Stri
         })
         .collect()
 }
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Key bindings for the chat: the composer's suggestion keys and the global
 /// quick-command bar (cmd/ctrl-K). Call after `gpui_kit::init`; repeated
@@ -65,7 +58,8 @@ impl Global for Initialized {}
 pub struct ChatPanel {
     state: Entity<EditorState>,
     composer: Entity<Composer>,
-    scroller: Entity<MessageScrollerState>,
+    /// The thread's rows, one per message, following the newest.
+    list: ListState,
     reviews: change_set::Reviews,
     /// Change sets whose card is up: a resolved one stays, with what came of
     /// it, until the user's next message.
@@ -91,7 +85,16 @@ impl ChatPanel {
         init(cx);
         quick::register(&state, cx);
         let count = state.read(cx).chat.len();
-        let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
+        let list = ListState::new(count, ListAlignment::Top, px(400.));
+        list.set_follow_mode(FollowMode::Tail);
+        // The jump-to-latest button follows the scroll position.
+        let this = cx.weak_entity();
+        list.set_scroll_handler(move |_, _, cx| {
+            let this = this.clone();
+            cx.defer(move |cx| {
+                let _ = this.update(cx, |_, cx| cx.notify());
+            });
+        });
         let composer = cx.new(|cx| Composer::new(state.clone(), window, cx));
         quick::register_composer(&composer, cx);
         let _subscriptions = vec![
@@ -110,7 +113,7 @@ impl ChatPanel {
         Self {
             state,
             composer,
-            scroller,
+            list,
             reviews: Default::default(),
             shown: HashSet::new(),
             tools_open: HashSet::new(),
@@ -132,7 +135,14 @@ impl ChatPanel {
                 context::references_block(s.bus.project(), s.services.analysis.as_deref(), &text);
             s.send_chat_with_context(text, block, cx)
         });
-        self.scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+        self.scroll_to_end(cx);
+    }
+
+    /// Show the newest message and keep following the thread.
+    fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
+        self.list.set_follow_mode(FollowMode::Tail);
+        self.list.scroll_to_end();
+        cx.notify();
     }
 
     /// Keep the virtual list's rows in step with the conversation: append
@@ -151,19 +161,19 @@ impl ChatPanel {
             self.tool_open.clear();
             self.shown.clear();
         }
-        self.scroller.update(cx, |list, cx| {
-            let n = list.item_count();
-            if switched {
-                list.reset(count, cx);
-                list.scroll_to_end(cx);
-            } else if count < n {
-                list.reset(count, cx);
-            } else if count > n {
-                list.append(count - n, cx);
-            } else if changed {
-                list.remeasure(cx);
+        let n = self.list.item_count();
+        if switched || count < n {
+            self.list.reset(count);
+            self.scroll_to_end(cx);
+        } else if count > n {
+            self.list.splice(n..n, count - n);
+            // The row before may have changed with it (choices answered).
+            if n > 0 {
+                self.list.remeasure_items(n - 1..n);
             }
-        });
+        } else if changed {
+            self.list.remeasure();
+        }
     }
 
     /// The timeline picked a change item: open its card's review list and
@@ -184,7 +194,7 @@ impl ChatPanel {
     }
 
     fn remeasure(&mut self, cx: &mut Context<Self>) {
-        self.scroller.update(cx, |list, cx| list.remeasure(cx));
+        self.list.remeasure();
         cx.notify();
     }
 
@@ -194,14 +204,12 @@ impl ChatPanel {
 
     /// Ask before deleting a chat: its conversation can't be brought back.
     fn confirm_delete(state: Entity<EditorState>, id: String, window: &mut Window, cx: &mut App) {
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_confirm(cx, move |dialog, _, _| {
             let (state, id) = (state.clone(), id.clone());
-            alert
+            dialog
                 .title("Delete this chat?")
-                .ok_text("Delete")
-                .ok_variant(ButtonVariant::Danger)
-                .show_cancel(true)
-                .on_ok(move |_, _, cx| {
+                .destructive()
+                .confirm("Delete", move |_, cx| {
                     state.update(cx, |s, cx| s.delete_chat(&id, cx));
                     true
                 })
@@ -214,59 +222,75 @@ impl ChatPanel {
         let s = self.state.read(cx);
         let active = s.active_chat().to_owned();
         let sessions = s.chat_sessions();
-        let theme = cx.theme();
-        let (accent, hover, muted) = (theme.accent, theme.secondary_hover, theme.muted_foreground);
-        v_flex()
-            .id("chat-sessions")
+        let rows = sessions.into_iter().enumerate().map(|(ix, (id, title))| {
+            let current = id == active;
+            let open = {
+                let id = id.clone();
+                cx.listener(move |this, _, _, cx| {
+                    this.sessions_open = false;
+                    this.state.update(cx, |s, cx| s.switch_chat(&id, cx));
+                    cx.notify();
+                })
+            };
+            let delete = cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                Self::confirm_delete(this.state.clone(), id.clone(), window, cx);
+            });
+            h_flex()
+                .id(("chat-session", ix))
+                .group("chat-session")
+                .relative()
+                .flex_none()
+                .h(px(26.))
+                .pl(px(8.))
+                .pr(px(3.))
+                .gap(px(8.))
+                .rounded(t::RADIUS)
+                .cursor_pointer()
+                .map(|el| {
+                    if current {
+                        el.bg(t::alpha(t::AC, 0.1)).child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(2.))
+                                .rounded_l(t::RADIUS)
+                                .bg(t::AC),
+                        )
+                    } else {
+                        el.text_color(t::T2)
+                            .hover(|el| el.bg(t::HV).text_color(t::T1))
+                    }
+                })
+                .on_click(open)
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .flex_none()
+                        .invisible()
+                        .group_hover("chat-session", |el| el.visible())
+                        .child(
+                            Button::new(("chat-delete", ix))
+                                .icon(IconName::Trash)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Delete chat")
+                                .on_click(delete),
+                        ),
+                )
+        });
+        div()
             .flex_1()
             .min_h_0()
-            .p_2()
-            .gap_0p5()
-            .overflow_y_scroll()
-            .children(sessions.into_iter().enumerate().map(|(ix, (id, title))| {
-                let current = id == active;
-                let open = {
-                    let id = id.clone();
-                    cx.listener(move |this, _, _, cx| {
-                        this.sessions_open = false;
-                        this.state.update(cx, |s, cx| s.switch_chat(&id, cx));
-                        cx.notify();
-                    })
-                };
-                let delete = cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    Self::confirm_delete(this.state.clone(), id.clone(), window, cx);
-                });
-                h_flex()
-                    .id(("chat-session", ix))
-                    .group("chat-session")
-                    .flex_none()
-                    .h(px(32.))
-                    .pl_2()
-                    .pr_1()
-                    .gap_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_sm()
-                    .when(current, |el| el.bg(accent))
-                    .hover(|el| el.bg(hover))
-                    .on_click(open)
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .child(
-                        div()
-                            .flex_none()
-                            .invisible()
-                            .group_hover("chat-session", |el| el.visible())
-                            .child(
-                                Button::new(("chat-delete", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("Delete chat")
-                                    .child(glyph(Glyph::Trash, px(13.), muted))
-                                    .on_click(delete),
-                            ),
-                    )
-            }))
+            .child(
+                v_flex()
+                    .p(px(4.))
+                    .gap(px(1.))
+                    .children(rows)
+                    .overflow_y_scrollbar(),
+            )
             .into_any_element()
     }
 
@@ -280,99 +304,120 @@ impl ChatPanel {
             .into_iter()
             .find(|(id, _)| id == s.active_chat())
             .map_or_else(|| "Untitled".to_owned(), |(_, title)| title);
-        let theme = cx.theme();
-        h_flex()
-            .h(px(40.))
-            .flex_none()
-            .px_3()
-            .gap_2()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
+        PanelHeader::new()
+            .leading(
                 h_flex()
-                    .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .gap_1()
+                    .gap(px(6.))
                     .child(
                         div()
                             .id("chat-backend")
                             .flex_none()
-                            .child(
-                                Icon::new(IconName::Bot)
-                                    .size_4()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .tooltip(move |window, cx| Tooltip::new(backend).build(window, cx)),
+                            .child(Icon::new(IconName::Sparkles).size(px(13.)))
+                            .tooltip(Tooltip::text(backend)),
                     )
-                    .child(div().min_w_0().text_sm().truncate().child(title)),
+                    .child(div().flex_none().text_color(t::T1).child("Agent"))
+                    .child(div().flex_none().text_color(t::T3).child("·"))
+                    .child(div().min_w_0().truncate().child(title)),
             )
             .child(
-                h_flex()
-                    .flex_none()
-                    .gap_0p5()
-                    .child(
-                        Button::new("chat-new")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .small()
-                            .tooltip("New chat")
-                            .disabled(empty || busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sessions_open = false;
-                                this.state.update(cx, |s, cx| s.new_chat(cx))
-                            })),
-                    )
-                    .child(
-                        Button::new("chat-sessions-toggle")
-                            .icon(IconName::Menu)
-                            .ghost()
-                            .small()
-                            .tooltip("Chats")
-                            .selected(self.sessions_open)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sessions_open = !this.sessions_open;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("chat-settings")
-                            .icon(IconName::Settings)
-                            .ghost()
-                            .small()
-                            .tooltip("Agent settings")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                            ),
-                    ),
+                Button::new("chat-new")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .small()
+                    .tooltip("New chat")
+                    .disabled(empty || busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sessions_open = false;
+                        this.state.update(cx, |s, cx| s.new_chat(cx))
+                    })),
+            )
+            .child(
+                Button::new("chat-sessions-toggle")
+                    .icon(IconName::List)
+                    .ghost()
+                    .small()
+                    .tooltip("Chats")
+                    .selected(self.sessions_open)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sessions_open = !this.sessions_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("chat-settings")
+                    .icon(IconName::Settings2)
+                    .ghost()
+                    .small()
+                    .tooltip("Agent settings")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .child(
+                Button::new("chat-hide")
+                    .icon(IconName::PanelRightClose)
+                    .ghost()
+                    .small()
+                    .tooltip("Hide agent")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::app::ToggleAgent), cx)
+                    }),
             )
     }
 
     fn render_thread(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.state.read(cx).chat.is_empty() {
-            return div()
+            return h_flex()
                 .flex_1()
-                .flex()
-                .items_center()
                 .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .gap(px(8.))
+                .text_color(t::T3)
                 .child("Ask for an edit")
+                .child(Kbd::new("Cmd K"))
                 .into_any_element();
         }
+        let scrolled_up = self.list.max_offset_for_scrollbar().y > px(0.)
+            && !self.list.is_following_tail()
+            && !self.list.is_scrolled_to_end().unwrap_or(false);
         let this = cx.entity().downgrade();
         div()
+            .relative()
             .flex_1()
             .min_h_0()
             .child(
-                MessageScroller::new("chat-thread", self.scroller.clone(), move |ix, _, cx| {
-                    this.update(cx, |this, cx| this.render_message(ix, cx))
-                        .unwrap_or_else(|_| div().into_any_element())
+                list(self.list.clone(), move |ix, _, cx| {
+                    this.update(cx, |this, cx| {
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .px(px(12.))
+                            .pt(px(12.))
+                            .child(this.render_message(ix, cx))
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|_| div().into_any_element())
                 })
-                .with_bottom_fade(cx.theme().background)
-                .with_row_style(StyleRefinement::default().pb_5()),
+                .size_full()
+                .pb(px(14.)),
             )
+            .vertical_scrollbar(&self.list)
+            .when(scrolled_up, |el| {
+                el.child(
+                    h_flex()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(10.))
+                        .justify_center()
+                        .child(
+                            Button::new("chat-latest")
+                                .icon(IconName::ArrowDown)
+                                .tooltip("Jump to latest")
+                                .rounded_full()
+                                .on_click(cx.listener(|this, _, _, cx| this.scroll_to_end(cx))),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -386,67 +431,71 @@ impl ChatPanel {
             .get(ix + 1)
             .filter(|m| m.role == ChatRole::User)
             .map(|m| m.text.clone());
-        let text = match msg.role {
-            ChatRole::User => String::new(),
-            ChatRole::Agent => refs::display(&msg.text, state.bus.project()),
-        };
         let busy = state.agent_busy();
-        match msg.role {
-            ChatRole::User => {
-                Message::new()
-                    .alignment(MessageAlignment::End)
-                    .content(MessageContent::new().bubble(
-                        Bubble::new().with_variant(BubbleVariant::Muted).child(
-                            div().text_sm().child(chips::message_text(
-                                ix,
-                                &msg.text,
-                                &self.state,
-                                cx,
-                            )),
-                        ),
-                    ))
-                    .into_any_element()
-            }
-            ChatRole::Agent => {
-                let mut content = MessageContent::new().gap_2();
-                if !text.is_empty() {
-                    let state = self.state.downgrade();
-                    content = content.child(div().w_full().text_sm().child(
-                        TextView::markdown(("chat-text", ix), text).on_link_click(
-                            move |url, _, _, cx| match refs::token_of_link(url) {
-                                Some(token) => {
-                                    if let Some(state) = state.upgrade() {
-                                        reveal::reveal(&state, &token, cx);
-                                    }
-                                }
-                                None => cx.open_url(url),
-                            },
-                        ),
-                    ));
-                }
-                if !msg.choices.is_empty() {
-                    content = content.child(h_flex().flex_wrap().gap_1p5().children(
-                        msg.choices.iter().enumerate().map(|(i, choice)| {
-                            let picked = answer.as_deref() == Some(choice.as_str());
-                            let reply = choice.clone();
-                            Button::new(("choice", ix * 16 + i))
-                                .label(choice.clone())
-                                .small()
-                                .outline()
-                                .selected(picked)
-                                .disabled(answer.is_some() || busy)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.send(reply.clone(), cx)),
-                                )
-                        }),
-                    ));
-                }
-                if !msg.tools.is_empty() {
-                    content = content.child(self.render_tools(ix, &msg.tools, cx));
-                }
-                Message::new().content(content).into_any_element()
-            }
+        if msg.role == ChatRole::User {
+            return h_flex()
+                .w_full()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(relative(0.9))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded_t(t::RADIUS_LG)
+                        .rounded_bl(t::RADIUS_LG)
+                        .rounded_br(px(3.))
+                        .border_1()
+                        .border_color(t::LN)
+                        .bg(t::R1)
+                        .line_height(px(20.))
+                        .child(chips::message_text(ix, &msg.text, &self.state, cx)),
+                )
+                .into_any_element();
         }
+        let text = refs::display(&msg.text, state.bus.project());
+        let mut content = v_flex().w_full().gap(px(8.));
+        if !text.is_empty() {
+            let state = self.state.downgrade();
+            content = content.child(
+                div().w_full().line_height(px(19.)).child(
+                    TextView::markdown(("chat-text", ix), text)
+                        .style(text_style())
+                        .on_link_click(move |url, _, _, cx| match refs::token_of_link(url) {
+                            Some(token) => {
+                                if let Some(state) = state.upgrade() {
+                                    reveal::reveal(&state, &token, cx);
+                                }
+                            }
+                            None => cx.open_url(url),
+                        }),
+                ),
+            );
+        }
+        if !msg.choices.is_empty() {
+            content = content.child(h_flex().flex_wrap().gap(px(6.)).children(
+                msg.choices.iter().enumerate().map(|(i, choice)| {
+                    let picked = answer.as_deref() == Some(choice.as_str());
+                    let button = Button::new(("choice", ix * 16 + i));
+                    if picked {
+                        // The pick stays, marked; nothing more to press.
+                        return button
+                            .border_color(t::AC)
+                            .bg(t::alpha(t::AC, 0.1))
+                            .child(Icon::new(IconName::Check).size(px(12.)).color(t::AC))
+                            .child(choice.clone());
+                    }
+                    let reply = choice.clone();
+                    button
+                        .label(choice.clone())
+                        .disabled(answer.is_some() || busy)
+                        .on_click(cx.listener(move |this, _, _, cx| this.send(reply.clone(), cx)))
+                }),
+            ));
+        }
+        if !msg.tools.is_empty() {
+            content = content.child(self.render_tools(ix, &msg.tools, cx));
+        }
+        content.into_any_element()
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -455,33 +504,45 @@ impl ChatPanel {
         let state = self.state.read(cx);
         let busy = state.agent_busy();
         let status = state.status.clone();
-        let theme = cx.theme();
         v_flex()
             .flex_none()
+            .gap(px(6.))
+            .px(px(10.))
+            .pb(px(10.))
             .children(changes)
             .children(approvals)
             .when(busy, |el| {
                 el.child(
                     h_flex()
-                        .px_4()
-                        .pt_1()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Spinner::new().xsmall())
+                        .h(px(20.))
+                        .px(px(4.))
+                        .gap(px(8.))
+                        .text_size(px(11.))
+                        .text_color(t::T2)
+                        .child(Spinner::new().size(px(10.)))
                         .child("Working"),
                 )
             })
             .when_some(status, |el, status| {
                 el.child(
                     h_flex()
-                        .px_4()
-                        .pt_1()
-                        .gap_1p5()
-                        .text_xs()
-                        .text_color(theme.red)
-                        .child(Icon::new(IconName::CircleAlert).size_3().flex_none())
-                        .child(div().min_w_0().truncate().child(status)),
+                        .items_start()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(t::RADIUS)
+                        .border_1()
+                        .border_color(t::alpha(t::ERR, 0.2))
+                        .bg(t::alpha(t::ERR, 0.07))
+                        .text_size(px(11.))
+                        .text_color(t::ERR)
+                        .child(
+                            div()
+                                .flex_none()
+                                .pt(px(1.))
+                                .child(Icon::new(IconName::CircleAlert).size(px(13.))),
+                        )
+                        .child(div().flex_1().min_w_0().line_clamp(3).child(status)),
                 )
             })
             .child(self.composer.clone())
@@ -489,10 +550,10 @@ impl ChatPanel {
 }
 
 impl Render for ChatPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .bg(cx.theme().background)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.composer.read(cx).has_focus(window, cx);
+        Panel::new()
+            .focused(focused)
             .child(self.render_header(cx))
             .map(|el| {
                 if self.sessions_open {
@@ -503,6 +564,24 @@ impl Render for ChatPanel {
                 }
             })
     }
+}
+
+/// Agent replies: body text, inline code and fenced blocks on Flikk
+/// surfaces, references as plain underlined text.
+fn text_style() -> TextViewStyle {
+    TextViewStyle::default()
+        .with_foreground(t::T1.into())
+        .with_muted_foreground(t::T2.into())
+        .with_link(t::T1.into())
+        .with_selection(t::alpha(t::AC, 0.3).into())
+        .with_code_background(t::G.into())
+        .with_border(t::LN.into())
+        .with_paragraph_gap(rems(0.5))
+        .with_inline_code(HighlightStyle {
+            background_color: Some(t::R1.into()),
+            ..Default::default()
+        })
+        .with_dark(true)
 }
 
 /// Changes whenever a visible row's height may have: streamed text, card

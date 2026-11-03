@@ -4,8 +4,7 @@
 //! while shows a spinner until it ends.
 
 use super::ChatPanel;
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
+use crate::ui::kit::{Icon, IconName, ScrollableElement as _, Spinner, h_flex, theme as t, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::ActivityEntry;
@@ -19,16 +18,20 @@ impl ChatPanel {
         entries: &[ActivityEntry],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
         let card = v_flex()
             .id(("tools", ix))
             .w_full()
             .overflow_hidden()
-            .rounded(theme.radius)
+            .rounded(t::RADIUS)
             .border_1()
-            .border_color(theme.border);
+            .bg(t::P);
         if let [entry] = entries {
             return card
+                .border_color(if failed(entry) {
+                    t::alpha(t::ERR, 0.25)
+                } else {
+                    t::LN
+                })
                 .child(self.render_tool(ix, 0, entry, cx))
                 .into_any_element();
         }
@@ -40,41 +43,43 @@ impl ChatPanel {
             .map(|e| e.tool.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        card.child(
-            row(&theme)
-                .id("tools-head")
-                .child(status(ok, running, &theme))
-                .child(
+        card.border_color(t::LN)
+            .child(
+                row()
+                    .id("tools-head")
+                    .when(open, |el| el.bg(t::HV))
+                    .child(status(ok, running))
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(format!("{} tool calls", entries.len())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(t::mono())
+                            .text_color(t::T2)
+                            .child(names),
+                    )
+                    .child(chevron(open))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.tools_open.remove(&ix) {
+                            this.tools_open.insert(ix);
+                        }
+                        this.remeasure(cx);
+                    })),
+            )
+            .when(open, |el| {
+                el.children(entries.iter().enumerate().map(|(j, entry)| {
                     div()
-                        .flex_none()
-                        .child(format!("{} tool calls", entries.len())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.muted_foreground)
-                        .font_family(theme.mono_font_family.clone())
-                        .child(names),
-                )
-                .child(chevron(open, &theme))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.tools_open.remove(&ix) {
-                        this.tools_open.insert(ix);
-                    }
-                    this.remeasure(cx);
-                })),
-        )
-        .when(open, |el| {
-            el.children(entries.iter().enumerate().map(|(j, entry)| {
-                div()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(self.render_tool(ix, j, entry, cx))
-            }))
-        })
-        .into_any_element()
+                        .border_t_1()
+                        .border_color(t::LN)
+                        .child(self.render_tool(ix, j, entry, cx))
+                }))
+            })
+            .into_any_element()
     }
 
     fn render_tool(
@@ -84,17 +89,16 @@ impl ChatPanel {
         entry: &ActivityEntry,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme().clone();
         let open = self.tool_open.contains(&(ix, j));
         v_flex()
             .child(
-                row(&theme)
+                row()
                     .id(("tool", j))
-                    .child(status(entry.ok, entry.running.is_some(), &theme))
+                    .child(status(entry.ok, entry.running.is_some()))
                     .child(
                         div()
                             .flex_none()
-                            .font_family(theme.mono_font_family.clone())
+                            .font_family(t::mono())
                             .child(entry.tool.clone()),
                     )
                     .child(
@@ -102,10 +106,10 @@ impl ChatPanel {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(theme.muted_foreground)
+                            .text_color(if failed(entry) { t::ERR } else { t::T2 })
                             .child(entry.summary.clone()),
                     )
-                    .child(chevron(open, &theme))
+                    .child(chevron(open))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.tool_open.remove(&(ix, j)) {
                             this.tool_open.insert((ix, j));
@@ -113,92 +117,92 @@ impl ChatPanel {
                         this.remeasure(cx);
                     })),
             )
-            .when(open, |el| el.child(details(entry, j, &theme)))
+            .when(open, |el| el.child(details(entry, j)))
     }
 }
 
-fn row(theme: &Theme) -> Div {
+fn failed(entry: &ActivityEntry) -> bool {
+    !entry.ok && entry.running.is_none()
+}
+
+fn row() -> Div {
     h_flex()
-        .h(px(30.))
-        .px_2p5()
-        .gap_2()
-        .text_xs()
+        .h(px(28.))
+        .px(px(10.))
+        .gap(px(8.))
+        .text_size(px(11.))
         .cursor_pointer()
-        .hover(|el| el.bg(theme.accent.opacity(0.5)))
+        .hover(|el| el.bg(t::HV))
 }
 
-fn status(ok: bool, running: bool, theme: &Theme) -> AnyElement {
+fn status(ok: bool, running: bool) -> AnyElement {
     if running {
-        return Spinner::new()
-            .with_size(px(14.))
-            .color(theme.muted_foreground)
-            .into_any_element();
+        return Spinner::new().size(px(12.)).color(t::T2).into_any_element();
     }
-    Icon::new(if ok {
-        IconName::CircleCheck
+    let (icon, color) = if ok {
+        (IconName::CircleCheck, t::OK)
     } else {
-        IconName::CircleX
-    })
-    .size_3p5()
-    .text_color(if ok { theme.green } else { theme.red })
-    .into_any_element()
+        (IconName::CircleX, t::ERR)
+    };
+    Icon::new(icon).color(color).into_any_element()
 }
 
-fn chevron(open: bool, theme: &Theme) -> Icon {
+fn chevron(open: bool) -> Icon {
     Icon::new(if open {
         IconName::ChevronDown
     } else {
         IconName::ChevronRight
     })
-    .size_3()
-    .text_color(theme.muted_foreground)
+    .size(px(12.))
+    .color(t::T3)
 }
 
-fn details(entry: &ActivityEntry, j: usize, theme: &Theme) -> impl IntoElement {
+fn details(entry: &ActivityEntry, j: usize) -> impl IntoElement {
     let args = serde_json::to_string_pretty(&entry.args).unwrap_or_default();
     v_flex()
-        .px_2p5()
-        .pb_2p5()
-        .gap_2()
-        .text_xs()
+        .px(px(10.))
+        .pb(px(10.))
+        .gap(px(8.))
+        .text_size(px(11.))
+        .line_height(px(16.))
         .when(!entry.args.is_null(), |el| {
             el.child(
-                div()
+                v_flex()
                     .id(("tool-args", j))
-                    .p_2()
                     .max_h(px(180.))
-                    .overflow_y_scroll()
-                    .rounded(theme.radius)
-                    .bg(theme.muted)
-                    .font_family(theme.mono_font_family.clone())
-                    .whitespace_normal()
-                    .children(
-                        args.lines()
-                            .map(|l| div().child(l.to_string()))
-                            .collect::<Vec<_>>(),
-                    ),
+                    .px(px(8.))
+                    .py(px(7.))
+                    .rounded(t::RADIUS_SM)
+                    .border_1()
+                    .border_color(t::LN)
+                    .bg(t::G)
+                    .font_family(t::mono())
+                    .text_size(px(10.5))
+                    .text_color(t::T2)
+                    .children(args.lines().map(|l| div().child(l.to_string())))
+                    .overflow_y_scrollbar(),
             )
         })
         .children(entry.excerpts.iter().map(|e| {
             div()
-                .pl_2()
+                .pl(px(8.))
                 .border_l_2()
-                .border_color(theme.border)
-                .text_color(theme.muted_foreground)
+                .border_color(t::LN)
+                .text_color(t::T2)
                 .child(e.clone())
         }))
         .when(!entry.images.is_empty(), |el| {
             el.child(
                 h_flex()
                     .flex_wrap()
-                    .gap_1p5()
+                    .gap(px(6.))
                     .children(entry.images.iter().map(|path| {
                         img(path.clone())
-                            .h(px(72.))
+                            .h(px(64.))
                             .max_w_full()
-                            .rounded(theme.radius)
+                            .rounded(t::RADIUS_SM)
                             .border_1()
-                            .border_color(theme.border)
+                            .border_color(t::LN)
                     })),
             )
         })

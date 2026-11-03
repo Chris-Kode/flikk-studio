@@ -33,25 +33,27 @@ mod gizmo;
 mod masks;
 mod player;
 
-use super::timeline::glyph::{Glyph, glyph};
 use super::timeline::{
     NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
 };
 use crate::app::TogglePlay;
 use crate::render_cache::{self, Globals};
-use crate::state::{EditorState, Source};
+use crate::state::EditorState;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, Icon, IconName, Panel, PanelHeader, PopupMenuItem, Segmented,
+    Tooltip, h_flex, theme as t, v_flex,
+};
 use crate::ui::media_pool::{item_name, seek_bar};
+use crate::ui::mixer::meter;
 use audio::AudioOut;
 use cache::{FrameCache, SharedCache};
 use gizmo::{Gizmo, Screen};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_core::agent::Workspace;
 use koo_core::compose::{self, MaskView, Stills};
 use koo_core::model::{ClipContent, MediaItem, MediaKind, Project, TrackKind};
-use koo_core::query::topmost_video_clip;
+use koo_core::query::{audible_clips_at, topmost_video_clip};
 use koo_core::services::{PixelOrder, Services};
 use koo_core::subject::SubjectPrompt;
 use koo_core::{ChangeSetId, Time};
@@ -109,7 +111,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", RemoveMask, g),
     ]);
 }
-const CONTROLS_HEIGHT: f32 = 30.;
+const TRANSPORT_HEIGHT: f32 = 44.;
+/// Where the meter turns hot (−12 dBFS) and loud (−3.6 dBFS), as a
+/// fraction of its height.
+const HOT: f32 = 0.8;
+const LOUD: f32 = 0.94;
 /// A playhead move larger than this between renders is a seek, in seconds.
 const SEEK_JUMP: f64 = 0.35;
 /// How long the playhead rests before the frames after it render ahead.
@@ -231,6 +237,10 @@ pub struct ViewerPanel {
     frame_rect: Rc<Cell<Bounds<Pixels>>>,
     /// Device pixels per logical pixel at the last layout.
     scale_factor: Rc<Cell<f32>>,
+    /// The pool item shown last, which Source brings back.
+    last_source: Option<koo_core::MediaId>,
+    /// The master's left and right meters.
+    meters: [meter::Display; 2],
     _observe: Subscription,
 }
 
@@ -266,6 +276,8 @@ impl ViewerPanel {
             pending_pick: None,
             frame_rect: Rc::new(Cell::new(Bounds::default())),
             scale_factor: Rc::new(Cell::new(1.0)),
+            last_source: None,
+            meters: Default::default(),
             _observe,
         }
     }
@@ -1204,81 +1216,45 @@ impl ViewerPanel {
         .detach();
     }
 
-    /// The opened item's controls: its name, a bar to seek on and the way
-    /// back to the program.
-    fn opened(&self, source: &Source, cx: &App) -> AnyElement {
-        let item = source.item().clone();
-        let (state, back) = (self.state.clone(), self.state.clone());
-        let name = item_name(&item);
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_2()
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(name),
-            )
-            .map(|d| {
-                if source.can_play() {
-                    d.child(seek_bar(
-                        source.fraction(),
-                        move |f, cx| state.update(cx, |s, cx| s.seek_source(&item, f, cx)),
-                        cx,
-                    ))
-                } else {
-                    d.child(div().flex_1())
-                }
-            })
-            .child(
-                Button::new("viewer-program")
-                    .ghost()
-                    .xsmall()
-                    .label("Program")
-                    .on_click(move |_, _, cx| back.update(cx, |s, cx| s.close_source(cx))),
-            )
-            .into_any_element()
-    }
-
-    fn controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The panel header: Source · Program, the view size and the frame
+    /// toggles.
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let project = state.monitor_project();
-        let rate = project.timeline.settings.rate;
-        let t = state.monitor_time();
-        let theme = cx.theme();
-        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let opened = state.source_picture().map(|s| self.opened(s, cx));
-        let program = opened.is_none();
-        let source = topmost_video_clip(&project.timeline, t).and_then(|(_, clip)| {
-            let at = clip.to_source(t)?;
-            let item = project.media(clip.media()?)?;
-            let rate = item
-                .info
-                .as_ref()
-                .and_then(|i| i.video.as_ref())
-                .map(|v| v.rate)
-                .unwrap_or(rate);
-            let name = item.path.file_name()?.to_string_lossy().into_owned();
-            Some((at.timecode(rate), name))
-        });
-        let playing = state.monitor_playing();
-        let entity = self.state.clone();
+        let opened = state.source_picture().is_some();
+        let recall = self
+            .last_source
+            .filter(|id| state.bus.project().media(*id).is_some());
+        let header = if opened || recall.is_some() {
+            let entity = self.state.clone();
+            PanelHeader::new().leading(
+                Segmented::new("viewer-monitor")
+                    .compact()
+                    .items(["Source", "Program"])
+                    .selected(if opened { 0 } else { 1 })
+                    .on_click(move |ix, _, cx| {
+                        entity.update(cx, |s, cx| match (*ix, recall) {
+                            (0, Some(id)) if s.source_picture().is_none() => s.open_source(id, cx),
+                            (1, _) => s.close_source(cx),
+                            _ => {}
+                        })
+                    }),
+            )
+        } else {
+            PanelHeader::new().title("Program")
+        };
+
         let viewer = cx.entity();
         let zoom = self.zoom;
-        let zoom_label = match zoom {
-            None => "Fit".to_string(),
-            Some(z) => format!("{:.0}%", z * 100.0),
-        };
-        let safe = self.gizmo.safe_areas;
         let zoom_menu = Button::new("viewer-zoom")
             .ghost()
-            .xsmall()
-            .label(zoom_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
+            .small()
+            .label(match zoom {
+                None => "Fit".to_string(),
+                Some(z) => format!("{:.0}%", z * 100.0),
+            })
+            .trailing_icon(IconName::ChevronDown)
+            .when(zoom.is_some(), |b| b.text_color(t::T1))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
                 let v = viewer.clone();
                 menu =
                     menu.item(PopupMenuItem::new("Fit").checked(zoom.is_none()).on_click(
@@ -1296,36 +1272,32 @@ impl ViewerPanel {
                 }
                 menu
             });
+
+        let toggle = |id: &'static str, icon, tip: &'static str, on: bool| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(tip)
+                .selected(on)
+                .accent(on)
+        };
         let viewer = cx.entity();
-        let safe_toggle = Button::new("viewer-safe")
-            .ghost()
-            .xsmall()
-            .toggled(safe)
-            .tooltip("Safe areas")
-            .child(glyph(
-                Glyph::SafeArea,
-                px(13.),
-                if safe { fg } else { muted },
-            ))
-            .on_click(move |_, _, cx| {
-                viewer.update(cx, |this, cx| {
-                    this.gizmo.safe_areas = !this.gizmo.safe_areas;
-                    cx.notify();
-                })
-            });
+        let safe = toggle(
+            "viewer-safe",
+            IconName::Scan,
+            "Safe areas",
+            self.gizmo.safe_areas,
+        )
+        .on_click(move |_, _, cx| {
+            viewer.update(cx, |this, cx| {
+                this.gizmo.safe_areas = !this.gizmo.safe_areas;
+                cx.notify();
+            })
+        });
         let viewer = cx.entity();
-        let masking = self.masks.on;
-        let mask_toggle = Button::new("viewer-masks")
-            .ghost()
-            .xsmall()
-            .toggled(masking)
-            .tooltip("Masks")
-            .child(glyph(
-                Glyph::Mask,
-                px(13.),
-                if masking { fg } else { muted },
-            ))
-            .on_click(move |_, _, cx| {
+        let masks = toggle("viewer-masks", IconName::Drama, "Masks", self.masks.on).on_click(
+            move |_, _, cx| {
                 viewer.update(cx, |this, cx| {
                     this.masks.on = !this.masks.on;
                     this.masks.cancel();
@@ -1335,153 +1307,330 @@ impl ViewerPanel {
                     }
                     cx.notify();
                 })
-            });
-        let tools = masking.then(|| {
-            let tool = self.masks.tool;
-            let tinted = self.masks.tinted;
-            let viewer = cx.entity();
-            let tint = {
-                let viewer = viewer.clone();
-                Button::new("viewer-mask-tint")
-                    .ghost()
-                    .xsmall()
-                    .toggled(tinted)
-                    .tooltip("Show what masks cut away")
-                    .child(glyph(
-                        Glyph::MaskOverlay,
-                        px(13.),
-                        if tinted { fg } else { muted },
-                    ))
-                    .on_click(move |_, _, cx| {
-                        viewer.update(cx, |this, cx| {
-                            this.masks.tinted = !this.masks.tinted;
-                            cx.notify();
-                        })
-                    })
-            };
-            let person = {
-                let viewer = viewer.clone();
-                Button::new("viewer-mask-person")
-                    .ghost()
-                    .xsmall()
-                    .tooltip("Remove background")
-                    .child(glyph(Glyph::Person, px(13.), muted))
-                    .on_click(move |_, _, cx| {
-                        viewer.update(cx, |this, cx| {
-                            this.masks.cancel();
-                            this.masks.tool = None;
-                            this.remove_background(cx);
-                            cx.notify();
-                        })
-                    })
-            };
-            h_flex()
-                .gap_1()
-                .child(person)
-                .children(
-                    [
-                        (masks::Tool::Subject, Glyph::Subject, "Subject"),
-                        (masks::Tool::Rectangle, Glyph::MaskRect, "Rectangle"),
-                        (masks::Tool::Ellipse, Glyph::MaskEllipse, "Ellipse"),
-                        (masks::Tool::Pen, Glyph::Pen, "Pen"),
-                    ]
-                    .into_iter()
-                    .map(|(t, g, tip)| {
-                        let on = tool == Some(t);
-                        let viewer = viewer.clone();
-                        Button::new(SharedString::from(format!("viewer-mask-{tip}")))
-                            .ghost()
-                            .xsmall()
-                            .toggled(on)
-                            .tooltip(tip)
-                            .child(glyph(g, px(13.), if on { fg } else { muted }))
-                            .on_click(move |_, _, cx| {
-                                viewer.update(cx, |this, cx| {
-                                    this.masks.cancel();
-                                    if this.masks.tool == Some(t) {
-                                        this.masks.tool = None;
-                                    } else if t == masks::Tool::Subject {
-                                        this.pick_subject_tool(cx);
-                                    } else {
-                                        this.masks.tool = Some(t);
-                                    }
-                                    cx.notify();
-                                })
-                            })
-                    }),
-                )
-                .child(tint)
-        });
+            },
+        );
         let viewer = cx.entity();
-        let pin = self.gizmo.corner_pin;
-        let pin_toggle = Button::new("viewer-corner-pin")
+        let pin = toggle(
+            "viewer-corner-pin",
+            IconName::SquareDashed,
+            "Corner pin",
+            self.gizmo.corner_pin,
+        )
+        .on_click(move |_, _, cx| {
+            viewer.update(cx, |this, cx| {
+                this.gizmo.corner_pin = !this.gizmo.corner_pin;
+                if this.gizmo.corner_pin {
+                    this.masks.on = false;
+                    this.masks.cancel();
+                }
+                cx.notify();
+            })
+        });
+        header
+            .child(zoom_menu)
+            .child(div().flex_none().w(px(1.)).h(px(14.)).bg(t::LN))
+            .child(safe)
+            .when(!opened, |h| h.child(masks).child(pin))
+    }
+
+    /// Mask mode's tools under the header: background removal, the
+    /// drawing tools and the cut-away tint, with the picture's mask count.
+    fn mask_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let count = self
+            .gizmo
+            .active(&state.selection.clips, self.requested)
+            .and_then(|shape| state.bus.project().timeline.clip(shape.clip))
+            .map_or(0, |(_, clip)| clip.masks.len());
+        let tool = self.masks.tool;
+        let viewer = cx.entity();
+        let person = {
+            let viewer = viewer.clone();
+            Button::new("viewer-mask-person")
+                .ghost()
+                .small()
+                .icon(IconName::UserRound)
+                .tooltip("Remove background")
+                .on_click(move |_, _, cx| {
+                    viewer.update(cx, |this, cx| {
+                        this.masks.cancel();
+                        this.masks.tool = None;
+                        this.remove_background(cx);
+                        cx.notify();
+                    })
+                })
+        };
+        let tools = [
+            (masks::Tool::Subject, IconName::WandSparkles, "Subject"),
+            (masks::Tool::Rectangle, IconName::Square, "Rectangle"),
+            (masks::Tool::Ellipse, IconName::Circle, "Ellipse"),
+            (masks::Tool::Pen, IconName::PenTool, "Pen"),
+        ]
+        .into_iter()
+        .map(|(t, icon, tip)| {
+            let viewer = viewer.clone();
+            Button::new(SharedString::from(format!("viewer-mask-{tip}")))
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(tip)
+                .selected(tool == Some(t))
+                .on_click(move |_, _, cx| {
+                    viewer.update(cx, |this, cx| {
+                        this.masks.cancel();
+                        if this.masks.tool == Some(t) {
+                            this.masks.tool = None;
+                        } else if t == masks::Tool::Subject {
+                            this.pick_subject_tool(cx);
+                        } else {
+                            this.masks.tool = Some(t);
+                        }
+                        cx.notify();
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+        let tinted = self.masks.tinted;
+        let tint = Button::new("viewer-mask-tint")
             .ghost()
-            .xsmall()
-            .toggled(pin)
-            .tooltip("Corner pin")
-            .child(glyph(
-                Glyph::CornerPin,
-                px(13.),
-                if pin { fg } else { muted },
-            ))
+            .small()
+            .icon(IconName::Contrast)
+            .tooltip("Show what masks cut away")
+            .selected(tinted)
+            .accent(tinted)
             .on_click(move |_, _, cx| {
                 viewer.update(cx, |this, cx| {
-                    this.gizmo.corner_pin = !this.gizmo.corner_pin;
-                    if this.gizmo.corner_pin {
-                        this.masks.on = false;
-                        this.masks.cancel();
-                    }
+                    this.masks.tinted = !this.masks.tinted;
                     cx.notify();
                 })
             });
         h_flex()
             .flex_none()
-            .h(px(CONTROLS_HEIGHT))
-            .px_2()
-            .gap_2()
-            .border_t_1()
-            .border_color(border)
-            .text_xs()
-            .child(
-                Button::new("viewer-play")
-                    .ghost()
-                    .xsmall()
-                    .tooltip(if playing {
-                        "Pause (Space)"
-                    } else {
-                        "Play (Space)"
-                    })
-                    .child(glyph(
-                        if playing { Glyph::Pause } else { Glyph::Play },
-                        px(13.),
-                        fg,
-                    ))
-                    .on_click(move |_, _, cx| entity.update(cx, |s, cx| s.toggle_play(cx))),
-            )
-            .child(div().text_color(fg).child(t.timecode(rate)))
-            .children(opened)
-            .when(program, |d| {
-                d.child(div().flex_1())
-                    .children(source.map(|(tc, name)| {
-                        h_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .text_color(muted)
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(name),
-                            )
-                            .child(div().flex_none().child(tc))
-                    }))
-                    .children(tools)
-                    .child(mask_toggle)
-                    .child(pin_toggle)
+            .h(t::PANEL_HEADER)
+            .px(px(8.))
+            .gap(px(2.))
+            .bg(t::G)
+            .border_b_1()
+            .border_color(t::LN)
+            .child(person)
+            .children(tools)
+            .child(div().flex_none().w(px(1.)).h(px(14.)).mx(px(4.)).bg(t::LN))
+            .child(tint)
+            .child(div().flex_1())
+            .when(count > 0, |d| {
+                d.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(t::T3)
+                        .child(match count {
+                            1 => "1 mask".to_string(),
+                            n => format!("{n} masks"),
+                        }),
+                )
             })
-            .child(safe_toggle)
-            .child(zoom_menu)
+    }
+
+    /// The transport: timecode and duration, the transport buttons around
+    /// play, and the shuttle speed and in/out points (a source's seek bar).
+    fn transport(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let project = state.monitor_project();
+        let rate = project.timeline.settings.rate;
+        let playing = state.monitor_playing();
+        let source = state.source_picture();
+        let timecode = h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_baseline()
+            .gap(px(10.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .font_family(t::mono())
+            .child(
+                div()
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t::T1)
+                    .child(state.monitor_time().timecode(rate)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(t::T3)
+                    .child(format!("/ {}", project.timeline.duration().timecode(rate))),
+            );
+
+        let entity = self.state.clone();
+        let play = div()
+            .id("viewer-play")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(32.))
+            .mx(px(4.))
+            .rounded_full()
+            .bg(t::T1)
+            .cursor_pointer()
+            .hover(|s| s.bg(t::alpha(t::T1, 0.85)))
+            .tooltip(Tooltip::with_kbd(
+                if playing { "Pause" } else { "Play" },
+                Some("Space"),
+            ))
+            .on_click(move |_, _, cx| entity.update(cx, |s, cx| s.toggle_play(cx)))
+            .child(
+                Icon::new(if playing {
+                    IconName::Pause
+                } else {
+                    IconName::Play
+                })
+                .size(px(14.))
+                .color(t::G),
+            );
+
+        let marked = state.in_out.filter(|_| source.is_none());
+        let step = |id: &'static str, icon, tip: &'static str, kbd: &'static str| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip_kbd(tip, kbd)
+        };
+        let action = |a: &'static dyn Action| {
+            let state = self.state.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                super::timeline::transport(&state, a, cx)
+            }
+        };
+        let (mark_in, mark_out) = (self.state.clone(), self.state.clone());
+        let buttons = h_flex().flex_none().gap(px(2.)).map(|d| {
+            if source.is_some() {
+                return d.child(play);
+            }
+            d.child(
+                step("viewer-mark-in", IconName::ArrowRightToLine, "Mark in", "I")
+                    .when(marked.is_some(), |b| b.text_color(t::T1))
+                    .on_click(move |_, _, cx| mark_in.update(cx, |s, cx| s.mark_in(cx))),
+            )
+            .child(
+                step("viewer-prev-cut", IconName::SkipBack, "Previous cut", "Up")
+                    .on_click(action(&PrevCut)),
+            )
+            .child(
+                step(
+                    "viewer-prev-frame",
+                    IconName::StepBack,
+                    "Previous frame",
+                    "Left",
+                )
+                .on_click(action(&PrevFrame)),
+            )
+            .child(play)
+            .child(
+                step(
+                    "viewer-next-frame",
+                    IconName::StepForward,
+                    "Next frame",
+                    "Right",
+                )
+                .on_click(action(&NextFrame)),
+            )
+            .child(
+                step("viewer-next-cut", IconName::SkipForward, "Next cut", "Down")
+                    .on_click(action(&NextCut)),
+            )
+            .child(
+                step(
+                    "viewer-mark-out",
+                    IconName::ArrowLeftToLine,
+                    "Mark out",
+                    "O",
+                )
+                .when(marked.is_some(), |b| b.text_color(t::T1))
+                .on_click(move |_, _, cx| mark_out.update(cx, |s, cx| s.mark_out(cx))),
+            )
+        });
+
+        let speed = state.play_speed;
+        let shuttling = source.is_none() && state.playing && speed != 1.0;
+        let mark = |label: &'static str, at: Time| {
+            h_flex()
+                .gap(px(4.))
+                .child(div().text_color(t::T3).child(label))
+                .child(div().font_family(t::mono()).child(short_timecode(at, rate)))
+        };
+        let seek = source.filter(|s| s.can_play()).map(|s| {
+            let item = s.item().clone();
+            let state = self.state.clone();
+            seek_bar(
+                s.fraction(),
+                move |f, cx| state.update(cx, |s, cx| s.seek_source(&item, f, cx)),
+                cx,
+            )
+        });
+        let trailing = h_flex()
+            .flex_1()
+            .min_w_0()
+            .justify_end()
+            .gap(px(10.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(11.))
+            .text_color(t::T2)
+            .when(shuttling, |d| {
+                d.child(
+                    div()
+                        .px(px(5.))
+                        .rounded(t::RADIUS_SM)
+                        .bg(t::R1)
+                        .font_family(t::mono())
+                        .text_size(px(10.))
+                        .child(format!(
+                            "{}{}×",
+                            if speed < 0.0 { "\u{2212}" } else { "" },
+                            speed.abs()
+                        )),
+                )
+            })
+            .children(marked.map(|r| {
+                h_flex()
+                    .gap(px(10.))
+                    .child(mark("In", r.start))
+                    .child(mark("Out", r.end))
+            }))
+            .children(seek);
+
+        h_flex()
+            .flex_none()
+            .h(px(TRANSPORT_HEIGHT))
+            .px(px(12.))
+            .gap(px(12.))
+            .border_t_1()
+            .border_color(t::LN)
+            .child(timecode)
+            .child(buttons)
+            .child(trailing)
+    }
+
+    /// What the frame's corner names while paused: the source, or the
+    /// track and file of the topmost picture and where in it the playhead
+    /// is.
+    fn frame_label(&self, state: &EditorState) -> Option<SharedString> {
+        if let Some(source) = state.source_picture() {
+            return Some(item_name(source.item()).into());
+        }
+        let project = state.monitor_project();
+        let t = state.monitor_time();
+        let (track, clip) = topmost_video_clip(&project.timeline, t)?;
+        let item = project.media(clip.media()?)?;
+        let rate = item
+            .info
+            .as_ref()
+            .and_then(|i| i.video.as_ref())
+            .map(|v| v.rate)
+            .unwrap_or(project.timeline.settings.rate);
+        let at = clip.to_source(t)?.timecode(rate);
+        Some(format!("{} · {} · {at}", track.name, item_name(item)).into())
     }
 }
 
@@ -1504,10 +1653,38 @@ impl Render for ViewerPanel {
 
         let picked = self.picked(cx);
         let state = self.state.read(cx);
+        if let Some(source) = state.source_picture() {
+            self.last_source = Some(source.item().id);
+        }
+        // The mixer shows the master in Audio; Deliver has no meter.
+        let metered = matches!(
+            state.workspace,
+            Workspace::Edit | Workspace::Captions | Workspace::Color
+        );
+        if metered {
+            for (display, level) in self.meters.iter_mut().zip(audio::channels()) {
+                display.update(level.take());
+            }
+            if self.meters.iter().any(|m| !m.is_silent()) {
+                window.request_animation_frame();
+            }
+        }
+        let program = state.source_picture().is_none();
         let project = state.monitor_project();
         let settings = project.timeline.settings.clone();
         let sequence = (settings.width.max(1), settings.height.max(1));
         let aspect = sequence.0 as f32 / sequence.1 as f32;
+        let t = state.monitor_time();
+        let audio_only = program
+            && !project
+                .timeline
+                .tracks
+                .iter()
+                .any(|tr| tr.kind != TrackKind::Audio && tr.clip_at(t).is_some())
+            && !audible_clips_at(&project.timeline, t).is_empty();
+        let label = (!state.monitor_playing() && !audio_only)
+            .then(|| self.frame_label(state))
+            .flatten();
         let picture = self.picture.clone();
         let overlay = self.editable(state).then(|| {
             self.gizmo.overlay(
@@ -1518,6 +1695,7 @@ impl Render for ViewerPanel {
                 state.preview.is_none() && !self.masks.on,
             )
         });
+        let masking = self.masks.on && program;
         let mask_overlay = (self.editable(state) && self.masks.on)
             .then(|| {
                 let shape = self
@@ -1538,24 +1716,17 @@ impl Render for ViewerPanel {
                 ))
             })
             .flatten();
-        let theme = cx.theme();
-        let bg = theme.background;
-        let colors = [
-            theme.primary,
-            theme.magenta,
-            theme.muted_foreground.opacity(0.7),
-        ];
         let width_cell = self.frame_width.clone();
         let rect_cell = self.frame_rect.clone();
         let scale_cell = self.scale_factor.clone();
         let (zoom, pan) = (self.zoom, self.pan);
         let entity = cx.entity();
 
-        let program = canvas(
+        let program_view = canvas(
             move |bounds, window, _| {
                 let sf = window.scale_factor();
                 let frame = match zoom {
-                    None => fit(bounds, aspect, px(8.)),
+                    None => fit(bounds, aspect, px(12.)),
                     Some(z) => {
                         let size = size(
                             px(sequence.0 as f32 * z / sf),
@@ -1578,8 +1749,7 @@ impl Render for ViewerPanel {
                 width_cell.set(width.clamp(160, max));
                 frame
             },
-            move |bounds, frame, window, _| {
-                window.paint_quad(fill(bounds, bg));
+            move |bounds, frame, window, cx| {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     window.paint_quad(fill(frame, black()));
                     if let Some(image) = picture {
@@ -1588,11 +1758,27 @@ impl Render for ViewerPanel {
                     }
                     if let Some(overlay) = &overlay {
                         let screen = Screen { frame, sequence };
-                        gizmo::paint(overlay, &screen, colors, window);
+                        gizmo::paint(overlay, &screen, window);
                     }
                     if let Some(overlay) = &mask_overlay {
                         let screen = Screen { frame, sequence };
-                        masks::paint(overlay, &screen, colors[1], window);
+                        masks::paint(overlay, &screen, window);
+                    }
+                    if let Some(text) = label {
+                        let run = TextRun {
+                            len: text.len(),
+                            font: font(t::mono()),
+                            color: t::alpha(t::ON_AC, 0.7).into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let line = window.text_system().shape_line(text, px(10.), &[run], None);
+                        let at = point(
+                            frame.origin.x.max(bounds.origin.x) + px(10.),
+                            frame.origin.y.max(bounds.origin.y) + px(8.),
+                        );
+                        let _ = line.paint(at, px(14.), TextAlign::Left, None, window, cx);
                     }
                 });
                 let e = entity.clone();
@@ -1620,9 +1806,10 @@ impl Render for ViewerPanel {
         };
         let stage = div()
             .id("viewer-program")
+            .relative()
             .flex_1()
-            .min_h_0()
-            .w_full()
+            .min_w_0()
+            .h_full()
             .overflow_hidden()
             .cursor(cursor)
             .on_mouse_down(
@@ -1643,11 +1830,25 @@ impl Render for ViewerPanel {
             .on_scroll_wheel(
                 cx.listener(|this, ev: &ScrollWheelEvent, _, cx| this.scrolled(ev, cx)),
             )
-            .child(program);
+            .child(program_view)
+            .when(audio_only, |d| {
+                d.child(
+                    v_flex()
+                        .absolute()
+                        .inset_0()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(t::T2)
+                        .child(Icon::new(IconName::AudioLines).size(px(18.)).color(t::T3))
+                        .child("Audio only"),
+                )
+            });
 
-        v_flex()
+        let focused = self.focus.contains_focused(window, cx);
+        div()
             .size_full()
-            .bg(bg)
             .key_context("Viewer")
             .on_action(cx.listener(|this, a: &TogglePlay, _, cx| {
                 super::timeline::transport(&this.state, a, cx)
@@ -1699,17 +1900,122 @@ impl Render for ViewerPanel {
                 });
             }))
             .child(
-                v_flex()
-                    .size_full()
-                    .track_focus(&self.focus)
-                    .when(picked, |d| d.key_context("Gizmo"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
-                    )
-                    .child(stage)
-                    .child(self.controls(cx)),
+                Panel::new().focused(focused).child(
+                    v_flex()
+                        .size_full()
+                        .min_h_0()
+                        .track_focus(&self.focus)
+                        .when(picked, |d| d.key_context("Gizmo"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
+                        )
+                        .child(self.header(cx))
+                        .when(masking, |d| d.child(self.mask_tools(cx)))
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .bg(t::G)
+                                .child(stage)
+                                .when(metered, |d| d.child(meter(&self.meters))),
+                        )
+                        .child(self.transport(cx)),
+                ),
             )
+    }
+}
+
+/// The master's meter beside the frame: a bar per side, rising through
+/// the hot and loud zones, with its peak hold and the louder side's held
+/// peak in dBFS under it.
+fn meter(sides: &[meter::Display; 2]) -> impl IntoElement {
+    let hold = sides.iter().map(|d| d.hold).fold(0., f32::max);
+    let (readout, color) = if hold < 1e-5 {
+        ("\u{2212}\u{221e}".to_string(), t::T3)
+    } else {
+        let db = 20. * hold.log10();
+        let sign = if db < -0.05 { "\u{2212}" } else { "+" };
+        let color = match meter::position(hold) {
+            _ if hold >= 1.0 => t::ERR,
+            p if p >= LOUD => t::WARN,
+            _ => t::T3,
+        };
+        (format!("{sign}{:.1}", db.abs()), color)
+    };
+    let bar = |d: &meter::Display| {
+        let level = meter::position(d.peak);
+        let held = meter::position(d.hold);
+        let zone = |from: f32, to: f32, color: Rgba| {
+            let h = (level.min(to) - from).max(0.);
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(relative(from))
+                .h(relative(h))
+                .bg(color)
+        };
+        let hold_color = match held {
+            _ if d.hold >= 1.0 => t::ON_AC,
+            p if p >= HOT => t::WARN,
+            _ => t::OK,
+        };
+        div()
+            .relative()
+            .w(px(6.))
+            .h_full()
+            .rounded(px(2.))
+            .overflow_hidden()
+            .bg(t::R1)
+            .child(zone(0., HOT, t::OK))
+            .child(zone(HOT, LOUD, t::WARN))
+            .child(zone(LOUD, 1., t::ERR))
+            .when(held > 0., |b| {
+                b.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(relative(1. - held))
+                        .h(px(2.))
+                        .bg(hold_color),
+                )
+            })
+    };
+    v_flex()
+        .flex_none()
+        .w(px(22.))
+        .h_full()
+        .pt(px(14.))
+        .pb(px(10.))
+        .mr(px(12.))
+        .items_center()
+        .gap(px(4.))
+        .child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .gap(px(3.))
+                .children(sides.iter().map(bar)),
+        )
+        .child(
+            div()
+                .font_family(t::mono())
+                .text_size(px(9.))
+                .text_color(color)
+                .whitespace_nowrap()
+                .child(readout),
+        )
+}
+
+/// `t` as a timecode, without the hours when there are none.
+fn short_timecode(t: Time, rate: koo_core::Rate) -> String {
+    let tc = t.timecode(rate);
+    match tc.strip_prefix("00:") {
+        Some(rest) => rest.to_string(),
+        None => tc,
     }
 }
 

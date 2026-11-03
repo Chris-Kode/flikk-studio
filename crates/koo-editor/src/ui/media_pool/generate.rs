@@ -1,21 +1,19 @@
 //! Generate: music or a sound effect from a description, made by the
 //! provider set in Settings → Integrations, landing in the Music Generated
 //! or Sound Effects Generated bin. Music runs as long as In/Out when they
-//! are set. A row for each generation running (any kind) shows where it is.
+//! are set. Each generation running (any kind) shows in the pool until it
+//! lands.
 
-use super::MediaPoolPanel;
-use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+use super::{MediaPoolPanel, form, thumb_badge};
+use crate::state::{EditorState, Generating};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DialogExt as _, Icon, IconName, Progress, Segmented, Spinner, Switch, Textarea,
+    Tooltip, h_flex, v_flex,
 };
+use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::slider::{SliderEvent, SliderState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::cloud::{Capability, CloudError, GenerateRequest, Stage};
 use koo_core::time::Time;
@@ -41,6 +39,20 @@ impl Kind {
         }
     }
 
+    pub fn icon(self) -> IconName {
+        match self {
+            Kind::Music => IconName::Music,
+            Kind::SoundEffect => IconName::AudioWaveform,
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Kind::Music => "Warm lo-fi beat with soft piano, slow and calm…",
+            Kind::SoundEffect => "Heavy wooden door creaking open in a stone hall…",
+        }
+    }
+
     /// Seconds: shortest, longest, and the step between.
     fn lengths(self) -> (f32, f32, f32) {
         match self {
@@ -54,21 +66,45 @@ impl Kind {
 /// or looping (sound effects).
 pub struct GenerateForm {
     state: Entity<EditorState>,
+    /// What a provider can make, for the switch between them.
+    kinds: Vec<Kind>,
     kind: Kind,
     prompt: Entity<TextareaState>,
     length: Entity<SliderState>,
     /// Instrumental music, or a sound effect that loops.
     option: bool,
-    _subscriptions: Vec<Subscription>,
+    _prompt: Subscription,
+    _length: Subscription,
 }
 
 impl GenerateForm {
     fn new(
         state: Entity<EditorState>,
+        kinds: Vec<Kind>,
         kind: Kind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let prompt = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 6)
+                .placeholder(kind.placeholder())
+        });
+        let length = Self::slider(&state, kind, cx);
+        Self {
+            _prompt: cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
+            _length: cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
+            state,
+            kinds,
+            kind,
+            prompt,
+            length,
+            option: kind == Kind::Music,
+        }
+    }
+
+    /// The length slider for `kind`: music starts as long as In/Out.
+    fn slider(state: &Entity<EditorState>, kind: Kind, cx: &mut App) -> Entity<SliderState> {
         let (min, max, step) = kind.lengths();
         let in_out = state
             .read(cx)
@@ -78,33 +114,27 @@ impl GenerateForm {
             Kind::Music => in_out.unwrap_or(30.),
             Kind::SoundEffect => 5.,
         };
-        let prompt = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(3, 6)
-                .placeholder(match kind {
-                    Kind::Music => "Warm lo-fi beat with soft piano, slow and calm…",
-                    Kind::SoundEffect => "Heavy wooden door creaking open in a stone hall…",
-                })
-        });
-        let length = cx.new(|_| {
+        cx.new(|_| {
             SliderState::new()
                 .min(min)
                 .max(max)
                 .step(step)
                 .default_value(default.clamp(min, max))
-        });
-        let _subscriptions = vec![
-            cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
-        ];
-        Self {
-            state,
-            kind,
-            prompt,
-            length,
-            option: kind == Kind::Music,
-            _subscriptions,
+        })
+    }
+
+    fn set_kind(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
+        if kind == self.kind {
+            return;
         }
+        self.kind = kind;
+        self.option = kind == Kind::Music;
+        self.prompt.update(cx, |p, cx| {
+            p.set_placeholder(kind.placeholder(), window, cx)
+        });
+        self.length = Self::slider(&self.state, kind, cx);
+        self._length = cx.subscribe(&self.length, |_, _, _: &SliderEvent, cx| cx.notify());
+        cx.notify();
     }
 
     fn request(&self, cx: &App) -> Option<GenerateRequest> {
@@ -130,49 +160,54 @@ impl GenerateForm {
         })
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = self.request(cx) {
-            self.state.update(cx, |s, cx| s.generate(request, cx));
-            window.close_dialog(cx);
-        }
+    /// Start it; `true` once it is on its way.
+    fn submit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(request) = self.request(cx) else {
+            return false;
+        };
+        self.state.update(cx, |s, cx| s.generate(request, cx));
+        true
     }
 }
 
 impl Render for GenerateForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let seconds = self.length.read(cx).value().start();
-        let muted = cx.theme().muted_foreground;
         let option = match self.kind {
             Kind::Music => "Instrumental",
             Kind::SoundEffect => "Loop",
         };
+        let kinds = self.kinds.clone();
+        let selected = kinds.iter().position(|k| *k == self.kind).unwrap_or(0);
         v_flex()
-            .gap_4()
-            .child(Textarea::new(&self.prompt).text_sm())
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex().justify_between().text_sm().child("Length").child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(length_label(seconds)),
-                        ),
-                    )
-                    .child(Slider::new(&self.length)),
-            )
-            .child(
-                h_flex().justify_between().text_sm().child(option).child(
-                    Switch::new("generate-option")
-                        .small()
-                        .checked(self.option)
-                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            this.option = *on;
-                            cx.notify();
+            .gap(px(10.))
+            .when(kinds.len() > 1, |el| {
+                el.child(
+                    Segmented::new("generate-kind")
+                        .items(kinds.iter().map(|k| k.label()))
+                        .selected(selected)
+                        .fill()
+                        .on_click(cx.listener(move |this, ix: &usize, window, cx| {
+                            if let Some(kind) = kinds.get(*ix) {
+                                this.set_kind(*kind, window, cx);
+                            }
                         })),
-                ),
-            )
+                )
+            })
+            .child(Textarea::new(&self.prompt))
+            .child(form::row(
+                "Length",
+                form::slider(&self.length, length_label(seconds)),
+            ))
+            .child(form::row(
+                option,
+                Switch::new("generate-option")
+                    .checked(self.option)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.option = *on;
+                        cx.notify();
+                    })),
+            ))
     }
 }
 
@@ -199,110 +234,188 @@ impl MediaPoolPanel {
         if window.has_active_dialog(cx) {
             return;
         }
-        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kind, window, cx));
-        window.open_dialog(cx, move |dialog, _, _| {
+        let mut kinds = self.can_generate(cx);
+        if !kinds.contains(&kind) {
+            kinds = vec![kind];
+        }
+        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kinds, kind, window, cx));
+        window.open_dialog(cx, move |dialog, _, cx| {
             let submit = form.clone();
+            let ready = form.read(cx).request(cx).is_some();
             dialog
-                .title(kind.label())
+                .title("Generate")
                 .w(px(440.))
                 .child(form.clone())
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("generate-cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("generate-ok")
-                                .primary()
-                                .label("Generate")
-                                .on_click(move |_, window, cx| {
-                                    submit.update(cx, |f, cx| f.submit(window, cx))
-                                }),
-                        ),
-                )
+                .confirm("Generate", move |_, cx| {
+                    submit.update(cx, |f, cx| f.submit(cx))
+                })
+                .confirm_disabled(!ready)
         });
-    }
-
-    /// A row for each generation running or failed, above the items.
-    pub(super) fn generations(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let generating = self.state.read(cx).generating.clone();
-        let theme = cx.theme().clone();
-        generating
-            .into_iter()
-            .map(|g| {
-                let id = g.id;
-                let summary: SharedString = g.request.summary().into();
-                let lead = match &g.failed {
-                    None => Spinner::new().xsmall().into_any_element(),
-                    Some(e) => {
-                        let message: SharedString = failure(e).into();
-                        div()
-                            .id(("generation-failed", id as usize))
-                            .child(
-                                Icon::new(IconName::CircleAlert)
-                                    .small()
-                                    .text_color(theme.red),
-                            )
-                            .tooltip(move |window, cx| {
-                                let message = message.clone();
-                                Tooltip::element(move |_, _| {
-                                    div().max_w(px(320.)).child(message.clone())
-                                })
-                                .build(window, cx)
-                            })
-                            .into_any_element()
-                    }
-                };
-                let stage = g.task.stage();
-                let running = g.failed.is_none();
-                // A provider that follows it can stop it; one request can't.
-                let action = if running && g.task.can_stop() {
-                    let stopping = g.task.cancelled();
-                    Button::new(("generation-stop", id as usize))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Square)
-                        .tooltip("Stop")
-                        .disabled(stopping)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.stop_generation(id, cx))
-                        }))
-                } else {
-                    Button::new(("generation-dismiss", id as usize))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .disabled(running)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.dismiss_generation(id, cx))
-                        }))
-                };
-                h_flex()
-                    .h(px(28.))
-                    .px_2()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(lead)
-                    .child(div().flex_1().min_w_0().truncate().child(summary))
-                    .children(running.then(|| stage_label(stage)).flatten())
-                    .child(action)
-                    .into_any_element()
-            })
-            .collect()
     }
 }
 
-/// Where a running generation is, when there is more to say than the
-/// spinner does: its place in the queue, or how much has come down.
-fn stage_label(stage: Stage) -> Option<String> {
+impl MediaPoolPanel {
+    /// A generation on its way, as a tile among the items.
+    pub(super) fn generation_tile(&self, g: &Generating, cx: &mut Context<Self>) -> AnyElement {
+        let running = g.failed.is_none();
+        let id = g.id as usize;
+        let group = SharedString::from(format!("generation-{id}"));
+        let center = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(running, |d| d.child(progress(g).w(relative(0.6))))
+            .when(!running, |d| {
+                d.child(Icon::new(IconName::CircleAlert).size(px(16.)).color(t::ERR))
+            });
+        let thumb = div()
+            .relative()
+            .w_full()
+            .aspect_ratio(16. / 9.)
+            .rounded(t::RADIUS_SM)
+            .overflow_hidden()
+            .bg(t::alpha(t::C, 0.1))
+            .child(center)
+            .child(
+                thumb_badge()
+                    .text_color(t::TI)
+                    .child(Icon::new(IconName::Sparkles).size(px(9.)))
+                    .child(g.request.capability().label()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .right(px(3.))
+                    .opacity(0.)
+                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .child(self.generation_action(g, cx)),
+            );
+        div()
+            .id(ElementId::Name(group.clone()))
+            .group(group)
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .text_size(px(11.))
+            .child(thumb)
+            .child(
+                div()
+                    .mt(px(4.))
+                    .truncate()
+                    .text_color(t::T2)
+                    .child(g.request.summary()),
+            )
+            .child(self.generation_meta(g))
+            .into_any_element()
+    }
+
+    /// A generation on its way, as a row of the list.
+    pub(super) fn generation_row(&self, g: &Generating, cx: &mut Context<Self>) -> AnyElement {
+        let running = g.failed.is_none();
+        h_flex()
+            .h(px(30.))
+            .gap(px(8.))
+            .px(px(8.))
+            .text_size(px(12.))
+            .child(
+                h_flex()
+                    .w(px(36.))
+                    .flex_none()
+                    .justify_center()
+                    .child(if running {
+                        Spinner::new().size(px(12.)).into_any_element()
+                    } else {
+                        Icon::new(IconName::CircleAlert)
+                            .size(px(13.))
+                            .color(t::ERR)
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t::T2)
+                            .child(g.request.summary()),
+                    )
+                    .when(running, |d| d.child(progress(g).w(px(60.)).flex_none())),
+            )
+            .child(self.generation_meta(g).flex_none())
+            .child(self.generation_action(g, cx))
+            .into_any_element()
+    }
+
+    /// Where a generation is, or why it failed (in full on hover).
+    fn generation_meta(&self, g: &Generating) -> Stateful<Div> {
+        let line = div()
+            .id(("generation-meta", g.id as usize))
+            .text_size(px(10.))
+            .text_color(t::T3)
+            .truncate();
+        match &g.failed {
+            Some(e) => {
+                let message: SharedString = failure(e).into();
+                line.text_color(t::ERR)
+                    .child("Failed")
+                    .tooltip(Tooltip::text(message))
+            }
+            None => line.child(stage_label(g.task.stage())),
+        }
+    }
+
+    /// Stop a running generation a provider follows, or dismiss a failed
+    /// one; one request can't be stopped.
+    fn generation_action(&self, g: &Generating, cx: &mut Context<Self>) -> Button {
+        let id = g.id;
+        let running = g.failed.is_none();
+        if running && g.task.can_stop() {
+            Button::new(("generation-stop", id as usize))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Square)
+                .tooltip("Stop")
+                .disabled(g.task.cancelled())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.stop_generation(id, cx))
+                }))
+        } else {
+            Button::new(("generation-dismiss", id as usize))
+                .ghost()
+                .xsmall()
+                .icon(IconName::X)
+                .tooltip("Dismiss")
+                .disabled(running)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.dismiss_generation(id, cx))
+                }))
+        }
+    }
+}
+
+/// How far a generation has come down, or a sweep until it says.
+fn progress(g: &Generating) -> Progress {
+    match g.task.stage() {
+        Stage::Downloading(f) => Progress::new().value(f),
+        _ => Progress::new().indeterminate(),
+    }
+}
+
+/// Where a running generation is: its place in the queue, or how much has
+/// come down.
+fn stage_label(stage: Stage) -> String {
     match stage {
-        Stage::Queued(Some(ahead)) if ahead > 0 => Some(format!("Queued · {ahead}")),
-        Stage::Queued(_) => Some("Queued".into()),
-        Stage::Downloading(f) => Some(format!("{:.0}%", f * 100.)),
-        Stage::Starting | Stage::Running => None,
+        Stage::Queued(Some(ahead)) if ahead > 0 => format!("Queued · {ahead} ahead"),
+        Stage::Queued(_) => "Queued".into(),
+        Stage::Downloading(f) => format!("Downloading · {:.0}%", f * 100.),
+        Stage::Starting | Stage::Running => "Generating".into(),
     }
 }
 

@@ -21,8 +21,8 @@ pub mod transcript;
 pub mod viewer;
 pub mod voices;
 
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
+use kit::theme as t;
 
 /// Drag payload for pool media dropped on the timeline or viewer.
 #[derive(Clone, Debug)]
@@ -32,8 +32,8 @@ pub struct MediaDrag {
 }
 
 impl Render for MediaDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        drag_chip(self.name.clone(), cx)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        drag_chip(self.name.clone())
     }
 }
 
@@ -46,8 +46,8 @@ pub struct SoundDrag {
 }
 
 impl Render for SoundDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        drag_chip(self.name.clone(), cx)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        drag_chip(self.name.clone())
     }
 }
 
@@ -80,8 +80,8 @@ impl FxDrag {
 }
 
 impl Render for FxDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        drag_chip(self.name.clone(), cx)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        drag_chip(self.name.clone())
     }
 }
 
@@ -94,8 +94,8 @@ pub struct AudioFxDrag {
 }
 
 impl Render for AudioFxDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        drag_chip(self.name.clone(), cx)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        drag_chip(self.name.clone())
     }
 }
 
@@ -110,21 +110,29 @@ pub struct RefDrag {
 }
 
 impl Render for RefDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let label = match self.refs.as_slice() {
             [(_, one)] => one.clone(),
             many => format!("{} items", many.len()).into(),
         };
-        drag_chip(label, cx)
+        drag_chip(label)
     }
 }
 
-fn drag_chip(label: SharedString, cx: &App) -> Div {
+/// The chip that follows the pointer while something is dragged.
+fn drag_chip(label: SharedString) -> Div {
     div()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_xs()
-        .bg(cx.theme().secondary)
+        .flex()
+        .items_center()
+        .h(px(26.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(t::TIP_LN)
+        .bg(t::TIP)
+        .shadow(t::floating_shadow())
+        .text_size(px(12.))
+        .text_color(t::T1)
+        .whitespace_nowrap()
         .child(label)
 }

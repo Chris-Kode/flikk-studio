@@ -1,26 +1,28 @@
-//! The selected clip's properties by kind. The header renames, labels,
-//! enables and retimes it. Video, overlays and generators get transform and
-//! effects (generators their program, video its color and linked audio),
-//! audio gets gain, fades and its track's mix, captions and titles get their
-//! text, timing and style.
+//! The selected clip's properties by kind. The header names the clip
+//! (double-click renames) and its menu labels and enables it. Picture clips
+//! (video, overlays, generators) page through Video, Audio, Speed, Color,
+//! Effects and Masks; audio clips get their volume, effects, fades, track
+//! mix and speed; captions and titles get their text, timing, transform and
+//! style.
 
-use super::param::{Key, format_value};
+use super::param::Key;
 use super::speed::SpeedRamp;
-use super::{InspectorPanel, section};
+use super::{InspectorPanel, View, group, label, row, wide};
 use crate::ui::caption_style::Target;
-use crate::ui::library::{FxGlyph, fx_glyph};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, IconName, Input, NumberField, PanelHeader, PopupMenuItem,
+    ScrubLabel, Switch, Tab, Tabs, Textarea, h_flex, v_flex,
+};
 use crate::ui::mixer::clip::ClipAudioFx;
-use crate::ui::timeline::glyph::{Glyph, glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, Textarea};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge};
 use koo_core::model::{Clip, ClipColor, ClipContent, Project, Timeline, Track, TrackKind};
 use koo_core::{ClipId, Time, TimeRange, TrackId};
+
+/// Speeds one click away under the rate.
+const SPEEDS: [(f64, &str); 4] = [(0.5, "0.5×"), (1., "1×"), (1.5, "1.5×"), (2., "2×")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClipKind {
@@ -43,17 +45,6 @@ impl ClipKind {
             ClipContent::Media { .. } => Self::Video,
         }
     }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Video => "Video",
-            Self::Audio => "Audio",
-            Self::Caption => "Caption",
-            Self::Title => "Title",
-            Self::Overlay => "Overlay",
-            Self::Generator => "Generator",
-        }
-    }
 }
 
 /// What the clip view needs of the clip's track.
@@ -63,16 +54,17 @@ pub(super) struct ClipTrack {
     pub kind: ClipKind,
 }
 
-/// The tabs of a picture clip; Color for media only, Audio only when it has
-/// linked audio.
+/// The pages of a picture clip; Speed and Color for media only, Audio only
+/// when it has linked audio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PictureTab {
     #[default]
     Video,
-    Effects,
-    Color,
     Audio,
     Speed,
+    Color,
+    Effects,
+    Masks,
 }
 
 impl InspectorPanel {
@@ -96,32 +88,30 @@ impl InspectorPanel {
         clip: Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let header = self.clip_header(&track, &clip, window, cx);
-        let body = match track.kind {
+    ) -> View {
+        let header = self.clip_header(&clip, cx);
+        match track.kind {
             ClipKind::Video | ClipKind::Overlay | ClipKind::Generator => {
-                self.picture_view(&clip, window, cx)
+                let (tabs, body) = self.picture_view(&clip, window, cx);
+                View {
+                    header: Some(header),
+                    tabs: Some(tabs),
+                    body,
+                }
             }
-            ClipKind::Audio => self.clip_audio_view(&track, &clip, window, cx),
-            ClipKind::Caption | ClipKind::Title => self.text_view(&track, &clip, window, cx),
-        };
-        v_flex()
-            .gap_4()
-            .child(header)
-            .child(body)
-            .into_any_element()
+            ClipKind::Audio => {
+                let body = self.clip_audio_view(&track, &clip, window, cx);
+                View::new(header, body)
+            }
+            ClipKind::Caption | ClipKind::Title => {
+                let body = self.text_view(&track, &clip, window, cx);
+                View::new(header, body)
+            }
+        }
     }
 
-    /// Kind, name (double-click renames), color label and enable; then the
-    /// clip's place on the timeline and, for media, its speed. Captions and
-    /// titles edit their timing in the text view instead.
-    fn clip_header(
-        &mut self,
-        track: &ClipTrack,
-        clip: &Clip,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    /// "Inspector", the clip's name (double-click renames it) and its menu.
+    fn clip_header(&mut self, clip: &Clip, cx: &mut Context<Self>) -> PanelHeader {
         let project = self.project(cx);
         let name = clip
             .name
@@ -131,121 +121,91 @@ impl InspectorPanel {
         if self.renaming.is_some_and(|id| id != clip.id) {
             self.renaming = None;
         }
-        let renaming = self.renaming == Some(clip.id);
-        let theme = cx.theme();
-        let (muted, secondary) = (theme.muted_foreground, theme.secondary);
         let id = clip.id;
-        let title: AnyElement = if renaming {
+        let title: AnyElement = if self.renaming == Some(id) {
             div()
                 .flex_1()
                 .min_w_0()
-                .child(Input::new(&self.name_field).xsmall())
+                .child(Input::new(&self.name_field).small())
                 .into_any_element()
         } else {
-            let shown = name.clone();
             div()
                 .id("clip-name")
                 .flex_1()
                 .min_w_0()
-                .text_sm()
                 .truncate()
-                .when(!clip.enabled, |d| d.text_color(muted))
-                .child(name)
+                .text_color(t::T3)
+                .when(!clip.enabled, |d| d.line_through())
+                .child(name.clone())
                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                     if ev.click_count() >= 2 {
-                        this.renaming = Some(id);
-                        let shown = shown.clone();
-                        this.name_field.update(cx, |f, cx| {
-                            f.set_value(shown, window, cx);
-                            f.focus(window, cx);
-                        });
-                        cx.notify();
+                        this.start_rename(id, window, cx);
                     }
                 }))
                 .into_any_element()
         };
-        let enabled = clip.enabled;
-        let head = h_flex()
-            .gap_1()
-            .child(
-                div()
-                    .flex_none()
-                    .mr_1()
-                    .px_1p5()
-                    .rounded_sm()
-                    .bg(secondary)
-                    .text_xs()
-                    .child(track.kind.label()),
+        PanelHeader::new()
+            .leading(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .child(div().flex_none().text_color(t::T1).child("Inspector"))
+                    .child(title),
             )
-            .child(title)
-            .child(self.color_label(clip, cx))
-            .child(
-                Button::new("clip-enabled")
-                    .ghost()
-                    .xsmall()
-                    .tooltip(if enabled { "Disable" } else { "Enable" })
-                    .child(glyph(
-                        if enabled { Glyph::Eye } else { Glyph::EyeOff },
-                        px(13.),
-                        muted,
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run(
-                            vec![Command::SetClipsEnabled {
-                                clips: vec![id],
-                                enabled: !enabled,
-                            }],
-                            "set_clips_enabled",
-                            cx,
-                        )
-                    })),
-            );
-        let timing = match track.kind {
-            ClipKind::Caption | ClipKind::Title => self.timing_fields(clip, window, cx),
-            _ => h_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!(
-                            "{} · {}",
-                            clip.range(),
-                            crate::ui::media_pool::clock(clip.duration)
-                        )),
-                )
-                .children(
-                    clip.media()
-                        .is_some()
-                        .then(|| self.speed_fields(clip, window, cx)),
-                )
-                .into_any_element(),
-        };
-        v_flex().gap_1p5().child(head).child(timing)
+            .child(self.clip_menu(clip, cx))
     }
 
-    /// Clip color label: a dot that opens the palette.
-    fn color_label(&self, clip: &Clip, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
-        let current = clip.color;
-        let id = clip.id;
-        let panel = cx.entity();
-        let dot = |c: Option<ClipColor>| {
-            div().size(px(10.)).rounded_full().map(|d| match c {
-                Some(c) => d.bg(rgb(c.rgb())),
-                None => d.border_1().border_color(muted),
-            })
+    fn start_rename(&mut self, clip: ClipId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, c)) = self.project(cx).timeline.clip(clip) else {
+            return;
         };
-        Button::new("clip-color")
+        let shown = c
+            .name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| clip_name(c, self.project(cx)));
+        self.renaming = Some(clip);
+        self.name_field.update(cx, |f, cx| {
+            f.set_value(shown, window, cx);
+            f.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Rename, enable or disable, and the colour label.
+    fn clip_menu(&self, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (id, enabled, current) = (clip.id, clip.enabled, clip.color);
+        let panel = cx.entity();
+        Button::new("clip-menu")
             .ghost()
             .xsmall()
-            .tooltip("Color")
-            .child(dot(current))
-            .dropdown_menu(move |mut menu, _, _| {
+            .icon(IconName::Ellipsis)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                let p = panel.clone();
+                menu = menu
+                    .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                        p.update(cx, |this, cx| this.start_rename(id, window, cx))
+                    }))
+                    .item({
+                        let p = panel.clone();
+                        PopupMenuItem::new(if enabled { "Disable" } else { "Enable" }).on_click(
+                            move |_, _, cx| {
+                                p.update(cx, |this, cx| {
+                                    this.run(
+                                        vec![Command::SetClipsEnabled {
+                                            clips: vec![id],
+                                            enabled: !enabled,
+                                        }],
+                                        "set_clips_enabled",
+                                        cx,
+                                    )
+                                })
+                            },
+                        )
+                    })
+                    .separator()
+                    .item(PopupMenuItem::label("Color"));
                 let set = |color: Option<ClipColor>| {
                     let panel = panel.clone();
                     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -270,15 +230,8 @@ impl InspectorPanel {
                     menu = menu.item(
                         PopupMenuItem::element(move |_, _| {
                             h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .size(px(10.))
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(border)
-                                        .bg(rgb(c.rgb())),
-                                )
+                                .gap(px(8.))
+                                .child(div().size(px(10.)).rounded_full().bg(rgb(c.rgb())))
                                 .child(c.label())
                         })
                         .checked(current == Some(c))
@@ -287,45 +240,6 @@ impl InspectorPanel {
                 }
                 menu
             })
-            .into_any_element()
-    }
-
-    /// Speed in percent, and whether changing it ripples later clips.
-    fn speed_fields(&mut self, clip: &Clip, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let shown = format!("{}%", format_value((clip.speed * 100.0) as f32, 0));
-        let editing = self
-            .speed_field
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
-        if self.speed_clip != Some(clip.id)
-            || (!editing && self.speed_field.read(cx).value() != shown)
-        {
-            self.speed_field
-                .update(cx, |f, cx| f.set_value(shown, window, cx));
-        }
-        self.speed_clip = Some(clip.id);
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .flex_none()
-            .gap_0p5()
-            .child(
-                div()
-                    .w(px(56.))
-                    .child(Input::new(&self.speed_field).xsmall()),
-            )
-            .child(
-                Button::new("speed-ripple")
-                    .ghost()
-                    .xsmall()
-                    .toggled(self.speed_ripple)
-                    .tooltip("Ripple")
-                    .child(fx_glyph(FxGlyph::Ripple, px(13.), muted))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.speed_ripple = !this.speed_ripple;
-                        cx.notify();
-                    })),
-            )
     }
 
     pub(super) fn commit_rename(&mut self, cx: &mut Context<Self>) {
@@ -345,16 +259,58 @@ impl InspectorPanel {
         }
     }
 
-    pub(super) fn commit_speed(&mut self, cx: &mut Context<Self>) {
+    /// The clip's rate with shortcuts, and whether changing it ripples
+    /// later clips.
+    fn speed_group(&mut self, clip: &Clip, cx: &mut Context<Self>) -> Div {
+        self.speed_clip = Some(clip.id);
+        let speed = clip.speed;
+        self.speed_field
+            .update(cx, |f, cx| f.set_value(speed * 100., cx));
+        let rows = if self.is_open("speed") {
+            let chips = SPEEDS.map(|(s, name)| {
+                Button::new(name)
+                    .xsmall()
+                    .label(name)
+                    .font_family(t::mono())
+                    .selected((speed - s).abs() < 1e-6)
+                    .accent((speed - s).abs() < 1e-6)
+                    .on_click(cx.listener(move |this, _, _, cx| this.commit_speed(s, cx)))
+            });
+            vec![
+                row(
+                    ScrubLabel::new(&self.speed_field, "Rate"),
+                    NumberField::new(&self.speed_field).unit("%"),
+                    None,
+                ),
+                h_flex()
+                    .flex_none()
+                    .gap(px(4.))
+                    .pl(px(104.))
+                    .pb(px(4.))
+                    .children(chips),
+                row(
+                    label("Ripple"),
+                    Switch::new("speed-ripple")
+                        .checked(self.speed_ripple)
+                        .tooltip("Move later clips with the change")
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            this.speed_ripple = *on;
+                            cx.notify();
+                        })),
+                    None,
+                ),
+            ]
+        } else {
+            Vec::new()
+        };
+        group(self.header("speed", "Speed", cx), rows)
+    }
+
+    /// Set the shown clip's speed (a fraction, 1 = normal).
+    pub(super) fn commit_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
         let Some(clip) = self.speed_clip else {
             return;
         };
-        let typed = self.speed_field.read(cx).value();
-        let Ok(percent) = typed.trim().trim_end_matches('%').trim().parse::<f64>() else {
-            cx.notify();
-            return;
-        };
-        let speed = percent / 100.0;
         let current = self.project(cx).timeline.clip(clip).map(|(_, c)| c.speed);
         if current.is_some_and(|c| (c - speed).abs() > 1e-6) {
             let ripple = self.speed_ripple;
@@ -369,18 +325,18 @@ impl InspectorPanel {
             );
         }
         // Show the stored (clamped or refused) speed again.
-        self.speed_clip = None;
         cx.notify();
     }
 
     // ---------------------------------------------------------- picture
 
+    /// The page tabs and the selected page.
     fn picture_view(
         &mut self,
         clip: &Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, AnyElement) {
         let media = matches!(clip.content, ClipContent::Media { .. });
         let sound = linked_audio(&self.project(cx).timeline, clip).map(|(track, audio)| {
             let info = ClipTrack {
@@ -389,110 +345,125 @@ impl InspectorPanel {
             };
             (info, audio.clone())
         });
-        let mut tabs = vec![
-            (PictureTab::Video, "Video"),
-            (PictureTab::Effects, "Effects"),
-        ];
-        if media {
-            tabs.push((PictureTab::Color, "Color"));
-        }
+        let mut tabs = vec![(PictureTab::Video, "Video", 0)];
         if sound.is_some() {
-            tabs.push((PictureTab::Audio, "Audio"));
+            tabs.push((PictureTab::Audio, "Audio", 0));
         }
         if media {
-            tabs.push((PictureTab::Speed, "Speed"));
+            tabs.push((PictureTab::Speed, "Speed", 0));
+            tabs.push((PictureTab::Color, "Color", 0));
         }
+        tabs.push((PictureTab::Effects, "Effects", clip.effects.len()));
+        tabs.push((PictureTab::Masks, "Masks", clip.masks.len()));
         let tab = Some(self.picture_tab)
-            .filter(|t| tabs.iter().any(|(tab, _)| tab == t))
+            .filter(|t| tabs.iter().any(|(tab, _, _)| tab == t))
             .unwrap_or(PictureTab::Video);
         let linked = sound.as_ref().map(|(_, a)| a.id);
         let body = match (tab, sound) {
-            (PictureTab::Color, _) => self.color_view(window, cx),
+            (PictureTab::Color, _) => div()
+                .p(px(12.))
+                .child(self.color_view(window, cx))
+                .into_any_element(),
             (PictureTab::Speed, _) => {
+                let speed = self.speed_group(clip, cx);
                 let state = self.state.clone();
                 let ramp = window.use_keyed_state("clip-speed-ramp", cx, move |_, cx| {
                     SpeedRamp::new(state, cx)
                 });
                 let (id, ripple) = (clip.id, self.speed_ripple);
                 ramp.update(cx, |r, _| r.set_clip(id, linked, ripple));
-                ramp.into_any_element()
+                v_flex().child(speed).child(ramp).into_any_element()
             }
-            (PictureTab::Audio, Some((track, audio))) => {
-                self.clip_audio_view(&track, &audio, window, cx)
-            }
-            (PictureTab::Effects, _) => self.effects_view(clip, window, cx),
+            (PictureTab::Audio, Some((track, audio))) => self
+                .clip_audio_view(&track, &audio, window, cx)
+                .into_any_element(),
+            (PictureTab::Effects, _) => self.effects_view(clip, window, cx).into_any_element(),
+            (PictureTab::Masks, _) => self.masks_view(clip, window, cx).into_any_element(),
             _ => {
                 let program = self.generator_view(clip, window, cx);
                 let transform = self.transform_view(clip, false, window, cx);
                 let stabilize = self.stabilize_view(clip, window, cx);
+                let effects = self.effects_summary(clip, cx);
                 v_flex()
-                    .gap_4()
                     .children(program)
+                    .children(transform)
                     .children(stabilize)
-                    .child(transform)
+                    .child(effects)
                     .into_any_element()
             }
         };
-        let picked: Vec<PictureTab> = tabs.iter().map(|(t, _)| *t).collect();
-        let tabs = TabBar::new("clip-tabs")
-            .segmented()
-            .xsmall()
-            .selected_index(picked.iter().position(|t| *t == tab).unwrap_or(0))
-            .children(tabs.into_iter().map(|(t, label)| {
-                let count = clip.effects.len();
-                match t {
-                    PictureTab::Effects if count > 0 => {
-                        Tab::new().label(format!("{label} {count}"))
-                    }
-                    _ => Tab::new().label(label),
-                }
-            }))
+        let picked: Vec<PictureTab> = tabs.iter().map(|(t, _, _)| *t).collect();
+        let tabs = Tabs::new("clip-tabs")
+            .selected(picked.iter().position(|t| *t == tab).unwrap_or(0))
+            .children(
+                tabs.into_iter()
+                    .map(|(_, label, count)| Tab::new(label).count(count)),
+            )
             .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                 this.picture_tab = picked.get(*ix).copied().unwrap_or_default();
                 cx.notify();
             }));
-        v_flex().gap_3().child(tabs).child(body).into_any_element()
+        (tabs.into_any_element(), body)
     }
 
     // ------------------------------------------------------------ audio
 
+    /// Volume (with keyframes) and the effect stack, as in the Audio
+    /// workspace; then fades, the track's mix and, for an audio clip, its
+    /// speed.
     fn clip_audio_view(
         &mut self,
         track: &ClipTrack,
         clip: &Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Volume (with keyframes) and the effect stack, as in the Audio
-        // workspace.
+    ) -> Div {
         let state = self.state.clone();
         let fx = window.use_keyed_state("edit-clip-audio-fx", cx, move |_, cx| {
             ClipAudioFx::new(state, cx)
         });
         let id = clip.id;
         fx.update(cx, |f, cx| f.set_clip(Some(id), cx));
-        let rows = [
-            (Key::FadeIn, clip.audio.fade_in.as_secs_f64() as f32),
-            (Key::FadeOut, clip.audio.fade_out.as_secs_f64() as f32),
-        ]
-        .map(|(key, v)| self.param(key, v, window, cx).row(cx));
-        let mix = self
+        let fades = if self.is_open("fades") {
+            [
+                (Key::FadeIn, clip.audio.fade_in.as_secs_f64() as f32),
+                (Key::FadeOut, clip.audio.fade_out.as_secs_f64() as f32),
+            ]
+            .map(|(key, v)| self.param_row(key, v, false, None, window, cx))
+            .into()
+        } else {
+            Vec::new()
+        };
+        let (mix, name) = self
             .project(cx)
             .timeline
             .track(track.id)
-            .map(|t| t.mix.clone())
+            .map(|t| (t.mix.clone(), t.name.clone()))
             .unwrap_or_default();
-        let track_rows = [
-            (Key::Volume(track.id), mix.volume_db),
-            (Key::Pan(track.id), mix.pan),
-        ]
-        .map(|(key, v)| self.param(key, v, window, cx).row(cx));
+        let track_rows = if self.is_open("track") {
+            [
+                (Key::Volume(track.id), mix.volume_db),
+                (Key::Pan(track.id), mix.pan),
+            ]
+            .map(|(key, v)| self.param_row(key, v, false, None, window, cx))
+            .into()
+        } else {
+            Vec::new()
+        };
+        let track_header = self.header("track", "Track", cx).child(
+            div()
+                .font_weight(FontWeight::NORMAL)
+                .text_size(px(11.))
+                .text_color(t::T3)
+                .child(name),
+        );
+        let speed = (track.kind == ClipKind::Audio && clip.media().is_some())
+            .then(|| self.speed_group(clip, cx));
         v_flex()
-            .gap_4()
             .child(fx)
-            .child(section("Fades", cx).children(rows))
-            .child(section("Track", cx).children(track_rows))
-            .into_any_element()
+            .child(group(self.header("fades", "Fades", cx), fades))
+            .child(group(track_header, track_rows))
+            .children(speed)
     }
 
     // ------------------------------------------------- captions, titles
@@ -503,7 +474,7 @@ impl InspectorPanel {
         clip: &Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Div {
         let text = match &clip.content {
             ClipContent::Caption { text, .. } | ClipContent::Title { text, .. } => text.clone(),
             _ => String::new(),
@@ -526,18 +497,24 @@ impl InspectorPanel {
             self.text_clip = Some(clip.id);
             self.text.update(cx, |t, cx| t.set_value(text, window, cx));
         }
+        let text_rows = if self.is_open("text") {
+            vec![wide(Textarea::new(&self.text).small())]
+        } else {
+            Vec::new()
+        };
+        let timing = self.timing_group(clip, window, cx);
         let transform = self.transform_view(clip, true, window, cx);
         let mut body = v_flex()
-            .gap_4()
-            .child(section("Text", cx).child(Textarea::new(&self.text)))
-            .child(transform);
+            .child(group(self.header("text", "Text", cx), text_rows))
+            .child(timing)
+            .children(transform);
         if track.kind == ClipKind::Caption {
             let target = Target::Track(track.id);
             self.caption_style
                 .update(cx, |p, cx| p.set_target(target, cx));
             body = body.child(self.caption_style.clone());
         }
-        body.into_any_element()
+        body
     }
 
     /// Commit the text field to the clip it was loaded from.
@@ -574,12 +551,7 @@ impl InspectorPanel {
     }
 
     /// Start and end as `M:SS.mmm` fields.
-    fn timing_fields(
-        &mut self,
-        clip: &Clip,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn timing_group(&mut self, clip: &Clip, window: &mut Window, cx: &mut Context<Self>) -> Div {
         if let Some(old) = self.timing_clip.filter(|old| *old != clip.id) {
             for edge in [Edge::Start, Edge::End] {
                 if let Some(range) = self.typed_range(old, edge, cx) {
@@ -605,13 +577,23 @@ impl InspectorPanel {
             }
         }
         self.timing_clip = Some(clip.id);
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .gap_2()
-            .child(div().flex_1().child(Input::new(&self.start_field).xsmall()))
-            .child(div().text_xs().text_color(muted).child("–"))
-            .child(div().flex_1().child(Input::new(&self.end_field).xsmall()))
-            .into_any_element()
+        let rows = if self.is_open("timing") {
+            vec![
+                row(
+                    label("Start"),
+                    Input::new(&self.start_field).small().font_family(t::mono()),
+                    None,
+                ),
+                row(
+                    label("End"),
+                    Input::new(&self.end_field).small().font_family(t::mono()),
+                    None,
+                ),
+            ]
+        } else {
+            Vec::new()
+        };
+        group(self.header("timing", "Timing", cx), rows)
     }
 
     /// Commit an edited start or end; anything unparsable or inverted is
@@ -706,7 +688,7 @@ fn clip_text(project: &Project, clip: ClipId) -> Option<String> {
     }
 }
 
-fn clip_name(clip: &Clip, project: &Project) -> String {
+pub(super) fn clip_name(clip: &Clip, project: &Project) -> String {
     match &clip.content {
         ClipContent::Media { media, .. } => project
             .media(*media)

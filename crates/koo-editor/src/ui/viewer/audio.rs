@@ -9,7 +9,8 @@
 //! * each audio track sums its spans, applies volume, pan and its effect
 //!   chain, and reports its meter;
 //! * the master sums the tracks, ducking music under the others, reports
-//!   its meter and feeds a short queue drained by the output callback.
+//!   its meter and each side's for the viewer ([`channels`]), and feeds a
+//!   short queue drained by the output callback.
 //!
 //! Effect state lives in the voices and tracks, so it starts fresh with
 //! every playback start and seek (both rebuild the mixer). Without an
@@ -29,7 +30,7 @@ use koo_core::time::FLICKS_PER_SECOND;
 use koo_core::{ClipId, Time, TimeRange, TrackId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,14 @@ const AHEAD: f64 = 0.12;
 const GAIN_STEP: usize = 32;
 /// Rate of the clock-driven mixer when there is no output device.
 const FALLBACK_RATE: u32 = 48_000;
+
+/// The master's left and right meters.
+static CHANNELS: LazyLock<[Level; 2]> = LazyLock::new(Default::default);
+
+/// The master's left and right meters, for the viewer.
+pub(super) fn channels() -> &'static [Level; 2] {
+    &CHANNELS
+}
 
 pub struct AudioOut {
     stop: Arc<AtomicBool>,
@@ -298,6 +307,8 @@ struct Mixer {
     music: Vec<f32>,
     master: Arc<Level>,
     master_rms: f32,
+    /// Running mean squares of the left and right meters.
+    channel_ms: [f32; 2],
     /// Per-sample coefficient of the meters' RMS window.
     rms_coef: f32,
 }
@@ -384,6 +395,7 @@ impl Mixer {
             music: Vec::new(),
             master: meter::level(None),
             master_rms: 0.,
+            channel_ms: [0.; 2],
             rms_coef: (-1. / (RMS_WINDOW_S * rate as f64)).exp() as f32,
         }
     }
@@ -541,6 +553,7 @@ impl Mixer {
             }
         }
         self.master_rms = measure(out, &self.master, self.master_rms, self.rms_coef);
+        measure_sides(out, &mut self.channel_ms, self.rms_coef);
         for s in out.iter_mut() {
             *s = s.clamp(-1., 1.);
         }
@@ -559,6 +572,21 @@ fn measure(buf: &[f32], level: &Level, mut ms: f32, coef: f32) -> f32 {
     }
     level.store(peak, ms.sqrt());
     ms
+}
+
+/// Store a block's peak and running RMS per side into [`channels`].
+fn measure_sides(buf: &[f32], ms: &mut [f32; 2], coef: f32) {
+    let mut peak = [0f32; 2];
+    for f in buf.as_chunks::<2>().0 {
+        for ((p, m), x) in peak.iter_mut().zip(ms.iter_mut()).zip(f) {
+            let x = x.abs();
+            *p = p.max(x);
+            *m = x * x + (*m - x * x) * coef;
+        }
+    }
+    for (level, (p, m)) in CHANNELS.iter().zip(peak.iter().zip(ms.iter())) {
+        level.store(*p, m.sqrt());
+    }
 }
 
 /// Time of mixed frame `frame` of a mix started at `from`.

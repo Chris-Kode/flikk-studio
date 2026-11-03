@@ -1,4 +1,4 @@
-//! Warnings and errors listed under the top bar's notice button, kept until
+//! Warnings and errors listed under the title bar's bell, kept until
 //! the user dismisses them or what they say stops being true.
 
 use std::collections::HashSet;
@@ -43,14 +43,6 @@ pub struct Notices {
 impl Notices {
     pub fn iter(&self) -> impl Iterator<Item = &Notice> {
         self.list.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
     }
 
     /// The most serious level shown, `None` without notices.

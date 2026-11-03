@@ -17,7 +17,8 @@
 //! points takes it away; the points can be dragged. A subject is outlined
 //! by its matte at the playhead ([`Subjects`]).
 
-use super::gizmo::{CLICK_SLOP, HANDLE, REACH, Screen, clip_time, near};
+use super::gizmo::{CLICK_SLOP, REACH, Screen, clip_time, draw, near, ringed, square};
+use crate::ui::kit::theme as t;
 use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::compose::Shape;
@@ -857,9 +858,14 @@ impl MaskEditor {
     }
 }
 
-/// Paint `overlay` at `screen`.
-pub(super) fn paint(overlay: &MaskOverlay, screen: &Screen, color: Hsla, window: &mut Window) {
-    let trace = |pts: &[Point<Pixels>], close: bool, mut b: PathBuilder| {
+/// Paint `overlay` at `screen`, in the accent.
+pub(super) fn paint(overlay: &MaskOverlay, screen: &Screen, window: &mut Window) {
+    let on_screen = |line: &[[f32; 2]]| -> Vec<Point<Pixels>> {
+        line.iter().map(|p| screen.to_screen(*p)).collect()
+    };
+    for line in &overlay.preview {
+        let pts = on_screen(line);
+        let mut b = PathBuilder::fill();
         for (i, p) in pts.iter().enumerate() {
             if i == 0 {
                 b.move_to(*p);
@@ -867,88 +873,56 @@ pub(super) fn paint(overlay: &MaskOverlay, screen: &Screen, color: Hsla, window:
                 b.line_to(*p);
             }
         }
-        if close {
-            b.close();
+        b.close();
+        if let Ok(path) = b.build() {
+            window.paint_path(path, t::alpha(t::AC, 0.22));
         }
-        b.build().ok()
-    };
-    let stroke =
-        |pts: &[Point<Pixels>], close: bool, width: f32, color: Hsla, window: &mut Window| {
-            if let Some(path) = trace(pts, close, PathBuilder::stroke(px(width))) {
-                window.paint_path(path, color);
-            }
-        };
-    let on_screen = |line: &[[f32; 2]]| -> Vec<Point<Pixels>> {
-        line.iter().map(|p| screen.to_screen(*p)).collect()
-    };
-    for line in &overlay.preview {
-        let pts = on_screen(line);
-        if let Some(path) = trace(&pts, true, PathBuilder::fill()) {
-            window.paint_path(path, color.opacity(0.22));
-        }
-        stroke(&pts, true, 1.5, color, window);
+        draw(window, &pts, true, 1.5, None, t::AC);
     }
     for (outline, picked) in &overlay.outlines {
-        let pts = on_screen(outline);
         let (width, color) = if *picked {
-            (1.5, color)
+            (1.5, t::AC)
         } else {
-            (1.0, color.opacity(0.6))
+            (1.0, t::alpha(t::AC, 0.6))
         };
-        stroke(&pts, true, width, color, window);
+        draw(window, &on_screen(outline), true, width, None, color);
     }
     for corners in &overlay.boxes {
-        stroke(&on_screen(corners), true, 1.0, color, window);
+        let dashed = t::alpha(t::AC, 0.67);
+        draw(
+            window,
+            &on_screen(corners),
+            true,
+            1.0,
+            Some([3.0, 3.0]),
+            dashed,
+        );
     }
-    let half = px(HANDLE / 2.0);
-    let square = |at: Point<Pixels>, window: &mut Window| {
-        let b = Bounds::new(point(at.x - half, at.y - half), size(half * 2., half * 2.));
-        window.paint_quad(fill(b, white()).border_widths(px(1.)).border_color(color));
-    };
     for h in &overlay.handles {
         square(screen.to_screen(*h), window);
     }
-    let disc = |at: Point<Pixels>, r: Pixels| {
-        let mut b = PathBuilder::fill();
-        b.move_to(point(at.x + r, at.y));
-        b.arc_to(point(r, r), px(0.), false, true, point(at.x - r, at.y));
-        b.arc_to(point(r, r), px(0.), false, true, point(at.x + r, at.y));
-        b.close();
-        b.build().ok()
-    };
     for (at, include) in &overlay.points {
         let at = screen.to_screen(*at);
-        let (outer, inner) = if *include {
-            (white(), color)
+        let (ring, fill) = if *include {
+            (t::ON_AC, t::AC)
         } else {
-            (color, white())
+            (t::AC, t::ON_AC)
         };
-        if let Some(path) = disc(at, px(DOT + 1.5)) {
-            window.paint_path(path, outer);
-        }
-        if let Some(path) = disc(at, px(DOT)) {
-            window.paint_path(path, inner);
-        }
+        ringed(at, DOT, fill, ring, window);
         if !include {
             let r = px(DOT * 0.55);
-            stroke(
-                &[point(at.x - r, at.y), point(at.x + r, at.y)],
-                false,
-                1.5,
-                color,
-                window,
-            );
+            let minus = [point(at.x - r, at.y), point(at.x + r, at.y)];
+            draw(window, &minus, false, 1.5, None, t::AC);
         }
     }
     if let Some((top, k)) = overlay.knob {
-        stroke(&[screen.to_screen(top), k], false, 1.0, color, window);
-        if let Some(path) = disc(k, half) {
-            window.paint_path(path, color);
-        }
+        let stem = [screen.to_screen(top), k];
+        draw(window, &stem, false, 1.0, None, t::alpha(t::AC, 0.67));
+        ringed(k, 3.5, t::ON_AC, t::AC, window);
     }
     if !overlay.pen.is_empty() {
         let pts = on_screen(&overlay.pen);
-        stroke(&pts, false, 1.5, color, window);
+        draw(window, &pts, false, 1.5, None, t::AC);
         for p in pts {
             square(p, window);
         }

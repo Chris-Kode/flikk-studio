@@ -3,7 +3,8 @@
 //! `@fx cross_dissolve` or `@range 1.000-4.500`, which is what the agent
 //! reads; `koo_core::query::resolve_project_references` parses them.
 
-use gpui_kit::component::IconName;
+use crate::ui::kit::{IconName, theme as t};
+use gpui_kit::Rgba;
 use koo_core::audiofx::AudioFxKind;
 use koo_core::command::Edge;
 use koo_core::fx::{self, FxRef};
@@ -75,19 +76,18 @@ impl RefKind {
         }
     }
 
-    pub fn icon(self) -> IconName {
+    /// How a token of this kind is marked; a clip takes its track's tint.
+    pub fn mark(self, project: &Project, token: &str) -> Mark {
         match self {
-            Self::Clip => IconName::Frame,
-            Self::Media => IconName::File,
-            Self::Marker => IconName::Map,
-            Self::Track => IconName::GalleryVerticalEnd,
-            Self::Bin => IconName::Folder,
-            Self::Effect => IconName::Palette,
-            Self::Transition => IconName::Replace,
-            Self::Fx => IconName::SquareTerminal,
-            Self::AudioFx => IconName::Mic,
-            Self::Range => IconName::Dash,
-            Self::Time => IconName::Play,
+            Self::Clip => Mark::Dot(clip_tint(project, token).unwrap_or(t::T3)),
+            Self::Effect | Self::Transition | Self::Fx => Mark::Dot(t::C),
+            Self::AudioFx => Mark::Dot(t::A),
+            Self::Media => Mark::Icon(IconName::Film, t::T2),
+            Self::Marker => Mark::Icon(IconName::MapPin, t::T2),
+            Self::Track => Mark::Icon(IconName::Rows3, t::T2),
+            Self::Bin => Mark::Icon(IconName::Folder, t::T2),
+            Self::Range => Mark::Icon(IconName::Brackets, t::T2),
+            Self::Time => Mark::Icon(IconName::TextCursor, t::PH),
         }
     }
 
@@ -113,6 +113,31 @@ impl RefKind {
             Resolved::Unresolved { .. } => return None,
         })
     }
+}
+
+/// What leads a reference chip or list row: a square in a track tint, or
+/// an icon in its colour.
+#[derive(Clone, Copy)]
+pub enum Mark {
+    Dot(Rgba),
+    Icon(IconName, Rgba),
+}
+
+/// The tint of the track a `@clip` token's clip sits on.
+fn clip_tint(project: &Project, token: &str) -> Option<Rgba> {
+    let r = query::resolve_project_references(project, token)
+        .into_iter()
+        .next()?;
+    let Resolved::Clip { clip } = r.reference else {
+        return None;
+    };
+    let (track, _) = project.timeline.clip(clip)?;
+    Some(match track.kind {
+        TrackKind::Video | TrackKind::Overlay => t::V,
+        TrackKind::Audio => t::A,
+        TrackKind::Caption => t::C,
+        TrackKind::Title => t::TI,
+    })
 }
 
 #[derive(Clone, Debug)]

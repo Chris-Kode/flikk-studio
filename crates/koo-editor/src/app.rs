@@ -1,27 +1,33 @@
-//! Window layout: workspace switcher on top, between the project menu and
-//! the notice and Settings buttons; the workspace's panels on the left, the
-//! agent chat docked on the right in every workspace (PRD AG1).
+//! Window layout: the title bar (project menu, workspace switcher, undo,
+//! notices, Settings, Render), the workspace's panels, the agent chat
+//! docked on their right in every workspace (PRD AG1) or folded to a rail,
+//! and the status bar.
 
 use crate::notices::NoticeAction;
 use crate::projects::{self, NewProject, OpenProject, SaveProject, SaveProjectAs};
 use crate::state::EditorState;
 use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, IconName, Indicator, Kbd, Panel, PanelHeader, PanelTabs,
+    PopupMenuItem, Progress, ScrollableElement as _, Segmented, h_flex, h_resizable,
+    resizable_panel, v_resizable,
+};
 use crate::ui::{
     chat::ChatPanel, code_editor::CodeEditorPanel, deliver::DeliverPanel,
     inspector::InspectorPanel, library::LibraryPanel, media_pool::MediaPoolPanel,
     mixer::MixerPanel, scopes::ScopesPanel, timeline::TimelinePanel, transcript::TranscriptPanel,
     viewer::ViewerPanel,
 };
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IconName};
+use gpui_kit::base::{InteractiveElementExt as _, ResizablePanel};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::Workspace;
+use koo_core::changeset::ChangeSetState;
+use koo_core::{Rate, TimeRange};
+use koo_deliver::RenderState;
+use std::time::Duration;
 
 actions!(
     koo,
@@ -31,6 +37,7 @@ actions!(
         TogglePlay,
         OpenSettings,
         OpenAgentSettings,
+        ToggleAgent,
         Quit
     ]
 );
@@ -50,6 +57,20 @@ pub fn bind_keys(cx: &mut App) {
     ]);
     projects::bind_keys(cx);
 }
+
+/// The platform's command modifier as shortcut chips spell it.
+const MOD: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
+/// The agent chat's width when docked.
+const CHAT_WIDTH: f32 = 340.;
+/// The folded chat's rail.
+const RAIL_WIDTH: f32 = 44.;
+/// How often the status bar redraws while a render runs.
+const RENDER_POLL: Duration = Duration::from_millis(250);
 
 /// What the Edit workspace's left panel shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,10 +95,16 @@ pub struct KooEditor {
     code_editor: Entity<CodeEditorPanel>,
     settings: Entity<EditorSettings>,
     left_tab: LeftTab,
+    /// The agent chat is docked, not folded to the rail.
+    agent_open: bool,
     /// The notice list is dropped down.
     notices_open: bool,
     /// Unsaved changes as last told to the window.
     edited: bool,
+    /// The title bar was pressed: moving the pointer moves the window.
+    moving: bool,
+    /// The status bar is redrawing for a running render.
+    render_poll: bool,
     _observe: Subscription,
 }
 
@@ -112,8 +139,11 @@ impl KooEditor {
             library: cx.new(|cx| LibraryPanel::new(state.clone(), window, cx)),
             code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
             settings: cx.new(|cx| EditorSettings::new(state.clone(), window, cx)),
+            agent_open: true,
             notices_open: false,
             edited: false,
+            moving: false,
+            render_poll: false,
             left_tab: match crate::demo::fx_view().as_deref() {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
@@ -121,59 +151,6 @@ impl KooEditor {
             state,
             _observe,
         }
-    }
-
-    /// Project name, with a dot while there are unsaved changes; opens
-    /// the project file commands and recent projects.
-    fn project_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.state.clone();
-        let s = state.read(cx);
-        let name = s.bus.project().name.clone();
-        let label = if s.is_dirty() {
-            format!("{name} •")
-        } else {
-            name
-        };
-        Button::new("project")
-            .ghost()
-            .small()
-            .label(label)
-            .dropdown_menu(move |menu, _, cx| {
-                let item =
-                    |label: &'static str,
-                     action: Box<dyn Action>,
-                     f: fn(&Entity<EditorState>, &mut Window, &mut App)| {
-                        let state = state.clone();
-                        PopupMenuItem::new(label)
-                            .action(action)
-                            .on_click(move |_, window, cx| f(&state, window, cx))
-                    };
-                let mut menu = menu
-                    .item(item(
-                        "New Project",
-                        Box::new(NewProject),
-                        projects::new_project,
-                    ))
-                    .item(item("Open…", Box::new(OpenProject), projects::open_dialog))
-                    .item(item("Save", Box::new(SaveProject), projects::save))
-                    .item(item("Save As…", Box::new(SaveProjectAs), projects::save_as));
-                let (current, recent) = {
-                    let s = state.read(cx);
-                    (s.file.clone(), s.recent_projects())
-                };
-                if !recent.is_empty() {
-                    menu = menu.item(PopupMenuItem::separator());
-                }
-                for path in recent {
-                    let state = state.clone();
-                    let label = koo_store::project_file::name_of(&path);
-                    let checked = current.as_ref() == Some(&path);
-                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                        move |_, window, cx| projects::open(&state, path.clone(), window, cx),
-                    ));
-                }
-                menu
-            })
     }
 
     /// Open Settings on `tab`, or on the page shown last.
@@ -188,11 +165,145 @@ impl KooEditor {
         EditorSettings::open(&self.settings, tab, window, cx);
     }
 
-    /// The notice button, while there are notices, and Settings.
-    fn top_right(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.state.read(cx).notices.is_empty() {
-            self.notices_open = false;
-        }
+    /// Project menu on the left, workspaces centred, history, notices,
+    /// Settings and Render on the right. On macOS the bar also holds the
+    /// window buttons and moves the window.
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let macos = cfg!(target_os = "macos");
+        let lights = macos && !window.is_fullscreen();
+        // Presses on the controls are theirs, not the start of a move.
+        let own = |el: Div| el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        div()
+            .id("title-bar")
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(t::TITLE_BAR)
+            .pl(px(if lights { 76. } else { 6. }))
+            .pr(px(12.))
+            .border_b_1()
+            .border_color(t::LN)
+            .bg(t::P)
+            .when(macos, |bar| {
+                bar.on_double_click(|_, window, _| window.titlebar_double_click())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.moving = true),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.moving = false),
+                    )
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
+                        if this.moving && e.pressed_button == Some(MouseButton::Left) {
+                            this.moving = false;
+                            window.start_window_move();
+                        }
+                    }))
+            })
+            .child(own(div()).child(self.project_menu(cx)))
+            .child(div().flex_1())
+            .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(own(div()).child(self.workspace_tabs(cx))),
+            )
+    }
+
+    /// Project name, "Edited" while there are unsaved changes; opens the
+    /// project file commands and recent projects.
+    fn project_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        let s = state.read(cx);
+        let name = s.bus.project().name.clone();
+        let edited = s.is_dirty();
+        Button::new("project")
+            .ghost()
+            .px(px(6.))
+            .text_color(t::T1)
+            .label(name)
+            .when(edited, |b| {
+                b.child(div().size(px(6.)).rounded_full().bg(t::T3)).child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(t::T3)
+                        .child("Edited"),
+                )
+            })
+            .trailing_icon(IconName::ChevronDown)
+            .dropdown_menu(move |menu, window, cx| {
+                let item =
+                    |label: &'static str,
+                     action: Box<dyn Action>,
+                     f: fn(&Entity<EditorState>, &mut Window, &mut App)| {
+                        let state = state.clone();
+                        PopupMenuItem::new(label)
+                            .action(action)
+                            .on_click(move |_, window, cx| f(&state, window, cx))
+                    };
+                let (current, recent) = {
+                    let s = state.read(cx);
+                    (s.file.clone(), s.recent_projects())
+                };
+                let mut menu = menu
+                    .item(
+                        item("New project", Box::new(NewProject), projects::new_project)
+                            .icon(IconName::FilePlus),
+                    )
+                    .item(
+                        item("Open…", Box::new(OpenProject), projects::open_dialog)
+                            .icon(IconName::FolderOpen),
+                    );
+                if !recent.is_empty() {
+                    let state = state.clone();
+                    menu = menu.submenu("Open recent", window, cx, move |mut menu, _, _| {
+                        for path in &recent {
+                            let (state, path) = (state.clone(), path.clone());
+                            let label = koo_store::project_file::name_of(&path);
+                            let checked = current.as_ref() == Some(&path);
+                            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                move |_, window, cx| {
+                                    projects::open(&state, path.clone(), window, cx)
+                                },
+                            ));
+                        }
+                        menu
+                    });
+                }
+                menu.separator()
+                    .item(item("Save", Box::new(SaveProject), projects::save).icon(IconName::Save))
+                    .item(item("Save as…", Box::new(SaveProjectAs), projects::save_as))
+            })
+    }
+
+    fn workspace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.state.read(cx).workspace;
+        let state = self.state.clone();
+        Segmented::new("workspaces")
+            .items(Workspace::ALL.iter().map(|w| w.label()))
+            .selected(
+                Workspace::ALL
+                    .iter()
+                    .position(|w| *w == current)
+                    .unwrap_or(0),
+            )
+            .on_click(move |ix, _, cx| {
+                state.update(cx, |s, cx| s.set_workspace(Workspace::ALL[*ix], cx))
+            })
+    }
+
+    /// Undo and redo, the notices bell, Settings and, outside Deliver,
+    /// Render, which goes there.
+    fn top_right(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = self.state.read(cx);
+        let (can_undo, can_redo) = (s.bus.history().can_undo(), s.bus.history().can_redo());
+        let delivering = s.workspace == Workspace::Deliver;
         let this = cx.entity().downgrade();
         let notices = crate::ui::notices::button(
             &self.state,
@@ -219,73 +330,151 @@ impl KooEditor {
             },
             cx,
         );
-        div()
-            .flex()
-            .items_center()
-            .gap_0p5()
-            .children(notices)
+        let mut items = vec![
+            Button::new("undo")
+                .ghost()
+                .icon(IconName::Undo2)
+                .tooltip_kbd("Undo", format!("{MOD} Z"))
+                .disabled(!can_undo)
+                .on_click(cx.listener(|this, _, _, cx| this.state.update(cx, |s, cx| s.undo(cx))))
+                .into_any_element(),
+            Button::new("redo")
+                .ghost()
+                .icon(IconName::Redo2)
+                .tooltip_kbd("Redo", format!("Shift {MOD} Z"))
+                .disabled(!can_redo)
+                .on_click(cx.listener(|this, _, _, cx| this.state.update(cx, |s, cx| s.redo(cx))))
+                .into_any_element(),
+            div()
+                .w(px(1.))
+                .h(px(16.))
+                .mx(px(6.))
+                .bg(t::LN)
+                .into_any_element(),
+            notices.into_any_element(),
+            Button::new("settings")
+                .ghost()
+                .icon(IconName::Settings)
+                .tooltip_kbd("Settings", format!("{MOD} ,"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)))
+                .into_any_element(),
+        ];
+        if !delivering {
+            items.push(
+                Button::new("render")
+                    .primary()
+                    .ml(px(8.))
+                    .icon(IconName::Upload)
+                    .label("Render")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state
+                            .update(cx, |s, cx| s.set_workspace(Workspace::Deliver, cx))
+                    }))
+                    .into_any_element(),
+            );
+        }
+        items
+    }
+
+    /// The panels over the timeline, the agent chat beside them.
+    fn over_timeline(
+        &self,
+        id: &'static str,
+        panels: Vec<ResizablePanel>,
+        timeline: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // One timeline height per workspace, whichever panels sit above.
+        let workspace = self.state.read(cx).workspace as usize;
+        v_resizable(("over-timeline", workspace))
+            .child(resizable_panel().child(self.with_agent(id, panels, cx)))
             .child(
-                Button::new("settings")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Settings)
-                    .tooltip("Settings")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
-                    ),
+                resizable_panel()
+                    .size(px(timeline))
+                    .child(self.timeline.clone()),
             )
+            .into_any_element()
     }
 
-    fn workspace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.state.read(cx).workspace;
-        let state = self.state.clone();
-        TabBar::new("workspaces")
-            .segmented()
-            .selected_index(
-                Workspace::ALL
-                    .iter()
-                    .position(|w| *w == current)
-                    .unwrap_or(0),
-            )
-            .children(Workspace::ALL.iter().map(|w| Tab::new().label(w.label())))
-            .on_click(move |ix, _, cx| {
-                state.update(cx, |s, cx| s.set_workspace(Workspace::ALL[*ix], cx))
-            })
-    }
-
-    /// Viewer area on top, timeline below: the frame every editing workspace shares.
-    fn over_timeline(&self, id: &'static str, top: impl IntoElement) -> impl IntoElement {
-        v_resizable(id).child(resizable_panel().child(top)).child(
+    /// `panels` side by side, then the docked chat or its rail.
+    fn with_agent(
+        &self,
+        id: &'static str,
+        panels: Vec<ResizablePanel>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.agent_open;
+        let chat = open.then(|| {
             resizable_panel()
-                .size(px(300.))
-                .child(self.timeline.clone()),
-        )
+                .size(px(CHAT_WIDTH))
+                .fixed()
+                .child(self.chat.clone())
+        });
+        h_flex()
+            .size_full()
+            .child(
+                div().flex_1().min_w_0().h_full().child(
+                    h_resizable((id, open as usize))
+                        .children(panels)
+                        .children(chat),
+                ),
+            )
+            .when(!open, |row| row.child(self.rail(cx)))
     }
 
-    /// Edit's left panel: media pool or effects library under segmented tabs.
-    fn edit_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab = self.left_tab;
-        let border = cx.theme().border;
-        let body: AnyElement = match tab {
-            LeftTab::Media => self.media_pool.clone().into_any_element(),
-            LeftTab::Effects => self.library.clone().into_any_element(),
-        };
+    /// The folded chat: its button, counting the change sets waiting for
+    /// review.
+    fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pending = pending_reviews(self.state.read(cx));
         div()
-            .size_full()
             .flex()
             .flex_col()
+            .flex_none()
+            .items_center()
+            .w(px(RAIL_WIDTH))
+            .h_full()
+            .pt(px(8.))
+            .border_l_1()
+            .border_color(t::LN)
+            .bg(t::P)
             .child(
-                div().p_1().border_b_1().border_color(border).child(
-                    TabBar::new("edit-left")
-                        .segmented()
-                        .xsmall()
-                        .w_full()
-                        .selected_index(match tab {
+                Button::new("agent-rail")
+                    .ghost()
+                    .relative()
+                    .icon(IconName::Sparkles)
+                    .tooltip("Agent")
+                    .when(pending > 0, |b| b.child(Indicator::count(pending)))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_agent(cx))),
+            )
+    }
+
+    fn toggle_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent_open = !self.agent_open;
+        cx.notify();
+    }
+
+    /// Edit's left panel: the media pool or the effects library.
+    fn edit_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = self.left_tab;
+        let (body, actions): (AnyElement, AnyElement) = match tab {
+            LeftTab::Media => (
+                self.media_pool.clone().into_any_element(),
+                self.media_pool.update(cx, |p, cx| p.header_actions(cx)),
+            ),
+            LeftTab::Effects => (
+                self.library.clone().into_any_element(),
+                self.library.update(cx, |p, cx| p.header_actions(cx)),
+            ),
+        };
+        Panel::new()
+            .child(
+                PanelHeader::new().child(actions).leading(
+                    PanelTabs::new("edit-left")
+                        .items(["Media", "Effects"])
+                        .selected(match tab {
                             LeftTab::Media => 0,
                             LeftTab::Effects => 1,
                         })
-                        .child(Tab::new().label("Media").flex_1())
-                        .child(Tab::new().label("Effects").flex_1())
                         .on_click(cx.listener(|this, ix: &usize, _, cx| {
                             this.left_tab = if *ix == 0 {
                                 LeftTab::Media
@@ -299,82 +488,251 @@ impl KooEditor {
             .child(div().flex_1().min_h_0().child(body))
     }
 
+    /// The Captions workspace's caption style, under its header.
+    fn caption_style_panel(&self) -> impl IntoElement {
+        Panel::new()
+            .child(PanelHeader::new().title("Caption style"))
+            .child(
+                div()
+                    .id("caption-style")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(div().p(px(12.)).child(self.caption_style.clone())),
+            )
+    }
+
     fn workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let side = |width: f32| resizable_panel().size(px(width)).fixed();
         match self.state.read(cx).workspace {
             Workspace::Edit => {
                 // The code editor takes the inspector's place while open.
                 let coding = self.state.read(cx).editing_fx.is_some();
                 let (id, right, width): (&'static str, AnyElement, f32) = if coding {
                     (
-                        "edit-top-code",
+                        "edit-code",
                         self.code_editor.clone().into_any_element(),
                         460.,
                     )
                 } else {
-                    ("edit-top", self.inspector.clone().into_any_element(), 300.)
+                    ("edit", self.inspector.clone().into_any_element(), 300.)
                 };
-                self.over_timeline(
-                    "edit",
-                    h_resizable(id)
-                        .child(resizable_panel().size(px(260.)).child(self.edit_left(cx)))
-                        .child(resizable_panel().child(self.viewer.clone()))
-                        .child(resizable_panel().size(px(width)).child(right)),
-                )
-                .into_any_element()
+                let panels = vec![
+                    side(260.).child(self.edit_left(cx)),
+                    resizable_panel().child(self.viewer.clone()),
+                    side(width).child(right),
+                ];
+                self.over_timeline(id, panels, 340., cx)
             }
-            Workspace::Captions => self
-                .over_timeline(
-                    "captions",
-                    h_resizable("captions-top")
-                        .child(
-                            resizable_panel()
-                                .size(px(340.))
-                                .child(self.transcript.clone()),
-                        )
-                        .child(resizable_panel().child(self.viewer.clone()))
-                        .child(
-                            resizable_panel().size(px(300.)).child(
-                                div()
-                                    .id("caption-style")
-                                    .size_full()
-                                    .overflow_y_scrollbar()
-                                    .child(div().p_3().child(self.caption_style.clone())),
-                            ),
-                        ),
-                )
-                .into_any_element(),
-            Workspace::Color => self
-                .over_timeline(
-                    "color",
-                    h_resizable("color-top")
-                        .child(resizable_panel().child(self.viewer.clone()))
-                        .child(resizable_panel().size(px(340.)).child(self.scopes.clone()))
-                        .child(
-                            resizable_panel()
-                                .size(px(320.))
-                                .child(self.inspector.clone()),
-                        ),
-                )
-                .into_any_element(),
-            Workspace::Audio => self
-                .over_timeline(
-                    "audio",
-                    h_resizable("audio-top")
-                        .child(resizable_panel().child(self.viewer.clone()))
-                        .child(resizable_panel().size(px(420.)).child(self.mixer.clone()))
-                        .child(
-                            resizable_panel()
-                                .size(px(300.))
-                                .child(self.inspector.clone()),
-                        ),
-                )
-                .into_any_element(),
-            Workspace::Deliver => h_resizable("deliver")
-                .child(resizable_panel().size(px(380.)).child(self.deliver.clone()))
-                .child(resizable_panel().child(self.viewer.clone()))
-                .into_any_element(),
+            Workspace::Captions => {
+                let panels = vec![
+                    side(340.).child(self.transcript.clone()),
+                    resizable_panel().child(self.viewer.clone()),
+                    side(300.).child(self.caption_style_panel()),
+                ];
+                self.over_timeline("captions", panels, 340., cx)
+            }
+            Workspace::Color => {
+                let panels = vec![
+                    resizable_panel().child(self.viewer.clone()),
+                    side(330.).child(self.scopes.clone()),
+                    side(320.).child(self.inspector.clone()),
+                ];
+                self.over_timeline("color", panels, 340., cx)
+            }
+            Workspace::Audio => {
+                let panels = vec![
+                    resizable_panel().child(self.viewer.clone()),
+                    side(420.).child(self.mixer.clone()),
+                    side(300.).child(self.inspector.clone()),
+                ];
+                self.over_timeline("audio", panels, 300., cx)
+            }
+            Workspace::Deliver => {
+                let panels = vec![
+                    side(380.).child(self.deliver.clone()),
+                    resizable_panel().child(self.viewer.clone()),
+                ];
+                self.with_agent("deliver", panels, cx).into_any_element()
+            }
         }
     }
+
+    /// What the app can report: the last status message, a running
+    /// render, the timeline's format, the background render cache; on the
+    /// right, change sets waiting while the chat is docked, the selection
+    /// or the timeline's length, and the shortcuts to reach for.
+    fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.state.read(cx);
+        let project = s.bus.project();
+        let format = &project.timeline.settings;
+        let rate = format.rate;
+        let format = if s.workspace == Workspace::Audio {
+            format!("{} kHz", format.sample_rate as f32 / 1000.)
+        } else {
+            format!("{}×{} · {} fps", format.width, format.height, fps(rate))
+        };
+        let rendering = s
+            .render_queue
+            .jobs()
+            .into_iter()
+            .find_map(|job| match job.state {
+                RenderState::Running { fraction } => Some((job.output, fraction)),
+                _ => None,
+            });
+        let cache = cache_fraction(s);
+        let pending = if self.agent_open {
+            pending_reviews(s)
+        } else {
+            0
+        };
+        let selected = project
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter(|c| s.selection.clips.contains(&c.id))
+            .map(|c| c.range())
+            .reduce(|a, b| TimeRange::new(a.start.min(b.start), a.end.max(b.end)));
+        let place = match selected {
+            Some(range) => (
+                match s.selection.clips.len() {
+                    1 => "Clip".to_owned(),
+                    n => format!("{n} clips"),
+                },
+                format!(
+                    "{} → {}",
+                    range.start.timecode(rate),
+                    range.end.timecode(rate)
+                ),
+            ),
+            None => (
+                "Timeline".to_owned(),
+                project.timeline.duration().timecode(rate),
+            ),
+        };
+        let status = s.status.clone();
+        if rendering.is_some() {
+            self.poll_render(cx);
+        }
+
+        let mono = |text: String| div().font_family(t::mono()).text_color(t::T2).child(text);
+        let hint = |keys: &[&str], what: &'static str| {
+            h_flex()
+                .gap(px(3.))
+                .children(keys.iter().map(|k| Kbd::new(k.to_string())))
+                .child(div().ml(px(1.)).child(what))
+        };
+        h_flex()
+            .flex_none()
+            .gap(px(16.))
+            .h(t::STATUS_BAR)
+            .px(px(12.))
+            .border_t_1()
+            .border_color(t::LN)
+            .bg(t::P)
+            .text_size(px(11.))
+            .text_color(t::T3)
+            .whitespace_nowrap()
+            .children(status.map(|s| div().min_w_0().truncate().text_color(t::T2).child(s)))
+            .children(rendering.map(|(output, fraction)| {
+                let name = output
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                h_flex()
+                    .gap(px(6.))
+                    .child(format!("Rendering {name}"))
+                    .child(Progress::new().value(fraction).w(px(60.)).h(px(3.)))
+                    .child(mono(format!("{:.0} %", fraction * 100.)))
+            }))
+            .child(format)
+            .children(cache.map(|cached| {
+                h_flex()
+                    .gap(px(6.))
+                    .child("Cache")
+                    .child(
+                        div()
+                            .w(px(60.))
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(t::R1)
+                            .child(div().h_full().w(relative(cached)).rounded_full().bg(t::OK)),
+                    )
+                    .child(mono(format!("{:.0} %", cached * 100.)))
+            }))
+            .child(div().flex_1())
+            .when(pending > 0, |bar| {
+                bar.child(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(div().size(px(6.)).rounded_full().bg(t::AC))
+                        .child(match pending {
+                            1 => "Agent · 1 change set to review".to_owned(),
+                            n => format!("Agent · {n} change sets to review"),
+                        }),
+                )
+            })
+            .child(h_flex().gap(px(4.)).child(place.0).child(mono(place.1)))
+            .child(hint(&["J", "K", "L"], "shuttle"))
+            .child(hint(&[&format!("{MOD} K")], "ask the agent"))
+    }
+
+    /// Redraw the status bar until the running render finishes.
+    fn poll_render(&mut self, cx: &mut Context<Self>) {
+        if self.render_poll {
+            return;
+        }
+        self.render_poll = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RENDER_POLL).await;
+                let busy = this.update(cx, |this, cx| {
+                    let busy = this.state.read(cx).render_queue.is_busy();
+                    this.render_poll = busy;
+                    cx.notify();
+                    busy
+                });
+                if !matches!(busy, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+}
+
+/// Change sets the agent closed for review.
+fn pending_reviews(s: &EditorState) -> usize {
+    s.bus
+        .change_sets()
+        .iter()
+        .filter(|c| c.state == ChangeSetState::Pending)
+        .count()
+}
+
+/// How much of what the background render covers is on disk, `None` while
+/// nothing needs it.
+fn cache_fraction(s: &EditorState) -> Option<f32> {
+    let status = s.render.status()?;
+    let (mut total, mut cached) = (0, 0);
+    for (range, on_disk) in &status.runs {
+        let length = range.duration().as_millis();
+        total += length;
+        if *on_disk {
+            cached += length;
+        }
+    }
+    (total > 0).then(|| cached as f32 / total as f32)
+}
+
+/// "25", "29.97".
+fn fps(rate: Rate) -> String {
+    if rate.den == 1 {
+        return rate.num.to_string();
+    }
+    let text = format!("{:.3}", rate.fps());
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 impl Render for KooEditor {
@@ -384,21 +742,20 @@ impl Render for KooEditor {
             self.edited = edited;
             window.set_window_edited(edited);
         }
-        let theme = cx.theme();
-        let (bg, fg, border) = (theme.background, theme.foreground, theme.border);
-        let status = self.state.read(cx).status.clone();
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(bg)
-            .text_color(fg)
+            .bg(t::G)
+            .text_color(t::T1)
+            .text_size(px(12.))
             .on_action(
                 cx.listener(|this, _: &Undo, _, cx| this.state.update(cx, |s, cx| s.undo(cx))),
             )
             .on_action(
                 cx.listener(|this, _: &Redo, _, cx| this.state.update(cx, |s, cx| s.redo(cx))),
             )
+            .on_action(cx.listener(|this, _: &ToggleAgent, _, cx| this.toggle_agent(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(None, window, cx)
             }))
@@ -420,53 +777,8 @@ impl Render for KooEditor {
             .on_action(
                 cx.listener(|this, _: &Quit, window, cx| projects::quit(&this.state, window, cx)),
             )
-            .child(
-                // Project menu on the left, notices and Settings on the
-                // right; workspaces stay centred.
-                div()
-                    .relative()
-                    .flex()
-                    .justify_center()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        div()
-                            .absolute()
-                            .left_2()
-                            .top_0()
-                            .bottom_0()
-                            .flex()
-                            .items_center()
-                            .child(self.project_menu(cx)),
-                    )
-                    .child(self.workspace_tabs(cx))
-                    .child(
-                        div()
-                            .absolute()
-                            .right_2()
-                            .top_0()
-                            .bottom_0()
-                            .flex()
-                            .items_center()
-                            .child(self.top_right(cx)),
-                    ),
-            )
-            .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("root")
-                        .child(resizable_panel().child(self.workspace(cx)))
-                        .child(resizable_panel().size(px(360.)).child(self.chat.clone())),
-                ),
-            )
-            .children(status.map(|s| {
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .border_t_1()
-                    .border_color(border)
-                    .child(s)
-            }))
+            .child(self.title_bar(window, cx))
+            .child(div().flex_1().min_h_0().child(self.workspace(cx)))
+            .child(self.status_bar(cx))
     }
 }

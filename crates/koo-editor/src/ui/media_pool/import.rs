@@ -21,7 +21,13 @@ const IMAGE: &[&str] = &[
 ];
 
 impl MediaPoolPanel {
-    pub(super) fn import(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    /// Bring `paths` into `bin`; folders give the media directly in them.
+    pub(super) fn import(
+        &mut self,
+        paths: Vec<PathBuf>,
+        bin: Option<BinId>,
+        cx: &mut Context<Self>,
+    ) {
         let state = self.state.read(cx);
         let media = state.services.media.clone();
         let known: Vec<PathBuf> = state
@@ -31,7 +37,6 @@ impl MediaPoolPanel {
             .iter()
             .map(|m| m.path.clone())
             .collect();
-        let bin = self.bin;
         cx.spawn(async move |this, cx| {
             let items = cx
                 .background_executor()

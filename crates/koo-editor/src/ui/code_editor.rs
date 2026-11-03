@@ -5,17 +5,16 @@
 //! language are fixed once a program exists; built-ins open read-only.
 
 use crate::state::EditorState;
-use crate::ui::library::{FxGlyph, duplicate, fx_glyph};
-use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{
-    Editor, EditorState as CodeState, Input, InputEvent, InputState, Position,
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, EmptyState, IconName, Input, PanelHeader, PopupMenuItem,
+    ScrollableElement as _, SectionHeader, Spinner, Switch, h_flex, v_flex,
 };
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+use crate::ui::library::{duplicate, fx_glyph};
+use gpui_kit::base::InputBase;
+use gpui_kit::base::input::{
+    Diagnostic, DiagnosticColors, DiagnosticSeverity, Editor, EditorState as CodeState,
+    InputEditorStyle, InputEvent, InputState, Position,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -459,62 +458,52 @@ impl CodeEditorPanel {
         self.state.update(cx, |s, cx| s.edit_fx(None, cx));
     }
 
-    fn header(&self, asset: &FxAsset, readonly: bool, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let (muted, secondary) = (theme.muted_foreground, theme.secondary);
-        let kind = format!(
-            "{} · {}",
-            match asset.language {
-                FxLanguage::Glsl => "GLSL",
-                FxLanguage::Html => "HTML",
-            },
-            asset.kind.label()
-        );
-        let name: AnyElement = if readonly {
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .truncate()
-                .child(asset.name.clone())
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(Input::new(&self.name).small())
-                .into_any_element()
+    fn header(&self, asset: &FxAsset, cx: &mut Context<Self>) -> PanelHeader {
+        let language = match asset.language {
+            FxLanguage::Glsl => "GLSL",
+            FxLanguage::Html => "HTML",
         };
-        h_flex()
-            .gap_2()
-            .child(fx_glyph(
-                crate::ui::library::kind_glyph(asset),
-                px(14.),
-                muted,
-            ))
-            .child(name)
-            .child(
-                div()
-                    .flex_none()
-                    .px_1p5()
-                    .rounded_sm()
-                    .bg(secondary)
-                    .text_xs()
-                    .child(kind),
+        PanelHeader::new()
+            .leading(
+                h_flex()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .child(fx_glyph(
+                        crate::ui::library::kind_glyph(asset),
+                        px(13.),
+                        t::T2,
+                    ))
+                    .child(div().text_color(t::T1).truncate().child(asset.name.clone())),
             )
+            .context(format!("{language} · {}", asset.kind.label()))
             .child(
                 Button::new("close-code")
                     .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
+                    .small()
+                    .icon(IconName::X)
                     .tooltip("Close")
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
             )
     }
 
+    /// Name, category and description, while the program can be edited.
+    fn meta(&self) -> Div {
+        let field = |label: &'static str, input: &Entity<InputState>| {
+            h_flex()
+                .gap(px(6.))
+                .h(px(26.))
+                .child(div().w(px(76.)).flex_none().text_color(t::T2).child(label))
+                .child(div().flex_1().min_w_0().child(Input::new(input).small()))
+        };
+        v_flex()
+            .px(px(10.))
+            .pb(px(6.))
+            .child(field("Name", &self.name))
+            .child(field("Category", &self.category))
+            .child(field("Description", &self.description))
+    }
+
     fn params_view(&self, language: FxLanguage, readonly: bool, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
         let add = (!readonly).then(|| {
             Button::new("add-param")
                 .ghost()
@@ -530,22 +519,14 @@ impl CodeEditorPanel {
                     cx.notify();
                 }))
         });
-        let mut list = v_flex().gap_1();
+        let mut list = v_flex().gap(px(4.)).px(px(10.)).pb(px(8.));
         for (i, p) in self.params.iter().enumerate() {
             list = list.child(self.param_row(i, p, language, readonly, cx));
         }
         v_flex()
-            .gap_1()
-            .child(
-                h_flex()
-                    .h(px(22.))
-                    .justify_between()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(muted)
-                    .child("Parameters")
-                    .children(add),
-            )
+            .border_t_1()
+            .border_color(t::LN)
+            .child(SectionHeader::new("fx-params", "Parameters").children(add))
             .child(list)
     }
 
@@ -564,11 +545,11 @@ impl CodeEditorPanel {
             .filter(|t| language == FxLanguage::Html || *t != Type::Text)
             .collect();
         let type_button = Button::new(("param-type", i))
-            .outline()
             .xsmall()
             .w(px(84.))
+            .justify_between()
             .label(ty.label())
-            .dropdown_caret(true)
+            .trailing_icon(IconName::ChevronDown)
             .disabled(readonly)
             .dropdown_menu(move |mut menu, _, _| {
                 for t in &types {
@@ -585,12 +566,12 @@ impl CodeEditorPanel {
             div()
                 .flex_1()
                 .min_w(px(36.))
-                .child(Input::new(f).xsmall().disabled(readonly))
+                .child(Input::new(f).small().disabled(readonly))
         };
         let values: AnyElement = match ty {
             _ if ty.ranged() => h_flex()
                 .flex_1()
-                .gap_1()
+                .gap(px(4.))
                 .child(field(&p.min))
                 .child(field(&p.max))
                 .child(field(&p.default))
@@ -601,7 +582,6 @@ impl CodeEditorPanel {
                     .flex_1()
                     .child(
                         Switch::new(("param-on", i))
-                            .small()
                             .checked(on)
                             .disabled(readonly)
                             .on_click(cx.listener(move |this, v: &bool, _, cx| {
@@ -615,7 +595,7 @@ impl CodeEditorPanel {
             }
             Type::Choice => h_flex()
                 .flex_1()
-                .gap_1()
+                .gap(px(4.))
                 .child(field(&p.options))
                 .child(field(&p.default))
                 .into_any_element(),
@@ -625,12 +605,12 @@ impl CodeEditorPanel {
                 .into_any_element(),
         };
         h_flex()
-            .gap_1()
+            .gap(px(4.))
             .child(
                 div()
                     .w(px(84.))
                     .flex_none()
-                    .child(Input::new(&p.name).xsmall().disabled(readonly)),
+                    .child(Input::new(&p.name).small().disabled(readonly)),
             )
             .child(type_button)
             .child(values)
@@ -639,7 +619,8 @@ impl CodeEditorPanel {
                     Button::new(("remove-param", i))
                         .ghost()
                         .xsmall()
-                        .icon(IconName::Close)
+                        .icon(IconName::X)
+                        .tooltip("Remove")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if i < this.params.len() {
                                 this.params.remove(i);
@@ -648,6 +629,61 @@ impl CodeEditorPanel {
                         })),
                 )
             })
+    }
+
+    /// The code in a mono field with line numbers, its errors marked.
+    fn code_view(&self, readonly: bool, window: &mut Window, cx: &mut App) -> InputBase {
+        let code = self.code.clone();
+        code.update(cx, |c, cx| {
+            c.set_readonly(readonly, cx);
+            c.set_editor_style(InputEditorStyle {
+                foreground: t::T1.into(),
+                muted_foreground: t::T3.into(),
+                background: t::G.into(),
+                border: t::LN.into(),
+                selection: t::alpha(t::AC, 0.3).into(),
+                caret: t::T1.into(),
+                diagnostics: DiagnosticColors {
+                    error: t::ERR.into(),
+                    warning: t::WARN.into(),
+                    info: t::AC.into(),
+                    hint: t::T2.into(),
+                },
+                editor_active_line: Some(t::alpha(t::T1, 0.03).into()),
+                editor_gutter_background: Some(t::G.into()),
+                ..Default::default()
+            });
+            c.set_editor_paddings(Edges {
+                top: px(6.),
+                right: px(8.),
+                bottom: px(6.),
+                left: px(4.),
+            });
+        });
+        let focused = code.read(cx).has_selection_focus(window, cx);
+        let focus = code.clone();
+        InputBase::new(("fx-code", code.entity_id()))
+            .focused(focused)
+            .flex()
+            .flex_1()
+            .min_h(px(160.))
+            .mx(px(10.))
+            .rounded(t::RADIUS_SM)
+            .border_1()
+            .border_color(if focused { t::AC } else { t::LN })
+            .bg(t::G)
+            .font_family(t::mono())
+            .text_size(px(11.))
+            .line_height(px(17.))
+            .text_color(t::T1)
+            .when(focused, |f| f.shadow(t::field_ring(t::AC)))
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                if !focus.read(cx).has_selection_focus(window, cx) {
+                    focus.update(cx, |s, cx| s.focus(window, cx));
+                }
+            })
+            .child(div().size_full().min_w_0().child(Editor::new(&code)))
     }
 
     /// Change a parameter's type, resetting its default to fit.
@@ -674,25 +710,26 @@ impl CodeEditorPanel {
         if self.errors.is_empty() {
             return None;
         }
-        let theme = cx.theme();
-        let (red, hover) = (theme.red, theme.list_hover);
         let rows = self.errors.iter().enumerate().map(|(i, (line, message))| {
             let line = *line;
             h_flex()
                 .id(("fx-error", i))
-                .gap_2()
-                .px_1()
-                .py_0p5()
-                .rounded_sm()
-                .text_xs()
-                .text_color(red)
+                .items_start()
+                .gap(px(8.))
+                .px(px(6.))
+                .py(px(3.))
+                .rounded(t::RADIUS_SM)
+                .text_size(px(11.))
+                .text_color(t::ERR)
                 .when(line.is_some(), |d| {
-                    d.cursor_pointer().hover(|s| s.bg(hover))
+                    d.cursor_pointer().hover(|s| s.bg(t::alpha(t::ERR, 0.08)))
                 })
                 .child(
                     div()
                         .flex_none()
-                        .w(px(28.))
+                        .w(px(32.))
+                        .font_family(t::mono())
+                        .text_color(t::T3)
                         .children(line.map(|l| format!("L{l}"))),
                 )
                 .child(div().flex_1().min_w_0().child(message.clone()))
@@ -707,7 +744,9 @@ impl CodeEditorPanel {
         Some(
             div()
                 .id("fx-errors")
+                .flex_none()
                 .max_h(px(120.))
+                .mx(px(10.))
                 .overflow_y_scrollbar()
                 .child(v_flex().children(rows))
                 .into_any_element(),
@@ -718,20 +757,16 @@ impl CodeEditorPanel {
 impl Render for CodeEditorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let stored = self.stored(cx);
-        let muted = cx.theme().muted_foreground;
         let Some(stored) = stored else {
             // The program is gone (deleted, or its creation undone).
             if self.loaded.take().is_some() {
                 let state = self.state.clone();
                 cx.defer(move |cx| state.update(cx, |s, cx| s.edit_fx(None, cx)));
             }
-            return div()
+            return v_flex()
                 .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(muted)
-                .child(fx_glyph(FxGlyph::Code, px(18.), muted))
+                .bg(t::P)
+                .child(EmptyState::new(IconName::CodeXml, "No program open"))
                 .into_any_element();
         };
         let built = self.build(cx).ok();
@@ -744,33 +779,33 @@ impl Render for CodeEditorPanel {
         }
         let readonly = matches!(stored.id, FxRef::Builtin(_));
         let dirty = !readonly && self.build(cx).ok().as_ref() != self.loaded.as_ref();
-        let header = self.header(&stored, readonly, cx);
-        let meta = (!readonly).then(|| {
-            h_flex()
-                .gap_1()
-                .child(div().w(px(120.)).child(Input::new(&self.category).xsmall()))
-                .child(div().flex_1().child(Input::new(&self.description).xsmall()))
-        });
+        let header = self.header(&stored, cx);
+        let meta = (!readonly).then(|| self.meta());
         let params = self.params_view(stored.language, readonly, cx);
+        let code = self.code_view(readonly, window, cx);
         let errors = self.errors_view(cx);
         let r = stored.id.clone();
         let footer = h_flex()
-            .gap_2()
-            .justify_end()
-            .when(self.checking, |d| {
-                d.child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Checking…"),
-                )
-            })
+            .flex_none()
+            .gap(px(6.))
+            .h(px(42.))
+            .px(px(10.))
+            .border_t_1()
+            .border_color(t::LN)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .gap(px(6.))
+                    .text_size(px(11.))
+                    .text_color(t::T3)
+                    .when(self.checking, |d| {
+                        d.child(Spinner::new().size(px(11.))).child("Checking…")
+                    }),
+            )
             .when(readonly, |d| {
                 d.child(
                     Button::new("duplicate-fx")
                         .primary()
-                        .small()
                         .label("Duplicate to edit")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let r = r.clone();
@@ -782,7 +817,6 @@ impl Render for CodeEditorPanel {
                 d.child(
                     Button::new("revert-fx")
                         .ghost()
-                        .small()
                         .label("Revert")
                         .disabled(!dirty)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -795,7 +829,6 @@ impl Render for CodeEditorPanel {
                 .child(
                     Button::new("apply-fx")
                         .primary()
-                        .small()
                         .label("Apply")
                         .disabled(!dirty)
                         .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
@@ -803,21 +836,22 @@ impl Render for CodeEditorPanel {
             });
         v_flex()
             .size_full()
-            .p_3()
-            .gap_3()
+            .bg(t::P)
+            .text_size(px(12.))
+            .text_color(t::T1)
             .child(header)
-            .children(meta)
-            .child(params)
             .child(
-                div().flex_1().min_h(px(160.)).child(
-                    Editor::new(&self.code)
-                        .h_full()
-                        .readonly(readonly)
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_xs(),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(8.))
+                    .pt(px(6.))
+                    .pb(px(10.))
+                    .children(meta)
+                    .child(params)
+                    .child(code)
+                    .children(errors),
             )
-            .children(errors)
             .child(footer)
             .into_any_element()
     }

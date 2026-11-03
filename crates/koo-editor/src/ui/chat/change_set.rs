@@ -1,14 +1,12 @@
 //! Change-set card (PRD AG4–AG6), fixed above the composer, one per set:
-//! summary, Preview / Accept all / Review / Reject, the review list with
-//! per-item selection, and the outcome.
+//! title with its diff pills, the review list with per-item selection,
+//! Preview / Review / Reject / Accept, and the outcome once resolved.
 
 use super::ChatPanel;
 use super::refs::clock;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    StyledExt as _, h_flex, v_flex,
+use crate::ui::kit::{
+    Badge, Button, Checkbox, Icon, IconName, ScrollableElement as _, Tooltip, h_flex, theme as t,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -48,13 +46,7 @@ impl ChatPanel {
             .collect();
         self.shown.extend(sets.iter().copied());
         sets.into_iter()
-            .map(|id| {
-                div()
-                    .mx_2()
-                    .mt_1()
-                    .child(self.render_change_set(id, cx))
-                    .into_any_element()
-            })
+            .map(|id| self.render_change_set(id, cx))
             .collect()
     }
 
@@ -72,192 +64,226 @@ impl ChatPanel {
         let review = self.reviews.entry(id).or_default();
         let open = review.open;
         let excluded = review.excluded.clone();
-
-        let theme = cx.theme();
-
-        let total = set.items.len();
-        let warnings = set.items.iter().filter(|i| !i.warnings.is_empty()).count();
-        let listen = set.items.iter().filter(|i| needs_listen(i)).count();
         let resolved = set.state == ChangeSetState::Resolved;
-        // The agent is still adding to it this turn.
-        let working = set.state == ChangeSetState::Open;
-
-        let summary = h_flex()
-            .gap_3()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .child(format!(
-                "{total} {}",
-                if total == 1 { "change" } else { "changes" }
-            ))
-            .when(warnings > 0, |el| {
-                el.child(
-                    h_flex()
-                        .gap_1()
-                        .text_color(theme.yellow)
-                        .child(Icon::new(IconName::TriangleAlert).size_3())
-                        .child(warnings.to_string()),
-                )
-            })
-            .when(listen > 0 && !resolved, |el| {
-                el.child(
-                    h_flex()
-                        .id(("listen", id_hash(id)))
-                        .gap_1()
-                        .child(Icon::new(IconName::Mic).size_3())
-                        .child(listen.to_string())
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("Needs a listen")
-                                .build(window, cx)
-                        }),
-                )
-            });
+        let list = open.then(|| self.render_items(&set, &project, focused, cx));
 
         let review_button = Button::new(("review", id_hash(id)))
             .label("Review")
-            .xsmall()
             .ghost()
+            .small()
             .selected(open)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let r = this.reviews.entry(id).or_default();
                 r.open = !r.open;
                 this.remeasure(cx);
             }));
-        let actions = if resolved {
-            h_flex()
-                .child(outcome(&set, cx))
-                .child(div().flex_1())
-                .child(review_button)
-                .into_any_element()
-        } else {
-            h_flex()
-                .gap_1()
+        let card = v_flex()
+            .flex_none()
+            .w_full()
+            .overflow_hidden()
+            .rounded(t::RADIUS_LG)
+            .border_1()
+            .bg(t::R1);
+        if resolved {
+            return card
+                .border_color(t::LN)
+                .children(list.map(|list| div().border_b_1().border_color(t::LN).child(list)))
                 .child(
-                    Button::new(("preview", id_hash(id)))
-                        // The eye shows the state, like a track's visibility.
-                        .icon(if previewing {
-                            IconName::Eye
-                        } else {
-                            IconName::EyeOff
-                        })
-                        .label("Preview")
-                        .xsmall()
-                        .ghost()
-                        .selected(previewing)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| {
-                                let next = (s.preview != Some(id)).then_some(id);
-                                s.set_preview(next, cx)
-                            })
-                        })),
+                    h_flex()
+                        .h(px(34.))
+                        .pl(px(10.))
+                        .pr(px(6.))
+                        .gap(px(8.))
+                        .child(outcome(&set))
+                        .child(review_button),
                 )
-                .when(open, |el| {
-                    let all = excluded.is_empty();
-                    el.child(
-                        Button::new(("toggle-all", id_hash(id)))
-                            .label(if all { "None" } else { "All" })
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let items: Vec<_> = this
-                                    .state
-                                    .read(cx)
-                                    .bus
-                                    .change_set(id)
-                                    .map(|s| s.pending_items().map(|i| i.id).collect())
-                                    .unwrap_or_default();
-                                let r = this.reviews.entry(id).or_default();
-                                if r.excluded.is_empty() {
-                                    r.excluded.extend(items);
-                                } else {
-                                    r.excluded.clear();
-                                }
-                                cx.notify();
-                            })),
-                    )
-                })
-                .child(div().flex_1())
-                .child(review_button)
-                .child(
-                    Button::new(("reject", id_hash(id)))
-                        .label("Reject")
-                        .xsmall()
-                        .ghost()
-                        .disabled(working)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                .into_any_element();
+        }
+
+        // The agent is still adding to it this turn.
+        let working = set.state == ChangeSetState::Open;
+        let total = set.items.len();
+        // While reviewing, the primary action takes the ticked items.
+        let chosen = set
+            .pending_items()
+            .filter(|i| !open || !excluded.contains(&i.id))
+            .count();
+        let footer = h_flex()
+            .gap(px(4.))
+            .px(px(8.))
+            .py(px(6.))
+            .border_t_1()
+            .border_color(t::LN)
+            .child(
+                Button::new(("preview", id_hash(id)))
+                    // The eye shows the state, like a track's visibility.
+                    .icon(if previewing {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    })
+                    .label(if previewing { "Previewing" } else { "Preview" })
+                    .ghost()
+                    .small()
+                    .selected(previewing)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            let next = (s.preview != Some(id)).then_some(id);
+                            s.set_preview(next, cx)
+                        })
+                    })),
+            )
+            .child(div().flex_1())
+            .child(review_button)
+            .child(
+                Button::new(("reject", id_hash(id)))
+                    .label("Reject")
+                    .small()
+                    .disabled(working)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            if s.preview == Some(id) {
+                                s.set_preview(None, cx);
+                            }
+                            s.reject(id, None, cx)
+                        })
+                    })),
+            )
+            .child(
+                Button::new(("accept", id_hash(id)))
+                    .label(if chosen == total {
+                        "Accept all".to_string()
+                    } else {
+                        format!("Accept {chosen}")
+                    })
+                    .primary()
+                    .small()
+                    .disabled(chosen == 0 || working)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if open {
+                            this.accept_selected(id, cx);
+                        } else {
                             this.state.update(cx, |s, cx| {
                                 if s.preview == Some(id) {
                                     s.set_preview(None, cx);
                                 }
-                                s.reject(id, None, cx)
+                                s.accept(id, None, cx);
                             })
-                        })),
-                )
-                .child({
-                    // While reviewing, the primary action takes the ticked items.
-                    let chosen = set
-                        .pending_items()
-                        .filter(|i| !open || !excluded.contains(&i.id))
-                        .count();
-                    Button::new(("accept", id_hash(id)))
-                        .label(if chosen == total {
-                            "Accept all".to_string()
-                        } else {
-                            format!("Accept {chosen}")
-                        })
-                        .xsmall()
-                        .primary()
-                        .disabled(chosen == 0 || working)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if open {
-                                this.accept_selected(id, cx);
-                            } else {
-                                this.state.update(cx, |s, cx| {
-                                    if s.preview == Some(id) {
-                                        s.set_preview(None, cx);
-                                    }
-                                    s.accept(id, None, cx);
-                                })
-                            }
-                        }))
-                })
-                .into_any_element()
+                        }
+                    })),
+            );
+        card.border_color(if previewing {
+            t::AC
+        } else {
+            t::alpha(t::AC, 0.33)
+        })
+        .child(self.render_set_header(&set, open, &excluded, cx))
+        .children(list)
+        .child(footer)
+        .into_any_element()
+    }
+
+    /// Title, diff pills and, while reviewing, the tick-all toggle.
+    fn render_set_header(
+        &self,
+        set: &ChangeSet,
+        open: bool,
+        excluded: &HashSet<ChangeItemId>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = set.id;
+        let total = set.items.len();
+        let warnings = set.items.iter().filter(|i| !i.warnings.is_empty()).count();
+        let listen = set.items.iter().filter(|i| needs_listen(i)).count();
+        let cut: f64 = set
+            .items
+            .iter()
+            .filter_map(|i| match &i.command {
+                Command::RippleDelete { range, .. } => Some(range.duration().as_secs_f64()),
+                _ => None,
+            })
+            .sum();
+        let count = |icon: IconName, color: Rgba, n: usize| {
+            h_flex()
+                .flex_none()
+                .gap(px(3.))
+                .text_size(px(11.))
+                .text_color(color)
+                .child(Icon::new(icon).size(px(11.)))
+                .child(n.to_string())
         };
-
-        let list = open.then(|| self.render_items(&set, &project, focused, cx));
-
-        let theme = cx.theme();
-        v_flex()
-            .w_full()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(if previewing { theme.ring } else { theme.border })
-            .bg(theme.secondary.opacity(0.4))
+        h_flex()
+            .h(px(34.))
+            .pl(px(10.))
+            .pr(px(8.))
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(t::LN)
             .child(
-                v_flex()
-                    .gap_1()
-                    .px_3()
-                    .pt_2p5()
-                    .pb_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_medium()
-                            .line_clamp(2)
-                            .child(set.title.clone()),
-                    )
-                    .child(summary),
+                h_flex()
+                    .flex_none()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(t::RADIUS)
+                    .bg(t::alpha(t::AC, 0.15))
+                    .child(Icon::new(IconName::Sparkles).size(px(12.)).color(t::AC)),
             )
-            .children(list)
             .child(
                 div()
-                    .px_2()
-                    .py_1p5()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(actions),
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(set.title.clone()),
             )
-            .into_any_element()
+            .when(warnings > 0, |el| {
+                el.child(count(IconName::TriangleAlert, t::WARN, warnings))
+            })
+            .when(listen > 0, |el| {
+                el.child(
+                    div()
+                        .id(("listen", id_hash(id)))
+                        .child(count(IconName::Mic, t::T2, listen))
+                        .tooltip(Tooltip::text("Needs a listen")),
+                )
+            })
+            .child(div().flex_1())
+            .when(cut > 0., |el| {
+                el.child(Badge::new(format!("−{cut:.1} s")).err().mono())
+            })
+            .when(!open, |el| {
+                el.child(
+                    Badge::new(format!(
+                        "{total} {}",
+                        if total == 1 { "change" } else { "changes" }
+                    ))
+                    .mono(),
+                )
+            })
+            .when(open, |el| {
+                let all = excluded.is_empty();
+                el.child(
+                    Button::new(("toggle-all", id_hash(id)))
+                        .label(if all { "None" } else { "All" })
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let items: Vec<_> = this
+                                .state
+                                .read(cx)
+                                .bus
+                                .change_set(id)
+                                .map(|s| s.pending_items().map(|i| i.id).collect())
+                                .unwrap_or_default();
+                            let r = this.reviews.entry(id).or_default();
+                            if r.excluded.is_empty() {
+                                r.excluded.extend(items);
+                            } else {
+                                r.excluded.clear();
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
     }
 
     fn render_items(
@@ -272,7 +298,6 @@ impl ChatPanel {
         let excluded = review.excluded.clone();
         let reveal = review.reveal.take();
         let scroll = review.scroll.clone();
-        let theme = cx.theme().clone();
         let mut items: Vec<_> = set
             .items
             .iter()
@@ -286,9 +311,9 @@ impl ChatPanel {
         let rows = items.into_iter().map(|(ix, item, at)| {
             let item_id = item.id;
             let tint = match diff_kind(item) {
-                DiffKind::Added => theme.green,
-                DiffKind::Removed => theme.red,
-                DiffKind::Modified => theme.yellow,
+                DiffKind::Added => t::OK,
+                DiffKind::Removed => t::ERR,
+                DiffKind::Modified => t::WARN,
             };
             let reason = if ix == 0 && item.reason == set.title {
                 describe(&item.command)
@@ -296,21 +321,32 @@ impl ChatPanel {
                 item.reason.clone()
             };
             let pending = item.state == ItemState::Pending;
+            let ticked = pending && !excluded.contains(&item_id);
+            let conflicted = item.state == ItemState::Conflicted;
             let warning = item.warnings.first().map(warning_text);
             h_flex()
                 .id(("item", ix))
+                .relative()
+                .flex_none()
                 .h(px(28.))
-                .px_3()
-                .gap_2()
-                .text_xs()
+                .px(px(10.))
+                .gap(px(8.))
                 .cursor_pointer()
-                .hover(|el| el.bg(theme.accent.opacity(0.5)))
-                .when(focused == Some(item_id), |el| el.bg(theme.accent))
-                .when(!pending, |el| el.opacity(0.6))
+                .hover(|el| el.bg(t::HV))
+                .when(focused == Some(item_id), |el| {
+                    el.bg(t::alpha(t::AC, 0.08)).child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.))
+                            .bg(t::AC),
+                    )
+                })
                 .child(if pending {
                     Checkbox::new(("item-check", ix))
-                        .checked(!excluded.contains(&item_id))
-                        .xsmall()
+                        .checked(ticked)
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             let r = this.reviews.entry(id).or_default();
                             if *checked {
@@ -322,16 +358,32 @@ impl ChatPanel {
                         }))
                         .into_any_element()
                 } else {
-                    state_icon(item.state, &theme).into_any_element()
+                    state_icon(item.state).into_any_element()
                 })
-                .child(div().size_1p5().flex_none().rounded_full().bg(tint))
-                .child(div().flex_1().min_w_0().truncate().child(reason))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(tint)
+                        .when(pending && !ticked, |el| el.opacity(0.5)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(if ticked {
+                            t::T1
+                        } else if pending {
+                            t::T3
+                        } else {
+                            t::T2
+                        })
+                        .child(reason),
+                )
                 .when(needs_listen(item), |el| {
-                    el.child(
-                        Icon::new(IconName::Mic)
-                            .size_3()
-                            .text_color(theme.muted_foreground),
-                    )
+                    el.child(Icon::new(IconName::Mic).size(px(12.)).color(t::T2))
                 })
                 .when_some(warning, |el, text| {
                     el.child(
@@ -339,44 +391,52 @@ impl ChatPanel {
                             .id(("item-warning", ix))
                             .child(
                                 Icon::new(IconName::TriangleAlert)
-                                    .size_3()
-                                    .text_color(theme.yellow),
+                                    .size(px(12.))
+                                    .color(t::WARN),
                             )
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(text.clone())
-                                    .build(window, cx)
-                            }),
+                            .tooltip(Tooltip::text(text)),
                     )
                 })
-                .when(item.state == ItemState::Conflicted, |el| {
-                    el.child(div().text_color(theme.red).child("Conflict"))
-                })
-                .when_some(at, |el, t| {
+                .when(conflicted, |el| {
                     el.child(
                         div()
                             .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .child(clock(t)),
+                            .text_size(px(11.))
+                            .text_color(t::ERR)
+                            .child("Conflict"),
                     )
                 })
-                .when_some(at, |el, t| {
-                    el.on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.seek(t, cx))
+                .when_some(at, |el, at| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .font_family(t::mono())
+                            .text_size(px(10.))
+                            .text_color(if focused == Some(item_id) {
+                                t::T2
+                            } else {
+                                t::T3
+                            })
+                            .child(clock(at)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.seek(at, cx))
                     }))
                 })
         });
-        v_flex()
-            .border_t_1()
-            .border_color(theme.border)
+        div()
+            .relative()
             .child(
                 v_flex()
                     .id(("items", id_hash(id)))
-                    .track_scroll(&scroll)
-                    .py_1()
                     .max_h(px(280.))
-                    .overflow_y_scroll()
-                    .children(rows),
+                    .py(px(4.))
+                    .text_size(px(12.))
+                    .children(rows)
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll(),
             )
+            .vertical_scrollbar(&scroll)
             .into_any_element()
     }
 
@@ -406,8 +466,8 @@ impl ChatPanel {
     }
 }
 
-fn outcome(set: &ChangeSet, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
+/// What came of a resolved set, in its colour.
+fn outcome(set: &ChangeSet) -> impl IntoElement {
     let count = |state| set.items.iter().filter(|i| i.state == state).count();
     let (accepted, conflicted, total) = (
         count(ItemState::Accepted),
@@ -415,9 +475,9 @@ fn outcome(set: &ChangeSet, cx: &App) -> impl IntoElement {
         set.items.len(),
     );
     let (icon, color, text) = if accepted == total {
-        (IconName::CircleCheck, theme.green, "Accepted".to_string())
+        (IconName::CircleCheck, t::OK, "Accepted".to_string())
     } else if accepted == 0 && conflicted == 0 {
-        (IconName::CircleX, theme.muted_foreground, "Rejected".into())
+        (IconName::CircleX, t::T2, "Rejected".into())
     } else {
         let mut text = format!("Accepted {accepted} of {total}");
         if conflicted > 0 {
@@ -430,37 +490,30 @@ fn outcome(set: &ChangeSet, cx: &App) -> impl IntoElement {
                 }
             ));
         }
-        let color = if conflicted > 0 {
-            theme.red
-        } else {
-            theme.yellow
-        };
-        (IconName::CircleCheck, color, text)
+        (IconName::CircleCheck, t::OK, text)
     };
     h_flex()
-        .h(px(24.))
-        .px_1()
-        .gap_1p5()
-        .text_xs()
+        .flex_1()
+        .min_w_0()
+        .gap(px(5.))
+        .text_size(px(11.))
         .text_color(color)
-        .child(Icon::new(icon).size_3p5())
-        .child(text)
+        .child(Icon::new(icon).size(px(13.)))
+        .child(div().min_w_0().truncate().child(text))
 }
 
-fn state_icon(state: ItemState, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+fn state_icon(state: ItemState) -> impl IntoElement {
     let (icon, color) = match state {
-        ItemState::Accepted => (IconName::Check, theme.green),
-        ItemState::Rejected => (IconName::Close, theme.muted_foreground),
-        ItemState::Conflicted => (IconName::CircleAlert, theme.red),
-        ItemState::Pending => (IconName::Dash, theme.muted_foreground),
+        ItemState::Accepted => (IconName::Check, t::OK),
+        ItemState::Rejected => (IconName::X, t::T3),
+        ItemState::Conflicted => (IconName::CircleAlert, t::ERR),
+        ItemState::Pending => (IconName::Minus, t::T3),
     };
-    div()
-        .size_4()
-        .flex()
+    h_flex()
         .flex_none()
-        .items_center()
         .justify_center()
-        .child(Icon::new(icon).size_3().text_color(color))
+        .size(px(14.))
+        .child(Icon::new(icon).size(px(12.)).color(color))
 }
 
 fn id_hash(id: ChangeSetId) -> usize {
@@ -494,7 +547,7 @@ fn needs_listen(item: &ChangeItem) -> bool {
 }
 
 /// Where on the timeline an item lives, for seeking.
-pub fn item_time(item: &ChangeItem, project: &Project) -> Option<Time> {
+fn item_time(item: &ChangeItem, project: &Project) -> Option<Time> {
     use Command::*;
     match &item.command {
         RippleDelete { range, .. }

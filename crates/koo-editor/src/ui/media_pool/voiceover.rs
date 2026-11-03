@@ -6,21 +6,15 @@
 //! find, design or clone another, which this form then reads with. A voice
 //! in the library starts on the stability and similarity it last read with.
 
-use super::{MediaPoolPanel, listen_button};
+use super::{MediaPoolPanel, form, listen_button, play_dot};
 use crate::state::EditorState;
-use crate::ui::timeline::glyph::{Glyph, glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::searchable_list::SearchableListItem;
-use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
+    SelectItem, SelectState, Spinner, Textarea, Tooltip, h_flex, v_flex,
 };
+use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::cloud::{
@@ -74,7 +68,7 @@ impl VoiceRow {
     }
 }
 
-impl SearchableListItem for VoiceRow {
+impl SelectItem for VoiceRow {
     type Value = String;
 
     fn title(&self) -> SharedString {
@@ -96,7 +90,7 @@ pub struct Take {
 pub struct VoiceoverForm {
     state: Entity<EditorState>,
     voices: Vec<Voice>,
-    picker: Entity<SelectState<SearchableVec<VoiceRow>>>,
+    picker: Entity<SelectState<VoiceRow>>,
     /// The voice to pick once they are in.
     wanted: Option<String>,
     loading: bool,
@@ -130,9 +124,7 @@ impl VoiceoverForm {
                 .placeholder("[excited] Welcome back... today is the BIG one.")
                 .default_value(script_text)
         });
-        let picker = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(Vec::new()), None, window, cx).searchable(true)
-        });
+        let picker = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx).searchable(true));
         let slider = |value: f32, cx: &mut Context<Self>| {
             cx.new(|_| {
                 SliderState::new()
@@ -154,14 +146,12 @@ impl VoiceoverForm {
         );
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
-            cx.observe(&picker, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &picker,
                 window,
-                |this, _, ev: &SelectEvent<SearchableVec<VoiceRow>>, window, cx| {
-                    if let SelectEvent::Confirm(Some(id)) = ev {
-                        this.apply_saved_reading(&id.clone(), window, cx);
-                    }
+                |this, _, ev: &SelectEvent<VoiceRow>, window, cx| {
+                    let SelectEvent::Confirm(id) = ev;
+                    this.apply_saved_reading(&id.clone(), window, cx);
                 },
             ),
             cx.subscribe(&script, |_, _, _: &InputEvent, cx| cx.notify()),
@@ -224,8 +214,8 @@ impl VoiceoverForm {
             .position(|v| Some(&v.id) == wanted.as_ref());
         let selected = found.or((!self.voices.is_empty()).then_some(0));
         self.picker.update(cx, |picker, cx| {
-            picker.set_items(SearchableVec::new(rows), window, cx);
-            picker.set_selected_index(selected.map(IndexPath::new), window, cx);
+            picker.set_items(rows, window, cx);
+            picker.set_selected_index(selected, window, cx);
         });
     }
 
@@ -305,9 +295,10 @@ impl VoiceoverForm {
         })
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Start it; `true` once it is on its way.
+    fn submit(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(request) = self.request(cx) else {
-            return;
+            return false;
         };
         self.state.update(cx, |s, cx| {
             if let Some(reading) = request.reading() {
@@ -316,7 +307,7 @@ impl VoiceoverForm {
             }
             s.generate(request, cx);
         });
-        window.close_dialog(cx);
+        true
     }
 
     /// Fetch the sample of `voice`, then play it.
@@ -376,24 +367,23 @@ impl VoiceoverForm {
         let id = voice.as_ref().map(|v| &v.id);
         if id.is_some() && id == self.fetching.as_ref() {
             return div()
-                .size(px(24.))
                 .flex()
+                .flex_none()
+                .size(px(22.))
                 .items_center()
                 .justify_center()
-                .child(Spinner::new().xsmall())
+                .child(Spinner::new())
                 .into_any_element();
         }
         if let Some(item) = id.and_then(|id| self.samples.get(id)) {
             return listen_button("voice-sample", &self.state, item, cx).into_any_element();
         }
-        Button::new("voice-sample")
-            .ghost()
-            .xsmall()
-            .tooltip("Play")
-            .disabled(!voice.as_ref().is_some_and(|v| v.sample.is_some()))
-            .child(glyph(Glyph::Play, px(13.), cx.theme().foreground))
+        let heard = voice.as_ref().is_some_and(|v| v.sample.is_some());
+        play_dot("voice-sample", false, px(22.))
+            .when(!heard, |d| d.opacity(0.4))
+            .tooltip(Tooltip::text("Play"))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(voice) = voice.clone() {
+                if let Some(voice) = voice.clone().filter(|v| v.sample.is_some()) {
                     this.fetch_sample(voice, cx);
                 }
             }))
@@ -412,6 +402,7 @@ impl VoiceoverForm {
             .ghost()
             .xsmall()
             .label(name)
+            .trailing_icon(IconName::ChevronDown)
             .dropdown_menu(move |mut menu, _, _| {
                 for &tag in tags {
                     let form = form.clone();
@@ -425,33 +416,22 @@ impl VoiceoverForm {
 
     fn slider_row(name: &'static str, slider: &Entity<SliderState>, cx: &App) -> impl IntoElement {
         let percent = format!("{:.0}%", Self::slider_value(slider, cx) * 100.);
-        v_flex()
-            .gap_1()
-            .child(
-                h_flex().justify_between().text_sm().child(name).child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(percent),
-                ),
-            )
-            .child(Slider::new(slider))
+        form::row(name, form::slider(slider, percent))
     }
 }
 
 impl Render for VoiceoverForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
         let text = self.text(cx);
         let chars = text.chars().count();
         let fixed = cloud::without_breaks(&text);
-        let count = format!("{chars} / {SCRIPT_CHARS}");
         let sample = self.sample_button(cx);
         v_flex()
-            .gap_4()
-            .child(
+            .gap(px(10.))
+            .child(form::row(
+                "Voice",
                 h_flex()
-                    .gap_2()
+                    .gap(px(6.))
                     .child(
                         div().flex_1().min_w_0().child(
                             Select::new(&self.picker)
@@ -467,51 +447,35 @@ impl Render for VoiceoverForm {
                     .child(
                         Button::new("more-voices")
                             .ghost()
-                            .xsmall()
                             .icon(IconName::Plus)
                             .tooltip("More voices")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.more_voices(window, cx)),
                             ),
                     ),
-            )
+            ))
             .when_some(self.error.clone(), |el, error| {
-                el.child(div().text_xs().text_color(theme.red).child(error))
+                el.child(form::problem(error))
             })
             .child(
                 v_flex()
-                    .gap_1()
-                    .child(Textarea::new(&self.script).text_sm())
+                    .gap(px(4.))
+                    .child(Textarea::new(&self.script).counter(chars, SCRIPT_CHARS))
                     .child(
                         h_flex()
-                            .justify_between()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(self.tag_menu("Emotion", &EMOTIONS, cx))
-                                    .child(self.tag_menu("Reaction", &REACTIONS, cx))
-                                    .child(self.tag_menu("Pause", &PAUSES, cx)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if chars > SCRIPT_CHARS {
-                                        theme.red
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(count),
-                            ),
+                            .gap(px(2.))
+                            .child(self.tag_menu("Emotion", &EMOTIONS, cx))
+                            .child(self.tag_menu("Reaction", &REACTIONS, cx))
+                            .child(self.tag_menu("Pause", &PAUSES, cx)),
                     ),
             )
             .when_some(fixed, |el, fixed| {
                 let script = self.script.clone();
                 el.child(
                     h_flex()
-                        .justify_between()
-                        .text_xs()
-                        .text_color(theme.red)
-                        .child("<break> tags aren't read")
+                        .gap(px(8.))
+                        .text_color(t::ERR)
+                        .child(div().flex_1().child("<break> tags aren't read"))
                         .child(
                             Button::new("use-pauses")
                                 .xsmall()
@@ -560,22 +524,9 @@ pub fn open(state: Entity<EditorState>, take: Option<Take>, window: &mut Window,
             .title(Capability::Voiceover.label())
             .w(px(520.))
             .child(form.clone())
-            .footer(
-                DialogFooter::new()
-                    .child(
-                        Button::new("voiceover-cancel")
-                            .label("Cancel")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("voiceover-ok")
-                            .primary()
-                            .label("Generate")
-                            .disabled(!ready)
-                            .on_click(move |_, window, cx| {
-                                submit.update(cx, |f, cx| f.submit(window, cx))
-                            }),
-                    ),
-            )
+            .confirm("Generate", move |_, cx| {
+                submit.update(cx, |f, cx| f.submit(cx))
+            })
+            .confirm_disabled(!ready)
     });
 }

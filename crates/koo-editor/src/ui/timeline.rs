@@ -8,7 +8,6 @@
 mod drops;
 mod editing;
 mod fx;
-pub(crate) mod glyph;
 mod layout;
 mod menu;
 mod overlay;
@@ -21,14 +20,11 @@ mod waveform;
 use super::RefDrag;
 use crate::app::TogglePlay;
 use crate::state::EditorState;
-use glyph::{Glyph, glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::popover::Popover;
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+use crate::ui::kit::{
+    Button, ContextMenuExt as _, DropdownMenu as _, Icon, IconName, Popover, PopupMenu,
+    PopupMenuItem, Slider, Spinner, Tooltip, h_flex, popover, theme as t, v_flex,
 };
+use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState, SliderValue};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge, InsertMode};
@@ -38,9 +34,7 @@ use koo_core::model::{
 use koo_core::{ChangeItemId, ChangeSetId, ClipId, Rate, Time, TimeRange, TrackId};
 use layout::{EDGE_PX, HEADER_WIDTH, RULER_HEIGHT, Row, SNAP_PX, TOOLBAR_HEIGHT, Viewport};
 use overlay::OverlayItem;
-use paint::{
-    ClipScene, Colors, DropHint, Ghost, Marquee, Scene, TrackScene, TransitionScene, Warp,
-};
+use paint::{ClipScene, DropHint, Ghost, Marquee, Scene, TrackScene, TransitionScene, Warp};
 use silence::SilenceCache;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -231,13 +225,7 @@ fn step_cut(s: &mut EditorState, forward: bool, cx: &mut Context<EditorState>) {
 /// Where a new track of `kind` goes, and its name: captions on top,
 /// picture tracks above the topmost video track, audio at the bottom.
 fn new_track_slot(tl: &Timeline, kind: TrackKind) -> (usize, String) {
-    let prefix = match kind {
-        TrackKind::Video => "V",
-        TrackKind::Audio => "A",
-        TrackKind::Caption => "C",
-        TrackKind::Title => "T",
-        TrackKind::Overlay => "O",
-    };
+    let prefix = kind_prefix(kind);
     let mut n = tl.tracks.iter().filter(|t| t.kind == kind).count() + 1;
     while tl.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
         n += 1;
@@ -381,6 +369,8 @@ pub struct TimelinePanel {
     silence_min: Entity<SliderState>,
     silence_padding: Entity<SliderState>,
     silences: SilenceCache,
+    /// The toolbar's zoom slider, in px per second.
+    zoom: Entity<SliderState>,
     /// What a media or FX drag over the lanes would hit.
     drop: Option<DropHint>,
     /// Heights of tracks the user resized.
@@ -394,7 +384,7 @@ pub struct TimelinePanel {
     menu_at: Point<Pixels>,
     popup: Option<menu::Popup>,
     _observe: Subscription,
-    _sliders: [Subscription; 2],
+    _sliders: [Subscription; 3],
 }
 
 impl TimelinePanel {
@@ -418,9 +408,22 @@ impl TimelinePanel {
                 .step(0.02)
                 .default_value(0.1)
         });
+        let zoom = cx.new(|_| {
+            SliderState::new()
+                .min(layout::MIN_PX_PER_SEC)
+                .max(layout::MAX_PX_PER_SEC)
+                .scale(SliderScale::Logarithmic)
+                .step(0.01)
+                .default_value(Viewport::default().px_per_sec)
+        });
         let _sliders = [
             cx.subscribe(&silence_min, |_, _, _: &SliderEvent, cx| cx.notify()),
             cx.subscribe(&silence_padding, |_, _, _: &SliderEvent, cx| cx.notify()),
+            cx.subscribe(&zoom, |this, _, ev: &SliderEvent, cx| {
+                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
+                let factor = v.end() / this.viewport.px_per_sec;
+                this.zoom(factor, cx);
+            }),
         ];
         Self {
             state,
@@ -441,6 +444,7 @@ impl TimelinePanel {
             silence_min,
             silence_padding,
             silences: SilenceCache::default(),
+            zoom,
             drop: None,
             heights: HashMap::new(),
             clipboard: Vec::new(),
@@ -836,9 +840,10 @@ impl TimelinePanel {
             None
         };
         let changed = item != self.hovered_item
-            || (self.tool == Tool::Blade && hover != self.hover)
+            || (self.tool != Tool::Select && hover != self.hover)
             || hover.is_some() != self.hover.is_some()
-            || self.edge_hover(self.hover, cx) != self.edge_hover(hover, cx);
+            || self.edge_hover(self.hover, cx) != self.edge_hover(hover, cx)
+            || self.hovered_edge(self.hover, cx) != self.hovered_edge(hover, cx);
         self.hover = hover;
         self.hovered_item = item;
         if changed {
@@ -860,6 +865,49 @@ impl TimelinePanel {
             Hit::Transition { resize, .. } => resize,
             _ => false,
         })
+    }
+
+    /// The clip edge under `p` that a drag would trim.
+    fn hovered_edge(&self, p: Option<Point<Pixels>>, cx: &App) -> Option<(ClipId, Edge)> {
+        match self.hit(p?, cx) {
+            Hit::Clip {
+                clip,
+                edge: Some(edge),
+                ..
+            } => Some((clip, edge)),
+            _ => None,
+        }
+    }
+
+    /// What the trim tool does now: the drag under way, or the one the
+    /// pointer would start.
+    fn trim_mode(&self, cx: &App) -> Option<(IconName, &'static str)> {
+        const SLIP: (IconName, &str) = (IconName::UnfoldHorizontal, "Slip");
+        const RIPPLE: (IconName, &str) = (IconName::ArrowRightToLine, "Ripple");
+        const ROLL: (IconName, &str) = (IconName::ChevronsLeftRight, "Roll");
+        if self.tool != Tool::Trim {
+            return None;
+        }
+        match &self.drag {
+            Some(Drag::Slip { .. }) => Some(SLIP),
+            Some(Drag::Trim { .. }) => Some(RIPPLE),
+            Some(Drag::Roll { .. }) => Some(ROLL),
+            Some(_) => None,
+            None => match self.hit(self.hover?, cx) {
+                Hit::Clip { edge: None, .. } => Some(SLIP),
+                Hit::Clip {
+                    clip,
+                    edge: Some(edge),
+                    ..
+                } => Some(
+                    match neighbour(self.state.read(cx).bus.project(), clip, edge) {
+                        Some(_) => ROLL,
+                        None => RIPPLE,
+                    },
+                ),
+                _ => None,
+            },
+        }
     }
 
     fn drag_to(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1261,35 +1309,49 @@ impl TimelinePanel {
         }
     }
 
-    /// Show the row under a media drag at `p`.
+    /// Show where a media drag at `p` would land; a sound not yet in the
+    /// pool (no `media`) shows only the row.
     fn media_drag_moved(
         &mut self,
         p: Point<Pixels>,
         bounds: Bounds<Pixels>,
+        media: Option<koo_core::MediaId>,
         cx: &mut Context<Self>,
     ) {
-        let row = if bounds.contains(&p) {
+        let hint = if !bounds.contains(&p) {
+            None
+        } else if let Some(media) = media {
+            self.media_landing(media, p, cx)
+                .map(|(track, range, linked)| DropHint::Insert {
+                    track,
+                    range,
+                    linked,
+                })
+        } else {
             let (_, y) = self.local(p);
             let tl = &self.state.read(cx).bus.project().timeline;
-            layout::row_at(&self.rows(tl), y).map(|r| r.track)
-        } else {
-            None
+            layout::row_at(&self.rows(tl), y).map(|r| DropHint::Row(r.track))
         };
-        self.set_drop(row.map(DropHint::Row), cx);
+        if hint.is_none() {
+            self.snap = None;
+        }
+        self.set_drop(hint, cx);
     }
 
-    fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
-        self.drop = None;
-        let p = window.mouse_position();
+    /// Where `media` dropped at `p` lands: its track, its span there, and
+    /// the audio track its sound goes to.
+    fn media_landing(
+        &mut self,
+        media: koo_core::MediaId,
+        p: Point<Pixels>,
+        cx: &App,
+    ) -> Option<(TrackId, TimeRange, Option<TrackId>)> {
         let (x, y) = self.local(p);
-        let state = self.state.read(cx);
-        let project = state.bus.project();
-        let Some(item) = project.media(drag.media) else {
-            return;
-        };
+        let project = self.state.read(cx).bus.project();
+        let item = project.media(media)?;
         let rows = self.rows(&project.timeline);
         let wanted = match item.kind {
-            koo_core::model::MediaKind::Audio => TrackKind::Audio,
+            MediaKind::Audio => TrackKind::Audio,
             _ => TrackKind::Video,
         };
         let track = layout::row_at(&rows, y).map(|r| r.track).or_else(|| {
@@ -1299,34 +1361,14 @@ impl TimelinePanel {
                 .iter()
                 .find(|t| t.kind == wanted)
                 .map(|t| t.id)
-        });
-        let Some(track) = track else {
-            return;
-        };
+        })?;
         let len = item
             .info
             .as_ref()
             .map(|i| i.duration)
             .filter(|d| d.0 > 0)
             .unwrap_or(Time::from_secs_f64(5.));
-        let rate = project.timeline.settings.rate;
-        let at = self
-            .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
-            .floor_to_frame(rate);
-        self.snap = None;
-        let insert = |track| Command::InsertClip {
-            media: drag.media,
-            source: TimeRange::new(Time::ZERO, len),
-            track,
-            at,
-            mode: InsertMode::Overwrite,
-        };
-        let state = self.state.read(cx);
-        let project = state.bus.project();
-        let has_audio = project
-            .media(drag.media)
-            .and_then(|m| m.info.as_ref())
-            .is_some_and(|i| !i.audio.is_empty());
+        let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
         // Video with sound lands as a linked pair: the mixer and renderer
         // read audio from audio tracks only.
         let linked = match project.timeline.track(track).map(|t| t.kind) {
@@ -1334,6 +1376,28 @@ impl TimelinePanel {
                 matching_audio_track(&project.timeline, track)
             }
             _ => None,
+        };
+        let rate = project.timeline.settings.rate;
+        let at = self
+            .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
+            .floor_to_frame(rate);
+        Some((track, TimeRange::new(at, at + len), linked))
+    }
+
+    fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
+        self.drop = None;
+        let landing = self.media_landing(drag.media, window.mouse_position(), cx);
+        self.snap = None;
+        let Some((track, range, linked)) = landing else {
+            cx.notify();
+            return;
+        };
+        let insert = |track| Command::InsertClip {
+            media: drag.media,
+            source: TimeRange::new(Time::ZERO, range.duration()),
+            track,
+            at: range.start,
+            mode: InsertMode::Overwrite,
         };
         self.state.update(cx, |s, cx| match linked {
             Some(audio) => {
@@ -1519,7 +1583,9 @@ impl TimelinePanel {
     // --------------------------------------------------------------- render
 
     fn scene(&mut self, cx: &mut Context<Self>) -> Scene {
-        let colors = Colors::new(cx.theme());
+        let hover_edge = self
+            .hovered_edge(self.hover, cx)
+            .filter(|_| self.drag.is_none());
         let state = self.state.read(cx);
         let project = state.bus.project();
         let media = state.services.media.clone();
@@ -1580,6 +1646,7 @@ impl TimelinePanel {
                             track,
                             range: c.range().shift(*delta),
                             label: None,
+                            edge: None,
                         });
                     }
                 }
@@ -1589,25 +1656,33 @@ impl TimelinePanel {
             }) => {
                 if let Some((track, c)) = tl.clip(*clip) {
                     let r = c.range();
-                    let range = match edge {
-                        Edge::Start => TimeRange::new(r.start + *delta, r.end),
-                        Edge::End => TimeRange::new(r.start, r.end + *delta),
+                    let (range, moved) = match edge {
+                        Edge::Start => (TimeRange::new(r.start + *delta, r.end), r.start + *delta),
+                        Edge::End => (TimeRange::new(r.start, r.end + *delta), r.end + *delta),
                     };
                     ghosts.push(Ghost {
                         track: track.id,
                         range,
-                        label: None,
+                        label: Some(signed_timecode(*delta, rate).into()),
+                        edge: Some(moved),
                     });
                 }
             }
             Some(Drag::Roll { left, right, delta }) => {
                 if let (Some((track, l)), Some((_, r))) = (tl.clip(*left), tl.clip(*right)) {
                     let cut = l.end() + *delta;
-                    for range in [TimeRange::new(l.start, cut), TimeRange::new(cut, r.end())] {
+                    for (range, label) in [
+                        (
+                            TimeRange::new(l.start, cut),
+                            Some(signed_timecode(*delta, rate)),
+                        ),
+                        (TimeRange::new(cut, r.end()), None),
+                    ] {
                         ghosts.push(Ghost {
                             track: track.id,
                             range,
-                            label: None,
+                            label: label.map(Into::into),
+                            edge: Some(cut),
                         });
                     }
                 }
@@ -1618,6 +1693,7 @@ impl TimelinePanel {
                         track: track.id,
                         range: c.range(),
                         label: Some(signed_timecode(*delta, rate).into()),
+                        edge: None,
                     });
                 }
             }
@@ -1658,13 +1734,23 @@ impl TimelinePanel {
                             }
                             _ => vec![],
                         };
+                        let icon = if !clip.enabled {
+                            Some(IconName::EyeOff)
+                        } else if matches!(clip.content, ClipContent::Generator { .. }) {
+                            Some(IconName::PaintBucket)
+                        } else if track.kind == TrackKind::Title {
+                            Some(IconName::Type)
+                        } else {
+                            None
+                        };
                         ClipScene {
                             tiles,
                             range: clip.range(),
                             label: clip.display_name(project).into(),
-                            color: clip.color.map(|c| rgb(c.rgb()).into()),
+                            color: clip.color.map(|c| rgb(c.rgb())),
                             enabled: clip.enabled,
-                            generator: matches!(clip.content, ClipContent::Generator { .. }),
+                            offline: clip.media().is_some_and(|m| state.offline.contains(&m)),
+                            icon,
                             effects: !clip.effects.is_empty(),
                             speed: if clip.is_ramped() {
                                 Some("ramp".into())
@@ -1678,17 +1764,31 @@ impl TimelinePanel {
                             }),
                             selected: selection.contains(&clip.id),
                             lifted: lifted.contains(&clip.id),
+                            hover_edge: hover_edge
+                                .filter(|(id, _)| *id == clip.id)
+                                .map(|(_, edge)| edge),
                             peaks,
                             fade_in: clip.audio.fade_in,
                             fade_out: clip.audio.fade_out,
                         }
                     })
                     .collect();
+                let audio = track.kind == TrackKind::Audio;
+                let hidden = !audio && track.mix.mute;
+                let silent = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+                let fade = if hidden {
+                    0.3
+                } else if silent {
+                    0.45
+                } else {
+                    1.
+                };
                 TrackScene {
                     row: *row,
                     clips,
-                    dimmed: track.mix.mute
-                        || (any_solo && track.kind == TrackKind::Audio && !track.mix.solo),
+                    fade: if track.locked { fade * 0.55 } else { fade },
+                    locked: track.locked,
+                    hidden,
                 }
             })
             .collect();
@@ -1710,8 +1810,7 @@ impl TimelinePanel {
                 transitions.push(TransitionScene {
                     track: track.id,
                     range,
-                    label: koo_core::fx::asset(project, &t.fx)
-                        .map_or_else(|| "Transition".into(), |a| a.name.clone().into()),
+                    label: format!("{:.1}s", range.duration().as_secs_f64()).into(),
                     selected: selected_transition == Some(t.owner),
                 });
             }
@@ -1745,6 +1844,7 @@ impl TimelinePanel {
             markers: tl.markers.clone(),
             in_out,
             playhead,
+            scrubbing: matches!(self.drag, Some(Drag::Scrub)),
             overlay,
             focused,
             hovered: self.hovered_item.map(|(_, i)| i),
@@ -1755,7 +1855,6 @@ impl TimelinePanel {
             blade,
             drop: self.drop,
             marquee,
-            colors,
             render: self.state.read(cx).render.status(),
         };
 
@@ -1792,7 +1891,8 @@ impl TimelinePanel {
         width: f32,
     ) -> Vec<(f32, f32, std::sync::Arc<RenderImage>)> {
         let vp = self.viewport;
-        let tile_w = ((row.height - 6.) * 16. / 9.).max(8.);
+        let (_, strip) = layout::filmstrip(row.height - layout::CLIP_INSET * 2.);
+        let tile_w = (strip * 16. / 9.).max(8.);
         let (x0, x1) = (vp.x(clip.start), vp.x(clip.end()));
         let (v0, v1) = (x0.max(0.), x1.min(width));
         if v1 <= v0 {
@@ -1836,17 +1936,25 @@ impl TimelinePanel {
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let tool = |id: &'static str, g: Glyph, active: bool, tip: &'static str| {
+        let tool = |id: &'static str, icon: IconName, which: Tool, tip: &'static str, kbd| {
             Button::new(id)
                 .ghost()
-                .xsmall()
-                .selected(active)
-                .tooltip(tip)
-                .child(glyph(g, px(14.), if active { fg } else { muted }))
+                .small()
+                .w(px(24.))
+                .icon(icon)
+                .selected(self.tool == which)
+                .tooltip_kbd(tip, kbd)
         };
-        let separator = || div().w(px(1.)).h(px(16.)).mx_1().bg(border);
+        let toggle = |id: &'static str, icon: IconName, on: bool| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .w(px(24.))
+                .icon(icon)
+                .selected(on)
+                .accent(on)
+        };
+        let separator = || div().flex_none().w(px(1.)).h(px(14.)).mx(px(4.)).bg(t::LN);
         let entity = cx.entity();
         let silence = Popover::new("silence-tool")
             .anchor(Anchor::TopLeft)
@@ -1860,27 +1968,36 @@ impl TimelinePanel {
                     })
                 }
             })
-            .trigger(tool(
-                "silence",
-                Glyph::Silence,
-                self.silence_open,
-                "Remove silences",
-            ))
+            .trigger(
+                toggle("silence", IconName::AudioLines, self.silence_open)
+                    .tooltip("Remove silences"),
+            )
             .content(move |_, _, cx| silence_content(&entity, cx));
+        let settings = &self.state.read(cx).bus.project().timeline.settings;
+        let fps = format!("{:.2}", settings.rate.fps());
+        let format = format!(
+            "{}×{} · {} fps",
+            settings.width,
+            settings.height,
+            fps.trim_end_matches('0').trim_end_matches('.')
+        );
+        let mode = self.trim_mode(cx);
+        let pps = self.viewport.px_per_sec;
 
         h_flex()
             .flex_none()
             .h(px(TOOLBAR_HEIGHT))
-            .px_2()
-            .gap_0p5()
+            .px(px(8.))
+            .gap(px(4.))
             .border_b_1()
-            .border_color(border)
+            .border_color(t::LN)
             .child(
                 tool(
                     "tool-select",
-                    Glyph::Pointer,
-                    self.tool == Tool::Select,
-                    "Select (V)",
+                    IconName::MousePointer2,
+                    Tool::Select,
+                    "Select",
+                    "V",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.tool = Tool::Select;
@@ -1888,82 +2005,107 @@ impl TimelinePanel {
                 })),
             )
             .child(
-                tool(
-                    "tool-blade",
-                    Glyph::Blade,
-                    self.tool == Tool::Blade,
-                    "Blade (B)",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.tool = Tool::Blade;
-                    cx.notify();
-                })),
+                tool("tool-blade", IconName::Scissors, Tool::Blade, "Blade", "B").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.tool = Tool::Blade;
+                        cx.notify();
+                    }),
+                ),
             )
             .child(
                 tool(
                     "tool-trim",
-                    Glyph::Trim,
-                    self.tool == Tool::Trim,
-                    "Trim (T)",
+                    IconName::MoveHorizontal,
+                    Tool::Trim,
+                    "Trim",
+                    "T",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.tool = Tool::Trim;
                     cx.notify();
                 })),
             )
+            .children(mode.map(|(icon, label)| {
+                h_flex()
+                    .flex_none()
+                    .h(px(20.))
+                    .ml(px(4.))
+                    .px(px(7.))
+                    .gap(px(5.))
+                    .rounded(t::RADIUS_SM)
+                    .border_1()
+                    .border_color(t::LN)
+                    .bg(t::G)
+                    .text_size(px(11.))
+                    .text_color(t::T1)
+                    .child(Icon::new(icon).size(px(12.)).color(t::T2))
+                    .child(label)
+            }))
             .child(separator())
             .child(
-                tool("snapping", Glyph::Magnet, self.snapping, "Snapping (N)").on_click(
-                    cx.listener(|this, _, _, cx| {
+                toggle("snapping", IconName::Magnet, self.snapping)
+                    .tooltip_kbd("Snapping", "N")
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.snapping = !this.snapping;
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
+            .child(silence)
             .child(
-                tool("marker", Glyph::Marker, false, "Add marker (M)")
+                Button::new("marker")
+                    .ghost()
+                    .small()
+                    .w(px(24.))
+                    .icon(IconName::BookmarkPlus)
+                    .tooltip_kbd("Add marker", "M")
                     .on_click(cx.listener(|this, _, _, cx| this.add_marker(false, cx))),
             )
-            .child(separator())
             .child(
-                tool("prev-cut", Glyph::PrevCut, false, "Previous cut (Up)").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        transport(&this.state, &PrevCut, cx);
-                        this.reveal_playhead(cx);
-                    },
-                )),
+                div()
+                    .ml(px(10.))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(t::T3)
+                    .child(format),
             )
-            .child(
-                tool("next-cut", Glyph::NextCut, false, "Next cut (Down)").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        transport(&this.state, &NextCut, cx);
-                        this.reveal_playhead(cx);
-                    },
-                )),
-            )
-            .child(separator())
-            .child(silence)
             .child(div().flex_1())
             .child(
-                tool("zoom-out", Glyph::Minus, false, "Zoom out (-)")
+                Button::new("zoom-out")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ZoomOut)
+                    .tooltip_kbd("Zoom out", "-")
+                    .disabled(pps <= layout::MIN_PX_PER_SEC)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom(0.8, cx))),
             )
+            .child(Slider::new(&self.zoom).flex_none().w(px(90.)))
             .child(
-                tool("zoom-in", Glyph::Plus, false, "Zoom in (=)")
+                Button::new("zoom-in")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ZoomIn)
+                    .tooltip_kbd("Zoom in", "=")
+                    .disabled(pps >= layout::MAX_PX_PER_SEC)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom(1.25, cx))),
             )
             .child(
-                tool("zoom-fit", Glyph::Fit, false, "Zoom to fit (Shift Z)")
+                Button::new("zoom-fit")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Maximize2)
+                    .tooltip_kbd("Zoom to fit", "Shift Z")
                     .on_click(cx.listener(|this, _, _, cx| this.fit(cx))),
             )
     }
 
     fn headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let marker = theme.blue_light;
         let alt = self.alt;
-        let tl = &self.state.read(cx).bus.project().timeline;
+        let state = self.state.read(cx);
+        let timecode = state
+            .playhead
+            .timecode(state.bus.project().timeline.settings.rate);
+        let tl = &state.bus.project().timeline;
         let any_solo = tl
             .tracks
             .iter()
@@ -1972,40 +2114,38 @@ impl TimelinePanel {
             .rows(tl)
             .into_iter()
             .zip(tl.tracks.iter().cloned())
+            .zip(track_codes(tl))
             .collect();
-        let icon = |id: SharedString, g: Glyph, on: bool, tip: &'static str| {
-            Button::new(ElementId::Name(id))
-                .ghost()
-                .xsmall()
-                .tooltip(tip)
-                .child(glyph(g, px(13.), if on { fg } else { muted.opacity(0.7) }))
-        };
         let panel = cx.entity();
-        let children = rows.into_iter().map(|(row, track)| {
+        let children = rows.into_iter().map(|((row, track), code)| {
             let id = track.id;
             let locked = track.locked;
             let panel = panel.clone();
             let audio = track.kind == TrackKind::Audio;
-            let dimmed = track.mix.mute || (any_solo && audio && !track.mix.solo);
+            let muted = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+            let hidden = !audio && track.mix.mute;
             let key = |name: &str| SharedString::from(format!("{name}-{}", track.id));
-            let (mute_glyph, mute_tip) = match (audio, track.mix.mute) {
-                (true, false) => (Glyph::Speaker, "Mute"),
-                (true, true) => (Glyph::SpeakerOff, "Unmute"),
-                (false, false) => (Glyph::Eye, "Hide"),
-                (false, true) => (Glyph::EyeOff, "Show"),
+            let name = if track.name == code {
+                kind_label(track.kind).to_string()
+            } else {
+                track.name.clone()
             };
             let reference = refs::track(&track);
             h_flex()
                 .id(ElementId::Name(key("header")))
                 .relative()
+                .flex_none()
                 .h(px(row.height))
-                .px_2()
-                .gap_0p5()
+                .pl(px(8.))
+                .pr(px(6.))
+                .gap(px(4.))
                 .border_b_1()
-                .border_color(border.opacity(0.5))
+                .border_color(t::LN)
+                .text_size(px(11.))
+                .hover(|s| s.bg(t::HV))
                 .when(audio, |el| {
-                    el.drag_over::<super::AudioFxDrag>(move |style, _, _, _| {
-                        style.bg(marker.opacity(0.25))
+                    el.drag_over::<super::AudioFxDrag>(|style, _, _, _| {
+                        style.bg(t::alpha(t::AC, 0.15))
                     })
                     .on_drop(cx.listener(
                         move |this, drag: &super::AudioFxDrag, _, cx| {
@@ -2044,58 +2184,93 @@ impl TimelinePanel {
                         ),
                 )
                 .child(
+                    h_flex()
+                        .flex_none()
+                        .justify_center()
+                        .w(px(24.))
+                        .h(px(18.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(t::LN)
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t::T2)
+                        .child(code),
+                )
+                .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_xs()
-                        .text_color(if dimmed { muted } else { fg })
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(track.name.clone()),
+                        .truncate()
+                        .text_color(if muted || hidden { t::T3 } else { t::T2 })
+                        .child(name),
                 )
                 .child(
-                    icon(key("mute"), mute_glyph, track.mix.mute, mute_tip).on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
-                    ),
+                    Button::new(ElementId::Name(key("lock")))
+                        .ghost()
+                        .xsmall()
+                        .icon(if locked {
+                            IconName::Lock
+                        } else {
+                            IconName::LockOpen
+                        })
+                        .selected(locked)
+                        .tooltip(if locked { "Unlock" } else { "Lock" })
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_lock(id, cx))),
                 )
+                .when(!audio, |el| {
+                    el.child(
+                        Button::new(ElementId::Name(key("hide")))
+                            .ghost()
+                            .xsmall()
+                            .icon(if hidden {
+                                IconName::EyeOff
+                            } else {
+                                IconName::Eye
+                            })
+                            .selected(hidden)
+                            .tooltip(if hidden { "Show" } else { "Hide" })
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
+                            ),
+                    )
+                })
                 .when(audio, |el| {
                     el.child(
-                        icon(key("solo"), Glyph::Headphones, track.mix.solo, "Solo").on_click(
+                        mix_toggle(key("mute"), "M", track.mix.mute, t::ERR, "Mute").on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
+                        ),
+                    )
+                    .child(
+                        mix_toggle(key("solo"), "S", track.mix.solo, t::WARN, "Solo").on_click(
                             cx.listener(move |this, _, _, cx| this.toggle_mix(id, true, cx)),
                         ),
                     )
                 })
-                .child(
-                    icon(
-                        key("lock"),
-                        if track.locked {
-                            Glyph::Lock
-                        } else {
-                            Glyph::Unlock
-                        },
-                        track.locked,
-                        if track.locked { "Unlock" } else { "Lock" },
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_lock(id, cx))),
-                )
                 .context_menu(move |menu, _, _| {
                     let remove = panel.clone();
                     let mention = panel.clone();
                     let reference = reference.clone();
                     add_track_items(menu, &panel)
-                        .item(PopupMenuItem::separator())
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Add to chat")
+                                .icon(IconName::MessageSquarePlus)
+                                .on_click(move |_, _, cx| {
+                                    let r = reference.clone();
+                                    mention.update(cx, |this, cx| this.mention(vec![r], cx))
+                                }),
+                        )
+                        .separator()
                         .item(
                             PopupMenuItem::new("Delete track")
+                                .icon(IconName::Trash)
+                                .destructive()
                                 .disabled(locked)
                                 .on_click(move |_, _, cx| {
                                     remove.update(cx, |this, cx| this.remove_track(id, cx))
                                 }),
                         )
-                        .item(PopupMenuItem::separator())
-                        .item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
-                            let r = reference.clone();
-                            mention.update(cx, |this, cx| this.mention(vec![r], cx))
-                        }))
                 })
         });
         v_flex()
@@ -2103,25 +2278,18 @@ impl TimelinePanel {
             .w(px(HEADER_WIDTH))
             .h_full()
             .border_r_1()
-            .border_color(border)
+            .border_color(t::LN)
             .child(
                 h_flex()
                     .flex_none()
                     .h(px(RULER_HEIGHT))
-                    .px_1()
+                    .px(px(8.))
                     .border_b_1()
-                    .border_color(border)
-                    .child(
-                        Button::new("add-track")
-                            .ghost()
-                            .xsmall()
-                            .tooltip("Add track")
-                            .child(glyph(Glyph::Plus, px(12.), muted))
-                            .dropdown_menu({
-                                let panel = cx.entity();
-                                move |menu, _, _| add_track_items(menu, &panel)
-                            }),
-                    ),
+                    .border_color(t::LN)
+                    .font_family(t::mono())
+                    .text_size(px(11.))
+                    .text_color(t::AC)
+                    .child(timecode),
             )
             .child(
                 div().flex_1().min_h_0().overflow_hidden().relative().child(
@@ -2130,7 +2298,20 @@ impl TimelinePanel {
                         .left_0()
                         .right_0()
                         .top(px(-self.viewport.scroll_y))
-                        .children(children),
+                        .children(children)
+                        .child(
+                            div().px(px(6.)).py(px(6.)).child(
+                                Button::new("add-track")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Plus)
+                                    .label("Track")
+                                    .dropdown_menu({
+                                        let panel = cx.entity();
+                                        move |menu, _, _| add_track_items(menu, &panel)
+                                    }),
+                            ),
+                        ),
                 ),
             )
     }
@@ -2145,7 +2326,6 @@ impl TimelinePanel {
         let hovered = overlay::collect(&state.bus.project().timeline, state.bus.chat_change_sets())
             .into_iter()
             .find(|i| i.set == set && i.item == item)?;
-        let theme = cx.theme();
         let b = self.bounds.get();
         let x = (p.x - b.origin.x + px(14.))
             .min(b.size.width - px(260.))
@@ -2160,27 +2340,103 @@ impl TimelinePanel {
             below
         };
         Some(
-            v_flex()
+            popover::surface()
                 .absolute()
                 .left(x)
                 .top(y)
                 .max_w(px(320.))
-                .px_2()
-                .py_1()
-                .gap_0p5()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .text_xs()
-                .text_color(theme.popover_foreground)
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(t::RADIUS)
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .text_size(px(11.))
                 .child(hovered.reason)
-                .children(
-                    warnings
-                        .into_iter()
-                        .map(|w| div().text_color(theme.warning).child(w)),
-                ),
+                .children(warnings.into_iter().map(|w| {
+                    h_flex()
+                        .gap(px(4.))
+                        .text_color(t::WARN)
+                        .child(Icon::new(IconName::TriangleAlert).size(px(11.)))
+                        .child(w)
+                })),
         )
+    }
+}
+
+/// A header's M or S button: `color` fills it while `on`.
+fn mix_toggle(
+    id: SharedString,
+    label: &'static str,
+    on: bool,
+    color: Rgba,
+    tip: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(id))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(18.))
+        .rounded(px(3.))
+        .border_1()
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .map(|el| {
+            if on {
+                el.bg(color).border_color(color).text_color(t::G)
+            } else {
+                el.border_color(t::LN)
+                    .text_color(t::T3)
+                    .hover(|s| s.bg(t::HV).text_color(t::T1))
+            }
+        })
+        .tooltip(Tooltip::text(tip))
+        .child(label)
+}
+
+/// The header chips: `V1` is the picture track nearest the audio, `A1` the
+/// topmost audio track; captions and titles count down from the top.
+fn track_codes(tl: &Timeline) -> Vec<String> {
+    let up = |kind: TrackKind| matches!(kind, TrackKind::Video | TrackKind::Overlay);
+    let order = tl
+        .tracks
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, t)| up(t.kind))
+        .chain(tl.tracks.iter().enumerate().filter(|(_, t)| !up(t.kind)));
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut codes = vec![String::new(); tl.tracks.len()];
+    for (i, track) in order {
+        let prefix = kind_prefix(track.kind);
+        let n = counts.entry(prefix).or_default();
+        *n += 1;
+        codes[i] = format!("{prefix}{n}");
+    }
+    codes
+}
+
+fn kind_prefix(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "V",
+        TrackKind::Audio => "A",
+        TrackKind::Caption => "C",
+        TrackKind::Title => "T",
+        TrackKind::Overlay => "O",
+    }
+}
+
+/// A header's name when the track has only its code.
+fn kind_label(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "Video",
+        TrackKind::Audio => "Audio",
+        TrackKind::Caption => "Captions",
+        TrackKind::Title => "Titles",
+        TrackKind::Overlay => "Overlay",
     }
 }
 
@@ -2271,15 +2527,47 @@ fn signed_timecode(t: Time, rate: Rate) -> String {
     format!("{sign}{}:{:02}", frames / fps.max(1), frames % fps.max(1))
 }
 
+/// The silence tool's popover: thresholds, what they find, and Remove.
 fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
     let this = panel.read(cx);
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
+    let close = {
+        let panel = panel.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            panel.update(cx, |this, cx| {
+                this.silence_open = false;
+                cx.notify();
+            })
+        }
+    };
+    let card = v_flex()
+        .w(px(236.))
+        .px(px(12.))
+        .py(px(10.))
+        .gap(px(9.))
+        .child(
+            h_flex()
+                .child(
+                    div()
+                        .flex_1()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Remove silences"),
+                )
+                .child(
+                    Button::new("silence-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::X)
+                        .on_click(close),
+                ),
+        );
     if this.state.read(cx).services.analysis.is_none() {
-        return div()
-            .text_xs()
-            .text_color(muted)
-            .child("Analysis is not available")
+        return card
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(t::T2)
+                    .child("Analysis is not available"),
+            )
             .into_any_element();
     }
     let (min, pad) = this.silence_params(cx);
@@ -2287,38 +2575,65 @@ fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
     let found = this.silences.timeline_silences(project, min, pad);
     let total: f64 = found.iter().map(|r| r.duration().as_secs_f64()).sum();
     let loading = this.silences.is_loading();
-    let row = |label: &'static str, value: String| {
+    let row = |label: &'static str, slider: &Entity<SliderState>, value: String| {
         h_flex()
-            .justify_between()
-            .text_xs()
-            .child(div().text_color(muted).child(label))
-            .child(value)
+            .gap(px(8.))
+            .text_size(px(11.))
+            .child(div().w(px(62.)).flex_none().text_color(t::T2).child(label))
+            .child(Slider::new(slider).flex_1())
+            .child(
+                div()
+                    .w(px(44.))
+                    .flex_none()
+                    .text_right()
+                    .font_family(t::mono())
+                    .child(value),
+            )
     };
-    let label = if loading {
-        "Analyzing…".to_string()
+    let summary = if loading {
+        h_flex()
+            .gap(px(6.))
+            .text_color(t::T2)
+            .child(Spinner::new().size(px(11.)))
+            .child("Analyzing…")
     } else if found.is_empty() {
-        "No silences".to_string()
+        h_flex().text_color(t::T3).child("Nothing found")
     } else {
-        format!("Remove {} · {:.1} s", found.len(), total)
+        h_flex()
+            .font_family(t::mono())
+            .text_color(t::T2)
+            .child(format!("{} regions · ", found.len()))
+            .child(div().text_color(t::ERR_TX).child(format!("−{total:.1} s")))
     };
     let panel = panel.clone();
-    v_flex()
-        .w(px(240.))
-        .gap_2()
-        .child(row("Minimum", format!("{:.1} s", min.as_secs_f64())))
-        .child(Slider::new(&this.silence_min))
-        .child(row("Padding", format!("{:.2} s", pad.as_secs_f64())))
-        .child(Slider::new(&this.silence_padding))
-        .child(
-            Button::new("apply-silences")
-                .primary()
-                .small()
-                .w_full()
-                .label(label)
-                .disabled(found.is_empty())
-                .on_click(move |_, _, cx| panel.update(cx, |this, cx| this.apply_silences(cx))),
-        )
-        .into_any_element()
+    card.child(row(
+        "Min length",
+        &this.silence_min,
+        format!("{:.1} s", min.as_secs_f64()),
+    ))
+    .child(row(
+        "Padding",
+        &this.silence_padding,
+        format!("{:.2} s", pad.as_secs_f64()),
+    ))
+    .child(
+        h_flex()
+            .gap(px(8.))
+            .pt(px(9.))
+            .border_t_1()
+            .border_color(t::LN)
+            .text_size(px(11.))
+            .child(summary.flex_1())
+            .child(
+                Button::new("apply-silences")
+                    .primary()
+                    .small()
+                    .label("Remove")
+                    .disabled(found.is_empty())
+                    .on_click(move |_, _, cx| panel.update(cx, |this, cx| this.apply_silences(cx))),
+            ),
+    )
+    .into_any_element()
 }
 
 impl Focusable for TimelinePanel {
@@ -2404,12 +2719,16 @@ impl Render for TimelinePanel {
         };
         let overlays = self.ref_overlays(cx);
         let popup = self.render_popup(cx);
-        let theme = cx.theme();
         let menu_panel = cx.entity();
+        // Keep the zoom slider on the viewport's zoom, however it changed.
+        let pps = self.viewport.px_per_sec;
+        if (self.zoom.read(cx).value().end() - pps).abs() > pps * 1e-3 {
+            self.zoom.update(cx, |s, cx| s.set_value(pps, window, cx));
+        }
 
         let main = v_flex()
             .size_full()
-            .bg(theme.background)
+            .bg(t::P)
             .track_focus(&self.focus)
             .key_context("Timeline")
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
@@ -2524,7 +2843,13 @@ impl Render for TimelinePanel {
                             )
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::MediaDrag>, _, cx| {
-                                    this.media_drag_moved(ev.event.position, ev.bounds, cx)
+                                    let media = ev.drag(cx).media;
+                                    this.media_drag_moved(
+                                        ev.event.position,
+                                        ev.bounds,
+                                        Some(media),
+                                        cx,
+                                    )
                                 },
                             ))
                             .on_drop(cx.listener(|this, drag: &super::MediaDrag, window, cx| {
@@ -2532,7 +2857,7 @@ impl Render for TimelinePanel {
                             }))
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::SoundDrag>, _, cx| {
-                                    this.media_drag_moved(ev.event.position, ev.bounds, cx)
+                                    this.media_drag_moved(ev.event.position, ev.bounds, None, cx)
                                 },
                             ))
                             .on_drop(cx.listener(|this, drag: &super::SoundDrag, window, cx| {

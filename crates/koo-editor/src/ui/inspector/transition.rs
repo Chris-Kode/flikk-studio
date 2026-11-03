@@ -3,12 +3,10 @@
 
 use super::controls::{FxOwner, FxTarget};
 use super::param::Key;
-use super::{InspectorPanel, section};
-use crate::ui::library::{FxGlyph, fx_glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use super::{InspectorPanel, View, group, label, panel_header, row, select_field};
+use crate::ui::kit::{
+    Button, DropdownMenu as _, IconName, PopupMenuItem, Segmented, h_flex, v_flex,
+};
 use gpui_kit::*;
 use koo_core::ClipId;
 use koo_core::command::{Command, Edge};
@@ -28,37 +26,39 @@ impl InspectorPanel {
         edge: Edge,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Option<View> {
         let owner = FxOwner::Transition { clip, edge };
         let target = self.fx_target(&owner, cx)?;
         let transition = target.transition.clone()?;
         let at_cut = self.at_cut(clip, edge, cx);
-        let header = self.transition_header(&target, clip, edge, cx);
-        let duration = self
-            .param(
-                Key::TransitionDuration,
-                transition.duration.as_secs_f64() as f32,
-                window,
-                cx,
-            )
-            .row(cx);
-        let mut timing = v_flex()
-            .gap_0p5()
-            .child(self.transition_type(&transition, clip, edge, cx))
-            .child(duration);
+        let mut rows = vec![self.transition_type(&transition, clip, edge, cx)];
+        rows.push(self.param_row(
+            Key::TransitionDuration,
+            transition.duration.as_secs_f64() as f32,
+            false,
+            None,
+            window,
+            cx,
+        ));
         if at_cut {
-            timing = timing.child(self.transition_align(&transition, clip, edge, cx));
+            rows.push(self.transition_align(&transition, clip, edge, cx));
         }
-        let rows = self.fx_param_rows(&target, window, cx);
-        let params = (!rows.is_empty()).then(|| section("Parameters", cx).children(rows));
-        Some(
-            v_flex()
-                .gap_4()
-                .child(header)
-                .child(timing)
-                .children(params)
-                .into_any_element(),
-        )
+        let params = self.fx_param_rows(&target, window, cx);
+        let rows = rows
+            .into_iter()
+            .map(IntoElement::into_any_element)
+            .chain(params)
+            .chain([self
+                .transition_actions(&target, clip, edge, cx)
+                .into_any_element()]);
+        let header = group(
+            crate::ui::kit::SectionHeader::new("transition", target.asset.name.clone()),
+            rows,
+        );
+        Some(View::new(
+            panel_header("Transition"),
+            v_flex().child(header),
+        ))
     }
 
     /// Whether a clip meets this edge, so the transition sits on a cut.
@@ -76,15 +76,14 @@ impl InspectorPanel {
         })
     }
 
-    fn transition_header(
+    /// Edit its code, mention it in the chat, remove it.
+    fn transition_actions(
         &self,
         target: &FxTarget,
         clip: ClipId,
         edge: Edge,
         cx: &mut Context<Self>,
     ) -> Div {
-        let theme = cx.theme();
-        let (muted, secondary) = (theme.muted_foreground, theme.secondary);
         let fx = target.asset.id.clone();
         let side = match edge {
             Edge::Start => "in",
@@ -96,55 +95,39 @@ impl InspectorPanel {
         );
         let state = self.state.clone();
         h_flex()
-            .gap_2()
-            .child(
-                div()
-                    .flex_none()
-                    .px_1p5()
-                    .rounded_sm()
-                    .bg(secondary)
-                    .text_xs()
-                    .child("Transition"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .truncate()
-                    .child(target.asset.name.clone()),
-            )
-            .child(
-                Button::new("transition-chat")
-                    .ghost()
-                    .xsmall()
-                    .tooltip("Add to chat")
-                    .child(div().text_xs().text_color(muted).child("@"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mention = mention.clone();
-                        this.state.update(cx, |s, cx| s.mention(vec![mention], cx));
-                    })),
-            )
+            .flex_none()
+            .h(px(30.))
+            .pl(px(16.))
+            .pr(px(10.))
+            .gap(px(2.))
             .child(
                 Button::new("transition-code")
                     .ghost()
                     .xsmall()
-                    .tooltip("Edit code")
-                    .child(fx_glyph(FxGlyph::Code, px(13.), muted))
+                    .icon(IconName::Code)
+                    .label("Edit code")
                     .on_click(move |_, _, cx| {
                         state.update(cx, |s, cx| s.edit_fx(Some(fx.clone()), cx))
                     }),
             )
             .child(
+                Button::new("transition-chat")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::MessageSquarePlus)
+                    .label("Add to chat")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mention = mention.clone();
+                        this.state.update(cx, |s, cx| s.mention(vec![mention], cx));
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
                 Button::new("transition-remove")
                     .ghost()
                     .xsmall()
+                    .icon(IconName::Trash)
                     .tooltip("Remove")
-                    .child(crate::ui::timeline::glyph::glyph(
-                        crate::ui::timeline::glyph::Glyph::Trash,
-                        px(13.),
-                        muted,
-                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run(
                             vec![Command::SetTransition {
@@ -173,48 +156,42 @@ impl InspectorPanel {
             .map(|a| (a.name.clone(), a.id.clone()))
             .collect();
         let current = transition.fx.fx.clone();
-        let label = options
+        let name = options
             .iter()
             .find(|(_, r)| *r == current)
             .map(|(n, _)| n.clone())
             .unwrap_or_else(|| current.to_string());
         let (panel, base) = (cx.entity(), transition.clone());
-        labeled(
-            "Type",
-            Button::new("transition-type")
-                .outline()
-                .xsmall()
-                .w_full()
-                .label(label)
-                .dropdown_caret(true)
-                .dropdown_menu(move |mut menu, _, _| {
-                    for (name, r) in &options {
-                        let (panel, r, base) = (panel.clone(), r.clone(), base.clone());
-                        menu = menu.item(
-                            PopupMenuItem::new(name.clone())
-                                .checked(r == current)
-                                .on_click(move |_, _, cx| {
-                                    let transition = Transition {
-                                        fx: FxInstance::new(r.clone()),
-                                        ..base.clone()
-                                    };
-                                    panel.update(cx, |this, cx| {
-                                        this.run(
-                                            vec![Command::SetTransition {
-                                                clip,
-                                                edge,
-                                                transition: Some(transition),
-                                            }],
-                                            "set_transition",
-                                            cx,
-                                        )
-                                    })
-                                }),
-                        );
-                    }
-                    menu
-                }),
-            cx,
+        row(
+            label("Type"),
+            select_field("transition-type", name).dropdown_menu(move |mut menu, _, _| {
+                for (name, r) in &options {
+                    let (panel, r, base) = (panel.clone(), r.clone(), base.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(name.clone())
+                            .checked(r == current)
+                            .on_click(move |_, _, cx| {
+                                let transition = Transition {
+                                    fx: FxInstance::new(r.clone()),
+                                    ..base.clone()
+                                };
+                                panel.update(cx, |this, cx| {
+                                    this.run(
+                                        vec![Command::SetTransition {
+                                            clip,
+                                            edge,
+                                            transition: Some(transition),
+                                        }],
+                                        "set_transition",
+                                        cx,
+                                    )
+                                })
+                            }),
+                    );
+                }
+                menu
+            }),
+            None,
         )
     }
 
@@ -230,13 +207,13 @@ impl InspectorPanel {
             .iter()
             .position(|(a, _)| *a == transition.align)
             .unwrap_or(1);
-        labeled(
-            "Align",
-            TabBar::new("transition-align")
-                .segmented()
-                .xsmall()
-                .selected_index(selected)
-                .children(ALIGNS.iter().map(|(_, l)| Tab::new().label(*l)))
+        row(
+            label("Align"),
+            Segmented::new("transition-align")
+                .compact()
+                .fill()
+                .items(ALIGNS.map(|(_, l)| l))
+                .selected(selected)
                 .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                     let transition = Transition {
                         align: ALIGNS[*ix].0,
@@ -252,23 +229,7 @@ impl InspectorPanel {
                         cx,
                     );
                 })),
-            cx,
+            None,
         )
     }
-}
-
-/// A 28 px row with a label column, like the slider rows.
-pub(super) fn labeled(label: &'static str, control: impl IntoElement, cx: &App) -> Div {
-    h_flex()
-        .h(px(28.))
-        .gap_2()
-        .child(
-            div()
-                .w(px(64.))
-                .flex_none()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
-        .child(div().flex_1().min_w_0().child(control))
 }

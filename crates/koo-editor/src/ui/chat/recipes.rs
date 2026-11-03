@@ -2,6 +2,7 @@
 //! from the store, or the seven built-ins (PRD "Automations") without one.
 
 use crate::state::EditorState;
+use crate::ui::kit::IconName;
 
 const BUILTIN: [(&str, &str); 7] = [
     ("rough-cut", "Rough cut"),
@@ -33,4 +34,18 @@ pub fn list(state: &EditorState) -> Vec<(String, String)> {
             (r.name, title)
         })
         .collect()
+}
+
+/// The icon the quick-command bar lists a recipe with.
+pub fn icon(name: &str) -> IconName {
+    match name {
+        "rough-cut" => IconName::Scissors,
+        "dead-time" => IconName::AudioLines,
+        "teaser" => IconName::Clapperboard,
+        "captions" => IconName::Captions,
+        "zooms" => IconName::ZoomIn,
+        "music" => IconName::Music,
+        "feedback" => IconName::MessageSquareText,
+        _ => IconName::WandSparkles,
+    }
 }

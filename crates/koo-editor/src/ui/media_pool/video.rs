@@ -5,20 +5,15 @@
 //! the prompt. Lengths, shapes and resolutions are the picked model's, and
 //! the video runs as long as In/Out when they are set.
 
-use super::{MediaPoolPanel, item_name};
+use super::{MediaPoolPanel, form, item_name};
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::searchable_list::SearchableListItem;
-use gpui_kit::component::select::{SearchableVec, Select, SelectState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
+    SelectItem, SelectState, Switch, Textarea, h_flex, v_flex,
 };
+use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_agent::tools::video::FrameGrab;
@@ -49,7 +44,7 @@ impl Choice {
     }
 }
 
-impl SearchableListItem for Choice {
+impl SelectItem for Choice {
     type Value = String;
 
     fn title(&self) -> SharedString {
@@ -61,7 +56,7 @@ impl SearchableListItem for Choice {
     }
 }
 
-type Picker = Entity<SelectState<SearchableVec<Choice>>>;
+type Picker = Entity<SelectState<Choice>>;
 
 pub struct VideoForm {
     state: Entity<EditorState>,
@@ -134,10 +129,10 @@ impl VideoForm {
         let _subscriptions = vec![
             cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
-            cx.observe(&start, |_, _, cx| cx.notify()),
-            cx.observe(&end, |_, _, cx| cx.notify()),
-            cx.observe(&aspect, |_, _, cx| cx.notify()),
-            cx.observe(&resolution, |_, _, cx| cx.notify()),
+            cx.subscribe(&start, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
+            cx.subscribe(&end, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
+            cx.subscribe(&aspect, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
+            cx.subscribe(&resolution, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
         ];
         let sound = state.read(cx).video_sound();
         Self {
@@ -264,15 +259,17 @@ impl VideoForm {
         self.request(cx).is_some() && self.problem(cx).is_none()
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Start it; `true` once it is on its way.
+    fn submit(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.ready(cx) {
-            return;
+            return false;
         }
-        if let Some((request, grabs)) = self.request(cx) {
-            self.state
-                .update(cx, |s, cx| s.generate_video(request, grabs, cx));
-            window.close_dialog(cx);
-        }
+        let Some((request, grabs)) = self.request(cx) else {
+            return false;
+        };
+        self.state
+            .update(cx, |s, cx| s.generate_video(request, grabs, cx));
+        true
     }
 
     /// Put `tag` in the prompt at the cursor, set off from the word before.
@@ -319,29 +316,32 @@ impl VideoForm {
             .collect()
     }
 
-    fn references_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+    /// The references taken, each a chip that puts its tag in the prompt,
+    /// and the button adding another.
+    fn references(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let form = cx.entity();
         let addable = self.addable(cx);
-        let chips: Vec<AnyElement> = self
-            .reference_items(cx)
-            .into_iter()
+        let taken = self.reference_items(cx);
+        let chips: Vec<AnyElement> = taken
+            .iter()
             .enumerate()
             .map(|(ix, (tag, item))| {
                 let id = item.id;
                 let insert: SharedString = tag.clone().into();
                 h_flex()
-                    .gap_1()
-                    .pl_2()
-                    .rounded_md()
+                    .h(px(20.))
+                    .pl(px(6.))
+                    .rounded(t::RADIUS_SM)
                     .border_1()
-                    .border_color(theme.border)
-                    .text_xs()
+                    .border_color(t::LN)
+                    .bg(t::R1)
+                    .text_size(px(11.))
                     .child(
                         div()
                             .id(("reference-tag", ix))
                             .cursor_pointer()
-                            .child(format!("{tag} · {}", item_name(&item)))
+                            .hover(|s| s.text_color(t::T1))
+                            .child(format!("{tag} · {}", item_name(item)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.insert_tag(&insert, window, cx)
                             })),
@@ -350,7 +350,7 @@ impl VideoForm {
                         Button::new(("reference-remove", ix))
                             .ghost()
                             .xsmall()
-                            .icon(IconName::Close)
+                            .icon(IconName::X)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.references.retain(|r| *r != id);
                                 cx.notify();
@@ -359,116 +359,84 @@ impl VideoForm {
                     .into_any_element()
             })
             .collect();
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .text_sm()
-                    .child("References")
-                    .child(
-                        Button::new("reference-add")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip("Add")
-                            .disabled(addable.is_empty())
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for item in &addable {
-                                    let (form, id) = (form.clone(), item.id);
-                                    menu = menu.item(PopupMenuItem::new(item_name(item)).on_click(
-                                        move |_, _, cx| {
-                                            form.update(cx, |this, cx| {
-                                                this.references.push(id);
-                                                cx.notify();
-                                            })
-                                        },
-                                    ));
-                                }
-                                menu
-                            }),
-                    ),
-            )
-            .when(!chips.is_empty(), |el| {
-                el.child(h_flex().flex_wrap().gap_1().children(chips))
+        h_flex()
+            .gap(px(6.))
+            .flex_wrap()
+            .when(chips.is_empty(), |el| {
+                el.child(div().text_color(t::T3).child("None"))
             })
+            .children(chips)
+            .child(
+                Button::new("reference-add")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip("Add")
+                    .disabled(addable.is_empty())
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for item in &addable {
+                            let (form, id) = (form.clone(), item.id);
+                            menu = menu.item(PopupMenuItem::new(item_name(item)).on_click(
+                                move |_, _, cx| {
+                                    form.update(cx, |this, cx| {
+                                        this.references.push(id);
+                                        cx.notify();
+                                    })
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
     }
 }
 
 impl Render for VideoForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
         let seconds = self.seconds(cx);
         let starts = self.starts(cx);
-        let row = |name: &'static str, picker: &Picker| {
-            h_flex().justify_between().text_sm().child(name).child(
-                div()
-                    .w(px(220.))
-                    .flex_none()
-                    .child(Select::new(picker).small()),
-            )
-        };
+        let pick = |name: &'static str, picker: &Picker| form::row(name, Select::new(picker));
         v_flex()
-            .gap_4()
-            .child(Textarea::new(&self.prompt).text_sm())
-            .child(row("Start frame", &self.start))
+            .gap(px(10.))
+            .child(Textarea::new(&self.prompt))
+            .child(pick("Start frame", &self.start))
             .when(starts && self.model.last_frame, |el| {
-                el.child(row("End frame", &self.end))
+                el.child(pick("End frame", &self.end))
             })
             .when(!starts && self.model.references.is_some(), |el| {
-                el.child(self.references_block(cx))
+                el.child(form::row("References", self.references(cx)))
             })
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex().justify_between().text_sm().child("Length").child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{seconds} s")),
-                        ),
-                    )
-                    .child(Slider::new(&self.length)),
-            )
+            .child(form::row(
+                "Length",
+                form::slider(&self.length, format!("{seconds} s")),
+            ))
             .when(!(starts && self.model.frame_sets_aspect), |el| {
-                el.child(row("Aspect ratio", &self.aspect))
+                el.child(pick("Aspect ratio", &self.aspect))
             })
             .when(!self.model.resolutions.is_empty(), |el| {
-                el.child(row("Resolution", &self.resolution))
+                el.child(pick("Resolution", &self.resolution))
             })
             .when(self.model.audio == VideoSound::Switch, |el| {
-                el.child(
-                    h_flex().justify_between().text_sm().child("Sound").child(
-                        Switch::new("video-audio")
-                            .small()
-                            .checked(self.audio)
-                            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                                this.audio = *on;
-                                cx.notify();
-                            })),
-                    ),
-                )
+                el.child(form::row(
+                    "Sound",
+                    Switch::new("video-audio")
+                        .checked(self.audio)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            this.audio = *on;
+                            cx.notify();
+                        })),
+                ))
             })
             .when_some(self.problem(cx), |el, problem| {
-                el.child(div().text_xs().text_color(theme.red).child(problem))
+                el.child(form::problem(problem))
             })
     }
 }
 
 fn picker(rows: Vec<Choice>, selected: usize, window: &mut Window, cx: &mut App) -> Picker {
     let many = rows.len() > 8;
-    cx.new(|cx| {
-        SelectState::new(
-            SearchableVec::new(rows),
-            Some(IndexPath::new(selected)),
-            window,
-            cx,
-        )
-        .searchable(many)
-    })
+    cx.new(|cx| SelectState::new(rows, Some(selected), window, cx).searchable(many))
 }
-
 /// The aspect ratio a `width` × `height` sequence has, when it is a common
 /// one.
 fn shape_of(width: u32, height: u32) -> Option<&'static str> {
@@ -520,23 +488,10 @@ impl MediaPoolPanel {
                 .title(Capability::Video.label())
                 .w(px(520.))
                 .child(form.clone())
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("video-cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("video-ok")
-                                .primary()
-                                .label("Generate")
-                                .disabled(!ready)
-                                .on_click(move |_, window, cx| {
-                                    submit.update(cx, |f, cx| f.submit(window, cx))
-                                }),
-                        ),
-                )
+                .confirm("Generate", move |_, cx| {
+                    submit.update(cx, |f, cx| f.submit(cx))
+                })
+                .confirm_disabled(!ready)
         });
     }
 }

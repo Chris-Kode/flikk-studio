@@ -14,19 +14,16 @@ pub use apply::{apply_fx, duplicate, fx_mention};
 pub use glyphs::{FxGlyph, fx_glyph};
 
 use crate::state::EditorState;
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, ContextMenuExt as _, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName,
+    Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Tab, Tabs, Tooltip, h_flex, v_flex,
+};
 use crate::ui::media_pool::import::is_audio;
-use crate::ui::media_pool::listen_button;
+use crate::ui::media_pool::{clock, listen_dot};
 use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
 use apply::Starter;
-use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::LibraryId;
@@ -36,7 +33,11 @@ use koo_core::fx::{self, FxAsset, FxKind, FxLanguage, FxRef};
 use koo_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, SavedVoice, Sound};
 use koo_core::model::Project;
 use shared::Link;
-use std::collections::HashSet;
+use std::cell::Cell;
+use std::rc::Rc;
+
+/// Narrowest an effect tile gets before the grid drops a column.
+const TILE: f32 = 72.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Section {
@@ -66,6 +67,23 @@ impl Section {
         Self::Voices,
     ];
 
+    /// Its page's name in the tabs.
+    fn tab(self) -> &'static str {
+        match self {
+            Self::Video => "Video",
+            Self::Transitions => "Transitions",
+            Self::Generators => "Generators",
+            Self::Titles => "Titles",
+            Self::Audio => "Audio",
+            Self::Project => "Project",
+            Self::Library => "Library",
+            Self::Presets => "Presets",
+            Self::Sounds => "Sounds",
+            Self::Voices => "Voices",
+        }
+    }
+
+    /// Its heading over the items.
     fn label(self) -> &'static str {
         match self {
             Self::Video => "Video Effects",
@@ -110,6 +128,8 @@ struct Entry {
     description: SharedString,
     glyph: FxGlyph,
     kind: Option<FxKind>,
+    /// What a row shows after the name: a sound's length, a voice's kind.
+    meta: Option<SharedString>,
 }
 
 pub fn kind_glyph(asset: &FxAsset) -> FxGlyph {
@@ -172,6 +192,7 @@ fn preset_entry(p: &Preset) -> Entry {
         description: SharedString::default(),
         glyph,
         kind: None,
+        meta: None,
     }
 }
 
@@ -188,6 +209,7 @@ fn sound_entry(s: &Sound) -> Entry {
             .unwrap_or_default(),
         glyph: FxGlyph::Audio,
         kind: None,
+        meta: s.info.as_ref().map(|i| clock(i.duration).into()),
     }
 }
 
@@ -200,6 +222,7 @@ fn voice_entry(v: &SavedVoice) -> Entry {
         description: v.description().into(),
         glyph: FxGlyph::Audio,
         kind: None,
+        meta: None,
     }
 }
 
@@ -211,6 +234,7 @@ fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
         description: a.description.clone().into(),
         glyph: kind_glyph(a),
         kind: Some(a.kind),
+        meta: None,
     };
     match section {
         Section::Audio => AudioFxKind::ALL
@@ -222,6 +246,7 @@ fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
                 description: audio_description(k).into(),
                 glyph: FxGlyph::Audio,
                 kind: None,
+                meta: None,
             })
             .collect(),
         Section::Project => project
@@ -269,17 +294,21 @@ fn grouped(entries: Vec<Entry>) -> Vec<(String, Vec<Entry>)> {
 pub struct LibraryPanel {
     state: Entity<EditorState>,
     search: Entity<InputState>,
-    collapsed: HashSet<Section>,
+    /// The page shown; `None` shows every section.
+    page: Option<Section>,
     selected: Option<Item>,
     /// Library item being renamed in `name`.
     renaming: Option<LibraryId>,
     name: Entity<InputState>,
+    /// The items area's width last frame, for the tiles' columns.
+    width: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl LibraryPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search effects, sounds, voices"));
         let name = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
@@ -297,10 +326,11 @@ impl LibraryPanel {
         Self {
             state,
             search,
-            collapsed: HashSet::new(),
+            page: None,
             selected: None,
             renaming: None,
             name,
+            width: Rc::default(),
             _subscriptions,
         }
     }
@@ -373,20 +403,12 @@ impl LibraryPanel {
         .detach();
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The Edit panel header's actions while the library shows: a new
+    /// program, and importing into the library.
+    pub fn header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.clone();
-        let panel = cx.entity();
         h_flex()
-            .gap_1()
-            .p_2()
-            .child(
-                div().flex_1().child(
-                    Input::new(&self.search)
-                        .small()
-                        .prefix(IconName::Search)
-                        .cleanable(true),
-                ),
-            )
+            .gap(px(2.))
             .child(
                 Button::new("new-program")
                     .ghost()
@@ -402,153 +424,301 @@ impl LibraryPanel {
                                 },
                             ));
                         }
-                        let panel = panel.clone();
-                        menu.item(PopupMenuItem::separator()).item(
-                            PopupMenuItem::new("Import to Library…").on_click(move |_, _, cx| {
-                                panel.update(cx, |this, cx| this.import(cx))
-                            }),
-                        )
+                        menu
                     }),
             )
+            .child(
+                Button::new("import-library")
+                    .ghost()
+                    .small()
+                    .icon(IconName::FolderDown)
+                    .tooltip("Import to Library")
+                    .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
+            )
+            .into_any_element()
     }
 
-    fn section(&self, section: Section, query: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The entries of `section` that match `query`.
+    fn shown(&self, section: Section, query: &str, cx: &App) -> Vec<Entry> {
         let state = self.state.read(cx);
-        let all = entries(state.bus.project(), &state.library, section);
         let matches = |e: &Entry| {
             query.is_empty()
                 || [e.name.as_ref(), e.category.as_str(), e.description.as_ref()]
                     .iter()
                     .any(|s| s.to_lowercase().contains(query))
         };
-        let shown: Vec<Entry> = all.into_iter().filter(matches).collect();
-        if shown.is_empty() {
-            return None;
-        }
-        let count = shown.len();
-        let open = !query.is_empty() || !self.collapsed.contains(&section);
-        let theme = cx.theme();
-        let (muted, hover) = (theme.muted_foreground, theme.list_hover);
-        let header = h_flex()
-            .id(SharedString::from(format!("section-{section:?}")))
-            .h(px(26.))
-            .px_1()
-            .gap_1()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|s| s.bg(hover))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .child(
-                Icon::new(if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .xsmall()
-                .text_color(muted),
-            )
-            .child(div().flex_1().child(section.label()))
-            .child(div().text_color(muted).child(count.to_string()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.collapsed.remove(&section) {
-                    this.collapsed.insert(section);
-                }
-                cx.notify();
-            }));
-        let mut body = v_flex().child(header);
-        if open {
-            for (category, list) in grouped(shown) {
-                if !category.is_empty() {
-                    body = body.child(
-                        div()
-                            .pl(px(26.))
-                            .pt_1()
-                            .pb_0p5()
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .child(category),
-                    );
-                }
-                for e in list {
-                    body = body.child(self.row(e, cx));
-                }
-            }
-        }
-        Some(body.into_any_element())
+        entries(state.bus.project(), &state.library, section)
+            .into_iter()
+            .filter(matches)
+            .collect()
     }
 
-    fn row(&self, e: Entry, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let selected = self.selected.as_ref() == Some(&e.item);
-        let (muted, fg) = (theme.muted_foreground, theme.foreground);
-        let (active, hover) = (theme.list_active, theme.list_hover);
-        let id = match &e.item {
+    /// All, then a page for each section that has something to show.
+    fn tabs(&self, sections: &[Section], cx: &mut Context<Self>) -> Stateful<Div> {
+        let selected = self
+            .page
+            .and_then(|p| sections.iter().position(|s| *s == p))
+            .map_or(0, |ix| ix + 1);
+        let pages: Vec<Option<Section>> = std::iter::once(None)
+            .chain(sections.iter().copied().map(Some))
+            .collect();
+        div()
+            .id("library-tabs")
+            .flex_none()
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(t::LN)
+            .child(
+                Tabs::new("library-pages")
+                    .border_b_0()
+                    .px(px(10.))
+                    .child(Tab::new("All"))
+                    .children(sections.iter().map(|s| Tab::new(s.tab())))
+                    .selected(selected)
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        this.page = pages.get(*ix).copied().flatten();
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// `section`'s items under their headings: tiles for what changes the
+    /// picture, rows for the rest.
+    fn section(
+        &self,
+        section: Section,
+        shown: Vec<Entry>,
+        all: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let width = self.width.get().as_f32();
+        let cols = if width > 0. {
+            ((width - 16. + 8.) / (TILE + 8.)).floor().max(2.) as u16
+        } else {
+            3
+        };
+        let mut body = v_flex();
+        for (category, list) in grouped(shown) {
+            let title = match (all, category.is_empty()) {
+                (true, true) => section.label().to_owned(),
+                (true, false) => format!("{} · {category}", section.label()),
+                (false, true) => String::new(),
+                (false, false) => category,
+            };
+            if !title.is_empty() {
+                body = body.child(
+                    div()
+                        .pt(px(10.))
+                        .pb(px(6.))
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t::T3)
+                        .child(title),
+                );
+            }
+            let tiles = list.iter().all(|e| e.kind.is_some());
+            if tiles {
+                body = body.child(
+                    div()
+                        .grid()
+                        .grid_cols(cols)
+                        .gap(px(8.))
+                        .children(list.into_iter().map(|e| self.tile(e, cx))),
+                );
+            } else {
+                body = body.child(
+                    v_flex()
+                        .mx(px(-4.))
+                        .children(list.into_iter().map(|e| self.row(e, cx))),
+                );
+            }
+        }
+        body
+    }
+
+    fn element_id(item: &Item) -> SharedString {
+        match item {
             Item::Fx(r) => format!("fx-{r}"),
             Item::Audio(k) => format!("afx-{}", k.name()),
             Item::Program(id) => format!("lib-{}", id.0),
             Item::Preset(id) => format!("preset-{}", id.0),
             Item::Sound(id) => format!("sound-{}", id.0),
             Item::Voice(id) => format!("voice-{}", id.0),
-        };
-        let renaming = match &e.item {
+        }
+        .into()
+    }
+
+    /// The library item `item` is being renamed, if it is.
+    fn renaming(&self, item: &Item) -> bool {
+        match item {
             Item::Program(id) | Item::Preset(id) | Item::Sound(id) | Item::Voice(id) => {
                 self.renaming == Some(*id)
             }
             _ => false,
-        };
-        if renaming {
-            return h_flex()
-                .h(px(26.))
-                .pl(px(24.))
-                .pr_2()
-                .child(Input::new(&self.name).xsmall())
-                .into_any_element();
         }
-        let listen = match &e.item {
-            Item::Sound(id) => {
-                let sound = self.state.read(cx).library.sound(*id).map(Sound::item);
-                sound.map(|s| listen_button(format!("listen-{}", id.0), &self.state, &s, cx))
-            }
-            Item::Voice(id) => {
-                let sample = self.state.read(cx).library.voice(*id);
-                let sample = sample.and_then(SavedVoice::sample_item);
-                sample.map(|s| listen_button(format!("listen-{}", id.0), &self.state, &s, cx))
-            }
-            _ => None,
-        };
-        // Gone from the account: it reads nothing until made again.
-        let gone = match &e.item {
-            Item::Voice(id) => {
-                let state = self.state.read(cx);
-                let voice = state.library.voice(*id);
-                voice.is_some_and(|v| state.account_voices.has(&v.voice) == Some(false))
-            }
-            _ => false,
-        };
-        let item = e.item.clone();
-        let description = e.description.clone();
-        let row = h_flex()
-            .id(SharedString::from(id))
-            .h(px(26.))
-            .pl(px(24.))
-            .pr_2()
-            .gap_2()
-            .rounded_md()
-            .text_xs()
-            .cursor_pointer()
-            .when(selected, |d| d.bg(active))
-            .when(!selected, |d| d.hover(|s| s.bg(hover)))
-            .when(gone, |d| d.opacity(0.5))
+    }
+
+    /// An effect, transition, generator or title as a tile.
+    fn tile(&self, e: Entry, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected.as_ref() == Some(&e.item);
+        let renaming = self.renaming(&e.item);
+        let thumb = div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .aspect_ratio(16. / 9.)
+            .rounded(t::RADIUS_SM)
+            .bg(t::R1)
+            .when(selected, |d| d.shadow(ring(t::AC, 1.5)))
+            .when(!selected, |d| {
+                d.group_hover(Self::element_id(&e.item), |s| {
+                    s.shadow(ring(t::alpha(t::T1, 0.13), 1.))
+                })
+            })
             .child(fx_glyph(
                 e.glyph,
-                px(13.),
-                if selected { fg } else { muted },
-            ))
+                px(18.),
+                if selected { t::T1 } else { t::T2 },
+            ));
+        let name: AnyElement = if renaming {
+            div()
+                .mt(px(4.))
+                .child(Input::new(&self.name).small())
+                .into_any_element()
+        } else {
+            div()
+                .mt(px(4.))
+                .text_size(px(11.))
+                .truncate()
+                .text_color(if selected { t::T1 } else { t::T2 })
+                .child(e.name.clone())
+                .into_any_element()
+        };
+        let el = self
+            .frame(&e, cx)
+            .group(Self::element_id(&e.item))
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(thumb)
+            .child(name);
+        self.finish(el, &e, cx)
+    }
+
+    /// An audio effect, preset, sound or voice as a row.
+    fn row(&self, e: Entry, cx: &mut Context<Self>) -> AnyElement {
+        if self.renaming(&e.item) {
+            return h_flex()
+                .h(px(28.))
+                .px(px(8.))
+                .child(Input::new(&self.name).small())
+                .into_any_element();
+        }
+        let selected = self.selected.as_ref() == Some(&e.item);
+        let state = self.state.read(cx);
+        let sample = match &e.item {
+            Item::Sound(id) => state.library.sound(*id).map(Sound::item),
+            Item::Voice(id) => state.library.voice(*id).and_then(SavedVoice::sample_item),
+            _ => None,
+        };
+        let playing = sample.as_ref().and_then(|s| {
+            let source = state
+                .source
+                .as_ref()
+                .filter(|p| p.is(s) && p.is_playing())?;
+            Some(source.fraction())
+        });
+        // Gone from the account: it reads nothing until made again.
+        let gone = match &e.item {
+            Item::Voice(id) => state
+                .library
+                .voice(*id)
+                .is_some_and(|v| state.account_voices.has(&v.voice) == Some(false)),
+            _ => false,
+        };
+        let lead: AnyElement = match &sample {
+            _ if gone => div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(20.))
+                .rounded_full()
+                .border_1()
+                .border_color(t::LN)
+                .text_color(t::T2)
+                .child(Icon::new(IconName::Unlink).size(px(9.)))
+                .into_any_element(),
+            Some(item) => listen_dot(
+                format!("listen-{}", Self::element_id(&e.item)),
+                &self.state,
+                item,
+                px(20.),
+                cx,
+            )
+            .into_any_element(),
+            None => div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(20.))
+                .child(fx_glyph(
+                    e.glyph,
+                    px(13.),
+                    if selected { t::T1 } else { t::T2 },
+                ))
+                .into_any_element(),
+        };
+        let meta = if gone {
+            Some(SharedString::from("Not on the account"))
+        } else {
+            e.meta.clone()
+        };
+        let el = self
+            .frame(&e, cx)
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(t::RADIUS)
+            .text_color(if selected || playing.is_some() {
+                t::T1
+            } else {
+                t::T2
+            })
+            .when(selected, |d| d.bg(t::HV))
+            .when(!selected, |d| d.hover(|s| s.bg(t::HV).text_color(t::T1)))
+            .when(gone, |d| d.opacity(0.45))
+            .child(lead)
             .child(div().flex_1().min_w_0().truncate().child(e.name.clone()))
-            .children(listen)
+            .children(playing.map(|f| bar3(f).w(px(54.)).flex_none()))
+            .children(meta.map(|m| {
+                div()
+                    .flex_none()
+                    .max_w(px(120.))
+                    .truncate()
+                    .when(!gone, |d| d.font_family(t::mono()))
+                    .text_size(px(10.))
+                    .text_color(if gone { t::T2 } else { t::T3 })
+                    .child(m)
+            }));
+        self.finish(el, &e, cx)
+    }
+
+    /// What tiles and rows share: selecting, applying on a double click,
+    /// and the description on hover.
+    fn frame(&self, e: &Entry, cx: &mut Context<Self>) -> Stateful<Div> {
+        let item = e.item.clone();
+        let description = e.description.clone();
+        div()
+            .id(Self::element_id(&e.item))
+            .cursor_pointer()
             .when(!description.is_empty(), |d| {
-                d.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                d.tooltip(Tooltip::text(description))
             })
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.selected = Some(item.clone());
@@ -556,9 +726,13 @@ impl LibraryPanel {
                     this.apply(&item, window, cx);
                 }
                 cx.notify();
-            }));
-        let row = match (&e.item, e.kind) {
-            (Item::Fx(r), Some(kind)) => row.on_drag(
+            }))
+    }
+
+    /// Dragging onto the timeline and the chat, and the right-click menu.
+    fn finish(&self, el: Stateful<Div>, e: &Entry, cx: &mut Context<Self>) -> AnyElement {
+        let el = match (&e.item, e.kind) {
+            (Item::Fx(r), Some(kind)) => el.on_drag(
                 FxDrag {
                     fx: r.clone(),
                     kind,
@@ -567,7 +741,7 @@ impl LibraryPanel {
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
-            (Item::Program(id), Some(kind)) => row.on_drag(
+            (Item::Program(id), Some(kind)) => el.on_drag(
                 FxDrag {
                     fx: FxRef::builtin(""),
                     kind,
@@ -576,35 +750,61 @@ impl LibraryPanel {
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
-            (Item::Audio(kind), _) => row.on_drag(
+            (Item::Audio(kind), _) => el.on_drag(
                 AudioFxDrag {
                     kind: *kind,
                     name: e.name.clone(),
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
-            (Item::Sound(id), _) => row.on_drag(
+            (Item::Sound(id), _) => el.on_drag(
                 SoundDrag {
                     sound: *id,
                     name: e.name.clone(),
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
-            _ => row,
+            _ => el,
         };
         let (panel, state, item) = (cx.entity(), self.state.clone(), e.item.clone());
-        row.context_menu(move |menu, _, cx| item_menu(menu, &panel, &state, &item, cx))
+        el.context_menu(move |menu, _, cx| item_menu(menu, &panel, &state, &item, cx))
             .into_any_element()
     }
 }
 
+/// A ring `width` wide around a tile's picture.
+fn ring(color: Rgba, width: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: color.into(),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(width),
+        inset: false,
+    }]
+}
+
+/// How far a sound plays, as a 3 px bar.
+fn bar3(fraction: f32) -> Div {
+    div()
+        .h(px(3.))
+        .rounded_full()
+        .bg(t::alpha(t::T1, 0.08))
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .w(relative(fraction.clamp(0., 1.)))
+                .bg(t::T1),
+        )
+}
+
 fn item_menu(
-    menu: gpui_kit::component::menu::PopupMenu,
+    menu: PopupMenu,
     panel: &Entity<LibraryPanel>,
     state: &Entity<EditorState>,
     item: &Item,
     cx: &App,
-) -> gpui_kit::component::menu::PopupMenu {
+) -> PopupMenu {
     if let Item::Voice(id) = item {
         return voice_menu(menu, panel, state, *id, cx);
     }
@@ -721,12 +921,12 @@ fn read_with(state: &Entity<EditorState>, id: LibraryId, window: &mut Window, cx
 /// designing it again when the account no longer has it, renaming,
 /// removing it from the library, and deleting it from the account.
 fn voice_menu(
-    menu: gpui_kit::component::menu::PopupMenu,
+    menu: PopupMenu,
     panel: &Entity<LibraryPanel>,
     state: &Entity<EditorState>,
     id: LibraryId,
     cx: &App,
-) -> gpui_kit::component::menu::PopupMenu {
+) -> PopupMenu {
     let s = state.read(cx);
     let Some(saved) = s.library.voice(id).cloned() else {
         return menu;
@@ -782,15 +982,13 @@ fn voice_menu(
             PopupMenuItem::new(format!("Delete from {provider}…")).on_click(
                 move |_, window, cx| {
                     let (state, name) = (s5.clone(), name.clone());
-                    window.open_alert_dialog(cx, move |alert, _, _| {
+                    window.open_confirm(cx, move |dialog, _, _| {
                         let state = state.clone();
-                        alert
+                        dialog
                             .title(format!("Delete “{name}” from {provider}?"))
                             .description("Voiceovers it read stay.")
-                            .ok_text("Delete")
-                            .ok_variant(ButtonVariant::Danger)
-                            .show_cancel(true)
-                            .on_ok(move |_, _, cx| {
+                            .destructive()
+                            .confirm("Delete", move |_, cx| {
                                 state.update(cx, |s, cx| s.delete_saved_voice(id, cx));
                                 true
                             })
@@ -802,12 +1000,12 @@ fn voice_menu(
 
 /// What a library item offers besides using it.
 fn library_menu(
-    menu: gpui_kit::component::menu::PopupMenu,
+    menu: PopupMenu,
     panel: &Entity<LibraryPanel>,
     state: &Entity<EditorState>,
     id: LibraryId,
     program: bool,
-) -> gpui_kit::component::menu::PopupMenu {
+) -> PopupMenu {
     let mut menu = menu.item(PopupMenuItem::separator());
     if program {
         let (s1, s2) = (state.clone(), state.clone());
@@ -846,28 +1044,57 @@ fn library_menu(
 impl Render for LibraryPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let sections: Vec<AnyElement> = Section::ALL
+        let shown: Vec<(Section, Vec<Entry>)> = Section::ALL
             .into_iter()
-            .filter_map(|s| self.section(s, &query, cx))
+            .map(|s| (s, self.shown(s, &query, cx)))
+            .filter(|(_, e)| !e.is_empty())
             .collect();
-        let muted = cx.theme().muted_foreground;
-        let empty = sections.is_empty();
-        v_flex().size_full().child(self.toolbar(cx)).child(
-            div()
-                .id("library-items")
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .pb_2()
-                .overflow_y_scrollbar()
-                .when(empty, |d| {
-                    d.flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(muted)
-                        .child(IconName::Search)
-                })
-                .children(sections),
-        )
+        let sections: Vec<Section> = shown.iter().map(|(s, _)| *s).collect();
+        if self.page.is_some_and(|p| !sections.contains(&p)) {
+            self.page = None;
+        }
+        let page = self.page;
+        let tabs = self.tabs(&sections, cx);
+        let empty = shown.is_empty();
+        let body: Vec<Div> = shown
+            .into_iter()
+            .filter(|(s, _)| page.is_none_or(|p| p == *s))
+            .map(|(s, entries)| self.section(s, entries, page.is_none(), cx))
+            .collect();
+        let measured = self.width.clone();
+        v_flex()
+            .size_full()
+            .text_size(px(12.))
+            .text_color(t::T1)
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(8.))
+                    .pt(px(8.))
+                    .pb(px(6.))
+                    .child(Input::new(&self.search).search()),
+            )
+            .child(tabs)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        canvas(move |b, _, _| measured.set(b.size.width), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .child(
+                        div()
+                            .id("library-items")
+                            .size_full()
+                            .overflow_y_scrollbar()
+                            .when(empty, |d| {
+                                d.child(EmptyState::new(IconName::Search, "No matches").compact())
+                            })
+                            .child(v_flex().px(px(8.)).pb(px(8.)).children(body)),
+                    ),
+            )
     }
 }

@@ -1,11 +1,10 @@
-//! One numeric property: a slider plus an optional number field. Values are
-//! committed once, on slider release or Enter/blur, never per pixel of drag;
-//! while dragging, the viewer shows the value uncommitted.
+//! One numeric property as an inspector row: a label that scrubs, a number
+//! field and the row's keyframe lane. The kit's [`NumberFieldState`] owns
+//! the scrub and the typing; a scrub shows its value in the viewer
+//! uncommitted and commits once, on release, as does Enter or blur.
 
-use super::InspectorPanel;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use super::{InspectorPanel, label, row};
+use crate::ui::kit::{NumberField, NumberFieldEvent, NumberFieldState, ScrubLabel, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::TrackId;
@@ -52,7 +51,7 @@ pub enum Key {
     Smoothness,
 }
 
-/// A slider of a mask.
+/// A value of a mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MaskField {
     Feather,
@@ -112,7 +111,7 @@ impl MaskField {
     }
 }
 
-/// Range and display of a key. Sliders and fields work in display units
+/// Range and display of a key. Fields work in display units
 /// (`model × factor`).
 pub struct Spec {
     pub label: &'static str,
@@ -123,7 +122,6 @@ pub struct Spec {
     pub factor: f32,
     /// Model units; double-click the label to reset.
     pub default: f32,
-    pub field: bool,
 }
 
 impl Key {
@@ -136,14 +134,13 @@ impl Key {
             decimals,
             factor,
             default,
-            field: true,
         };
         match self {
-            Key::PosX => s("X", -100., 100., 0.1, 1, 100., 0.),
-            Key::PosY => s("Y", -100., 100., 0.1, 1, 100., 0.),
+            Key::PosX => s("Position X", -100., 100., 0.1, 1, 100., 0.),
+            Key::PosY => s("Position Y", -100., 100., 0.1, 1, 100., 0.),
             Key::Scale => s("Scale", 10., 400., 1., 0, 100., 1.),
-            Key::ScaleX => s("Scale X", 0., 400., 1., 0, 100., 1.),
-            Key::ScaleY => s("Scale Y", 0., 400., 1., 0, 100., 1.),
+            Key::ScaleX => s("Stretch W", 0., 400., 1., 0, 100., 1.),
+            Key::ScaleY => s("Stretch H", 0., 400., 1., 0, 100., 1.),
             Key::Rotation => s("Rotation", -180., 180., 0.5, 1, 1., 0.),
             Key::SkewX => s("Skew X", -80., 80., 0.5, 1, 1., 0.),
             Key::SkewY => s("Skew Y", -80., 80., 0.5, 1, 1., 0.),
@@ -160,7 +157,16 @@ impl Key {
                 0.,
             ),
             Key::Pin(i) => s(
-                ["↖ X", "↖ Y", "↗ X", "↗ Y", "↘ X", "↘ Y", "↙ X", "↙ Y"][i.min(7)],
+                [
+                    "Top left X",
+                    "Top left Y",
+                    "Top right X",
+                    "Top right Y",
+                    "Bottom right X",
+                    "Bottom right Y",
+                    "Bottom left X",
+                    "Bottom left Y",
+                ][i.min(7)],
                 -100.,
                 100.,
                 0.5,
@@ -186,185 +192,162 @@ impl Key {
             Key::Gamma => s("Gamma", 0.2, 3., 0.01, 2, 1., 1.),
             Key::Temperature => s("Temp", -100., 100., 1., 0, 100., 0.),
             Key::Tint => s("Tint", -100., 100., 1., 0, 100., 0.),
-            Key::Lift(_) => Spec {
-                field: false,
-                ..s("Lift", -50., 50., 0.5, 1, 100., 0.)
-            },
-            Key::GammaRgb(_) => Spec {
-                field: false,
-                ..s("Gamma", 50., 200., 0.5, 1, 100., 1.)
-            },
-            Key::Gain(_) => Spec {
-                field: false,
-                ..s("Gain", 0., 200., 0.5, 1, 100., 1.)
-            },
+            Key::Lift(_) => s("Lift", -50., 50., 0.5, 1, 100., 0.),
+            Key::GammaRgb(_) => s("Gamma", 50., 200., 0.5, 1, 100., 1.),
+            Key::Gain(_) => s("Gain", 0., 200., 0.5, 1, 100., 1.),
             Key::FadeIn => s("Fade in", 0., 10., 0.05, 2, 1., 0.),
             Key::FadeOut => s("Fade out", 0., 10., 0.05, 2, 1., 0.),
-            Key::Volume(_) => Spec {
-                field: false,
-                ..s("Volume", -60., 12., 0.1, 1, 1., 0.)
-            },
-            Key::Pan(_) => Spec {
-                field: false,
-                ..s("Pan", -100., 100., 1., 0, 100., 0.)
-            },
+            Key::Volume(_) => s("Volume", -60., 12., 0.1, 1, 1., 0.),
+            Key::Pan(_) => s("Pan", -100., 100., 1., 0, 100., 0.),
             Key::DuckReduction => s("Reduction", -40., 0., 0.5, 1, 1., -12.),
             Key::DuckAttack => s("Attack", 0., 2000., 10., 0, 1000., 0.2),
             Key::DuckRelease => s("Release", 0., 4000., 10., 0, 1000., 0.6),
             Key::Smoothness => s("Amount", 0., 100., 1., 0, 100., 0.5),
         }
     }
+
+    /// The unit shown after the value.
+    fn unit(self) -> Option<&'static str> {
+        Some(match self {
+            Key::Scale | Key::ScaleX | Key::ScaleY | Key::Opacity | Key::Crop(_) => "%",
+            Key::Rotation | Key::SkewX | Key::SkewY => "°",
+            Key::Mask(_, MaskField::Rotation) => "°",
+            Key::Mask(_, MaskField::Feather | MaskField::Expansion) => return None,
+            Key::Mask(..) | Key::Smoothness => "%",
+            Key::TransitionDuration | Key::FadeIn | Key::FadeOut => "s",
+            Key::Volume(_) | Key::DuckReduction => "dB",
+            Key::DuckAttack | Key::DuckRelease => "ms",
+            _ => return None,
+        })
+    }
 }
 
+/// The field behind one key, kept across renders.
 pub struct Param {
-    key: Key,
-    slider: Entity<SliderState>,
-    field: Option<Entity<InputState>>,
-    /// Last model value shown.
-    value: f32,
-    dragging: bool,
-    /// The field holds an uncommitted edit.
-    typing: bool,
-    _subscriptions: Vec<Subscription>,
+    field: Entity<NumberFieldState>,
+    factor: f32,
+    _subscription: Subscription,
 }
 
 impl Param {
-    pub fn new(
+    fn new(key: Key, value: f32, window: &mut Window, cx: &mut Context<InspectorPanel>) -> Self {
+        let spec = key.spec();
+        let factor = spec.factor;
+        let field = cx.new(|cx| {
+            NumberFieldState::new(window, cx)
+                .min(spec.min as f64)
+                .max(spec.max as f64)
+                .step(spec.step as f64)
+                .decimals(spec.decimals)
+                .default_value((value * factor) as f64)
+        });
+        let _subscription = cx.subscribe(
+            &field,
+            move |this, _, ev: &NumberFieldEvent, cx| match *ev {
+                NumberFieldEvent::Change(v) => this.preview(key, v as f32 / factor, cx),
+                NumberFieldEvent::Commit(v) => this.commit(key, v as f32 / factor, cx),
+            },
+        );
+        Self {
+            field,
+            factor,
+            _subscription,
+        }
+    }
+
+    /// Follow the model; a scrub in progress keeps its value.
+    fn sync(&self, value: f32, cx: &mut App) {
+        let shown = (value * self.factor) as f64;
+        self.field.update(cx, |f, cx| f.set_value(shown, cx));
+    }
+}
+
+impl InspectorPanel {
+    /// The field for `key`, created on first use and synced to `value`.
+    fn param(&mut self, key: Key, value: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.params
+            .entry(key)
+            .or_insert_with(|| Param::new(key, value, window, cx))
+            .sync(value, cx);
+    }
+
+    /// Double-click a label: back to the key's default.
+    fn reset(key: Key, cx: &Context<Self>) -> impl Fn(&mut Window, &mut App) + 'static {
+        let panel = cx.entity().downgrade();
+        let default = key.spec().default;
+        move |_, cx| {
+            let _ = panel.update(cx, |this, cx| this.commit(key, default, cx));
+        }
+    }
+
+    /// `key` on its own row: its label scrubs it. `keyed` marks a keyframe
+    /// at the playhead; `lane` is the keyframe navigation, if it has one.
+    pub(super) fn param_row(
+        &mut self,
         key: Key,
         value: f32,
+        keyed: bool,
+        lane: Option<AnyElement>,
         window: &mut Window,
-        cx: &mut Context<InspectorPanel>,
-    ) -> Self {
-        let spec = key.spec();
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(spec.min)
-                .max(spec.max)
-                .step(spec.step)
-                .default_value(value * spec.factor)
-        });
-        let mut subs = vec![cx.subscribe_in(
-            &slider,
-            window,
-            move |this, _, ev: &SliderEvent, window, cx| match ev {
-                SliderEvent::Change(v) => {
-                    if let Some(p) = this.params.get_mut(&key) {
-                        p.dragging = true;
-                        p.show_field(v.start(), window, cx);
-                    }
-                    this.preview(key, v.start() / spec.factor, cx);
-                }
-                SliderEvent::Release(v) => {
-                    if let Some(p) = this.params.get_mut(&key) {
-                        p.dragging = false;
-                    }
-                    this.commit(key, v.start() / spec.factor, cx);
-                }
-            },
-        )];
-        let field = spec.field.then(|| {
-            let text = format_value(value * spec.factor, spec.decimals);
-            let field = cx.new(|cx| InputState::new(window, cx).default_value(text));
-            subs.push(cx.subscribe_in(
-                &field,
-                window,
-                move |this, input, ev: &InputEvent, _, cx| {
-                    if let Some(p) = this.params.get_mut(&key) {
-                        p.typing = matches!(ev, InputEvent::Change);
-                    }
-                    if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        let parsed = input.read(cx).value().trim().parse::<f32>();
-                        let current = this.params.get(&key).map(|p| p.value);
-                        if let (Ok(v), Some(current)) = (parsed, current) {
-                            let v = (v / spec.factor)
-                                .clamp(spec.min / spec.factor, spec.max / spec.factor);
-                            if (v - current).abs() > f32::EPSILON {
-                                this.commit(key, v, cx);
-                            }
-                        }
-                    }
-                },
-            ));
-            field
-        });
-        Self {
-            key,
-            slider,
-            field,
-            value,
-            dragging: false,
-            typing: false,
-            _subscriptions: subs,
-        }
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.param(key, value, window, cx);
+        let field = &self.params[&key].field;
+        let label = ScrubLabel::new(field, key.spec().label)
+            .keyed(keyed)
+            .on_reset(Self::reset(key, cx));
+        let number = NumberField::new(field)
+            .keyed(keyed)
+            .when_some(key.unit(), |f, unit| f.unit(unit));
+        row(label, number, lane)
     }
 
-    fn show_field(&self, display: f32, window: &mut Window, cx: &mut App) {
-        if let Some(field) = &self.field {
-            let text = format_value(display, self.key.spec().decimals);
-            field.update(cx, |f, cx| f.set_value(text, window, cx));
+    /// Two keys side by side under one label, as X and Y; each field's
+    /// axis name scrubs it.
+    pub(super) fn pair_row(
+        &mut self,
+        title: &'static str,
+        keys: [(Key, f32, &'static str); 2],
+        keyed: bool,
+        lane: Option<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        for (key, value, _) in keys {
+            self.param(key, value, window, cx);
         }
-    }
-
-    /// Resync on the next render, whether the commit applied or was refused.
-    pub fn invalidate(&mut self) {
-        self.value = f32::NAN;
-    }
-
-    /// Follow the model, except while the user drags this slider or types
-    /// in its field.
-    pub fn sync(&mut self, value: f32, window: &mut Window, cx: &mut App) {
-        if self.dragging || (value - self.value).abs() < 1e-6 {
-            return;
-        }
-        self.value = value;
-        let display = value * self.key.spec().factor;
-        self.slider
-            .update(cx, |s, cx| s.set_value(display, window, cx));
-        if !self.typing {
-            self.show_field(display, window, cx);
-        }
-    }
-
-    /// Label, slider and field on one 28 px row.
-    pub fn row(&self, cx: &mut Context<InspectorPanel>) -> Div {
-        let spec = self.key.spec();
-        let key = self.key;
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .h(px(28.))
-            .gap_2()
-            .child(
-                div()
-                    .id(SharedString::from(format!("label-{key:?}")))
-                    .w(px(64.))
-                    .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .truncate()
-                    .child(spec.label)
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            this.commit(key, spec.default, cx);
-                        }
-                    })),
-            )
-            .child(self.slider(None))
-            .when_some(self.field.as_ref(), |row, field| {
-                row.child(
-                    div()
-                        .w(px(56.))
-                        .flex_none()
-                        .child(Input::new(field).xsmall()),
+        let fields = keys.map(|(key, _, axis)| {
+            let field = &self.params[&key].field;
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    NumberField::new(field)
+                        .keyed(keyed)
+                        .pl(px(18.))
+                        .when_some(key.unit(), |f, unit| f.unit(unit)),
                 )
-            })
-    }
-
-    pub fn slider(&self, color: Option<Hsla>) -> Div {
-        div().flex_1().min_w_0().child(
-            Slider::new(&self.slider)
-                .when_some(color, |s, c| s.bg(c))
-                .w_full(),
-        )
+                .child(
+                    // Over the field, so a drag on the axis scrubs rather
+                    // than focusing the text.
+                    div()
+                        .absolute()
+                        .left(px(6.))
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .occlude()
+                        .child(
+                            ScrubLabel::new(field, axis)
+                                .keyed(keyed)
+                                .on_reset(Self::reset(key, cx)),
+                        ),
+                )
+        });
+        let [x, y] = fields;
+        row(label(title), h_flex().gap(px(4.)).child(x).child(y), lane)
     }
 }
 

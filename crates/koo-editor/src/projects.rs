@@ -3,9 +3,7 @@
 //! with unsaved changes. The files themselves are `persistence`'s.
 
 use crate::state::EditorState;
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
+use crate::ui::kit::DialogExt as _;
 use gpui_kit::*;
 use koo_store::project_file::{EXTENSION, sanitize};
 use std::path::PathBuf;
@@ -156,32 +154,20 @@ fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut
     }
     let name = state.read(cx).bus.project().name.clone();
     let state = state.clone();
-    window.open_alert_dialog(cx, move |alert, _, _| {
+    window.open_confirm(cx, move |dialog, _, _| {
         let (save_state, discard_state) = (state.clone(), state.clone());
         let (save_then_do, discard_then_do) = (then.clone(), then.clone());
-        alert.title(format!("Save changes to “{name}”?")).footer(
-            DialogFooter::new()
-                .child(
-                    Button::new("cancel")
-                        .label("Cancel")
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("discard")
-                        .label("Don't Save")
-                        .on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
-                            discard_state.update(cx, |s, _| s.discard_changes());
-                            run(&discard_state, discard_then_do.clone(), window, cx);
-                        }),
-                )
-                .child(Button::new("save").primary().label("Save").on_click(
-                    move |_, window, cx| {
-                        window.close_dialog(cx);
-                        save_then(&save_state, Some(save_then_do.clone()), window, cx);
-                    },
-                )),
-        )
+        dialog
+            .title(format!("Save changes to “{name}”?"))
+            .secondary("Don't Save", move |window, cx| {
+                discard_state.update(cx, |s, _| s.discard_changes());
+                run(&discard_state, discard_then_do.clone(), window, cx);
+                true
+            })
+            .confirm("Save", move |window, cx| {
+                save_then(&save_state, Some(save_then_do.clone()), window, cx);
+                true
+            })
     });
 }
 

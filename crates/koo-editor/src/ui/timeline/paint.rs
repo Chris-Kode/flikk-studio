@@ -3,69 +3,15 @@
 //! and the playhead.
 //! `Scene` is a snapshot taken in `render`, so painting never touches state.
 
-use super::layout::{self, RULER_HEIGHT, Row, Viewport};
+use super::layout::{self, CLIP_INSET, RULER_HEIGHT, Row, Viewport};
 use super::overlay::{Mark, OverlayItem};
 use super::waveform;
-use gpui_kit::component::Theme;
+use crate::ui::kit::{IconName, theme as t};
 use gpui_kit::*;
+use koo_core::command::Edge;
 use koo_core::model::{Marker, MarkerKind, TrackKind};
 use koo_core::{ChangeItemId, Rate, Time, TimeRange, TrackId};
 use std::sync::Arc;
-
-#[derive(Clone, Copy)]
-pub struct Colors {
-    pub background: Hsla,
-    pub lane: Hsla,
-    pub border: Hsla,
-    pub foreground: Hsla,
-    pub muted: Hsla,
-    pub video: Hsla,
-    pub audio: Hsla,
-    pub caption: Hsla,
-    pub title: Hsla,
-    pub green: Hsla,
-    pub red: Hsla,
-    pub yellow: Hsla,
-    pub marker: Hsla,
-    pub protected: Hsla,
-    pub selection: Hsla,
-    /// Render bar: frames on disk, and frames still to compose.
-    pub cached: Hsla,
-    pub uncached: Hsla,
-}
-
-impl Colors {
-    pub fn new(theme: &Theme) -> Self {
-        Self {
-            background: theme.background,
-            lane: theme.secondary,
-            border: theme.border,
-            foreground: theme.foreground,
-            muted: theme.muted_foreground,
-            video: theme.blue,
-            audio: theme.cyan,
-            caption: theme.magenta,
-            title: theme.magenta_light,
-            green: theme.green,
-            red: theme.red,
-            yellow: theme.yellow,
-            marker: theme.blue_light,
-            protected: theme.warning,
-            selection: theme.foreground,
-            cached: theme.success,
-            uncached: theme.danger,
-        }
-    }
-
-    fn of(&self, kind: TrackKind) -> Hsla {
-        match kind {
-            TrackKind::Video | TrackKind::Overlay => self.video,
-            TrackKind::Audio => self.audio,
-            TrackKind::Caption => self.caption,
-            TrackKind::Title => self.title,
-        }
-    }
-}
 
 /// Clip time → source played since the clip's start.
 pub type Warp = Arc<dyn Fn(Time) -> Time>;
@@ -73,10 +19,13 @@ pub type Warp = Arc<dyn Fn(Time) -> Time>;
 pub struct ClipScene {
     pub range: TimeRange,
     pub label: SharedString,
-    /// Clip color label; the track's color otherwise.
-    pub color: Option<Hsla>,
+    /// Clip color label; the track's tint otherwise.
+    pub color: Option<Rgba>,
     pub enabled: bool,
-    pub generator: bool,
+    /// Its media file is missing.
+    pub offline: bool,
+    /// Drawn before the name: disabled, generator, title.
+    pub icon: Option<IconName>,
     /// Has a video effect stack: an `fx` badge.
     pub effects: bool,
     /// Retimed: a speed badge such as `150%`.
@@ -84,6 +33,8 @@ pub struct ClipScene {
     pub selected: bool,
     /// Being dragged: drawn faded at its old place.
     pub lifted: bool,
+    /// The trim edge under the pointer.
+    pub hover_edge: Option<Edge>,
     pub peaks: Option<Arc<Vec<f32>>>,
     /// Retimed: clip time → source played since its start, which `peaks`
     /// span.
@@ -97,15 +48,21 @@ pub struct ClipScene {
 pub struct TrackScene {
     pub row: Row,
     pub clips: Vec<ClipScene>,
-    pub dimmed: bool,
+    /// Clip opacity: lower on muted, hidden and locked tracks.
+    pub fade: f32,
+    pub locked: bool,
+    /// A picture track switched off.
+    pub hidden: bool,
 }
 
 /// Where a dragged clip would land.
 pub struct Ghost {
     pub track: TrackId,
     pub range: TimeRange,
-    /// Slip offset and the like, drawn inside the outline.
+    /// Slip and trim offsets, drawn inside the outline.
     pub label: Option<SharedString>,
+    /// The edge a trim or roll moves, marked with an accent bar.
+    pub edge: Option<Time>,
 }
 
 /// A transition block straddling its cut or clip edge.
@@ -119,12 +76,31 @@ pub struct TransitionScene {
 /// What an FX or media drag would hit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropHint {
-    /// A whole lane (media).
+    /// A whole lane (a sound not yet in the pool).
     Row(TrackId),
     /// A clip (effects).
     Clip(TrackId, TimeRange),
     /// A span that would be filled (a transition, a generator).
     Span(TrackId, TimeRange),
+    /// Media landing at `range`, with its sound on `linked`.
+    Insert {
+        track: TrackId,
+        range: TimeRange,
+        linked: Option<TrackId>,
+    },
+}
+
+impl DropHint {
+    /// The lanes it tints.
+    fn tints(&self, track: TrackId) -> bool {
+        match *self {
+            DropHint::Row(t) => t == track,
+            DropHint::Insert {
+                track: t, linked, ..
+            } => t == track || linked == Some(track),
+            DropHint::Clip(..) | DropHint::Span(..) => false,
+        }
+    }
 }
 
 /// Rubber band in timeline time and scrolled lane y.
@@ -141,6 +117,8 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub in_out: Option<TimeRange>,
     pub playhead: Time,
+    /// The ruler is being dragged: the playhead shows its timecode.
+    pub scrubbing: bool,
     pub overlay: Vec<OverlayItem>,
     pub focused: Option<ChangeItemId>,
     pub hovered: Option<ChangeItemId>,
@@ -152,7 +130,6 @@ pub struct Scene {
     pub blade: Option<(Time, Option<TrackId>)>,
     pub drop: Option<DropHint>,
     pub marquee: Option<Marquee>,
-    pub colors: Colors,
     /// Which compositor ranges the background render has on disk.
     pub render: Option<Arc<crate::render_cache::Status>>,
 }
@@ -166,8 +143,22 @@ impl Scene {
     }
 }
 
+/// The tint clips on a `kind` track take.
+fn tint(kind: TrackKind) -> Rgba {
+    match kind {
+        TrackKind::Video | TrackKind::Overlay => t::V,
+        TrackKind::Audio => t::A,
+        TrackKind::Caption => t::C,
+        TrackKind::Title => t::TI,
+    }
+}
+
+/// `c` with its alpha scaled by `k`.
+fn fade(c: Rgba, k: f32) -> Rgba {
+    t::alpha(c, c.a * k)
+}
+
 pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    let c = scene.colors;
     let vp = scene.viewport;
     let left = bounds.origin.x;
     let width = bounds.size.width;
@@ -177,28 +168,41 @@ pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut
     );
     let x_of = |t: Time| left + px(vp.x(t));
     let row_top = |row: &Row| lanes.origin.y + px(row.y - vp.scroll_y);
+    // A clip's box in its row.
+    let clip_box = |row: &Row, range: TimeRange| {
+        let (a, b) = (x_of(range.start), x_of(range.end));
+        Bounds::new(
+            point(a, row_top(row) + px(CLIP_INSET)),
+            size(b - a, px(row.height - CLIP_INSET * 2.)),
+        )
+    };
 
-    window.paint_quad(fill(bounds, c.background));
+    window.paint_quad(fill(bounds, t::LANE));
 
     window.with_content_mask(Some(ContentMask { bounds: lanes }), |window| {
-        // Lanes.
         for track in &scene.tracks {
-            let top = row_top(&track.row);
             let rect = Bounds::new(
-                point(left, top + px(1.)),
-                size(width, px(track.row.height - 2.)),
+                point(left, row_top(&track.row)),
+                size(width, px(track.row.height)),
             );
-            let tint = if scene.drop == Some(DropHint::Row(track.row.track)) {
-                c.lane.opacity(0.9)
-            } else {
-                c.lane.opacity(0.35)
-            };
-            window.paint_quad(fill(rect, tint));
+            if track.locked {
+                window.paint_quad(fill(rect, pattern_slash(t::alpha(t::T1, 0.04), 6., 6.)));
+            }
+            if track.hidden {
+                window.paint_quad(fill(rect, t::alpha(t::G, 0.4)));
+            }
+            if scene.drop.is_some_and(|d| d.tints(track.row.track)) {
+                window.paint_quad(fill(rect, t::alpha(t::AC, 0.04)));
+            }
+            window.paint_quad(fill(
+                Bounds::new(point(left, rect.bottom() - px(1.)), size(width, px(1.))),
+                t::LN,
+            ));
         }
 
         // In/out: dim what is outside.
         if let Some(r) = scene.in_out.filter(|r| !r.is_empty()) {
-            let shade = c.background.opacity(0.45);
+            let shade = t::alpha(t::G, 0.45);
             let (a, b) = (x_of(r.start), x_of(r.end));
             if a > left {
                 window.paint_quad(fill(
@@ -226,66 +230,25 @@ pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut
             let (a, b) = (x_of(m.range.start), x_of(m.range.end));
             window.paint_quad(fill(
                 Bounds::new(point(a, lanes.origin.y), size(b - a, lanes.size.height)),
-                c.protected.opacity(0.06),
+                t::alpha(t::WARN, 0.06),
             ));
         }
 
         for track in &scene.tracks {
-            let color = c.of(track.row.kind);
-            let top = row_top(&track.row);
             for clip in &track.clips {
-                paint_clip(
-                    clip,
-                    track,
-                    color,
-                    Bounds::new(
-                        point(x_of(clip.range.start), top + px(2.)),
-                        size(
-                            x_of(clip.range.end) - x_of(clip.range.start),
-                            px(track.row.height - 4.),
-                        ),
-                    ),
-                    &c,
-                    window,
-                    cx,
-                );
+                let rect = clip_box(&track.row, clip.range);
+                paint_clip(clip, track, rect, window, cx);
             }
         }
 
-        for t in &scene.transitions {
-            if let Some(row) = scene.row(t.track) {
-                let top = row_top(row);
-                let (a, b) = (x_of(t.range.start), x_of(t.range.end));
-                let rect = Bounds::new(
-                    point(a, top + px(2.)),
-                    size((b - a).max(px(6.)), px(row.height - 4.)),
-                );
-                paint_transition(t, rect, &c, window, cx);
+        for tr in &scene.transitions {
+            if let Some(row) = scene.row(tr.track) {
+                paint_transition(tr, row, row_top(row), &x_of, window, cx);
             }
         }
 
         if let Some(hint) = scene.drop {
-            let (track, range, filled) = match hint {
-                DropHint::Row(_) => (None, None, false),
-                DropHint::Clip(t, r) => (Some(t), Some(r), false),
-                DropHint::Span(t, r) => (Some(t), Some(r), true),
-            };
-            if let (Some(row), Some(r)) = (track.and_then(|t| scene.row(t)), range) {
-                let top = row_top(row);
-                let (a, b) = (x_of(r.start), x_of(r.end));
-                let rect = Bounds::new(
-                    point(a, top + px(1.)),
-                    size((b - a).max(px(4.)), px(row.height - 2.)),
-                );
-                window.paint_quad(quad(
-                    rect,
-                    px(4.),
-                    c.marker.opacity(if filled { 0.35 } else { 0.12 }),
-                    px(2.),
-                    c.marker,
-                    BorderStyle::Solid,
-                ));
-            }
+            paint_drop(hint, &scene, &clip_box, window, cx);
         }
 
         // Pending change sets.
@@ -295,7 +258,7 @@ pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut
             };
             let rect = overlay_rect(item, row, &vp, lanes, left);
             let emphasis = scene.focused == Some(item.item) || scene.hovered == Some(item.item);
-            paint_overlay_item(item, rect, emphasis, &c, window);
+            paint_overlay_item(item, rect, emphasis, window);
         }
 
         // Silence preview.
@@ -305,56 +268,18 @@ pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut
                 point(a, lanes.origin.y),
                 size((b - a).max(px(1.)), lanes.size.height),
             );
-            window.paint_quad(fill(band, c.red.opacity(0.22)));
-            window.paint_quad(fill(
-                Bounds::new(band.origin, size(px(1.), band.size.height)),
-                c.red.opacity(0.6),
-            ));
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(b - px(1.), band.origin.y),
-                    size(px(1.), band.size.height),
-                ),
-                c.red.opacity(0.6),
-            ));
+            window.paint_quad(fill(band, t::alpha(t::ERR, 0.22)));
+            for x in [a, band.right() - px(1.)] {
+                window.paint_quad(fill(
+                    Bounds::new(point(x, band.origin.y), size(px(1.), band.size.height)),
+                    t::alpha(t::ERR, 0.6),
+                ));
+            }
         }
 
         for ghost in &scene.ghosts {
             if let Some(row) = scene.row(ghost.track) {
-                let top = row_top(row);
-                let rect = Bounds::new(
-                    point(x_of(ghost.range.start), top + px(2.)),
-                    size(
-                        x_of(ghost.range.end) - x_of(ghost.range.start),
-                        px(row.height - 4.),
-                    ),
-                );
-                window.paint_quad(quad(
-                    rect,
-                    px(4.),
-                    c.foreground.opacity(0.08),
-                    px(1.5),
-                    c.foreground.opacity(0.9),
-                    BorderStyle::Solid,
-                ));
-                if let Some(label) = &ghost.label {
-                    let line = shape(label, px(11.), c.foreground, window);
-                    let origin = point(
-                        rect.origin.x + (rect.size.width - line.width) / 2.,
-                        rect.origin.y + (rect.size.height - px(14.)) / 2.,
-                    );
-                    window.paint_quad(
-                        fill(
-                            Bounds::new(
-                                origin - point(px(4.), px(1.)),
-                                size(line.width + px(8.), px(16.)),
-                            ),
-                            c.background.opacity(0.85),
-                        )
-                        .corner_radii(px(3.)),
-                    );
-                    let _ = line.paint(origin, px(14.), TextAlign::Left, None, window, cx);
-                }
+                paint_ghost(ghost, clip_box(row, ghost.range), &x_of, window, cx);
             }
         }
 
@@ -362,59 +287,46 @@ pub fn paint(scene: Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut
             let (y0, y1) = (m.from.1.min(m.to.1), m.from.1.max(m.to.1));
             let (a, b) = (x_of(m.from.0.min(m.to.0)), x_of(m.from.0.max(m.to.0)));
             let top = lanes.origin.y + px(y0 - vp.scroll_y);
-            let rect = Bounds::new(point(a, top), size(b - a, px(y1 - y0)));
             window.paint_quad(quad(
-                rect,
+                Bounds::new(point(a, top), size(b - a, px(y1 - y0))),
                 px(0.),
-                c.marker.opacity(0.12),
+                t::alpha(t::MK, 0.12),
                 px(1.),
-                c.marker.opacity(0.8),
+                t::alpha(t::MK, 0.8),
                 BorderStyle::Solid,
             ));
         }
 
-        if let Some((t, track)) = scene.blade {
-            let x = x_of(t);
+        if let Some((at, track)) = scene.blade {
+            let x = x_of(at);
             let (top, h) = match track.and_then(|t| scene.row(t)) {
                 Some(row) => (row_top(row), px(row.height)),
                 None => (lanes.origin.y, lanes.size.height),
             };
-            window.paint_quad(fill(Bounds::new(point(x, top), size(px(1.), h)), c.red));
+            window.paint_quad(fill(Bounds::new(point(x, top), size(px(1.), h)), t::PH));
+            paint_icon(
+                IconName::Scissors,
+                point(x + px(5.), top + px(4.)),
+                px(12.),
+                t::T1,
+                window,
+                cx,
+            );
         }
     });
 
-    if let Some(t) = scene.snap {
-        let x = x_of(t);
+    if let Some(at) = scene.snap {
         window.paint_quad(fill(
-            Bounds::new(point(x, lanes.origin.y), size(px(1.), lanes.size.height)),
-            c.yellow.opacity(0.9),
+            Bounds::new(
+                point(x_of(at), bounds.origin.y),
+                size(px(1.), bounds.size.height),
+            ),
+            t::alpha(t::WARN, 0.9),
         ));
     }
 
     paint_ruler(&scene, bounds, window, cx);
-
-    // Playhead.
-    let x = x_of(scene.playhead);
-    if x >= left - px(6.) && x <= left + width + px(6.) {
-        window.paint_quad(fill(
-            Bounds::new(
-                point(x, bounds.origin.y + px(6.)),
-                size(px(1.), bounds.size.height),
-            ),
-            c.foreground,
-        ));
-        let mut head = PathBuilder::fill();
-        let y = bounds.origin.y + px(4.);
-        head.move_to(point(x - px(5.5), y));
-        head.line_to(point(x + px(6.5), y));
-        head.line_to(point(x + px(6.5), y + px(8.)));
-        head.line_to(point(x + px(0.5), y + px(14.)));
-        head.line_to(point(x - px(5.5), y + px(8.)));
-        head.close();
-        if let Ok(path) = head.build() {
-            window.paint_path(path, c.foreground);
-        }
-    }
+    paint_playhead(&scene, bounds, window, cx);
 }
 
 /// Lane rectangle of an overlay item. Added clips that land on committed
@@ -434,7 +346,7 @@ pub fn overlay_rect(
     let w = (b - a).max(px(3.));
     if item.mark == Mark::Added && item.overlaps {
         let h = (row.height * 0.45).max(10.);
-        Bounds::new(point(a, top + px(row.height - h - 1.)), size(w, px(h)))
+        Bounds::new(point(a, top + px(row.height - h - 2.)), size(w, px(h)))
     } else {
         Bounds::new(point(a, top + px(2.)), size(w, px(row.height - 4.)))
     }
@@ -443,238 +355,397 @@ pub fn overlay_rect(
 fn paint_clip(
     clip: &ClipScene,
     track: &TrackScene,
-    color: Hsla,
     rect: Bounds<Pixels>,
-    c: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let color = match (clip.enabled, clip.color) {
-        (false, _) => c.muted,
-        (true, Some(label)) => label,
-        (true, None) => color,
-    };
-    let alpha = if clip.lifted { 0.35 } else { 1. };
-    let dim = if track.dimmed { 0.5 } else { 1. } * if clip.enabled { 1. } else { 0.5 };
-    let body = color.opacity(0.32 * alpha * dim);
-    let (border, border_w) = if clip.selected {
-        (c.selection, px(1.5))
+    let kind = track.row.kind;
+    let k = if clip.lifted { 0.35 } else { 1. } * track.fade;
+    let hue = clip.color.unwrap_or_else(|| tint(kind));
+    let (top, bottom, border, text) = if clip.offline {
+        (t::G, t::G, t::alpha(t::WARN, 0.6), t::WARN)
+    } else if !clip.enabled {
+        let wash = t::alpha(t::T3, 0.12);
+        (wash, wash, t::alpha(t::T3, 0.4), t::T3)
     } else {
-        (color.opacity(0.75 * alpha * dim), px(1.))
+        match kind {
+            TrackKind::Video | TrackKind::Overlay => (
+                t::alpha(hue, 0.25),
+                t::alpha(hue, 0.15),
+                t::alpha(hue, 0.6),
+                t::T1,
+            ),
+            TrackKind::Audio => (
+                t::alpha(hue, 0.15),
+                t::alpha(hue, 0.15),
+                t::alpha(hue, 0.5),
+                t::T1,
+            ),
+            TrackKind::Caption => (
+                t::alpha(hue, 0.2),
+                t::alpha(hue, 0.2),
+                t::alpha(hue, 0.5),
+                t::T1,
+            ),
+            TrackKind::Title => (
+                t::alpha(hue, 0.12),
+                t::alpha(hue, 0.12),
+                t::alpha(hue, 0.53),
+                t::T1,
+            ),
+        }
+    };
+    let text = fade(text, k);
+    let (border, border_w) = if clip.selected {
+        window.paint_quad(quad(
+            rect.dilate(px(1.)),
+            px(5.),
+            transparent_black(),
+            px(1.),
+            t::alpha(t::AC, 0.33 * k),
+            BorderStyle::Solid,
+        ));
+        (fade(t::AC, k), px(2.))
+    } else if clip.hover_edge.is_some() {
+        (t::alpha(border, (border.a + 0.3).min(1.) * k), px(1.))
+    } else {
+        (fade(border, k), px(1.))
     };
     window.paint_quad(quad(
         rect,
-        px(4.),
-        body,
+        t::RADIUS_SM,
+        linear_gradient(
+            180.,
+            linear_color_stop(fade(top, k), 0.),
+            linear_color_stop(fade(bottom, k), 1.),
+        ),
         border_w,
         border,
         BorderStyle::Solid,
     ));
-    // A brighter strip on top reads as the clip's "spine".
-    window.paint_quad(quad(
-        Bounds::new(
-            rect.origin + point(px(1.), px(1.)),
-            size((rect.size.width - px(2.)).max(px(0.)), px(2.)),
-        ),
-        Corners {
-            top_left: px(3.),
-            top_right: px(3.),
-            bottom_left: px(0.),
-            bottom_right: px(0.),
-        },
-        color.opacity(0.8 * alpha * dim),
-        px(0.),
-        transparent_black(),
-        BorderStyle::Solid,
-    ));
+    if clip.offline {
+        window.paint_quad(
+            fill(rect, pattern_slash(t::alpha(t::WARN, 0.1 * k), 5., 5.))
+                .corner_radii(t::RADIUS_SM),
+        );
+    }
 
-    let inner = Bounds::new(
-        rect.origin + point(px(1.), px(1.)),
-        size(
-            (rect.size.width - px(2.)).max(px(0.)),
-            (rect.size.height - px(2.)).max(px(0.)),
-        ),
-    );
+    let inner = rect.inset(px(1.));
     window.with_content_mask(Some(ContentMask { bounds: inner }), |window| {
-        let strip_top = inner.origin.y + px(2.);
-        for (offset, w, image) in &clip.tiles {
-            let tile = Bounds::new(
-                point(rect.origin.x + px(*offset), strip_top),
-                size(px(*w), inner.size.height - px(2.)),
-            );
-            let _ = window.paint_image(tile, tile, Corners::default(), image.clone(), 0, false);
-        }
         if !clip.tiles.is_empty() {
-            window.paint_quad(fill(inner, color.opacity(0.12)));
-            if alpha < 1. || dim < 1. {
-                window.paint_quad(fill(inner, c.background.opacity(1. - alpha * dim)));
+            let (offset, h) = layout::filmstrip(f32::from(rect.size.height));
+            let strip_top = rect.origin.y + px(offset);
+            for (x, w, image) in &clip.tiles {
+                let tile = Bounds::new(
+                    point(rect.origin.x + px(*x), strip_top),
+                    size(px(*w), px(h)),
+                );
+                let _ = window.paint_image(tile, tile, Corners::default(), image.clone(), 0, false);
+                window.paint_quad(fill(
+                    Bounds::new(tile.origin, size(px(1.), tile.size.height)),
+                    t::G,
+                ));
             }
+            let strip = Bounds::new(
+                point(inner.origin.x, strip_top),
+                size(inner.size.width, px(h)),
+            );
+            let veil = if clip.enabled { 1. - 0.85 * k } else { 0.78 };
+            window.paint_quad(fill(strip, t::alpha(t::G, veil)));
         }
         if let Some(peaks) = &clip.peaks {
-            paint_waveform(peaks, clip, rect, color.opacity(0.55 * alpha * dim), window);
+            paint_waveform(peaks, clip, rect, fade(t::alpha(t::A, 0.7), k), window);
         }
-        if clip.generator {
-            paint_stripes(inner, color.opacity(0.35 * alpha * dim), window);
-        }
-        paint_fades(clip, rect, c, window);
-        if rect.size.width > px(18.) {
-            let text_color = c.foreground.opacity(0.92 * alpha * dim);
-            let y = if track.row.height > 32. {
-                rect.origin.y + px(4.)
-            } else {
-                rect.origin.y + (rect.size.height - px(14.)) / 2.
+        paint_fades(clip, rect, k, window);
+        if let Some(edge) = clip.hover_edge {
+            let x = match edge {
+                Edge::Start => rect.origin.x,
+                Edge::End => rect.right() - px(6.),
             };
-            let origin = point(rect.origin.x.max(inner.origin.x) + px(6.), y);
-            if !clip.tiles.is_empty() {
-                let line = shape(&clip.label, px(11.), text_color, window);
-                window.paint_quad(
-                    fill(
-                        Bounds::new(
-                            origin - point(px(4.), px(1.)),
-                            size(line.width + px(8.), px(16.)),
-                        ),
-                        c.background.opacity(0.6),
-                    )
-                    .corner_radii(px(3.)),
-                );
-            }
-            paint_text(&clip.label, origin, px(11.), text_color, window, cx);
-            paint_badges(clip, rect, track.row.height, text_color, c, window, cx);
+            window.paint_quad(fill(
+                Bounds::new(point(x, rect.origin.y), size(px(6.), rect.size.height)),
+                t::alpha(t::T1, 0.18),
+            ));
+        }
+        if rect.size.width > px(18.) {
+            paint_clip_label(clip, rect, text, window, cx);
         }
     });
 }
 
-/// Speed and `fx` badges at the clip's top right, when they fit.
-fn paint_badges(
+/// The icon, name and badges along a clip's top edge, and the offline note.
+fn paint_clip_label(
     clip: &ClipScene,
     rect: Bounds<Pixels>,
-    row_height: f32,
-    text: Hsla,
-    c: &Colors,
+    text: Rgba,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let badges: Vec<&str> = clip
+    let y = if rect.size.height >= px(24.) {
+        rect.origin.y + px(2.)
+    } else {
+        rect.origin.y + (rect.size.height - px(13.)) / 2.
+    };
+    let mut x = rect.origin.x + px(6.);
+    if let Some(icon) = clip.icon.or(clip.offline.then_some(IconName::Unlink)) {
+        paint_icon(icon, point(x, y + px(2.)), px(10.), text, window, cx);
+        x += px(14.);
+    }
+    let line = shape(&clip.label, px(10.), text, false, window);
+    let _ = line.paint(point(x, y), px(13.), TextAlign::Left, None, window, cx);
+    x += line.width + px(4.);
+    for badge in clip
         .speed
         .as_deref()
         .into_iter()
         .chain(clip.effects.then_some("fx"))
-        .collect();
-    if badges.is_empty() {
-        return;
-    }
-    let lines: Vec<ShapedLine> = badges
-        .iter()
-        .map(|b| shape(b, px(10.), text, window))
-        .collect();
-    let total: Pixels = lines.iter().map(|l| l.width + px(10.)).sum();
-    if rect.size.width < total + px(28.) {
-        return;
-    }
-    let y = if row_height > 32. {
-        rect.origin.y + px(4.)
-    } else {
-        rect.origin.y + (rect.size.height - px(14.)) / 2.
-    };
-    let mut x = rect.right() - px(4.);
-    for line in lines.iter().rev() {
+    {
+        let line = shape(badge, px(9.), text, true, window);
         let w = line.width + px(6.);
-        x -= w;
+        if x + w > rect.right() - px(4.) {
+            break;
+        }
         window.paint_quad(
             fill(
-                Bounds::new(point(x, y), size(w, px(14.))),
-                c.background.opacity(0.8),
+                Bounds::new(point(x, y), size(w, px(13.))),
+                t::alpha(t::G, 0.72),
             )
-            .corner_radii(px(3.)),
+            .corner_radii(px(2.)),
         );
         let _ = line.paint(
             point(x + px(3.), y + px(1.)),
-            px(12.),
+            px(11.),
             TextAlign::Left,
             None,
             window,
             cx,
         );
-        x -= px(4.);
+        x += w + px(4.);
+    }
+    if clip.offline && rect.size.height >= px(32.) {
+        paint_text(
+            "Media offline",
+            point(rect.origin.x + px(6.), rect.bottom() - px(15.)),
+            px(9.),
+            t::alpha(t::WARN, 0.67),
+            window,
+            cx,
+        );
     }
 }
 
 fn paint_transition(
-    t: &TransitionScene,
-    rect: Bounds<Pixels>,
-    c: &Colors,
+    tr: &TransitionScene,
+    row: &Row,
+    top: Pixels,
+    x_of: &impl Fn(Time) -> Pixels,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (border, border_w) = if t.selected {
-        (c.selection, px(1.5))
+    let inset = if row.height >= 30. { 7. } else { CLIP_INSET };
+    let (a, b) = (x_of(tr.range.start), x_of(tr.range.end));
+    let rect = Bounds::new(
+        point(a, top + px(inset)),
+        size((b - a).max(px(6.)), px(row.height - inset * 2.)),
+    );
+    let (border, border_w) = if tr.selected {
+        window.paint_quad(quad(
+            rect.dilate(px(1.)),
+            px(4.),
+            transparent_black(),
+            px(1.),
+            t::alpha(t::AC, 0.33),
+            BorderStyle::Solid,
+        ));
+        (t::AC, px(2.))
     } else {
-        (c.foreground.opacity(0.55), px(1.))
+        (t::alpha(t::ON_AC, 0.33), px(1.))
     };
     window.paint_quad(quad(
         rect,
         px(3.),
-        c.background.opacity(0.78),
+        linear_gradient(
+            90.,
+            linear_color_stop(t::alpha(t::V, 0.33), 0.),
+            linear_color_stop(t::alpha(t::ON_AC, 0.13), 1.),
+        ),
         border_w,
         border,
         BorderStyle::Solid,
     ));
-    if t.selected {
-        window.paint_quad(fill(rect, c.selection.opacity(0.16)).corner_radii(px(3.)));
-    }
-    let inset = px(3.);
-    let mut line = PathBuilder::stroke(px(1.));
-    line.move_to(point(rect.origin.x + inset, rect.bottom() - inset));
-    line.line_to(point(rect.right() - inset, rect.origin.y + inset));
-    if let Ok(path) = line.build() {
-        window.paint_path(
-            path,
-            c.foreground.opacity(if t.selected { 0.6 } else { 0.3 }),
-        );
-    }
-    let label = shape(&t.label, px(10.), c.foreground.opacity(0.9), window);
-    if label.width + px(12.) < rect.size.width {
+    let color = if tr.selected {
+        t::ON_AC
+    } else {
+        t::alpha(t::ON_AC, 0.8)
+    };
+    let label = shape(&tr.label, px(9.), color, true, window);
+    if label.width + px(8.) < rect.size.width {
         let origin = point(
             rect.origin.x + (rect.size.width - label.width) / 2.,
-            rect.origin.y + (rect.size.height - px(13.)) / 2.,
+            rect.origin.y + (rect.size.height - px(12.)) / 2.,
+        );
+        let _ = label.paint(origin, px(12.), TextAlign::Left, None, window, cx);
+    }
+}
+
+fn paint_ghost(
+    ghost: &Ghost,
+    rect: Bounds<Pixels>,
+    x_of: &impl Fn(Time) -> Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let rect = rect.dilate(px(1.));
+    window.paint_quad(quad(
+        rect,
+        t::RADIUS_SM,
+        t::alpha(t::T1, 0.08),
+        px(1.5),
+        t::alpha(t::T1, 0.9),
+        BorderStyle::Solid,
+    ));
+    if let Some(at) = ghost.edge {
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(x_of(at) - px(2.), rect.origin.y),
+                    size(px(4.), rect.size.height),
+                ),
+                t::AC,
+            )
+            .corner_radii(px(2.)),
+        );
+    }
+    if let Some(label) = &ghost.label {
+        let line = shape(label, px(10.), t::T1, true, window);
+        let origin = point(
+            rect.origin.x + (rect.size.width - line.width) / 2.,
+            rect.origin.y + (rect.size.height - px(14.)) / 2.,
         );
         window.paint_quad(
             fill(
                 Bounds::new(
-                    origin - point(px(3.), px(1.)),
-                    size(label.width + px(6.), px(15.)),
+                    origin - point(px(4.), px(1.)),
+                    size(line.width + px(8.), px(16.)),
                 ),
-                c.background.opacity(0.85),
+                t::alpha(t::G, 0.85),
             )
             .corner_radii(px(3.)),
         );
-        let _ = label.paint(origin, px(13.), TextAlign::Left, None, window, cx);
+        let _ = line.paint(origin, px(14.), TextAlign::Left, None, window, cx);
     }
 }
 
+fn paint_drop(
+    hint: DropHint,
+    scene: &Scene,
+    clip_box: &impl Fn(&Row, TimeRange) -> Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let target = |track: TrackId, range: TimeRange, fill: Rgba, border: Rgba, w: f32| {
+        scene.row(track).map(|row| {
+            let mut rect = clip_box(row, range);
+            rect.size.width = rect.size.width.max(px(4.));
+            quad(rect, t::RADIUS_SM, fill, px(w), border, BorderStyle::Dashed)
+        })
+    };
+    match hint {
+        DropHint::Row(_) => {}
+        DropHint::Clip(track, range) => {
+            if let Some(q) = target(track, range, t::alpha(t::T1, 0.06), t::T1, 1.5) {
+                window.paint_quad(q);
+            }
+        }
+        DropHint::Span(track, range) => {
+            if let Some(q) = target(track, range, t::alpha(t::AC, 0.12), t::AC, 1.5) {
+                window.paint_quad(q);
+            }
+        }
+        DropHint::Insert {
+            track,
+            range,
+            linked,
+        } => {
+            let rows: Vec<&Row> = [Some(track), linked]
+                .into_iter()
+                .flatten()
+                .filter_map(|t| scene.row(t))
+                .collect();
+            if let Some(q) = target(track, range, t::alpha(t::AC, 0.12), t::AC, 1.) {
+                window.paint_quad(q);
+            }
+            if let Some(q) = linked
+                .and_then(|l| target(l, range, t::alpha(t::A, 0.08), t::alpha(t::A, 0.67), 1.))
+            {
+                window.paint_quad(q);
+            }
+            let (Some(first), Some(last)) = (
+                rows.iter()
+                    .map(|r| clip_box(r, range).origin.y)
+                    .reduce(Pixels::min),
+                rows.iter()
+                    .map(|r| clip_box(r, range).bottom())
+                    .reduce(Pixels::max),
+            ) else {
+                return;
+            };
+            let x = clip_box(rows[0], range).origin.x;
+            let line = Bounds::new(
+                point(x - px(1.), first - px(5.)),
+                size(px(2.), last - first + px(10.)),
+            );
+            window.paint_quad(fill(line.dilate(px(2.)), t::alpha(t::AC, 0.2)).corner_radii(px(3.)));
+            window.paint_quad(fill(line, t::AC).corner_radii(px(1.)));
+            let label = shape(
+                &range.start.timecode(scene.rate),
+                px(10.),
+                t::AC,
+                true,
+                window,
+            );
+            let origin = point(x - px(1.), last + px(10.));
+            window.paint_quad(
+                fill(
+                    Bounds::new(origin, size(label.width + px(10.), px(16.))),
+                    t::alpha(t::AC, 0.12),
+                )
+                .corner_radii(px(3.)),
+            );
+            let _ = label.paint(
+                origin + point(px(5.), px(1.)),
+                px(14.),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+/// Bars 1.5 px wide every 2.5 px, mirrored about the middle of the band
+/// under the clip's name.
 fn paint_waveform(
     peaks: &[f32],
     clip: &ClipScene,
     rect: Bounds<Pixels>,
-    color: Hsla,
+    color: Rgba,
     window: &mut Window,
 ) {
     let width = f32::from(rect.size.width);
     if width < 2. {
         return;
     }
+    let (offset, h) = layout::filmstrip(f32::from(rect.size.height));
+    let mid = rect.origin.y + px(offset + h / 2.);
+    let amp = h / 2.;
     let len = clip.range.duration();
-    let mid = rect.origin.y + rect.size.height * 0.66;
-    let amp = rect.size.height * 0.3;
     let visible = window.content_mask().bounds;
     let x0 = f32::from(visible.origin.x - rect.origin.x).max(0.);
     let x1 = f32::from(visible.right() - rect.origin.x).min(width);
-    if x1 <= x0 {
-        return;
-    }
-    let step = 2.;
-    let mut tops = Vec::new();
-    let mut x = x0;
+    let step = 2.5;
+    let mut x = x0 - x0.rem_euclid(step);
     while x < x1 {
         let from = Time((len.0 as f64 * (x / width) as f64) as i64);
         let to = Time((len.0 as f64 * ((x + step) / width) as f64) as i64);
@@ -683,50 +754,49 @@ fn paint_waveform(
             None => waveform::peak(peaks, len, from, to),
         }
         .clamp(0., 1.);
-        tops.push((rect.origin.x + px(x), p));
+        let bar = (amp * p).max(0.5);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(rect.origin.x + px(x), mid - px(bar)),
+                size(px(1.5), px(bar * 2.)),
+            ),
+            color,
+        ));
         x += step;
-    }
-    let mut path = PathBuilder::fill();
-    path.move_to(point(tops[0].0, mid));
-    for (x, p) in &tops {
-        path.line_to(point(*x, mid - amp * *p));
-    }
-    for (x, p) in tops.iter().rev() {
-        path.line_to(point(*x, mid + amp * *p * 0.6));
-    }
-    path.close();
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
     }
 }
 
-fn paint_fades(clip: &ClipScene, rect: Bounds<Pixels>, c: &Colors, window: &mut Window) {
+/// Fade ramps: the faded corner darkened under a diagonal line.
+fn paint_fades(clip: &ClipScene, rect: Bounds<Pixels>, k: f32, window: &mut Window) {
     let len = clip.range.duration().0 as f32;
     if len <= 0. {
         return;
     }
     let w = rect.size.width;
-    for (fade, start) in [(clip.fade_in, true), (clip.fade_out, false)] {
-        if fade.0 <= 0 {
+    let (top, bottom) = (rect.origin.y, rect.bottom());
+    for (fade_len, start) in [(clip.fade_in, true), (clip.fade_out, false)] {
+        if fade_len.0 <= 0 {
             continue;
         }
-        let fw = w * (fade.0 as f32 / len).min(1.);
-        let (top, bottom) = (rect.origin.y + px(1.), rect.bottom() - px(1.));
-        let mut path = PathBuilder::fill();
-        if start {
-            let x = rect.origin.x;
-            path.move_to(point(x, top));
-            path.line_to(point(x + fw, top));
-            path.line_to(point(x, bottom));
+        let fw = w * (fade_len.0 as f32 / len).min(1.);
+        let (edge, inner) = if start {
+            (rect.origin.x, rect.origin.x + fw)
         } else {
-            let x = rect.right();
-            path.move_to(point(x, top));
-            path.line_to(point(x - fw, top));
-            path.line_to(point(x, bottom));
+            (rect.right(), rect.right() - fw)
+        };
+        let mut shade = PathBuilder::fill();
+        shade.move_to(point(edge, top));
+        shade.line_to(point(inner, top));
+        shade.line_to(point(edge, bottom));
+        shade.close();
+        if let Ok(path) = shade.build() {
+            window.paint_path(path, t::alpha(t::G, 0.6 * k));
         }
-        path.close();
-        if let Ok(path) = path.build() {
-            window.paint_path(path, c.background.opacity(0.45));
+        let mut ramp = PathBuilder::stroke(px(1.));
+        ramp.move_to(point(edge, bottom));
+        ramp.line_to(point(inner, top));
+        if let Ok(path) = ramp.build() {
+            window.paint_path(path, t::alpha(t::T1, 0.67 * k));
         }
     }
 }
@@ -735,208 +805,277 @@ fn paint_overlay_item(
     item: &OverlayItem,
     rect: Bounds<Pixels>,
     emphasis: bool,
-    c: &Colors,
     window: &mut Window,
 ) {
-    let border_w = if emphasis { px(2.) } else { px(1.5) };
     match item.mark {
         Mark::Added => {
-            let fill_alpha = if emphasis { 0.38 } else { 0.24 };
+            let rect = rect.inset(px(1.));
+            let base = if emphasis { 0.36 } else { 0.24 };
             window.paint_quad(quad(
                 rect,
-                px(4.),
-                c.green.opacity(fill_alpha),
-                border_w,
-                c.green,
+                t::RADIUS_SM,
+                t::alpha(t::OK, if item.overlaps { 0.13 } else { base }),
+                px(if emphasis { 2. } else { 1.5 }),
+                t::OK,
                 BorderStyle::Dashed,
             ));
             if item.overlaps {
-                paint_stripes(rect, c.green.opacity(0.45), window);
+                window.paint_quad(
+                    fill(rect, pattern_slash(t::alpha(t::OK, 0.27), 3., 4.))
+                        .corner_radii(t::RADIUS_SM),
+                );
             }
         }
         Mark::Removed => {
-            // A band, not a box: removed spans of neighbouring clips and
-            // tracks merge into one gap.
-            window.paint_quad(fill(rect, c.red.opacity(if emphasis { 0.6 } else { 0.45 })));
-            let edge = if emphasis { 0.95 } else { 0.7 };
-            for x in [rect.origin.x, rect.right() - px(1.)] {
-                window.paint_quad(fill(
-                    Bounds::new(point(x, rect.origin.y), size(px(1.), rect.size.height)),
-                    c.red.opacity(edge),
-                ));
-            }
+            let (base, stripe) = if emphasis { (0.2, 0.3) } else { (0.08, 0.17) };
+            window.paint_quad(fill(rect, t::alpha(t::ERR, base)).corner_radii(px(3.)));
+            window.paint_quad(
+                fill(rect, pattern_slash(t::alpha(t::ERR, stripe), 4., 4.)).corner_radii(px(3.)),
+            );
+            let (w, color, style) = if emphasis {
+                (1.5, t::ERR, BorderStyle::Solid)
+            } else {
+                (1., t::alpha(t::ERR, 0.67), BorderStyle::Dashed)
+            };
+            window.paint_quad(quad(rect, px(3.), transparent_black(), px(w), color, style));
         }
         Mark::Modified => {
             window.paint_quad(quad(
                 rect,
-                px(4.),
-                c.yellow.opacity(if emphasis { 0.16 } else { 0.06 }),
-                border_w,
-                c.yellow,
+                t::RADIUS_SM,
+                t::alpha(t::WARN, if emphasis { 0.14 } else { 0.06 }),
+                px(if emphasis { 2. } else { 1.5 }),
+                t::WARN,
                 BorderStyle::Solid,
             ));
         }
         Mark::Cut => {
-            let x = rect.origin.x;
+            let w = if emphasis { px(2.) } else { px(1.5) };
             window.paint_quad(fill(
                 Bounds::new(
-                    point(x - px(0.5), rect.origin.y),
-                    size(border_w, rect.size.height),
+                    point(rect.origin.x - w / 2., rect.origin.y),
+                    size(w, rect.size.height),
                 ),
-                c.red.opacity(if emphasis { 1. } else { 0.8 }),
+                t::alpha(t::ERR, if emphasis { 1. } else { 0.8 }),
             ));
         }
     }
     if !item.warnings.is_empty() {
-        let d = px(7.);
+        let o = point(rect.right() - px(11.), rect.origin.y + px(3.));
         let mut tri = PathBuilder::fill();
-        let o = point(rect.right() - d - px(3.), rect.origin.y + px(3.));
-        tri.move_to(point(o.x + d / 2., o.y));
-        tri.line_to(point(o.x + d, o.y + d));
-        tri.line_to(point(o.x, o.y + d));
+        tri.move_to(point(o.x + px(4.), o.y));
+        tri.line_to(point(o.x + px(8.), o.y + px(7.)));
+        tri.line_to(point(o.x, o.y + px(7.)));
         tri.close();
         if let Ok(path) = tri.build() {
-            window.paint_path(path, c.protected);
+            window.paint_path(path, t::WARN);
         }
     }
 }
 
-fn paint_stripes(rect: Bounds<Pixels>, color: Hsla, window: &mut Window) {
-    window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
-        let h = rect.size.height;
-        let gap = px(7.);
-        let mut x = rect.origin.x - h;
-        let mut path = PathBuilder::stroke(px(1.));
-        let mut any = false;
-        while x < rect.right() {
-            path.move_to(point(x, rect.bottom()));
-            path.line_to(point(x + h, rect.origin.y));
-            any = true;
-            x += gap;
-        }
-        if any && let Ok(path) = path.build() {
-            window.paint_path(path, color);
-        }
-    });
-}
-
 fn paint_ruler(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    let c = scene.colors;
     let vp = scene.viewport;
     let left = bounds.origin.x;
     let width = bounds.size.width;
     let ruler = Bounds::new(bounds.origin, size(width, px(RULER_HEIGHT)));
-    window.paint_quad(fill(ruler, c.background));
+    window.paint_quad(fill(ruler, t::P));
     window.paint_quad(fill(
         Bounds::new(point(left, ruler.bottom() - px(1.)), size(width, px(1.))),
-        c.border,
+        t::LN,
     ));
     let x_of = |t: Time| left + px(vp.x(t));
 
     window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
-        // The render bar, along the top edge.
-        for (range, cached) in scene.render.iter().flat_map(|s| &s.runs) {
-            let (a, b) = (x_of(range.start), x_of(range.end));
-            if b < ruler.origin.x || a > ruler.right() {
-                continue;
-            }
-            let color = if *cached { c.cached } else { c.uncached };
-            window.paint_quad(fill(
-                Bounds::new(point(a, ruler.origin.y), size((b - a).max(px(1.)), px(2.))),
-                color.opacity(0.8),
-            ));
-        }
-        if let Some(r) = scene.in_out {
+        if let Some(r) = scene.in_out.filter(|r| !r.is_empty()) {
             let (a, b) = (x_of(r.start), x_of(r.end));
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(a, ruler.origin.y + px(RULER_HEIGHT - 6.)),
-                    size((b - a).max(px(2.)), px(5.)),
-                ),
-                c.foreground.opacity(0.35),
-            ));
+            let band = Bounds::new(
+                point(a, ruler.origin.y),
+                size((b - a).max(px(1.)), ruler.size.height - px(1.)),
+            );
+            window.paint_quad(fill(band, t::alpha(t::AC, 0.08)));
+            for x in [a, band.right() - px(1.)] {
+                window.paint_quad(fill(
+                    Bounds::new(point(x, band.origin.y), size(px(1.), band.size.height)),
+                    t::alpha(t::AC, 0.53),
+                ));
+            }
         }
 
         let ticks = layout::ticks(vp.px_per_sec, scene.rate);
         let first = vp.time(0.).0.max(0);
         let last = vp.time(f32::from(width)).0;
         let minor = ticks.minor.0.max(1);
-        let mut t = first - first.rem_euclid(minor);
-        while t <= last {
-            let x = x_of(Time(t));
-            let major = t % ticks.major.0.max(1) == 0;
-            let h = if major { 9. } else { 4. };
+        let mut at = first - first.rem_euclid(minor);
+        while at <= last {
+            let x = x_of(Time(at));
+            let major = at % ticks.major.0.max(1) == 0;
+            let (h, color) = if major {
+                (8., t::T3)
+            } else {
+                (4., t::alpha(t::T3, 0.53))
+            };
             window.paint_quad(fill(
-                Bounds::new(
-                    point(x, ruler.bottom() - px(h) - px(1.)),
-                    size(px(1.), px(h)),
-                ),
-                if major { c.muted } else { c.muted.opacity(0.5) },
+                Bounds::new(point(x, ruler.bottom() - px(h + 1.)), size(px(1.), px(h))),
+                color,
             ));
             if major {
-                paint_text(
-                    &layout::ruler_label(Time(t), scene.rate, ticks.frames),
+                let label = layout::ruler_label(Time(at), scene.rate, ticks.frames);
+                let line = shape(&label, px(10.), t::T3, true, window);
+                let _ = line.paint(
                     point(x + px(4.), ruler.origin.y + px(3.)),
-                    px(10.),
-                    c.muted,
+                    px(13.),
+                    TextAlign::Left,
+                    None,
                     window,
                     cx,
                 );
             }
-            t += minor;
+            at += minor;
+        }
+
+        // The render bar, along the top edge.
+        for (range, cached) in scene.render.iter().flat_map(|s| &s.runs) {
+            let (a, b) = (x_of(range.start), x_of(range.end));
+            if b < ruler.origin.x || a > ruler.right() {
+                continue;
+            }
+            let color = if *cached {
+                t::alpha(t::OK, 0.8)
+            } else {
+                t::alpha(t::ERR, 0.7)
+            };
+            window.paint_quad(fill(
+                Bounds::new(point(a, ruler.origin.y), size((b - a).max(px(1.)), px(3.))),
+                color,
+            ));
         }
 
         for m in &scene.markers {
             let color = match m.kind {
-                MarkerKind::Note => c.marker,
-                MarkerKind::Protected => c.protected,
+                MarkerKind::Note => t::MK,
+                MarkerKind::Protected => t::WARN,
             };
             paint_marker(m.range, color, &vp, ruler, window);
         }
         for item in scene.overlay.iter().filter(|i| i.track.is_none()) {
             let color = match item.mark {
-                Mark::Added => c.green,
-                Mark::Removed | Mark::Cut => c.red,
-                Mark::Modified => c.yellow,
+                Mark::Added => t::OK,
+                Mark::Removed | Mark::Cut => t::ERR,
+                Mark::Modified => t::WARN,
             };
             paint_marker(item.range, color, &vp, ruler, window);
         }
     });
 }
 
+/// A diamond on the ruler, with a line to the end of a range marker.
 fn paint_marker(
     range: TimeRange,
-    color: Hsla,
+    color: Rgba,
     vp: &Viewport,
     ruler: Bounds<Pixels>,
     window: &mut Window,
 ) {
     let a = ruler.origin.x + px(vp.x(range.start));
     let b = ruler.origin.x + px(vp.x(range.end));
-    let y = ruler.bottom() - px(8.);
-    if b - a > px(2.) {
+    let y = ruler.origin.y + px(7.);
+    if b - a > px(4.) {
         window.paint_quad(fill(
-            Bounds::new(point(a, y + px(2.)), size(b - a, px(3.))),
-            color.opacity(0.75),
+            Bounds::new(point(a, y - px(1.)), size(b - a, px(2.))),
+            t::alpha(color, 0.5),
         ));
     }
-    let mut tag = PathBuilder::fill();
-    tag.move_to(point(a - px(4.), y - px(4.)));
-    tag.line_to(point(a + px(4.), y - px(4.)));
-    tag.line_to(point(a + px(4.), y + px(2.)));
-    tag.line_to(point(a, y + px(6.)));
-    tag.line_to(point(a - px(4.), y + px(2.)));
-    tag.close();
-    if let Ok(path) = tag.build() {
+    let r = px(4.5);
+    let mut diamond = PathBuilder::fill();
+    diamond.move_to(point(a, y - r));
+    diamond.line_to(point(a + r, y));
+    diamond.line_to(point(a, y + r));
+    diamond.line_to(point(a - r, y));
+    diamond.close();
+    if let Ok(path) = diamond.build() {
         window.paint_path(path, color);
     }
 }
 
-fn shape(text: &str, font_size: Pixels, color: Hsla, window: &mut Window) -> ShapedLine {
+fn paint_playhead(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    let left = bounds.origin.x;
+    let x = left + px(scene.viewport.x(scene.playhead));
+    if x < left - px(6.) || x > left + bounds.size.width + px(6.) {
+        return;
+    }
+    let top = bounds.origin.y;
+    window.paint_quad(fill(
+        Bounds::new(point(x, top), size(px(1.), bounds.size.height)),
+        t::PH,
+    ));
+    let (l, r) = (x - px(5.), x + px(6.));
+    let mut head = PathBuilder::fill();
+    head.move_to(point(l, top));
+    head.line_to(point(r, top));
+    head.line_to(point(r, top + px(7.2)));
+    head.line_to(point(x + px(0.5), top + px(12.)));
+    head.line_to(point(l, top + px(7.2)));
+    head.close();
+    if let Ok(path) = head.build() {
+        window.paint_path(path, t::PH);
+    }
+    if scene.scrubbing {
+        let line = shape(
+            &scene.playhead.timecode(scene.rate),
+            px(10.),
+            t::ON_AC,
+            true,
+            window,
+        );
+        let chip = Bounds::new(
+            point(x + px(8.), top + px(3.)),
+            size(line.width + px(10.), px(15.)),
+        );
+        window.paint_quad(fill(chip, t::PH).corner_radii(px(3.)));
+        let _ = line.paint(
+            chip.origin + point(px(5.), px(1.)),
+            px(13.),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+}
+
+fn paint_icon(
+    name: IconName,
+    origin: Point<Pixels>,
+    side: Pixels,
+    color: Rgba,
+    window: &mut Window,
+    cx: &App,
+) {
+    let _ = window.paint_svg(
+        Bounds::new(origin, size(side, side)),
+        name.path(),
+        None,
+        TransformationMatrix::unit(),
+        color.into(),
+        cx,
+    );
+}
+
+fn shape(
+    text: &str,
+    font_size: Pixels,
+    color: Rgba,
+    mono: bool,
+    window: &mut Window,
+) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
-        font: window.text_style().font(),
-        color,
+        font: if mono {
+            font(t::mono())
+        } else {
+            window.text_style().font()
+        },
+        color: color.into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -949,17 +1088,14 @@ fn shape(text: &str, font_size: Pixels, color: Hsla, window: &mut Window) -> Sha
     )
 }
 
-pub fn paint_text(
+fn paint_text(
     text: &str,
     origin: Point<Pixels>,
     font_size: Pixels,
-    color: Hsla,
+    color: Rgba,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if text.is_empty() {
-        return;
-    }
-    let line = shape(text, font_size, color, window);
+    let line = shape(text, font_size, color, false, window);
     let _ = line.paint(origin, font_size * 1.3, TextAlign::Left, None, window, cx);
 }

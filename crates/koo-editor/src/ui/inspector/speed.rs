@@ -3,11 +3,10 @@
 //! ramps, keeping the clip's length, how slowed frames are drawn and what
 //! ramped audio does. A ramp applies to the clip and its linked audio.
 
+use super::{group, label, row, wide};
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{Button, SectionHeader, Segmented, Switch, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::ClipId;
@@ -22,7 +21,7 @@ const LOW: f64 = 0.1;
 const HIGH: f64 = 10.;
 /// Speeds marked across the graph.
 const GRID: [f64; 5] = [0.25, 0.5, 1., 2., 4.];
-const HEIGHT: f32 = 150.;
+const HEIGHT: f32 = 140.;
 
 pub struct SpeedRamp {
     state: Entity<EditorState>,
@@ -31,6 +30,8 @@ pub struct SpeedRamp {
     audio: Option<ClipId>,
     ripple: bool,
     keep_length: bool,
+    /// The group is unfolded.
+    open: bool,
     drag: Option<Drag>,
     _observe: Subscription,
 }
@@ -51,6 +52,7 @@ impl SpeedRamp {
             audio: None,
             ripple: false,
             keep_length: false,
+            open: true,
             drag: None,
             _observe,
         }
@@ -192,7 +194,7 @@ fn paint(
             Bounds::new(point(b.origin.x, y), size(b.size.width, px(1.))),
             color,
         ));
-        label(
+        paint_text(
             &format!("{s}×"),
             point(b.origin.x + px(4.), y - px(13.)),
             c.text,
@@ -236,14 +238,14 @@ fn paint(
         let x = (at.x + px(8.)).min(b.origin.x + b.size.width - px(40.));
         let y = (at.y - px(20.)).max(b.origin.y + px(2.));
         let shown = format!("{}%", (p[1] * 100.).round());
-        label(&shown, point(x, y), c.line, window, cx);
+        paint_text(&shown, point(x, y), c.line, window, cx);
     }
 }
 
-fn label(text: &str, at: Point<Pixels>, color: Hsla, window: &mut Window, cx: &mut App) {
+fn paint_text(text: &str, at: Point<Pixels>, color: Hsla, window: &mut Window, cx: &mut App) {
     let run = TextRun {
         len: text.len(),
-        font: window.text_style().font(),
+        font: font(t::mono()),
         color,
         background_color: None,
         underline: None,
@@ -259,14 +261,13 @@ fn label(text: &str, at: Point<Pixels>, color: Hsla, window: &mut Window, cx: &m
 }
 
 /// The graph: the clip's speed (or the point being dragged), the playhead.
-fn graph(ramp: Entity<SpeedRamp>, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
+fn graph(ramp: Entity<SpeedRamp>) -> impl IntoElement {
     let colors = Colors {
-        bg: theme.secondary,
-        grid: theme.border,
-        line: theme.primary,
-        text: theme.muted_foreground,
-        playhead: theme.foreground.opacity(0.4),
+        bg: t::G.into(),
+        grid: t::LN.into(),
+        line: t::AC.into(),
+        text: t::T3.into(),
+        playhead: t::PH.into(),
     };
     let state = ramp.clone();
     canvas(
@@ -294,7 +295,6 @@ fn graph(ramp: Entity<SpeedRamp>, cx: &App) -> impl IntoElement {
     )
     .w_full()
     .h(px(HEIGHT))
-    .rounded_md()
 }
 
 fn listen(ramp: Entity<SpeedRamp>, b: Bounds<Pixels>, hitbox: Hitbox, window: &mut Window) {
@@ -378,6 +378,27 @@ impl Render for SpeedRamp {
         let Some(clip) = self.clip(cx).cloned() else {
             return v_flex();
         };
+        let header = SectionHeader::new("ramp", "Ramp")
+            .open(self.open)
+            .on_toggle(cx.listener(|this, open: &bool, _, cx| {
+                this.open = *open;
+                cx.notify();
+            }))
+            .when(clip.is_ramped(), |h| {
+                h.child(
+                    Button::new("ramp-none")
+                        .ghost()
+                        .xsmall()
+                        .label("None")
+                        .tooltip("Remove the ramp")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ramp(Vec::new(), true, cx);
+                        })),
+                )
+            });
+        if !self.open {
+            return group(header, Vec::<Div>::new());
+        }
         let audio = self.audio.and_then(|id| {
             self.state
                 .read(cx)
@@ -388,55 +409,39 @@ impl Render for SpeedRamp {
                 .map(|(_, c)| c.clone())
         });
         let base = clip.speed;
-        let keep = self.keep_length;
         let presets = h_flex()
             .flex_wrap()
-            .gap_1()
+            .gap(px(4.))
             .children(SpeedPreset::ALL.into_iter().map(|p| {
                 Button::new(p.key())
-                    .outline()
                     .xsmall()
                     .label(p.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ramp(p.points(base), this.keep_length, cx);
                     }))
-            }))
-            .when(clip.is_ramped(), |row| {
-                row.child(
-                    Button::new("ramp-none")
-                        .ghost()
-                        .xsmall()
-                        .label("None")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.ramp(Vec::new(), true, cx);
-                        })),
-                )
-            });
-        let keep_row = h_flex()
-            .justify_between()
-            .text_xs()
-            .child("Keep length")
-            .child(
-                Switch::new("ramp-keep-length")
-                    .small()
-                    .checked(keep)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        this.keep_length = *on;
-                        cx.notify();
-                    })),
-            );
+            }));
+        let keep = row(
+            label("Keep length"),
+            Switch::new("ramp-keep-length")
+                .checked(self.keep_length)
+                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                    this.keep_length = *on;
+                    cx.notify();
+                })),
+            None,
+        );
         let id = clip.id;
         let current = clip.retime.interpolation;
-        let modes = TabBar::new("ramp-frames")
-            .segmented()
-            .xsmall()
-            .selected_index(
+        let modes = Segmented::new("ramp-frames")
+            .compact()
+            .fill()
+            .items(Interpolation::ALL.map(|m| m.label()))
+            .selected(
                 Interpolation::ALL
                     .iter()
                     .position(|m| *m == current)
                     .unwrap_or(0),
             )
-            .children(Interpolation::ALL.map(|m| Tab::new().label(m.label())))
             .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                 if let Some(m) = Interpolation::ALL.get(*ix).copied()
                     && m != current
@@ -447,30 +452,31 @@ impl Render for SpeedRamp {
         let sound = audio.filter(|a| a.is_ramped()).map(|a| {
             let muted = a.retime.audio == RampAudio::Mute;
             let audio_id = a.id;
-            h_flex()
-                .justify_between()
-                .text_xs()
-                .child("Mute audio")
-                .child(
-                    Switch::new("ramp-mute")
-                        .small()
-                        .checked(muted)
-                        .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                            let audio = if *on {
-                                RampAudio::Mute
-                            } else {
-                                RampAudio::Stretch
-                            };
-                            this.retime(audio_id, None, Some(audio), cx);
-                        })),
-                )
+            row(
+                label("Mute audio"),
+                Switch::new("ramp-mute")
+                    .checked(muted)
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        let audio = if *on {
+                            RampAudio::Mute
+                        } else {
+                            RampAudio::Stretch
+                        };
+                        this.retime(audio_id, None, Some(audio), cx);
+                    })),
+                None,
+            )
         });
-        v_flex()
-            .gap_2()
-            .child(graph(cx.entity(), cx))
-            .child(presets)
-            .child(keep_row)
-            .child(modes)
-            .children(sound)
+        let graph = div()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(t::LN)
+            .overflow_hidden()
+            .child(graph(cx.entity()));
+        let rows: Vec<Div> = [wide(graph), wide(presets), keep, wide(modes)]
+            .into_iter()
+            .chain(sound)
+            .collect();
+        group(header, rows)
     }
 }

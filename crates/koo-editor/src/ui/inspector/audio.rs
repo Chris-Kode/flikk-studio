@@ -3,16 +3,13 @@
 //! A1–A3). The track mixer is its own panel (`ui/mixer.rs`).
 
 use super::param::{Key, format_value};
-use super::{InspectorPanel, audio_tracks, is_media, section_with, sound_clips};
-use crate::ui::mixer::clip::ClipAudioFx;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+use super::{
+    InspectorPanel, View, audio_tracks, clip, group, is_media, label, panel_header, row,
+    sound_clips, wide,
 };
-use gpui_kit::prelude::FluentBuilder as _;
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{Button, IconName, NumberField, Segmented, Switch, h_flex, v_flex};
+use crate::ui::mixer::clip::ClipAudioFx;
 use gpui_kit::*;
 use koo_core::analysis::Loudness;
 use koo_core::command::Command;
@@ -28,22 +25,28 @@ impl InspectorPanel {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> View {
         let clips = self.selected_clips(cx);
-        let sound = sound_clips(&self.project(cx).timeline, &clips)
+        let project = self.project(cx);
+        let sound = sound_clips(&project.timeline, &clips)
             .first()
-            .map(|c| c.id);
-        let mut view = v_flex().gap_4();
-        if let Some(id) = sound {
+            .map(|c| (c.id, clip::clip_name(c, project)));
+        let context = sound
+            .as_ref()
+            .map_or_else(|| project.name.clone(), |(_, name)| name.clone());
+        let mut body = v_flex();
+        if let Some((id, _)) = sound {
             let state = self.state.clone();
             let fx = window.use_keyed_state("clip-audio-fx", cx, move |_, cx| {
                 ClipAudioFx::new(state, cx)
             });
             fx.update(cx, |f, cx| f.set_clip(Some(id), cx));
-            view = view.child(fx);
+            body = body.child(fx);
         }
-        view.child(self.loudness_view(cx))
-            .child(self.ducking_view(window, cx))
+        let body = body
+            .child(self.loudness_view(cx))
+            .child(self.ducking_view(window, cx));
+        View::new(panel_header(context), body)
     }
 
     /// Clips the loudness readout covers: every media clip on an audio track.
@@ -55,62 +58,69 @@ impl InspectorPanel {
             .collect()
     }
 
+    /// Integrated loudness and true peak of the timeline, measured on
+    /// request, and normalizing it to the targets.
     fn loudness_view(&self, cx: &mut Context<Self>) -> Div {
         let scope = self.loudness_scope(cx);
         let reading = combined(&scope, &self.loudness);
         let has_service = self.state.read(cx).services.analysis.is_some();
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
         let measure = Button::new("measure")
             .ghost()
             .xsmall()
-            .icon(IconName::RefreshCw)
+            .icon(IconName::Gauge)
             .tooltip("Measure")
             .loading(self.measuring)
             .disabled(!has_service || scope.is_empty())
             .on_click(cx.listener(|this, _, _, cx| this.measure(cx)));
+        let header = self.header("loudness", "Loudness", cx).child(measure);
+        if !self.is_open("loudness") {
+            return group(header, Vec::<Div>::new());
+        }
         let figure = |value: Option<f32>, unit: &'static str| {
             h_flex()
                 .items_end()
-                .gap_1()
+                .gap(px(4.))
                 .child(
                     div()
-                        .text_lg()
-                        .when(value.is_none(), |d| d.text_color(muted))
-                        .child(value.map(|v| format_value(v, 1)).unwrap_or("—".into())),
+                        .font_family(t::mono())
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if value.is_some() { t::T1 } else { t::T3 })
+                        .child(value.map_or("\u{2014}".into(), |v| format_value(v, 1))),
                 )
-                .child(div().text_xs().text_color(muted).child(unit))
+                .child(
+                    div()
+                        .pb(px(3.))
+                        .text_size(px(10.))
+                        .text_color(t::T3)
+                        .child(unit),
+                )
         };
-        section_with("Loudness", measure, cx)
+        let readout = h_flex()
+            .gap(px(16.))
+            .child(figure(reading.map(|r| r.integrated_lufs), "LUFS"))
+            .child(figure(reading.map(|r| r.true_peak_db), "dBTP"));
+        let targets = h_flex()
+            .gap(px(6.))
             .child(
-                h_flex()
-                    .gap_4()
-                    .child(figure(reading.map(|r| r.integrated_lufs), "LUFS"))
-                    .child(figure(reading.map(|r| r.true_peak_db), "dBTP")),
+                div()
+                    .w(px(76.))
+                    .child(NumberField::new(&self.lufs_target).unit("LUFS")),
             )
             .child(
-                h_flex()
-                    .pt_1()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(84.))
-                            .child(Input::new(&self.lufs_target).xsmall().suffix("LUFS")),
-                    )
-                    .child(
-                        div()
-                            .w(px(84.))
-                            .child(Input::new(&self.peak_target).xsmall().suffix("dBTP")),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("normalize")
-                            .small()
-                            .label("Normalize")
-                            .disabled(reading.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.normalize(cx))),
-                    ),
+                div()
+                    .w(px(76.))
+                    .child(NumberField::new(&self.peak_target).unit("dBTP")),
             )
+            .child(div().flex_1())
+            .child(
+                Button::new("normalize")
+                    .small()
+                    .label("Normalize")
+                    .disabled(reading.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| this.normalize(cx))),
+            );
+        group(header, [wide(readout), wide(targets)])
     }
 
     fn measure(&mut self, cx: &mut Context<Self>) {
@@ -153,11 +163,8 @@ impl InspectorPanel {
 
     /// One batch of `SetGain` that moves the timeline as a whole.
     fn normalize(&mut self, cx: &mut Context<Self>) {
-        let target = self.lufs_target.read(cx).value().trim().parse::<f32>();
-        let peak = self.peak_target.read(cx).value().trim().parse::<f32>();
-        let presets = &self.state.read(cx).presets;
-        let target = target.unwrap_or(presets.loudness_lufs);
-        let peak = peak.unwrap_or(presets.true_peak_db);
+        let target = self.lufs_target.read(cx).value() as f32;
+        let peak = self.peak_target.read(cx).value() as f32;
         let scope = self.loudness_scope(cx);
         let Some(all) = combined(&scope, &self.loudness) else {
             return;
@@ -174,6 +181,8 @@ impl InspectorPanel {
         self.run(commands, "normalize", cx);
     }
 
+    /// Lower the music under speech: which track is the music, by how
+    /// much, and how fast.
     fn ducking_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let project = self.project(cx);
         let tracks = audio_tracks(project);
@@ -181,7 +190,6 @@ impl InspectorPanel {
         let default_music = tracks.last().map(|t| t.id);
         let reduction = self.state.read(cx).presets.ducking_db;
         let toggle = Switch::new("ducking")
-            .small()
             .checked(ducking.is_some())
             .disabled(default_music.is_none())
             .on_click(cx.listener(move |this, on: &bool, _, cx| {
@@ -196,9 +204,9 @@ impl InspectorPanel {
                 };
                 this.set_ducking(ducking, cx);
             }));
-        let mut view = section_with("Ducking", toggle, cx);
-        let Some(d) = ducking else {
-            return view;
+        let header = self.header("ducking", "Ducking", cx).child(toggle);
+        let Some(d) = ducking.filter(|_| self.is_open("ducking")) else {
+            return group(header, Vec::<Div>::new());
         };
         let selected = tracks
             .iter()
@@ -206,32 +214,32 @@ impl InspectorPanel {
             .unwrap_or(0);
         let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
         let current = d.clone();
-        view = view.child(
-            h_flex().h(px(28.)).child(
-                TabBar::new("music-track")
-                    .segmented()
-                    .xsmall()
-                    .selected_index(selected)
-                    .children(tracks.iter().map(|t| Tab::new().label(t.name.clone())))
-                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                        if let Some(track) = ids.get(*ix) {
-                            let d = Ducking {
-                                music_track: *track,
-                                ..current.clone()
-                            };
-                            this.set_ducking(Some(d), cx);
-                        }
-                    })),
-            ),
-        );
+        let mut rows = vec![row(
+            label("Music"),
+            Segmented::new("music-track")
+                .compact()
+                .fill()
+                .items(tracks.iter().map(|t| t.name.clone()))
+                .selected(selected)
+                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                    if let Some(track) = ids.get(*ix) {
+                        let d = Ducking {
+                            music_track: *track,
+                            ..current.clone()
+                        };
+                        this.set_ducking(Some(d), cx);
+                    }
+                })),
+            None,
+        )];
         for (key, v) in [
             (Key::DuckReduction, d.reduction_db),
             (Key::DuckAttack, d.attack.as_secs_f64() as f32),
             (Key::DuckRelease, d.release.as_secs_f64() as f32),
         ] {
-            view = view.child(self.param(key, v, window, cx).row(cx));
+            rows.push(self.param_row(key, v, false, None, window, cx));
         }
-        view
+        group(header, rows)
     }
 }
 

@@ -2,12 +2,8 @@
 //! parameters with keyframes, and a shortcut to its code.
 
 use super::controls::FxOwner;
-use super::transition::labeled;
-use super::{InspectorPanel, section_with};
-use crate::ui::library::{FxGlyph, fx_glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use super::{InspectorPanel, group, label, row, select_field};
+use crate::ui::kit::{Button, DropdownMenu as _, IconName, PopupMenuItem};
 use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::fx::{self, FxInstance, FxKind, FxLanguage, FxRef};
@@ -20,7 +16,7 @@ impl InspectorPanel {
         clip: &Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Option<Div> {
         let ClipContent::Generator { fx: instance } = &clip.content else {
             return None;
         };
@@ -34,13 +30,8 @@ impl InspectorPanel {
         let current = instance.fx.clone();
         let (panel, clip_id, id) = (cx.entity(), clip.id, instance.id);
         let picked = current.clone();
-        let program = Button::new("generator-program")
-            .outline()
-            .xsmall()
-            .w_full()
-            .label(target.asset.name.clone())
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
+        let program = select_field("generator-program", target.asset.name.clone()).dropdown_menu(
+            move |mut menu, _, _| {
                 for (name, r) in &programs {
                     let (panel, r) = (panel.clone(), r.clone());
                     menu = menu.item(
@@ -64,29 +55,27 @@ impl InspectorPanel {
                     );
                 }
                 menu
-            });
-        let muted = cx.theme().muted_foreground;
-        let state = self.state.clone();
-        let actions = h_flex().child(
-            Button::new("generator-code")
-                .ghost()
-                .xsmall()
-                .tooltip("Edit code")
-                .child(fx_glyph(FxGlyph::Code, px(13.), muted))
-                .on_click(move |_, _, cx| {
-                    state.update(cx, |s, cx| s.edit_fx(Some(current.clone()), cx))
-                }),
+            },
         );
+        let state = self.state.clone();
+        let code = Button::new("generator-code")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Code)
+            .tooltip("Edit code")
+            .on_click(move |_, _, cx| {
+                state.update(cx, |s, cx| s.edit_fx(Some(current.clone()), cx))
+            });
         let title = match language {
             FxLanguage::Html => "Title",
             FxLanguage::Glsl => "Generator",
         };
-        let rows = self.fx_param_rows(&target, window, cx);
-        Some(
-            section_with(title, actions, cx)
-                .child(labeled("Program", program, cx))
-                .children(rows)
-                .into_any_element(),
-        )
+        let header = self.header("generator", title, cx).child(code);
+        if !self.is_open("generator") {
+            return Some(group(header, Vec::<AnyElement>::new()));
+        }
+        let rows = std::iter::once(row(label("Program"), program, None).into_any_element())
+            .chain(self.fx_param_rows(&target, window, cx));
+        Some(group(header, rows))
     }
 }

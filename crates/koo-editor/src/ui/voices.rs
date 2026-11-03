@@ -6,20 +6,16 @@
 
 use crate::state::EditorState;
 use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, recording};
-use crate::ui::media_pool::import::is_audio;
-use crate::ui::media_pool::listen_button;
-use crate::ui::timeline::glyph::{Glyph, glyph};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
+    PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab, Tabs, Textarea,
+    Tooltip, h_flex, v_flex,
 };
+use crate::ui::media_pool::form;
+use crate::ui::media_pool::import::is_audio;
+use crate::ui::media_pool::{listen_button, play_dot};
+use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::cloud::{
@@ -522,75 +518,100 @@ impl VoicesDialog {
         if let Some(item) = self.samples.get(&voice.id) {
             return listen_button(id, &self.state, item, cx).into_any_element();
         }
+        let heard = voice.sample.is_some();
         let voice = voice.clone();
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .tooltip("Play")
-            .disabled(voice.sample.is_none())
-            .child(glyph(Glyph::Play, px(13.), cx.theme().foreground))
+        play_dot(id, false, px(22.))
+            .when(!heard, |d| d.opacity(0.4))
+            .tooltip(Tooltip::text("Play"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.fetch_sample(voice.clone(), cx);
+                if voice.sample.is_some() {
+                    this.fetch_sample(voice.clone(), cx);
+                }
             }))
             .into_any_element()
     }
 
     fn voice_row(&self, voice: &Voice, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let selected = self.selected.as_ref() == Some(&voice.id);
         let adding = self.busy == Some(Busy::Adding(voice.id.clone()));
         let id = voice.id.clone();
         let picked = voice.clone();
-        let traits = voice.traits.join(", ");
+        let taken = voice.clone();
         let rate = voice.rate.map(|r| format!("×{r:.1}"));
         let notice = voice.notice_days;
         let row_id = SharedString::from(format!("voice-{}", voice.id));
+        let tags = voice.traits.iter().take(2).map(|tag| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(18.))
+                .px(px(6.))
+                .rounded(t::RADIUS_SM)
+                .bg(t::alpha(t::T1, 0.04))
+                .text_size(px(10.))
+                .text_color(t::T2)
+                .child(cloud::voice_label(tag))
+        });
+        let action = Button::new(SharedString::from(format!("take-{}", voice.id)))
+            .small()
+            .label(if voice.shared() { "Add" } else { "Use" })
+            .loading(adding)
+            .disabled(self.busy.is_some() && !adding)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if this.busy.is_none() {
+                    this.take(taken.clone(), window, cx);
+                }
+            }));
+        let action = if selected { action.primary() } else { action };
         h_flex()
             .id(row_id)
-            .h(px(32.))
-            .px_2()
-            .gap_2()
-            .rounded_md()
+            .h(px(40.))
+            .px(px(10.))
+            .gap(px(10.))
+            .rounded(t::RADIUS)
             .cursor_pointer()
-            .when(selected, |d| d.bg(theme.list_active))
-            .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
+            .when(selected, |d| {
+                d.bg(t::alpha(t::AC, 0.08))
+                    .shadow(inset_ring(t::alpha(t::AC, 0.4)))
+            })
+            .when(!selected, |d| d.hover(|s| s.bg(t::HV)))
             .child(self.sample_button(voice, cx))
             .child(
-                h_flex()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .text_sm()
-                    .child(div().flex_none().child(voice.name.clone()))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(traits),
-                    ),
+                    .child(div().truncate().child(voice.name.clone()))
+                    .when(!voice.description.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(t::T3)
+                                .child(voice.description.clone()),
+                        )
+                    }),
             )
+            .child(h_flex().gap(px(3.)).flex_none().children(tags))
             .when_some(rate, |d, rate| {
+                let mut text = "Costs more credits per character".to_owned();
+                if let Some(days) = notice {
+                    text.push_str(&format!("; can be withdrawn with {days} days' notice"));
+                }
                 d.child(
                     div()
-                        .text_xs()
-                        .text_color(theme.yellow)
-                        .child(rate)
                         .id(SharedString::from(format!("rate-{}", voice.id)))
-                        .tooltip(move |window, cx| {
-                            let mut text = "Costs more credits per character".to_owned();
-                            if let Some(days) = notice {
-                                text.push_str(&format!(
-                                    "; can be withdrawn with {days} days' notice"
-                                ));
-                            }
-                            gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
-                        }),
+                        .flex_none()
+                        .font_family(t::mono())
+                        .text_size(px(10.))
+                        .text_color(t::WARN)
+                        .child(rate)
+                        .tooltip(Tooltip::text(text)),
                 )
             })
-            .when(adding, |d| d.child(spinner_box()))
+            .child(action)
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.selected = Some(id.clone());
                 if ev.click_count() >= 2 && this.busy.is_none() {
@@ -613,8 +634,8 @@ impl VoicesDialog {
     fn filter_button(&self, filter: Filter, cx: &mut Context<Self>) -> AnyElement {
         let dialog = cx.entity();
         let current = filter.value(&self.query).cloned();
-        let label = current.as_ref().map_or_else(
-            || filter.label().to_owned(),
+        let value = current.as_ref().map_or_else(
+            || "Any".to_owned(),
             |v| {
                 filter
                     .values()
@@ -623,32 +644,38 @@ impl VoicesDialog {
                     .map_or_else(|| v.clone(), |(_, name)| name)
             },
         );
-        Button::new(SharedString::from(format!("filter-{}", filter.label())))
-            .ghost()
+        let chip = Button::new(SharedString::from(format!("filter-{}", filter.label())))
             .xsmall()
-            .label(label)
-            .toggled(current.is_some())
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
+            .label(format!("{} · {value}", filter.label()))
+            .trailing_icon(IconName::ChevronDown)
+            .h(px(22.))
+            .px(px(8.))
+            .rounded_full()
+            .text_color(t::T2)
+            .when(current.is_some(), |b| {
+                b.border_color(t::alpha(t::AC, 0.53))
+                    .bg(t::alpha(t::AC, 0.08))
+                    .text_color(t::T1)
+            });
+        chip.dropdown_menu(move |mut menu, _, _| {
+            let d = dialog.clone();
+            menu = menu.item(PopupMenuItem::new("Any").on_click(move |_, _, cx| {
+                d.update(cx, |this, cx| this.set_filter(filter, None, cx))
+            }));
+            for (code, name) in filter.values() {
                 let d = dialog.clone();
-                menu = menu.item(PopupMenuItem::new("Any").on_click(move |_, _, cx| {
-                    d.update(cx, |this, cx| this.set_filter(filter, None, cx))
+                menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
+                    d.update(cx, |this, cx| {
+                        this.set_filter(filter, Some(code.to_owned()), cx)
+                    })
                 }));
-                for (code, name) in filter.values() {
-                    let d = dialog.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
-                        d.update(cx, |this, cx| {
-                            this.set_filter(filter, Some(code.to_owned()), cx)
-                        })
-                    }));
-                }
-                menu
-            })
-            .into_any_element()
+            }
+            menu
+        })
+        .into_any_element()
     }
 
     fn find_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let voices = self.shown(cx);
         let state = self.state.read(cx);
         let loading = match self.scope {
@@ -659,15 +686,14 @@ impl VoicesDialog {
             Scope::Account => state.account_voices.error.clone(),
             Scope::Shared => None,
         };
-        let scope = TabBar::new("voice-scope")
-            .segmented()
-            .xsmall()
-            .selected_index(match self.scope {
+        let scope = Segmented::new("voice-scope")
+            .items(["Account", "Voice Library"])
+            .selected(match self.scope {
                 Scope::Account => 0,
                 Scope::Shared => 1,
             })
-            .child(Tab::new().label("Account"))
-            .child(Tab::new().label("Voice Library"))
+            .fill()
+            .w(px(220.))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 let scope = if *ix == 0 {
                     Scope::Account
@@ -676,84 +702,90 @@ impl VoicesDialog {
                 };
                 this.set_scope(scope, cx);
             }));
-        let filters = h_flex().gap_1().flex_wrap().children(
-            Filter::ALL
-                .into_iter()
-                .map(|f| self.filter_button(f, cx))
-                .collect::<Vec<_>>(),
-        );
         let similar = self.similar.as_ref().map(|(_, label)| label.clone());
-        let rows: Vec<AnyElement> = voices.iter().map(|v| self.voice_row(v, cx)).collect();
-        let empty = rows.is_empty();
-        let more = self.scope == Scope::Shared && self.more && self.similar.is_none();
-        let next = self.shared_page + 1;
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex().gap_2().child(scope).child(
-                    div().flex_1().child(
-                        Input::new(&self.search)
-                            .small()
-                            .prefix(IconName::Search)
-                            .cleanable(true),
-                    ),
-                ),
+        let filters = h_flex()
+            .gap(px(6.))
+            .flex_wrap()
+            .children(
+                Filter::ALL
+                    .into_iter()
+                    .map(|f| self.filter_button(f, cx))
+                    .collect::<Vec<_>>(),
             )
-            .child(filters)
             .when_some(similar, |el, label| {
                 el.child(
                     h_flex()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
+                        .gap(px(4.))
+                        .h(px(22.))
+                        .pl(px(8.))
+                        .pr(px(2.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(t::LN)
+                        .text_size(px(11.))
+                        .child(Icon::new(IconName::AudioLines).size(px(11.)).color(t::A))
                         .child(format!("Like {label}"))
                         .child(
                             Button::new("clear-similar")
                                 .ghost()
                                 .xsmall()
-                                .icon(IconName::Close)
+                                .icon(IconName::X)
+                                .rounded_full()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.similar = None;
                                     this.search_shared(0, cx);
                                 })),
                         ),
                 )
-            })
+            });
+        let rows: Vec<AnyElement> = voices.iter().map(|v| self.voice_row(v, cx)).collect();
+        let empty = rows.is_empty();
+        let more = self.scope == Scope::Shared && self.more && self.similar.is_none();
+        let next = self.shared_page + 1;
+        let nothing = !loading
+            && empty
+            && load_error.is_none()
+            && self.error.is_none()
+            && (self.searched || self.scope == Scope::Account);
+        v_flex()
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.search).search()),
+                    )
+                    .child(scope),
+            )
+            .child(filters)
             .child(
                 div()
                     .id("voice-list")
                     .h(px(300.))
+                    .mx(px(-10.))
                     .overflow_y_scrollbar()
                     .when(loading && empty, |d| {
                         d.flex()
                             .items_center()
                             .justify_center()
-                            .child(Spinner::new().small())
+                            .child(Spinner::new().size(px(14.)))
                     })
-                    .when_some(load_error.clone().filter(|_| empty), |d, e| {
-                        d.p_2().text_xs().text_color(theme.red).child(e)
+                    .when_some(load_error.filter(|_| empty), |d, e| {
+                        d.p(px(10.)).child(form::problem(e))
                     })
-                    .when(
-                        !loading
-                            && empty
-                            && load_error.is_none()
-                            && self.error.is_none()
-                            && (self.searched || self.scope == Scope::Account),
-                        |d| {
-                            d.flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(theme.muted_foreground)
-                                .child(IconName::Search)
-                        },
-                    )
-                    .children(rows)
+                    .when(nothing, |d| {
+                        d.child(EmptyState::new(IconName::Search, "No voices found").compact())
+                    })
+                    .child(v_flex().gap(px(2.)).children(rows))
                     .when(more, |d| {
                         d.child(
-                            h_flex().justify_center().p_1().child(
+                            h_flex().justify_center().p(px(4.)).child(
                                 Button::new("more-voices")
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .label("More")
                                     .loading(loading)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -852,53 +884,73 @@ impl VoicesDialog {
     }
 
     fn describe_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let chars = self.description.read(cx).value().trim().chars().count();
-        let max = DESIGN_DESCRIPTION.1;
+        let (min, max) = DESIGN_DESCRIPTION;
         let current = self.designed_now(cx);
-        let previews = self.previews.iter().enumerate().map(|(i, (_, item))| {
-            let picked = self.picked == Some(i) && current;
-            h_flex()
-                .id(("preview", i))
-                .h(px(32.))
-                .px_2()
-                .gap_2()
-                .rounded_md()
-                .cursor_pointer()
-                .when(picked, |d| d.bg(theme.list_active))
-                .when(!picked, |d| d.hover(|s| s.bg(theme.list_hover)))
-                .child(listen_button(("listen-preview", i), &self.state, item, cx))
-                .child(div().text_sm().child(format!("Voice {}", i + 1)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.picked = Some(i);
-                    cx.notify();
-                }))
-        });
-        v_flex()
-            .gap_3()
-            .child(Input::new(&self.name).small())
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(Textarea::new(&self.description).text_sm())
-                    .child(
-                        h_flex().justify_end().child(
+        let idle = self.busy.is_none();
+        let previews: Vec<AnyElement> =
+            self.previews
+                .iter()
+                .enumerate()
+                .map(|(i, (_, item))| {
+                    let picked = self.picked == Some(i) && current;
+                    let state = self.state.read(cx);
+                    let playing = state
+                        .source
+                        .as_ref()
+                        .filter(|p| p.is(item) && p.is_playing())
+                        .map(|p| p.fraction());
+                    h_flex()
+                        .id(("preview", i))
+                        .h(px(30.))
+                        .px(px(8.))
+                        .gap(px(8.))
+                        .rounded(t::RADIUS)
+                        .cursor_pointer()
+                        .when(picked, |d| d.bg(t::HV))
+                        .when(!picked, |d| d.hover(|s| s.bg(t::HV)))
+                        .child(listen_button(("listen-preview", i), &self.state, item, cx))
+                        .child(
                             div()
-                                .text_xs()
-                                .text_color(if chars > max {
-                                    theme.red
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(format!("{chars} / {max}")),
-                        ),
+                                .flex_1()
+                                .text_color(if picked { t::T1 } else { t::T2 })
+                                .child(format!("Take {}", i + 1)),
+                        )
+                        .children(playing.map(|f| bar3(f).w(px(70.)).flex_none()))
+                        .child(Radio::new(("pick-preview", i)).checked(picked).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.picked = Some(i);
+                                cx.notify();
+                            }),
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.picked = Some(i);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+        v_flex()
+            .gap(px(10.))
+            .child(Textarea::new(&self.description).counter(chars, max))
+            .child(Textarea::new(&self.sample_text))
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.name)))
+                    .child(
+                        Button::new("design-voice")
+                            .label("Generate")
+                            .loading(self.busy == Some(Busy::Designing))
+                            .disabled(!idle || chars < min)
+                            .on_click(cx.listener(|this, _, window, cx| this.design(window, cx))),
                     ),
             )
-            .child(Textarea::new(&self.sample_text).text_sm())
-            .when(!self.previews.is_empty(), |el| {
+            .when(!previews.is_empty(), |el| {
                 el.child(
                     v_flex()
-                        .gap_0p5()
+                        .gap(px(2.))
+                        .mx(px(-6.))
                         .when(!current, |d| d.opacity(0.5))
                         .children(previews),
                 )
@@ -980,7 +1032,6 @@ impl VoicesDialog {
     }
 
     fn clone_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let dialog = cx.entity();
         let pool: Vec<(SharedString, PathBuf)> = self
             .state
@@ -992,49 +1043,60 @@ impl VoicesDialog {
             .filter(|m| matches!(m.kind, MediaKind::Audio | MediaKind::Video))
             .map(|m| (crate::ui::media_pool::item_name(m).into(), m.path.clone()))
             .collect();
-        let files = self.files.iter().enumerate().map(|(i, path)| {
-            h_flex()
-                .h(px(28.))
-                .px_2()
-                .gap_2()
-                .rounded_md()
-                .bg(theme.secondary)
-                .text_sm()
-                .child(div().flex_1().min_w_0().truncate().child(file_name(path)))
-                .child(
-                    Button::new(("remove-file", i))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.files.remove(i);
-                            cx.notify();
-                        })),
-                )
-        });
+        let files: Vec<AnyElement> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                h_flex()
+                    .h(px(28.))
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .rounded(t::RADIUS)
+                    .child(Icon::new(IconName::AudioLines).size(px(13.)).color(t::A))
+                    .child(div().flex_1().min_w_0().truncate().child(file_name(path)))
+                    .child(
+                        Button::new(("remove-file", i))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.files.remove(i);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         v_flex()
-            .gap_3()
-            .child(Input::new(&self.clone_name).small())
-            .when(!self.files.is_empty(), |el| {
-                el.child(v_flex().gap_1().children(files))
+            .gap(px(10.))
+            .child(Input::new(&self.clone_name))
+            .when(!files.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .p(px(4.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(t::LN)
+                        .bg(t::G)
+                        .children(files),
+                )
             })
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap(px(6.))
                     .child(
                         Button::new("add-files")
-                            .outline()
-                            .xsmall()
+                            .small()
                             .label("Add files…")
                             .on_click(cx.listener(|this, _, _, cx| this.add_files(cx))),
                     )
                     .when(!pool.is_empty(), |el| {
                         el.child(
                             Button::new("from-pool")
-                                .outline()
-                                .xsmall()
+                                .small()
                                 .label("From the pool")
-                                .dropdown_caret(true)
+                                .trailing_icon(IconName::ChevronDown)
                                 .dropdown_menu(move |mut menu, _, _| {
                                     for (name, path) in &pool {
                                         let (d, path) = (dialog.clone(), path.clone());
@@ -1056,7 +1118,7 @@ impl VoicesDialog {
                     }),
             )
             .child(
-                Checkbox::new("denoise")
+                Switch::new("denoise")
                     .label("Remove background noise")
                     .checked(self.denoise)
                     .on_click(cx.listener(|this, on: &bool, _, cx| {
@@ -1085,19 +1147,16 @@ impl VoicesDialog {
             Page::Find => {
                 let voice = self.selected_voice(cx);
                 let label = if voice.as_ref().is_some_and(Voice::shared) {
-                    "Add"
+                    "Add & use"
                 } else {
                     "Use"
                 };
                 (label, idle && voice.is_some())
             }
-            Page::Describe if self.designed_now(cx) => {
-                let named = !self.name.read(cx).value().trim().is_empty();
-                ("Save", idle && named && self.picked.is_some())
-            }
             Page::Describe => {
-                let chars = self.description.read(cx).value().trim().chars().count();
-                ("Generate", idle && chars >= DESIGN_DESCRIPTION.0)
+                let named = !self.name.read(cx).value().trim().is_empty();
+                let ready = self.designed_now(cx) && named && self.picked.is_some();
+                ("Save", idle && ready)
             }
             Page::Clone => {
                 let named = !self.clone_name.read(cx).value().trim().is_empty();
@@ -1109,11 +1168,9 @@ impl VoicesDialog {
         }
     }
 
+    /// Saving or making what the footer button asked for.
     fn working(&self) -> bool {
-        matches!(
-            self.busy,
-            Some(Busy::Designing | Busy::Saving | Busy::Cloning | Busy::Adding(_))
-        )
+        matches!(self.busy, Some(Busy::Saving | Busy::Cloning))
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1126,8 +1183,7 @@ impl VoicesDialog {
                     self.take(voice, window, cx);
                 }
             }
-            Page::Describe if self.designed_now(cx) => self.save_design(window, cx),
-            Page::Describe => self.design(window, cx),
+            Page::Describe => self.save_design(window, cx),
             Page::Clone => self.clone_voice(window, cx),
         }
     }
@@ -1135,18 +1191,18 @@ impl VoicesDialog {
 
 impl Render for VoicesDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let tabs = TabBar::new("voices-page")
-            .underline()
-            .small()
-            .selected_index(match self.page {
+        let tabs = Tabs::new("voices-page")
+            .mx(px(-16.))
+            .px(px(16.))
+            .gap(px(16.))
+            .selected(match self.page {
                 Page::Find => 0,
                 Page::Describe => 1,
                 Page::Clone => 2,
             })
-            .child(Tab::new().label("Find"))
-            .child(Tab::new().label("Describe"))
-            .child(Tab::new().label("From audio"))
+            .child(Tab::new("Find"))
+            .child(Tab::new("Describe"))
+            .child(Tab::new("From audio"))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 this.page = match ix {
                     0 => Page::Find,
@@ -1162,11 +1218,11 @@ impl Render for VoicesDialog {
             Page::Clone => self.clone_page(cx),
         };
         v_flex()
-            .gap_3()
+            .gap(px(12.))
             .child(tabs)
             .child(page)
             .when_some(self.error.clone(), |el, error| {
-                el.child(div().text_xs().text_color(theme.red).child(error))
+                el.child(form::problem(error))
             })
     }
 }
@@ -1177,14 +1233,41 @@ fn file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// A spinner the size of a small button.
+/// A spinner the size of a play button.
 fn spinner_box() -> impl IntoElement {
     div()
-        .size(px(24.))
         .flex()
+        .flex_none()
+        .size(px(22.))
         .items_center()
         .justify_center()
-        .child(Spinner::new().xsmall())
+        .child(Spinner::new())
+}
+
+/// How far a take plays, as a 3 px bar.
+fn bar3(fraction: f32) -> Div {
+    div()
+        .h(px(3.))
+        .rounded_full()
+        .bg(t::alpha(t::T1, 0.08))
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .w(relative(fraction.clamp(0., 1.)))
+                .bg(t::T1),
+        )
+}
+
+/// A 1 px ring inside a selected row.
+fn inset_ring(color: Rgba) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: color.into(),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
+        inset: true,
+    }]
 }
 
 /// Formats every provider takes as they are.
@@ -1222,23 +1305,14 @@ pub fn open(
         let submit = dialog.clone();
         let (label, ready) = dialog.read(cx).primary(cx);
         let working = dialog.read(cx).working();
-        d.title("Voices").w(px(580.)).child(dialog.clone()).footer(
-            DialogFooter::new()
-                .child(
-                    Button::new("voices-cancel")
-                        .label("Cancel")
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("voices-ok")
-                        .primary()
-                        .label(label)
-                        .loading(working)
-                        .disabled(!ready)
-                        .on_click(move |_, window, cx| {
-                            submit.update(cx, |f, cx| f.submit(window, cx))
-                        }),
-                ),
-        )
+        d.title("Voices")
+            .w(px(580.))
+            .child(dialog.clone())
+            .confirm(label, move |window, cx| {
+                submit.update(cx, |f, cx| f.submit(window, cx));
+                false
+            })
+            .confirm_disabled(!ready)
+            .working(working)
     });
 }

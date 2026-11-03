@@ -1,7 +1,8 @@
 //! Inspector, contextual by workspace: in Edit, the selected transition, or
-//! the selected clip's properties by kind with its effects, grade and linked
-//! audio; in Color and Audio, the whole timeline's grade, or its mixer,
-//! loudness and ducking.
+//! the selected clip's properties by kind with its effects, masks, grade
+//! and linked audio; in Color and Audio, the whole timeline's grade, or its
+//! loudness and ducking. Properties sit in collapsible groups of 26 px rows:
+//! a label that scrubs, the value, and the keyframe lane.
 
 mod audio;
 mod clip;
@@ -22,11 +23,16 @@ pub(crate) use param::format_value;
 
 use crate::state::EditorState;
 use crate::ui::caption_style::{self, CaptionStylePanel};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, EmptyState, IconName, NumberFieldEvent, NumberFieldState, Panel, PanelHeader,
+    ScrollableElement as _, SectionHeader, h_flex, v_flex,
+};
 use clip::PictureTab;
-use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_core::MaskId;
 use koo_core::agent::Workspace;
 use koo_core::analysis::Loudness;
 use koo_core::command::{Command, Edge};
@@ -43,9 +49,11 @@ pub struct InspectorPanel {
     /// Integrated loudness and true peak per clip, before clip gain.
     loudness: HashMap<ClipId, Loudness>,
     measuring: bool,
-    lufs_target: Entity<InputState>,
-    peak_target: Entity<InputState>,
+    lufs_target: Entity<NumberFieldState>,
+    peak_target: Entity<NumberFieldState>,
     picture_tab: PictureTab,
+    /// Groups folded to their header, by key.
+    collapsed: HashSet<&'static str>,
     /// Caption or title text, and the clip it was loaded from.
     text: Entity<TextareaState>,
     text_clip: Option<ClipId>,
@@ -59,14 +67,33 @@ pub struct InspectorPanel {
     fx_controls: HashMap<controls::ControlKey, controls::Control>,
     /// Effects folded to their header.
     collapsed_fx: HashSet<koo_core::EffectId>,
+    /// The mask whose settings show in the Masks tab.
+    open_mask: Option<MaskId>,
     /// Clip name field while renaming, and the clip it renames.
     name_field: Entity<InputState>,
     renaming: Option<ClipId>,
     /// Speed in percent, the clip it shows, and whether a change ripples.
-    speed_field: Entity<InputState>,
+    speed_field: Entity<NumberFieldState>,
     speed_clip: Option<ClipId>,
     speed_ripple: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the panel shows for a selection: its header, page tabs and body.
+pub(super) struct View {
+    header: Option<PanelHeader>,
+    tabs: Option<AnyElement>,
+    body: AnyElement,
+}
+
+impl View {
+    fn new(header: PanelHeader, body: impl IntoElement) -> Self {
+        Self {
+            header: Some(header),
+            tabs: None,
+            body: body.into_any_element(),
+        }
+    }
 }
 
 impl InspectorPanel {
@@ -78,14 +105,32 @@ impl InspectorPanel {
         });
         let start_field = cx.new(|cx| InputState::new(window, cx));
         let name_field = cx.new(|cx| InputState::new(window, cx));
-        let speed_field = cx.new(|cx| InputState::new(window, cx));
         let end_field = cx.new(|cx| InputState::new(window, cx));
+        let speed_field = cx.new(|cx| {
+            NumberFieldState::new(window, cx)
+                .min(koo_core::speed::MIN_SPEED * 100.)
+                .max(koo_core::speed::MAX_SPEED * 100.)
+                .default_value(100.)
+        });
         let commit = |ev: &InputEvent| {
             matches!(
                 ev,
                 InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
             )
         };
+        let presets = state.read(cx).presets.clone();
+        let target = |value: f32, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                NumberFieldState::new(window, cx)
+                    .min(-60.)
+                    .max(0.)
+                    .step(0.1)
+                    .decimals(1)
+                    .default_value(value as f64)
+            })
+        };
+        let lufs_target = target(presets.loudness_lufs, window, cx);
+        let peak_target = target(presets.true_peak_db, window, cx);
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe(&text, move |this, _, ev: &InputEvent, cx| {
@@ -108,21 +153,14 @@ impl InspectorPanel {
                     this.commit_rename(cx);
                 }
             }),
-            cx.subscribe(&speed_field, move |this, _, ev: &InputEvent, cx| {
-                if commit(ev) {
-                    this.commit_speed(cx);
+            cx.subscribe(&speed_field, |this, _, ev: &NumberFieldEvent, cx| {
+                if let NumberFieldEvent::Commit(percent) = *ev {
+                    this.commit_speed(percent / 100., cx);
                 }
             }),
         ];
         let caption_style = cx.new(|cx| {
             CaptionStylePanel::new(state.clone(), caption_style::Target::Active, window, cx)
-        });
-        let presets = state.read(cx).presets.clone();
-        let lufs_target = cx.new(|cx| {
-            InputState::new(window, cx).default_value(param::format_value(presets.loudness_lufs, 1))
-        });
-        let peak_target = cx.new(|cx| {
-            InputState::new(window, cx).default_value(param::format_value(presets.true_peak_db, 1))
         });
         Self {
             state,
@@ -137,6 +175,7 @@ impl InspectorPanel {
                 _ if crate::demo::speed::enabled() => PictureTab::Speed,
                 _ => PictureTab::default(),
             },
+            collapsed: HashSet::from(["crop", "pin"]),
             text,
             text_clip: None,
             start_field,
@@ -145,6 +184,7 @@ impl InspectorPanel {
             caption_style,
             fx_controls: HashMap::new(),
             collapsed_fx: HashSet::new(),
+            open_mask: None,
             name_field,
             renaming: None,
             speed_field,
@@ -152,24 +192,6 @@ impl InspectorPanel {
             speed_ripple: false,
             _subscriptions,
         }
-    }
-
-    /// The control for `key`, created on first use and synced to `value`.
-    fn param(
-        &mut self,
-        key: Key,
-        value: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> &Param {
-        let p = match self.params.entry(key) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(Param::new(key, value, window, cx))
-            }
-        };
-        p.sync(value, window, cx);
-        p
     }
 
     fn project<'a>(&self, cx: &'a App) -> &'a Project {
@@ -201,17 +223,14 @@ impl InspectorPanel {
         });
     }
 
-    /// Apply a control's new model value.
+    /// Apply a field's new model value.
     fn commit(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
-        if let Some(p) = self.params.get_mut(&key) {
-            p.invalidate();
-        }
         self.state.update(cx, |s, cx| s.show_live(&[], cx));
         let (commands, label) = self.commands(key, v, cx);
         self.run(commands, label, cx);
     }
 
-    /// Show a value in the viewer while its slider is dragged.
+    /// Show a value in the viewer while its label is scrubbed.
     fn preview(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
         let (commands, _) = self.commands(key, v, cx);
         self.state.update(cx, |s, cx| s.show_live(&commands, cx));
@@ -385,58 +404,177 @@ impl InspectorPanel {
     fn set_ducking(&mut self, ducking: Option<Ducking>, cx: &mut Context<Self>) {
         self.run(vec![Command::SetDucking { ducking }], "set_ducking", cx);
     }
+
+    fn is_open(&self, group: &'static str) -> bool {
+        !self.collapsed.contains(group)
+    }
+
+    /// The header of the collapsible group `key`; a click folds or unfolds
+    /// it.
+    fn header(
+        &self,
+        key: &'static str,
+        title: impl Into<SharedString>,
+        cx: &Context<Self>,
+    ) -> SectionHeader {
+        let panel = cx.entity().downgrade();
+        SectionHeader::new(key, title)
+            .open(self.is_open(key))
+            .on_toggle(move |open, _, cx| {
+                let _ = panel.update(cx, |this, cx| {
+                    if *open {
+                        this.collapsed.remove(key);
+                    } else {
+                        this.collapsed.insert(key);
+                    }
+                    cx.notify();
+                });
+            })
+    }
 }
 
 impl Render for InspectorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match self.state.read(cx).workspace {
-            Workspace::Color => self.timeline_color_view(window, cx),
-            Workspace::Audio => self.timeline_audio_view(window, cx).into_any_element(),
+        let view = match self.state.read(cx).workspace {
+            Workspace::Color => View {
+                header: None,
+                tabs: None,
+                body: div()
+                    .p(px(12.))
+                    .child(self.timeline_color_view(window, cx))
+                    .into_any_element(),
+            },
+            Workspace::Audio => self.timeline_audio_view(window, cx),
             _ => self.edit_view(window, cx),
         };
-        div()
-            .id("inspector")
-            .size_full()
-            .overflow_y_scrollbar()
-            .child(v_flex().p_3().gap_4().child(body))
+        Panel::new()
+            .children(view.header)
+            .children(view.tabs)
+            .child(
+                div()
+                    .id("inspector")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(v_flex().pb(px(12.)).child(view.body)),
+            )
     }
 }
 
-/// Group title above a block of controls.
-pub(crate) fn section(title: &'static str, cx: &App) -> Div {
-    v_flex().gap_0p5().child(
-        div()
-            .pb_1()
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(cx.theme().muted_foreground)
-            .child(title),
-    )
+/// The panel header: "Inspector" and what it shows.
+fn panel_header(context: impl Into<SharedString>) -> PanelHeader {
+    PanelHeader::new().title("Inspector").context(context)
 }
 
-/// Group title with actions on the right.
-pub(crate) fn section_with(title: &'static str, actions: impl IntoElement, cx: &App) -> Div {
-    v_flex().gap_0p5().child(
-        h_flex()
-            .h(px(22.))
-            .justify_between()
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(cx.theme().muted_foreground)
-            .child(title)
-            .child(actions),
-    )
+/// A group of rows under its header, ruled off below. Pass no rows for a
+/// folded group.
+fn group<E: IntoElement>(header: SectionHeader, rows: impl IntoIterator<Item = E>) -> Div {
+    let rows: Vec<AnyElement> = rows
+        .into_iter()
+        .map(IntoElement::into_any_element)
+        .collect();
+    v_flex()
+        .flex_none()
+        .border_b_1()
+        .border_color(t::LN)
+        .child(header)
+        .when(!rows.is_empty(), |g| {
+            g.child(v_flex().pb(px(6.)).children(rows))
+        })
 }
 
-/// One muted line for an empty state.
-fn empty(text: &'static str, cx: &App) -> AnyElement {
+/// An inspector row: the 76 px label, the control, and the 54 px keyframe
+/// lane, kept empty where there is none so the fields line up.
+fn row(label: impl IntoElement, control: impl IntoElement, lane: Option<AnyElement>) -> Div {
+    h_flex()
+        .flex_none()
+        .h(px(26.))
+        .gap(px(6.))
+        .pl(px(22.))
+        .pr(px(10.))
+        .child(
+            div()
+                .w(px(76.))
+                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(control))
+        .child(h_flex().w(px(54.)).flex_none().justify_end().children(lane))
+}
+
+/// A row's label that does not scrub.
+fn label(text: impl Into<SharedString>) -> Div {
     div()
-        .py_8()
-        .flex()
-        .justify_center()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.))
+        .text_color(t::T2)
+        .child(text.into())
+}
+
+/// A control spanning a group's width, inset like the rows.
+fn wide(child: impl IntoElement) -> Div {
+    div()
+        .flex_none()
+        .pl(px(22.))
+        .pr(px(10.))
+        .py(px(3.))
+        .child(child)
+}
+
+/// A select-like field: the current value and a chevron; give it a
+/// dropdown menu of the choices.
+fn select_field(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Button {
+    Button::new(id)
+        .small()
+        .label(value)
+        .trailing_icon(IconName::ChevronDown)
+        .w_full()
+        .justify_between()
+        .overflow_hidden()
+        .px(px(6.))
+        .rounded(t::RADIUS_SM)
+        .bg(t::G)
+        .font_weight(FontWeight::NORMAL)
+}
+
+/// A one-line error under a group's rows.
+fn error_line(message: impl Into<SharedString>) -> Div {
+    div()
+        .pl(px(22.))
+        .pr(px(10.))
+        .py(px(2.))
+        .text_size(px(11.))
+        .text_color(t::ERR)
+        .child(message.into())
+}
+
+/// A group of other panels' controls (caption styles) titled like the
+/// inspector's.
+pub(crate) fn section(title: &'static str, _: &App) -> Div {
+    section_frame(SectionHeader::new(title, title))
+}
+
+/// [`section`] with actions on the right of its header.
+pub(crate) fn section_with(title: &'static str, actions: impl IntoElement, _: &App) -> Div {
+    section_frame(SectionHeader::new(title, title).child(actions))
+}
+
+fn section_frame(header: SectionHeader) -> Div {
+    v_flex()
+        .flex_none()
+        .pb(px(6.))
+        .border_b_1()
+        .border_color(t::LN)
+        .child(header)
+}
+
+/// The empty state of a view with nothing to show.
+fn empty(text: &'static str, _: &App) -> AnyElement {
+    EmptyState::new(IconName::MousePointerClick, text)
+        .compact()
         .into_any_element()
 }
 

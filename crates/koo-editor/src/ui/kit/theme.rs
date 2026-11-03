@@ -88,6 +88,14 @@ pub const A: Rgba = hex(0x2EC4B6);
 pub const C: Rgba = hex(0xB57CF0);
 /// Titles and generators track tint.
 pub const TI: Rgba = hex(0xD7B4FF);
+/// Timeline lanes, under the clips.
+pub const LANE: Rgba = hex(0x0E0E10);
+/// Timeline markers and the marquee band.
+pub const MK: Rgba = hex(0x7FB0FF);
+/// Stands in for a picture behind caption lettering previews.
+pub const BACKDROP: Rgba = hex(0x2F343D);
+/// A dialog's sidebar and footer, a step below its body.
+pub const INSET: Rgba = hex(0x0F0F11);
 
 /// Clips and fields.
 pub const RADIUS_SM: Pixels = px(4.);

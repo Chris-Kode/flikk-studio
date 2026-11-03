@@ -19,6 +19,7 @@
 //! `compose::lettering_transform`).
 
 use super::Request;
+use crate::ui::kit::theme as t;
 use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::compose::{self, GroupMove, Shape};
@@ -27,7 +28,11 @@ use koo_core::services::Placement;
 use koo_core::{ClipId, Time};
 
 /// Side of a square handle, in screen pixels.
-pub(super) const HANDLE: f32 = 8.0;
+const HANDLE: f32 = 6.0;
+/// Radius of the rotate knob and the corner-pin handles.
+const KNOB: f32 = 3.5;
+/// Radius of the anchor's ring.
+const ANCHOR: f32 = 4.5;
 /// How far a handle reaches for the mouse, in screen pixels.
 pub(super) const REACH: f32 = 7.0;
 /// Distance of the rotate handle above the box, in screen pixels.
@@ -140,6 +145,8 @@ pub(super) struct Overlay {
     pub safe: bool,
     /// Handles can be used.
     pub editable: bool,
+    /// The handle being dragged, drawn filled.
+    pub grabbed: Option<Handle>,
 }
 
 #[derive(Default)]
@@ -432,6 +439,7 @@ impl Gizmo {
                 guides: self.guides.clone(),
                 safe: self.safe_areas,
                 editable,
+                grabbed: self.grabbed(),
             };
         }
         if let Some(shape) = self.active(selected, request)
@@ -471,6 +479,18 @@ impl Gizmo {
             guides: self.guides.clone(),
             safe: self.safe_areas,
             editable,
+            grabbed: self.grabbed(),
+        }
+    }
+
+    /// The handle a drag holds, when it is drawn differently.
+    fn grabbed(&self) -> Option<Handle> {
+        let mode = self.drag.as_ref().map(|d| d.mode);
+        match mode.or(self.group_drag.as_ref().map(|g| g.mode))? {
+            Mode::Rotate => Some(Handle::Rotate),
+            Mode::Anchor => Some(Handle::Anchor),
+            Mode::Pin(i) => Some(Handle::Corner(i)),
+            _ => None,
         }
     }
 
@@ -1122,29 +1142,78 @@ pub(super) fn cursor(handle: Option<Handle>, dragging: bool) -> CursorStyle {
     }
 }
 
+/// A polyline through `pts`, closed or not, `width` wide; dashed by
+/// `dash` (on, off) when given.
+fn stroke(
+    pts: &[Point<Pixels>],
+    close: bool,
+    width: f32,
+    dash: Option<[f32; 2]>,
+) -> Option<Path<Pixels>> {
+    let mut b = PathBuilder::stroke(px(width));
+    if let Some([on, off]) = dash {
+        b = b.dash_array(&[px(on), px(off)]);
+    }
+    for (i, p) in pts.iter().enumerate() {
+        if i == 0 {
+            b.move_to(*p);
+        } else {
+            b.line_to(*p);
+        }
+    }
+    if close {
+        b.close();
+    }
+    b.build().ok()
+}
+
+/// Paint [`stroke`] in `color`.
+pub(super) fn draw(
+    window: &mut Window,
+    pts: &[Point<Pixels>],
+    close: bool,
+    width: f32,
+    dash: Option<[f32; 2]>,
+    color: Rgba,
+) {
+    if let Some(path) = stroke(pts, close, width, dash) {
+        window.paint_path(path, color);
+    }
+}
+
+/// A filled disc of radius `r` at `at`.
+fn disc(at: Point<Pixels>, r: f32) -> Option<Path<Pixels>> {
+    let r = px(r);
+    let mut b = PathBuilder::fill();
+    b.move_to(point(at.x + r, at.y));
+    b.arc_to(point(r, r), px(0.), false, true, point(at.x - r, at.y));
+    b.arc_to(point(r, r), px(0.), false, true, point(at.x + r, at.y));
+    b.close();
+    b.build().ok()
+}
+
+/// A disc of `fill` ringed 1 px in `ring`.
+pub(super) fn ringed(at: Point<Pixels>, r: f32, fill: Rgba, ring: Rgba, window: &mut Window) {
+    if let Some(path) = disc(at, r + 1.0) {
+        window.paint_path(path, ring);
+    }
+    if let Some(path) = disc(at, r) {
+        window.paint_path(path, fill);
+    }
+}
+
+/// A square handle centred on `at`: white, ringed in the accent.
+pub(super) fn square(at: Point<Pixels>, window: &mut Window) {
+    let half = px(HANDLE / 2.0);
+    let b = Bounds::new(point(at.x - half, at.y - half), size(half * 2., half * 2.));
+    window.paint_quad(fill(b, t::ON_AC).border_widths(px(1.)).border_color(t::AC));
+}
+
 /// Paint `overlay` over the program at `screen`.
-pub(super) fn paint(overlay: &Overlay, screen: &Screen, colors: [Hsla; 3], window: &mut Window) {
-    let [line, guide, safe] = colors;
-    let stroke =
-        |pts: &[Point<Pixels>], close: bool, width: f32, color: Hsla, window: &mut Window| {
-            let mut b = PathBuilder::stroke(px(width));
-            for (i, p) in pts.iter().enumerate() {
-                if i == 0 {
-                    b.move_to(*p);
-                } else {
-                    b.line_to(*p);
-                }
-            }
-            if close {
-                b.close();
-            }
-            if let Ok(path) = b.build() {
-                window.paint_path(path, color);
-            }
-        };
+pub(super) fn paint(overlay: &Overlay, screen: &Screen, window: &mut Window) {
     let (w, h) = (screen.sequence.0 as f32, screen.sequence.1 as f32);
     if overlay.safe {
-        for f in SAFE {
+        for (f, a) in SAFE.into_iter().zip([0.3, 0.18]) {
             let q = [
                 [w * f, h * f],
                 [w * (1.0 - f), h * f],
@@ -1152,90 +1221,107 @@ pub(super) fn paint(overlay: &Overlay, screen: &Screen, colors: [Hsla; 3], windo
                 [w * f, h * (1.0 - f)],
             ]
             .map(|p| screen.to_screen(p));
-            stroke(&q, true, 1.0, safe, window);
+            draw(
+                window,
+                &q,
+                true,
+                1.0,
+                Some([3.0, 3.0]),
+                t::alpha(t::ON_AC, a),
+            );
         }
+        let c = screen.to_screen([w / 2.0, h / 2.0]);
+        let r = px(6.0);
+        let cross = t::alpha(t::ON_AC, 0.35);
+        draw(
+            window,
+            &[point(c.x - r, c.y), point(c.x + r, c.y)],
+            false,
+            1.0,
+            None,
+            cross,
+        );
+        draw(
+            window,
+            &[point(c.x, c.y - r), point(c.x, c.y + r)],
+            false,
+            1.0,
+            None,
+            cross,
+        );
     }
     for g in &overlay.guides {
         let (a, b) = match *g {
             Guide::Vertical(x) => ([x, 0.0], [x, h]),
             Guide::Horizontal(y) => ([0.0, y], [w, y]),
         };
-        stroke(
+        let snap = t::alpha(t::WARN, 0.9);
+        draw(
+            window,
             &[screen.to_screen(a), screen.to_screen(b)],
             false,
             1.0,
-            guide,
-            window,
+            None,
+            snap,
         );
     }
     for o in &overlay.outlines {
         let q = o.corners.map(|c| screen.to_screen(c));
-        let color = if o.active { line } else { line.opacity(0.6) };
-        stroke(&q, true, if o.active { 1.5 } else { 1.0 }, color, window);
+        let color = if o.active {
+            t::AC
+        } else {
+            t::alpha(t::AC, 0.6)
+        };
+        draw(window, &q, true, 1.0, None, color);
         if !o.active || !overlay.editable {
             continue;
         }
         if o.kind == OutlineKind::Pin {
-            for (_, at) in pin_handles(&o.corners, screen) {
-                let half = px(HANDLE / 2.0);
-                let square =
-                    Bounds::new(point(at.x - half, at.y - half), size(half * 2., half * 2.));
-                window.paint_quad(
-                    fill(square, line)
-                        .border_widths(px(1.))
-                        .border_color(white()),
-                );
+            for (handle, at) in pin_handles(&o.corners, screen) {
+                let (fill, ring) = if overlay.grabbed == Some(handle) {
+                    (t::AC, t::ON_AC)
+                } else {
+                    (t::ON_AC, t::AC)
+                };
+                ringed(at, KNOB, fill, ring, window);
             }
             continue;
         }
         let top = screen.to_screen(mid(o.corners[0], o.corners[1]));
         let knob = rotate_handle(&o.corners, screen);
-        stroke(&[top, knob], false, 1.0, line, window);
+        draw(window, &[top, knob], false, 1.0, None, t::AC);
         let shown = if o.kind == OutlineKind::Group {
             group_handles(&o.corners, screen)
         } else {
             handles(&o.corners, o.anchor, screen)
         };
         for (handle, at) in shown {
-            let half = px(HANDLE / 2.0);
+            let grabbed = overlay.grabbed == Some(handle);
             match handle {
                 Handle::Anchor => {
-                    let r = px(HANDLE * 0.75);
-                    stroke(
-                        &[point(at.x - r, at.y), point(at.x + r, at.y)],
-                        false,
-                        1.0,
-                        line,
-                        window,
-                    );
-                    stroke(
-                        &[point(at.x, at.y - r), point(at.x, at.y + r)],
-                        false,
-                        1.0,
-                        line,
-                        window,
-                    );
-                }
-                Handle::Rotate => {
-                    let r = half;
-                    let mut b = PathBuilder::fill();
-                    b.move_to(point(at.x + r, at.y));
-                    b.arc_to(point(r, r), px(0.), false, true, point(at.x - r, at.y));
-                    b.arc_to(point(r, r), px(0.), false, true, point(at.x + r, at.y));
-                    b.close();
-                    if let Ok(path) = b.build() {
-                        window.paint_path(path, line);
+                    if grabbed && let Some(path) = disc(at, ANCHOR + 1.0) {
+                        window.paint_path(path, t::alpha(t::AC, 0.33));
+                    }
+                    let ring: Vec<_> = (0..=24)
+                        .map(|i| {
+                            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                            point(at.x + px(ANCHOR * a.cos()), at.y + px(ANCHOR * a.sin()))
+                        })
+                        .collect();
+                    let r = px(ANCHOR);
+                    for pts in [
+                        ring,
+                        vec![point(at.x - r, at.y), point(at.x + r, at.y)],
+                        vec![point(at.x, at.y - r), point(at.x, at.y + r)],
+                    ] {
+                        draw(window, &pts, false, 1.0, None, t::AC);
                     }
                 }
-                _ => {
-                    let square =
-                        Bounds::new(point(at.x - half, at.y - half), size(half * 2., half * 2.));
-                    window.paint_quad(
-                        fill(square, white())
-                            .border_widths(px(1.))
-                            .border_color(line),
-                    );
+                Handle::Rotate => {
+                    let fill = if grabbed { t::AC } else { t::ON_AC };
+                    ringed(at, KNOB, fill, t::AC, window);
                 }
+                _ => square(at, window),
             }
         }
     }

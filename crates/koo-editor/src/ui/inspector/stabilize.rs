@@ -4,11 +4,8 @@
 //! title until it is done.
 
 use super::param::Key;
-use super::transition::labeled;
-use super::{InspectorPanel, section_with};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex};
+use super::{InspectorPanel, error_line, group, label, row, wide};
+use crate::ui::kit::{Progress, Segmented, Switch};
 use gpui_kit::*;
 use koo_core::command::Command;
 use koo_core::model::{Clip, MediaKind};
@@ -37,7 +34,6 @@ impl InspectorPanel {
         let toggle = {
             let (settings, item, stabilizer) = (settings.clone(), item.clone(), stabilizer.clone());
             Switch::new("stabilize")
-                .small()
                 .checked(settings.enabled)
                 .on_click(cx.listener(move |this, on: &bool, _, cx| {
                     if *on && let Some(s) = &stabilizer {
@@ -50,53 +46,43 @@ impl InspectorPanel {
                     this.run(vec![set(s)], "set_stabilization", cx);
                 }))
         };
-        let view = section_with("Stabilize", toggle, cx);
-        if !settings.enabled {
-            return Some(view);
+        let header = self.header("stabilize", "Stabilize", cx).child(toggle);
+        if !settings.enabled || !self.is_open("stabilize") {
+            return Some(group(header, Vec::<Div>::new()));
         }
-        let theme = cx.theme();
         let status = stabilizer.as_ref().map(|s| s.status(&item));
         let progress = match &status {
             Some(MotionStatus::Queued) => Some(0.0),
             Some(MotionStatus::Measuring(f)) => Some(*f),
             _ => None,
         }
-        .map(|fraction| {
-            div()
-                .h(px(2.))
-                .w_full()
-                .rounded_sm()
-                .bg(theme.secondary)
-                .child(div().h_full().w(relative(fraction)).bg(theme.primary))
-        });
+        .map(|fraction| wide(Progress::new().value(fraction)));
         let error = match status {
-            Some(MotionStatus::Failed(e)) => Some(
-                div()
-                    .text_xs()
-                    .text_color(theme.red)
-                    .child(SharedString::from(e)),
-            ),
+            Some(MotionStatus::Failed(e)) => Some(error_line(e)),
             _ => None,
         };
-        let choice = |label: &'static str,
+        let choice = |name: &'static str,
                       options: Vec<(&'static str, bool, Stabilization)>,
                       cx: &mut Context<Self>| {
-            let buttons = options
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (name, selected, s))| {
-                    Button::new(SharedString::from(format!("stabilize-{label}-{ix}")))
-                        .ghost()
-                        .xsmall()
-                        .selected(selected)
-                        .label(name)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !selected {
-                                this.run(vec![set(s.clone())], "set_stabilization", cx);
-                            }
-                        }))
-                });
-            labeled(label, h_flex().gap_1().children(buttons), cx)
+            let selected = options.iter().position(|(_, on, _)| *on).unwrap_or(0);
+            let labels: Vec<&'static str> = options.iter().map(|(l, _, _)| *l).collect();
+            let picks: Vec<Stabilization> = options.into_iter().map(|(_, _, s)| s).collect();
+            row(
+                label(name),
+                Segmented::new(SharedString::from(format!("stabilize-{name}")))
+                    .compact()
+                    .fill()
+                    .items(labels)
+                    .selected(selected)
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        if *ix != selected
+                            && let Some(s) = picks.get(*ix)
+                        {
+                            this.run(vec![set(s.clone())], "set_stabilization", cx);
+                        }
+                    })),
+                None,
+            )
         };
         let modes = StabilizeMode::ALL
             .iter()
@@ -121,15 +107,22 @@ impl InspectorPanel {
         let mode = choice("Mode", modes, cx);
         let crop = choice("Crop", crops, cx);
         let smoothness = (settings.mode == StabilizeMode::Smooth).then(|| {
-            self.param(Key::Smoothness, settings.smoothness, window, cx)
-                .row(cx)
+            self.param_row(
+                Key::Smoothness,
+                settings.smoothness,
+                false,
+                None,
+                window,
+                cx,
+            )
         });
-        Some(
-            view.children(progress)
-                .children(error)
-                .child(mode)
-                .children(smoothness)
-                .child(crop),
-        )
+        let rows: Vec<Div> = progress
+            .into_iter()
+            .chain(error)
+            .chain([mode])
+            .chain(smoothness)
+            .chain([crop])
+            .collect();
+        Some(group(header, rows))
     }
 }

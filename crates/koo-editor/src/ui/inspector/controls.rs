@@ -1,23 +1,22 @@
-//! Controls for FX parameters, generated from [`ParamSpec`]: number slider
-//! and field (Float/Int), switch (Bool), swatch with picker (Color), x/y
-//! fields (Point), text box (Text), dropdown (Choice) and file chooser
-//! (Image), each with keyframe navigation at the playhead. Like
-//! [`super::param`], drags preview live and commit once on release.
+//! Controls for FX parameters, generated from [`ParamSpec`]: a scrubbing
+//! number field (Float/Int), x/y fields (Point), switch (Bool), colour field
+//! (Color), text box (Text), select (Choice) and file chooser (Image), each
+//! with keyframe navigation at the playhead. Like [`super::param`], scrubs
+//! preview live and commit once on release.
 //!
 //! A control is keyed by what owns the parameter ([`FxOwner`]); the owner
 //! decides the command that sets it, so other inspector sections (audio
 //! effects, grade) can reuse the controls by adding an owner.
 
-use super::InspectorPanel;
-use super::param::format_value;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use super::{InspectorPanel, label, row, select_field};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, ColorField, DropdownMenu as _, IconName, Keyframe, KeyframeNav, NumberField,
+    NumberFieldEvent, NumberFieldState, PopupMenuItem, ScrubLabel, Switch, Textarea, h_flex,
+    v_flex,
+};
+use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::command::{Command, Edge};
@@ -191,7 +190,8 @@ impl FxTarget {
 
 /// Widgets of one parameter, created on first use.
 pub struct Control {
-    numbers: Vec<Number>,
+    /// One field for a number, two for a point.
+    numbers: Vec<Entity<NumberFieldState>>,
     color: Option<Entity<ColorPickerState>>,
     text: Option<Entity<TextareaState>>,
     /// Last model value shown; `None` resyncs on the next render.
@@ -199,16 +199,7 @@ pub struct Control {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A number with slider (Float/Int) or a bare field (Point components).
-struct Number {
-    slider: Option<Entity<SliderState>>,
-    field: Entity<InputState>,
-    decimals: usize,
-    dragging: bool,
-    typing: bool,
-}
-
-/// Decimals and slider step for a range.
+/// Decimals and step for a range.
 fn precision(min: f64, max: f64, int: bool) -> (usize, f64) {
     if int {
         return (0, 1.0);
@@ -268,18 +259,16 @@ impl Control {
                     ColorPickerState::new(window, cx).default_value(to_hsla(value.as_list()))
                 });
                 let k = key.clone();
-                subs.push(cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, _, ev: &ColorPickerEvent, _, cx| {
+                subs.push(
+                    cx.subscribe(&state, move |this, _, ev: &ColorPickerEvent, cx| {
                         let ColorPickerEvent::Change(Some(c)) = ev else {
                             return;
                         };
                         let rgb = c.to_rgb();
                         let v = [rgb.r, rgb.g, rgb.b, rgb.a].map(|c| c as f64).to_vec();
                         this.set_fx_param(&k, ParamValue::List(v), false, cx);
-                    },
-                ));
+                    }),
+                );
                 color = Some(state);
             }
             ParamKind::Text => {
@@ -290,10 +279,8 @@ impl Control {
                         .default_value(value.as_text().unwrap_or_default().to_owned())
                 });
                 let k = key.clone();
-                subs.push(cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, input, ev: &InputEvent, _, cx| {
+                subs.push(
+                    cx.subscribe(&state, move |this, input, ev: &InputEvent, cx| {
                         if matches!(
                             ev,
                             InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
@@ -304,8 +291,8 @@ impl Control {
                                 this.set_fx_param(&k, ParamValue::Text(typed), false, cx);
                             }
                         }
-                    },
-                ));
+                    }),
+                );
                 text = Some(state);
             }
             _ => {}
@@ -319,31 +306,26 @@ impl Control {
         }
     }
 
-    /// Follow the model, except where the user is dragging or typing.
+    /// Follow the model; a scrub or an edit in progress keeps its value.
     fn sync(&mut self, value: &ParamValue, window: &mut Window, cx: &mut App) {
         if self.shown.as_ref() == Some(value) {
             return;
         }
+        self.shown = Some(value.clone());
         let parts: Vec<f64> = match value {
             ParamValue::List(v) => v.clone(),
             other => other.as_f64().into_iter().collect(),
         };
-        if self.numbers.iter().any(|n| n.dragging) {
-            return;
-        }
-        self.shown = Some(value.clone());
-        for (n, v) in self.numbers.iter_mut().zip(&parts) {
-            if let Some(slider) = &n.slider {
-                slider.update(cx, |s, cx| s.set_value(*v as f32, window, cx));
-            }
-            if !n.typing {
-                let t = format_value(*v as f32, n.decimals);
-                n.field.update(cx, |f, cx| f.set_value(t, window, cx));
-            }
+        for (n, v) in self.numbers.iter().zip(&parts) {
+            n.update(cx, |n, cx| n.set_value(*v, cx));
         }
         if let Some(color) = &self.color {
             let c = to_hsla(Some(&parts));
-            color.update(cx, |s, cx| s.set_value(c, window, cx));
+            color.update(cx, |s, cx| {
+                if s.value() != Some(c) {
+                    s.set_value(c, window, cx);
+                }
+            });
         }
         if let (Some(text), Some(t)) = (&self.text, value.as_text()) {
             let editing = text.read(cx).focus_handle(cx).is_focused(window);
@@ -366,8 +348,8 @@ fn to_hsla(rgba: Option<&[f64]>) -> Hsla {
     .into()
 }
 
-/// A number field, with a slider when `range` is given. `part` is the
-/// component of a Point.
+/// A number field, clamped to `range` when given. `part` is the component
+/// of a Point.
 fn number(
     key: &ControlKey,
     part: usize,
@@ -376,86 +358,34 @@ fn number(
     window: &mut Window,
     cx: &mut Context<InspectorPanel>,
     subs: &mut Vec<Subscription>,
-) -> Number {
+) -> Entity<NumberFieldState> {
     let (min, max, int) = range.unwrap_or((0.0, 1.0, false));
     let (decimals, step) = precision(min, max, int);
-    let slider = range.map(|_| {
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(min as f32)
-                .max(max as f32)
-                .step(step as f32)
-                .default_value(value as f32)
-        });
-        let k = key.clone();
-        subs.push(cx.subscribe_in(
-            &slider,
-            window,
-            move |this, _, ev: &SliderEvent, window, cx| match ev {
-                SliderEvent::Change(v) => {
-                    let v = v.start() as f64;
-                    if let Some(n) = this.number_mut(&k, part) {
-                        n.dragging = true;
-                        let t = format_value(v as f32, n.decimals);
-                        n.field.update(cx, |f, cx| f.set_value(t, window, cx));
-                    }
-                    let value = this.with_part(&k, part, v);
-                    this.set_fx_param(&k, value, true, cx);
-                }
-                SliderEvent::Release(v) => {
-                    if let Some(n) = this.number_mut(&k, part) {
-                        n.dragging = false;
-                    }
-                    let value = this.with_part(&k, part, v.start() as f64);
-                    this.set_fx_param(&k, value, false, cx);
-                }
-            },
-        ));
-        slider
+    let field = cx.new(|cx| {
+        let field = NumberFieldState::new(window, cx)
+            .step(step)
+            .decimals(decimals)
+            .default_value(value);
+        match range {
+            Some(_) => field.min(min).max(max),
+            None => field,
+        }
     });
-    let field = cx
-        .new(|cx| InputState::new(window, cx).default_value(format_value(value as f32, decimals)));
     let k = key.clone();
-    subs.push(cx.subscribe_in(
-        &field,
-        window,
-        move |this, input, ev: &InputEvent, _, cx| {
-            if let Some(n) = this.number_mut(&k, part) {
-                n.typing = matches!(ev, InputEvent::Change);
-            }
-            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let Ok(v) = input.read(cx).value().trim().parse::<f64>() else {
-                    this.invalidate_control(&k);
-                    cx.notify();
-                    return;
-                };
-                let v = if range.is_some() {
-                    v.clamp(min, max)
-                } else {
-                    v
-                };
-                let value = this.with_part(&k, part, v);
-                let current = this.fx_controls.get(&k).and_then(|c| c.shown.clone());
-                if current.as_ref() != Some(&value) {
-                    this.set_fx_param(&k, value, false, cx);
-                }
-            }
-        },
-    ));
-    Number {
-        slider,
-        field,
-        decimals,
-        dragging: false,
-        typing: false,
-    }
+    subs.push(
+        cx.subscribe(&field, move |this, _, ev: &NumberFieldEvent, cx| {
+            let (v, live) = match *ev {
+                NumberFieldEvent::Change(v) => (v, true),
+                NumberFieldEvent::Commit(v) => (v, false),
+            };
+            let value = this.with_part(&k, part, v);
+            this.set_fx_param(&k, value, live, cx);
+        }),
+    );
+    field
 }
 
 impl InspectorPanel {
-    fn number_mut(&mut self, key: &ControlKey, part: usize) -> Option<&mut Number> {
-        self.fx_controls.get_mut(key)?.numbers.get_mut(part)
-    }
-
     fn invalidate_control(&mut self, key: &ControlKey) {
         if let Some(c) = self.fx_controls.get_mut(key) {
             c.shown = None;
@@ -541,158 +471,159 @@ impl InspectorPanel {
             owner: target.owner.clone(),
             param: spec.name.clone(),
         };
-        let control = match self.fx_controls.entry(key.clone()) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(Control::new(&key, spec, &value, window, cx))
-            }
-        };
-        control.sync(&value, window, cx);
+        self.fx_controls
+            .entry(key.clone())
+            .or_insert_with(|| Control::new(&key, spec, &value, window, cx))
+            .sync(&value, window, cx);
         let control = &self.fx_controls[&key];
-        let muted = cx.theme().muted_foreground;
         let id = format!("{:?}-{}", key.owner, key.param);
-        let reset = (key.clone(), spec.default.clone());
-        let label = div()
-            .id(SharedString::from(format!("label-{id}")))
-            .w(px(64.))
-            .flex_none()
-            .text_xs()
-            .text_color(muted)
-            .truncate()
-            .child(spec.label().to_owned())
-            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                if ev.click_count() >= 2 {
-                    this.set_fx_param(&reset.0, reset.1.clone(), false, cx);
-                }
-            }));
         let keyable = !matches!(
             spec.kind,
             ParamKind::Text | ParamKind::Choice { .. } | ParamKind::Image
         );
-        let keys = self.fx_key_nav(target, &spec.name, &value, keyable, cx);
-        let row = h_flex().min_h(px(28.)).gap_2().child(label);
-        let entity = cx.entity();
+        let keyed = target.keyed_at(&spec.name).is_some();
+        let lane = keyable.then(|| self.fx_key_nav(target, &spec.name, &value, cx));
+        let panel = cx.entity();
+        let reset = {
+            let (panel, key, default) = (panel.downgrade(), key.clone(), spec.default.clone());
+            move |_: &mut Window, cx: &mut App| {
+                let _ = panel.update(cx, |this, cx| {
+                    this.set_fx_param(&key, default.clone(), false, cx)
+                });
+            }
+        };
+        let name = spec.label().to_owned();
         match &spec.kind {
             ParamKind::Float { .. } | ParamKind::Int { .. } => {
                 let n = &control.numbers[0];
-                row.children(
-                    n.slider
-                        .as_ref()
-                        .map(|s| div().flex_1().min_w_0().child(Slider::new(s).w_full())),
+                row(
+                    ScrubLabel::new(n, name).keyed(keyed).on_reset(reset),
+                    NumberField::new(n).keyed(keyed),
+                    lane,
                 )
-                .child(
-                    div()
-                        .w(px(56.))
-                        .flex_none()
-                        .child(Input::new(&n.field).xsmall()),
-                )
-                .child(keys)
                 .into_any_element()
             }
-            ParamKind::Point => row
-                .children(control.numbers.iter().map(|n| {
+            ParamKind::Point => {
+                let fields = control.numbers.iter().zip(["X", "Y"]).map(|(n, axis)| {
                     div()
+                        .relative()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(&n.field).xsmall())
-                }))
-                .child(keys)
-                .into_any_element(),
+                        .child(NumberField::new(n).keyed(keyed).pl(px(18.)))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(6.))
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .occlude()
+                                .child(ScrubLabel::new(n, axis).keyed(keyed)),
+                        )
+                });
+                row(label(name), h_flex().gap(px(4.)).children(fields), lane).into_any_element()
+            }
             ParamKind::Bool => {
                 let on = value.as_bool().unwrap_or(false);
                 let k = key.clone();
-                row.child(
-                    div().flex_1().child(
-                        Switch::new(SharedString::from(format!("switch-{id}")))
-                            .small()
-                            .checked(on)
-                            .on_click(move |v, _, cx| {
-                                let v = *v;
-                                entity.update(cx, |this, cx| {
-                                    this.set_fx_param(&k, ParamValue::Bool(v), false, cx)
-                                })
-                            }),
-                    ),
+                row(
+                    label(name),
+                    Switch::new(SharedString::from(format!("switch-{id}")))
+                        .checked(on)
+                        .on_click(move |v, _, cx| {
+                            let v = *v;
+                            panel.update(cx, |this, cx| {
+                                this.set_fx_param(&k, ParamValue::Bool(v), false, cx)
+                            })
+                        }),
+                    lane,
                 )
-                .child(keys)
                 .into_any_element()
             }
-            ParamKind::Color => row
-                .child(
-                    div()
-                        .flex_1()
-                        .children(control.color.as_ref().map(|c| ColorPicker::new(c).small())),
-                )
-                .child(keys)
-                .into_any_element(),
+            ParamKind::Color => row(
+                label(name),
+                div().children(
+                    control
+                        .color
+                        .as_ref()
+                        .map(|c| ColorField::new(SharedString::from(format!("color-{id}")), c)),
+                ),
+                lane,
+            )
+            .into_any_element(),
             ParamKind::Text => v_flex()
-                .gap_1()
-                .child(row.child(div().flex_1()).child(keys))
-                .children(control.text.as_ref().map(|t| Textarea::new(t).small()))
+                .child(row(label(name), div(), None))
+                .children(control.text.as_ref().map(|t| {
+                    div()
+                        .pl(px(22.))
+                        .pr(px(10.))
+                        .pb(px(4.))
+                        .child(Textarea::new(t).small())
+                }))
                 .into_any_element(),
             ParamKind::Choice { options } => {
                 let current = value.as_text().unwrap_or_default().to_owned();
                 let options = options.clone();
                 let picked = current.clone();
-                row.child(
-                    div().flex_1().min_w_0().child(
-                        Button::new(SharedString::from(format!("choice-{id}")))
-                            .outline()
-                            .xsmall()
-                            .w_full()
-                            .label(current)
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for option in &options {
-                                    let (entity, k, o) =
-                                        (entity.clone(), key.clone(), option.clone());
-                                    menu = menu.item(
-                                        PopupMenuItem::new(option.clone())
-                                            .checked(*option == picked)
-                                            .on_click(move |_, _, cx| {
-                                                entity.update(cx, |this, cx| {
-                                                    this.set_fx_param(
-                                                        &k,
-                                                        ParamValue::Text(o.clone()),
-                                                        false,
-                                                        cx,
-                                                    )
-                                                })
-                                            }),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
+                row(
+                    label(name),
+                    select_field(SharedString::from(format!("choice-{id}")), current)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for option in &options {
+                                let (panel, k, o) = (panel.clone(), key.clone(), option.clone());
+                                menu = menu.item(
+                                    PopupMenuItem::new(option.clone())
+                                        .checked(*option == picked)
+                                        .on_click(move |_, _, cx| {
+                                            panel.update(cx, |this, cx| {
+                                                this.set_fx_param(
+                                                    &k,
+                                                    ParamValue::Text(o.clone()),
+                                                    false,
+                                                    cx,
+                                                )
+                                            })
+                                        }),
+                                );
+                            }
+                            menu
+                        }),
+                    None,
                 )
-                .child(keys)
                 .into_any_element()
             }
             ParamKind::Image => {
                 let path = value.as_text().unwrap_or_default().to_owned();
-                let name = std::path::Path::new(&path)
+                let file = std::path::Path::new(&path)
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                    .map(|n| n.to_string_lossy().into_owned());
                 let k = key.clone();
-                row.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xs()
-                        .truncate()
-                        .when(name.is_empty(), |d| d.text_color(muted).child("—"))
-                        .child(name),
+                row(
+                    label(name),
+                    h_flex()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(if file.is_some() { t::T1 } else { t::T3 })
+                                .child(file.unwrap_or_else(|| "\u{2014}".into())),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("image-{id}")))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::FolderOpen)
+                                .tooltip("Choose image")
+                                .on_click(move |_, _, cx| {
+                                    panel.update(cx, |this, cx| this.choose_image(&k, cx))
+                                }),
+                        ),
+                    None,
                 )
-                .child(
-                    Button::new(SharedString::from(format!("image-{id}")))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::FolderOpen)
-                        .tooltip("Choose image")
-                        .on_click(cx.listener(move |this, _, _, cx| this.choose_image(&k, cx))),
-                )
-                .child(keys)
                 .into_any_element()
             }
         }
@@ -718,120 +649,79 @@ impl InspectorPanel {
         .detach();
     }
 
-    /// Previous keyframe, add/remove at the playhead, next keyframe. The
-    /// arrows show only on animated parameters; space is kept so rows align.
+    /// Previous keyframe, add or remove one at the playhead, next keyframe.
     fn fx_key_nav(
         &self,
         target: &FxTarget,
         param: &str,
         value: &ParamValue,
-        keyable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let (primary, muted, hover) =
-            (theme.primary, theme.muted_foreground, theme.secondary_hover);
-        let group = h_flex().flex_none().w(px(42.)).justify_end();
-        if !keyable {
-            return group.into_any_element();
-        }
         let keyed = target.keyed_at(param);
-        let animated = target.animated(param);
-        let inside = target.inside;
-        let color = if animated { primary } else { muted };
-        let id = format!("{:?}-{param}", target.owner);
+        let state = match (keyed, target.animated(param)) {
+            (Some(_), _) => Keyframe::On,
+            (None, true) => Keyframe::Off,
+            (None, false) => Keyframe::None,
+        };
         let (clip, effect, origin) = (target.owner.clip(), target.instance.id, target.origin);
-        let times: Vec<Time> = {
-            let mut t: Vec<Time> = target
-                .instance
-                .keyframes
-                .iter()
-                .filter(|k| k.param == param)
-                .map(|k| k.at)
-                .collect();
-            t.sort();
-            t
-        };
-        let prev = times
+        let mut times: Vec<Time> = target
+            .instance
+            .keyframes
             .iter()
-            .rev()
-            .find(|t| **t < target.at - Time(target.frame.0 / 2))
-            .copied();
-        let next = times
-            .iter()
-            .find(|t| **t > target.at + Time(target.frame.0 / 2))
-            .copied();
-        let arrow = |name: &str, glyph: IconName, to: Option<Time>, cx: &mut Context<Self>| {
-            div()
-                .id(SharedString::from(format!("{name}-{id}")))
-                .w(px(12.))
-                .h(px(18.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(muted)
-                .when(!animated, |d| d.invisible())
-                .when(to.is_none(), |d| d.opacity(0.35))
-                .when_some(to, |d, to| {
-                    d.cursor_pointer()
-                        .hover(|s| s.text_color(primary))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.seek(origin + to, cx));
-                        }))
-                })
-                .child(gpui_kit::component::Icon::new(glyph).xsmall())
+            .filter(|k| k.param == param)
+            .map(|k| k.at)
+            .collect();
+        times.sort();
+        let half = Time(target.frame.0 / 2);
+        let prev = times.iter().rev().find(|t| **t < target.at - half).copied();
+        let next = times.iter().find(|t| **t > target.at + half).copied();
+        let panel = cx.entity();
+        let seek = |to: Option<Time>| {
+            let panel = panel.clone();
+            to.map(|to| {
+                move |_: &mut Window, cx: &mut App| {
+                    panel.update(cx, |this, cx| {
+                        this.state.update(cx, |s, cx| s.seek(origin + to, cx))
+                    })
+                }
+            })
         };
+        let (prev, next) = (seek(prev), seek(next));
         let (param_name, value) = (param.to_owned(), value.clone());
-        let diamond = div()
-            .id(SharedString::from(format!("kf-{id}")))
-            .flex_none()
-            .size(px(18.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .when(inside, |d| d.cursor_pointer().hover(|s| s.bg(hover)))
-            .when(!inside, |d| d.opacity(0.4))
-            .child(
-                div()
-                    .size(px(7.))
-                    .rounded(px(1.5))
-                    .border_1()
-                    .border_color(color)
-                    .when(keyed.is_some(), |d| d.bg(color)),
-            )
-            .tooltip(|window, cx| Tooltip::new("Keyframe").build(window, cx))
-            .when(inside, |d| {
-                d.on_click(cx.listener(move |this, _, _, cx| {
-                    let command = match keyed {
-                        Some(at) => Command::RemoveEffectKeyframe {
+        KeyframeNav::new(
+            SharedString::from(format!("kf-{:?}-{param}", target.owner)),
+            state,
+        )
+        .disabled(!target.inside)
+        .on_toggle(move |_, cx| {
+            panel.update(cx, |this, cx| {
+                let command = match keyed {
+                    Some(at) => Command::RemoveEffectKeyframe {
+                        clip,
+                        effect,
+                        param: param_name.clone(),
+                        at: origin + at,
+                    },
+                    None => {
+                        let Some(t) = this.fx_target_by_clip(clip, effect, cx) else {
+                            return;
+                        };
+                        Command::SetEffectKeyframe {
                             clip,
                             effect,
                             param: param_name.clone(),
-                            at: origin + at,
-                        },
-                        None => {
-                            let Some(t) = this.fx_target_by_clip(clip, effect, cx) else {
-                                return;
-                            };
-                            Command::SetEffectKeyframe {
-                                clip,
-                                effect,
-                                param: param_name.clone(),
-                                at: t.origin + t.at,
-                                value: value.clone(),
-                                ease: Default::default(),
-                            }
+                            at: t.origin + t.at,
+                            value: value.clone(),
+                            ease: Default::default(),
                         }
-                    };
-                    this.run(vec![command], "keyframe", cx);
-                }))
-            });
-        group
-            .child(arrow("prev", IconName::ChevronLeft, prev, cx))
-            .child(diamond)
-            .child(arrow("next", IconName::ChevronRight, next, cx))
-            .into_any_element()
+                    }
+                };
+                this.run(vec![command], "keyframe", cx);
+            })
+        })
+        .when_some(prev, |nav, f| nav.on_prev(f))
+        .when_some(next, |nav, f| nav.on_next(f))
+        .into_any_element()
     }
 
     /// Re-resolve an instance by its id at click time (the playhead may have

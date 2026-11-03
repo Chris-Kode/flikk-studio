@@ -55,6 +55,17 @@ fn main() {
                 ))),
                 ..Default::default()
             };
+            // On macOS the title bar is the app's own, window buttons included.
+            #[cfg(target_os = "macos")]
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.), px(13.))),
+                }),
+                app_owns_titlebar_drag: true,
+                ..options
+            };
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| app::KooEditor::new(window, cx))
             })

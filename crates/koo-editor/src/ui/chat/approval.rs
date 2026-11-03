@@ -1,20 +1,15 @@
 //! Approval cards (PRD: project/memory and deliver tools ask first), above
-//! the composer: one line per request with Approve / Deny, then what came of
-//! it in place of the buttons until the user's next message. A voice to be
+//! the composer: one row per request with Deny / Approve, then what came of
+//! it in its place until the user's next message. A voice to be
 //! added or read with plays from its card; approving a voice design opens
 //! the Voices dialog, where the user hears the takes and keeps one.
 
 use super::ChatPanel;
 use crate::state::voices::{VoiceSample, approval_voice};
 use crate::state::{ApprovalOutcome, EditorState};
+use crate::ui::kit::{Button, Icon, IconName, Progress, Spinner, Tooltip, h_flex, theme as t};
 use crate::ui::media_pool::listen_button;
-use crate::ui::timeline::glyph::{Glyph, glyph};
 use crate::ui::voices::{self, OnKept, Start};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_agent::PendingApproval;
 use koo_agent::tools::ApprovalRequest;
@@ -37,28 +32,22 @@ impl ChatPanel {
             .collect();
         cards
             .iter()
-            .map(|(p, o)| self.render_approval(p, o.as_ref(), cx))
+            .map(|(p, o)| match o {
+                None => self.render_approval(p, cx),
+                Some(o) => settled(p, o, self.state.read(cx)),
+            })
             .collect()
     }
 
-    fn render_approval(
-        &self,
-        approval: &PendingApproval,
-        outcome: Option<&ApprovalOutcome>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// A request waiting on the user: what it does, Deny and Approve.
+    fn render_approval(&self, approval: &PendingApproval, cx: &mut Context<Self>) -> AnyElement {
         let id = approval.id;
         let request = &approval.request;
         let summary: SharedString = request.summary.clone().into();
-        let icon = match request.category {
-            ToolCategory::Deliver => IconName::File,
-            ToolCategory::Generate => IconName::Mic,
-            _ => IconName::BookOpen,
-        };
         let approve = Button::new(("approve", id as usize))
             .label("Approve")
-            .xsmall()
-            .primary();
+            .primary()
+            .small();
         let approve =
             if request.tool == "design_voice" {
                 let args = request.args.clone();
@@ -70,58 +59,33 @@ impl ChatPanel {
                     this.state.update(cx, |s, cx| s.approve(id, cx))
                 }))
             };
-        let trailing = match outcome {
-            None => h_flex()
-                .flex_none()
-                .gap_1()
-                .children(self.sample_button(request, id, cx))
-                .child(
-                    Button::new(("deny", id as usize))
-                        .label("Deny")
-                        .xsmall()
-                        .ghost()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.deny_approval(id, cx))
-                        })),
-                )
-                .child(approve)
-                .into_any_element(),
-            Some(outcome) => outcome_line(id, outcome, self.state.read(cx), cx),
-        };
-        let theme = cx.theme();
-        h_flex()
-            .mx_2()
-            .mt_1()
-            .min_h(px(36.))
-            .pl_3()
-            .pr_1p5()
-            .py_1()
-            .gap_2()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary.opacity(0.4))
-            .text_xs()
-            .child(
-                Icon::new(icon)
-                    .size_3p5()
-                    .flex_none()
-                    .text_color(theme.muted_foreground),
-            )
+        let leading = self.sample_button(request, id, cx).unwrap_or_else(|| {
+            Icon::new(category_icon(request))
+                .color(t::T2)
+                .into_any_element()
+        });
+        card(("approval", id as usize))
+            .border_color(t::LN)
+            .child(leading)
             .child(
                 div()
-                    .id(("approval", id as usize))
+                    .id(("approval-text", id as usize))
                     .flex_1()
                     .min_w_0()
-                    .map(|el| match outcome {
-                        // Readable in full before deciding.
-                        None => el.line_clamp(2),
-                        Some(_) => el.truncate().text_color(theme.muted_foreground),
-                    })
+                    // Readable in full before deciding.
+                    .line_clamp(2)
                     .child(summary.clone())
-                    .tooltip(move |window, cx| Tooltip::new(summary.clone()).build(window, cx)),
+                    .tooltip(Tooltip::text(summary)),
             )
-            .child(trailing)
+            .child(
+                Button::new(("deny", id as usize))
+                    .label("Deny")
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.deny_approval(id, cx))
+                    })),
+            )
+            .child(approve)
             .into_any_element()
     }
 
@@ -140,16 +104,16 @@ impl ChatPanel {
                 listen_button(key, &self.state, &item, cx).into_any_element()
             }
             VoiceSample::Fetching => h_flex()
-                .size(px(22.))
                 .flex_none()
+                .size(px(22.))
                 .justify_center()
-                .child(Spinner::new().xsmall())
+                .child(Spinner::new().color(t::T2))
                 .into_any_element(),
             VoiceSample::Remote(voice) => Button::new(key)
                 .ghost()
-                .xsmall()
+                .small()
+                .icon(IconName::Play)
                 .tooltip("Play")
-                .child(glyph(Glyph::Play, px(13.), cx.theme().foreground))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let voice = voice.clone();
                     this.state.update(cx, |s, cx| s.hear_voice(voice, cx))
@@ -213,58 +177,108 @@ fn rendering(state: &EditorState) -> bool {
     })
 }
 
-fn outcome_line(id: u64, outcome: &ApprovalOutcome, state: &EditorState, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let (muted, green, red) = (theme.muted_foreground, theme.green, theme.red);
-    let line = |icon: Option<IconName>, color: Hsla, text: String| {
-        h_flex()
-            .flex_none()
-            .max_w(px(180.))
-            .h(px(24.))
-            .px_1p5()
-            .gap_1p5()
-            .text_xs()
-            .text_color(color)
-            .children(icon.map(|i| Icon::new(i).size_3p5().flex_none()))
-            .child(div().min_w_0().truncate().child(text))
+/// The 36 px row an approval sits in.
+fn card(id: impl Into<ElementId>) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .flex_none()
+        .min_h(px(36.))
+        .pl(px(10.))
+        .pr(px(6.))
+        .py(px(4.))
+        .gap(px(8.))
+        .rounded(t::RADIUS)
+        .border_1()
+        .bg(t::R1)
+}
+
+fn category_icon(request: &ApprovalRequest) -> IconName {
+    match request.category {
+        ToolCategory::Deliver => IconName::Clapperboard,
+        ToolCategory::Generate => IconName::Mic,
+        _ => IconName::BookOpen,
+    }
+}
+
+/// A request the user answered: what came of it, until their next message.
+/// The request itself is in the tooltip.
+fn settled(
+    approval: &PendingApproval,
+    outcome: &ApprovalOutcome,
+    state: &EditorState,
+) -> AnyElement {
+    let id = approval.id as usize;
+    let summary: SharedString = approval.request.summary.clone().into();
+    let icon = category_icon(&approval.request);
+    let row = card(("approval", id))
+        .border_color(t::LN)
+        .text_color(t::T2)
+        .tooltip(Tooltip::text(summary.clone()));
+    let text = |text: SharedString| div().flex_1().min_w_0().truncate().child(text);
+    let done = |label: String| {
+        card(("approval", id))
+            .border_color(t::LN)
+            .tooltip(Tooltip::text(summary.clone()))
+            .child(Icon::new(IconName::CircleCheck).color(t::OK))
+            .child(text(label.into()))
             .into_any_element()
     };
     let failed = |message: String| {
-        let tip: SharedString = message.into();
-        h_flex()
-            .id(("approval-error", id as usize))
-            .flex_none()
-            .h(px(24.))
-            .px_1p5()
-            .gap_1p5()
-            .text_xs()
-            .text_color(red)
-            .child(Icon::new(IconName::CircleAlert).size_3p5())
-            .child("Failed")
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        card(("approval", id))
+            .border_color(t::alpha(t::ERR, 0.25))
+            .text_color(t::ERR)
+            .tooltip(Tooltip::text(message.clone()))
+            .child(Icon::new(IconName::CircleAlert))
+            .child(text(format!("Failed · {message}").into()))
+            .into_any_element()
+    };
+    let note = |icon: IconName, label: &'static str| {
+        row.child(Icon::new(icon))
+            .child(text(label.into()))
             .into_any_element()
     };
     match outcome {
-        ApprovalOutcome::Working => h_flex()
-            .flex_none()
-            .px_1p5()
-            .child(Spinner::new().xsmall())
+        ApprovalOutcome::Working => card(("approval", id))
+            .border_color(t::LN)
+            .child(Icon::new(icon).color(t::T2))
+            .child(text(summary.clone()).text_color(t::T2))
+            .child(Spinner::new().color(t::T2))
             .into_any_element(),
-        ApprovalOutcome::Done(text) => line(Some(IconName::CircleCheck), green, text.clone()),
-        ApprovalOutcome::Denied => line(None, muted, "Denied".into()),
+        ApprovalOutcome::Done(label) => done(label.clone()),
+        ApprovalOutcome::Denied => note(IconName::CircleX, "Denied"),
         ApprovalOutcome::Failed(message) => failed(message.clone()),
         ApprovalOutcome::Rendering { job, file } => match state.render_job(*job).map(|j| j.state) {
-            Some(RenderState::Queued) => line(None, muted, "Queued".into()),
-            Some(RenderState::Running { fraction }) => line(
-                None,
-                muted,
-                format!("Rendering {:.0}%", (fraction * 100.0).clamp(0.0, 100.0)),
-            ),
+            Some(RenderState::Queued) => card(("approval", id))
+                .border_color(t::LN)
+                .text_color(t::T2)
+                .child(Icon::new(icon))
+                .child(div().flex_none().child("Queued"))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Progress::new().indeterminate().h(px(3.))),
+                )
+                .into_any_element(),
+            Some(RenderState::Running { fraction }) => card(("approval", id))
+                .border_color(t::LN)
+                .text_color(t::T2)
+                .child(Icon::new(icon))
+                .child(
+                    h_flex().flex_none().gap(px(4.)).child("Rendering").child(
+                        div()
+                            .font_family(t::mono())
+                            .child(format!("{:.0}%", (fraction * 100.0).clamp(0.0, 100.0))),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Progress::new().value(fraction).h(px(3.))),
+                )
+                .into_any_element(),
             Some(RenderState::Failed { message }) => failed(message),
-            Some(RenderState::Canceled) => line(None, muted, "Canceled".into()),
-            Some(RenderState::Done) | None => {
-                line(Some(IconName::CircleCheck), green, file.clone())
-            }
+            Some(RenderState::Canceled) => note(IconName::CircleX, "Canceled"),
+            Some(RenderState::Done) | None => done(file.clone()),
         },
     }
 }

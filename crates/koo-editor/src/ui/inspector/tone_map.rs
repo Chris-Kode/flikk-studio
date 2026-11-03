@@ -1,14 +1,11 @@
 //! HDR tone mapping of the selected clips' media (`koo_core::hdr`): Auto or
 //! Off, exposure and the source peak, through `Command::SetToneMap`.
 
-use super::{InspectorPanel, section_with};
+use super::{InspectorPanel, group, label, row};
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderScale, SliderState};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{Button, IconName, Segmented, Slider, Tooltip};
+use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState};
 use gpui_kit::*;
 use koo_core::MediaId;
 use koo_core::command::Command;
@@ -172,39 +169,33 @@ impl InspectorPanel {
         ui.update(cx, |ui, cx| ui.sync(ids, &item, window, cx));
         let tm = item.tone_map.clone();
         let auto = tm.mode == ToneMapMode::Auto;
-        let muted = cx.theme().muted_foreground;
-        let row = |label: &'static str, control: AnyElement, value: Option<String>| {
-            h_flex()
-                .h(px(28.))
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_none()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().child(control))
-                .when_some(value, |row, value| {
-                    row.child(
-                        div()
-                            .w(px(48.))
-                            .flex_none()
-                            .text_xs()
-                            .text_right()
-                            .text_color(muted)
-                            .child(value),
-                    )
-                })
-        };
         let (mode_ui, reset_ui) = (ui.clone(), ui.clone());
-        let mode = TabBar::new("tone-map-mode")
-            .segmented()
+        let reset = Button::new("tone-map-reset")
+            .ghost()
             .xsmall()
-            .selected_index(if auto { 0 } else { 1 })
-            .child(Tab::new().label("Auto"))
-            .child(Tab::new().label("Off"))
+            .icon(IconName::RotateCcw)
+            .tooltip("Reset")
+            .disabled(tm.is_default())
+            .on_click(move |_, _, cx| {
+                reset_ui.update(cx, |ui, cx| ui.commit(|tm| *tm = ToneMap::default(), cx))
+            });
+        let header = self.header("hdr", "HDR", cx).child(reset);
+        if !self.is_open("hdr") {
+            return Some(group(header, Vec::<Div>::new()).into_any_element());
+        }
+        let readout = |value: String| {
+            div()
+                .font_family(t::mono())
+                .text_size(px(11.))
+                .text_color(t::T2)
+                .child(value)
+                .into_any_element()
+        };
+        let mode = Segmented::new("tone-map-mode")
+            .compact()
+            .fill()
+            .items(["Auto", "Off"])
+            .selected(if auto { 0 } else { 1 })
             .on_click(move |ix, _, cx| {
                 let mode = if *ix == 0 {
                     ToneMapMode::Auto
@@ -213,15 +204,6 @@ impl InspectorPanel {
                 };
                 mode_ui.update(cx, |ui, cx| ui.commit(|tm| tm.mode = mode, cx));
             });
-        let reset = Button::new("tone-map-reset")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Undo2)
-            .tooltip("Reset")
-            .disabled(tm.is_default())
-            .on_click(move |_, _, cx| {
-                reset_ui.update(cx, |ui, cx| ui.commit(|tm| *tm = ToneMap::default(), cx))
-            });
         let (exposure, peak) = {
             let ui = ui.read(cx);
             (ui.exposure.clone(), ui.peak.clone())
@@ -229,27 +211,31 @@ impl InspectorPanel {
         let shown_exposure = exposure.read(cx).value().start();
         let shown_peak = peak.read(cx).value().start();
         let title = hdr::hdr_of(&item).map_or("HDR".to_string(), |h| h.describe());
-        Some(
-            section_with("HDR", reset, cx)
-                .child(
-                    div()
-                        .id("tone-map-source")
-                        .child(row("Tone map", mode.into_any_element(), None))
-                        .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx)),
-                )
-                .when(auto, |s| {
-                    s.child(row(
-                        "Exposure",
-                        Slider::new(&exposure).w_full().into_any_element(),
-                        Some(format!("{shown_exposure:+.1}")),
-                    ))
-                    .child(row(
-                        "Peak",
-                        Slider::new(&peak).w_full().into_any_element(),
-                        Some(format!("{shown_peak:.0}")),
-                    ))
-                })
+        let mut rows = vec![
+            div()
+                .id("tone-map-source")
+                .child(row(label("Tone map"), mode, None))
+                .tooltip(Tooltip::text(title))
                 .into_any_element(),
-        )
+        ];
+        if auto {
+            rows.push(
+                row(
+                    label("Exposure"),
+                    Slider::new(&exposure),
+                    Some(readout(format!("{shown_exposure:+.1}"))),
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                row(
+                    label("Peak"),
+                    Slider::new(&peak),
+                    Some(readout(format!("{shown_peak:.0}"))),
+                )
+                .into_any_element(),
+            );
+        }
+        Some(group(header, rows).into_any_element())
     }
 }

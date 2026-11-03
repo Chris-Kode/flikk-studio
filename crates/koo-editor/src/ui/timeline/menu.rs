@@ -1,12 +1,15 @@
 //! Right-click menus on clips, transitions, lanes and the ruler, and the
-//! small Change Speed / Rename popups they open.
+//! Change speed / Rename / Fit to duration popovers they open.
 
-use super::{MenuTarget, TimelinePanel, refs, transition_of};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use super::{
+    DeleteSelection, MenuTarget, PasteClips, RippleDeleteSelection, TimelinePanel, ToggleEnabled,
+    refs, transition_of,
+};
+use crate::ui::kit::{
+    Button, IconName, Input, PopoverPanel, PopupMenu, PopupMenuItem, Switch, h_flex, popover,
+    theme as t,
+};
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::ClipId;
@@ -127,59 +130,80 @@ impl TimelinePanel {
 
     pub(super) fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let popup = self.popup.as_ref()?;
-        let theme = cx.theme();
-        let speed = match popup.kind {
-            PopupKind::Speed { ripple } => Some(ripple),
-            PopupKind::Rename | PopupKind::FitDuration => None,
+        let (title, field) = match popup.kind {
+            PopupKind::Speed { .. } => ("Change speed", Some("Speed")),
+            PopupKind::Rename => ("Rename", None),
+            PopupKind::FitDuration => ("Fit to duration", Some("Duration")),
         };
-        let card = v_flex()
+        let input = Input::new(&popup.input)
+            .small()
+            .when(matches!(popup.kind, PopupKind::Speed { .. }), |i| {
+                i.suffix("%")
+            });
+        let row = |label: &'static str, control: AnyElement| {
+            h_flex()
+                .min_h(px(26.))
+                .gap(px(8.))
+                .child(
+                    div()
+                        .w(px(72.))
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(t::T2)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(control))
+        };
+        let panel = PopoverPanel::new(title)
+            .w(px(260.))
+            .on_close(cx.listener(|this, _, window, cx| this.close_popup(window, cx)))
+            .child(match field {
+                Some(label) => row(label, input.into_any_element()).into_any_element(),
+                None => input.into_any_element(),
+            })
+            .when_some(
+                match popup.kind {
+                    PopupKind::Speed { ripple } => Some(ripple),
+                    PopupKind::Rename | PopupKind::FitDuration => None,
+                },
+                |panel, ripple| {
+                    panel.child(row(
+                        "Ripple",
+                        Switch::new("speed-ripple")
+                            .checked(ripple)
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                if let Some(p) = &mut this.popup {
+                                    p.kind = PopupKind::Speed { ripple: *on };
+                                    cx.notify();
+                                }
+                            }))
+                            .into_any_element(),
+                    ))
+                },
+            )
+            .button(
+                Button::new("popup-cancel")
+                    .ghost()
+                    .label("Cancel")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_popup(window, cx))),
+            )
+            .button(
+                Button::new("popup-apply")
+                    .primary()
+                    .label("Apply")
+                    .kbd("Enter")
+                    .on_click(cx.listener(|this, _, window, cx| this.apply_popup(window, cx))),
+            );
+        let card = popover::surface()
             .id("clip-popup")
-            .w(px(if speed.is_some() { 180. } else { 220. }))
-            .p_2()
-            .gap_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
+            .occlude()
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_popup(window, cx)))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     this.close_popup(window, cx);
                 }
             }))
-            .child(
-                Input::new(&popup.input)
-                    .small()
-                    .when(speed.is_some(), |i| i.suffix("%")),
-            )
-            .when_some(speed, |el, ripple| {
-                el.child(
-                    h_flex()
-                        .justify_between()
-                        .child(
-                            Switch::new("speed-ripple")
-                                .small()
-                                .label("Ripple")
-                                .checked(ripple)
-                                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                                    if let Some(p) = &mut this.popup {
-                                        p.kind = PopupKind::Speed { ripple: *on };
-                                        cx.notify();
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new("speed-apply")
-                                .primary()
-                                .xsmall()
-                                .label("Apply")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.apply_popup(window, cx)),
-                                ),
-                        ),
-                )
-            });
+            .child(panel);
         Some(
             deferred(
                 anchored()
@@ -286,17 +310,32 @@ pub fn build(
             let colors = panel.clone();
             let toggle = panel.clone();
             let mention = panel.clone();
-            let menu = match sync {
-                Some(recorder) => sync_items(menu, panel, selected.clone(), recorder),
-                None => menu,
-            };
             let fit = panel.clone();
             let fit_duration = open(PopupKind::FitDuration);
             let menu = menu.item(
-                PopupMenuItem::new("Change Speed…")
-                    .disabled(locked || !media)
-                    .on_click(open(PopupKind::Speed { ripple: false })),
+                PopupMenuItem::new("Add to chat")
+                    .icon(IconName::MessageSquarePlus)
+                    .on_click(move |_, _, cx| {
+                        mention.update(cx, |this, cx| this.mention_selection(cx))
+                    }),
             );
+            let menu = in_out_item(menu, panel, in_out)
+                .separator()
+                .item(
+                    PopupMenuItem::new("Rename…")
+                        .icon(IconName::Pencil)
+                        .disabled(locked)
+                        .on_click(open(PopupKind::Rename)),
+                )
+                .submenu("Clip Color", window, cx, move |menu, _, _| {
+                    color_items(menu, &colors)
+                })
+                .item(
+                    PopupMenuItem::new("Change Speed…")
+                        .icon(IconName::Gauge)
+                        .disabled(locked || !media)
+                        .on_click(open(PopupKind::Speed { ripple: false })),
+                );
             let menu = if music {
                 menu.submenu("Fit To", window, cx, move |menu, _, _| {
                     fit_items(menu, &fit, id, locked, in_out, fit_duration.clone())
@@ -304,16 +343,20 @@ pub fn build(
             } else {
                 menu
             };
-            menu.submenu("Clip Color", window, cx, move |menu, _, _| {
-                color_items(menu, &colors)
-            })
-            .item(
-                PopupMenuItem::new("Rename…")
-                    .disabled(locked)
-                    .on_click(open(PopupKind::Rename)),
-            )
-            .item(
+            let menu = match sync {
+                Some(recorder) => sync_items(menu, panel, selected.clone(), recorder),
+                None => menu,
+            };
+            let ripple = panel.clone();
+            let remove = panel.clone();
+            menu.item(
                 PopupMenuItem::new(if enabled { "Disable" } else { "Enable" })
+                    .icon(if enabled {
+                        IconName::EyeOff
+                    } else {
+                        IconName::Eye
+                    })
+                    .action(Box::new(ToggleEnabled))
                     .disabled(locked)
                     .on_click(move |_, _, cx| {
                         let clips = selected.clone();
@@ -321,21 +364,37 @@ pub fn build(
                     }),
             )
             .separator()
-            .item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
-                mention.update(cx, |this, cx| this.mention_selection(cx))
-            }))
+            .item(
+                PopupMenuItem::new("Ripple delete")
+                    .action(Box::new(RippleDeleteSelection))
+                    .disabled(locked)
+                    .on_click(move |_, _, cx| {
+                        ripple.update(cx, |this, cx| this.delete_selection(true, cx))
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Delete")
+                    .icon(IconName::Trash)
+                    .action(Box::new(DeleteSelection))
+                    .destructive()
+                    .disabled(locked)
+                    .on_click(move |_, _, cx| {
+                        remove.update(cx, |this, cx| this.delete_selection(false, cx))
+                    }),
+            )
         }
         Content::Transition(owner, reference) => {
-            let mention = panel.clone();
             let remove = panel.clone();
-            menu.item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
-                remove.update(cx, |this, cx| this.remove_transition(owner, cx))
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
-                let r = reference.clone();
-                mention.update(cx, |this, cx| this.mention(vec![r], cx))
-            }))
+            mention_items(menu, panel, vec![reference], None)
+                .separator()
+                .item(
+                    PopupMenuItem::new("Delete")
+                        .icon(IconName::Trash)
+                        .destructive()
+                        .on_click(move |_, _, cx| {
+                            remove.update(cx, |this, cx| this.remove_transition(owner, cx))
+                        }),
+                )
         }
         Content::Lane {
             at,
@@ -343,14 +402,18 @@ pub fn build(
             in_out,
         } => {
             let paste = panel.clone();
-            let menu = menu.item(PopupMenuItem::new("Paste").disabled(!can_paste).on_click(
-                move |_, _, cx| {
-                    paste.update(cx, |this, cx| {
-                        this.state.update(cx, |s, cx| s.seek(at, cx));
-                        this.paste(cx);
-                    })
-                },
-            ));
+            let menu = menu.item(
+                PopupMenuItem::new("Paste")
+                    .icon(IconName::ClipboardPaste)
+                    .action(Box::new(PasteClips))
+                    .disabled(!can_paste)
+                    .on_click(move |_, _, cx| {
+                        paste.update(cx, |this, cx| {
+                            this.state.update(cx, |s, cx| s.seek(at, cx));
+                            this.paste(cx);
+                        })
+                    }),
+            );
             mention_items(menu.separator(), panel, vec![refs::time(at)], in_out)
         }
         Content::Ruler(first, in_out) => mention_items(menu, panel, vec![first], in_out),
@@ -375,13 +438,12 @@ fn sync_items(
             })
         })
     };
-    let menu = menu.item(item("Sync by Audio", false));
-    let menu = if recorder {
+    let menu = menu.item(item("Sync by Audio", false).icon(IconName::AudioWaveform));
+    if recorder {
         menu.item(item("Sync by Audio, Recorder Sound", true))
     } else {
         menu
-    };
-    menu.separator()
+    }
 }
 
 /// "Add to chat" for `refs`, plus the in/out range when one is marked.
@@ -392,10 +454,23 @@ fn mention_items(
     in_out: Option<koo_core::TimeRange>,
 ) -> PopupMenu {
     let mention = panel.clone();
-    let menu = menu.item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
-        let r = refs.clone();
-        mention.update(cx, |this, cx| this.mention(r, cx))
-    }));
+    let menu = menu.item(
+        PopupMenuItem::new("Add to chat")
+            .icon(IconName::MessageSquarePlus)
+            .on_click(move |_, _, cx| {
+                let r = refs.clone();
+                mention.update(cx, |this, cx| this.mention(r, cx))
+            }),
+    );
+    in_out_item(menu, panel, in_out)
+}
+
+/// "Add In/Out to chat" when a range is marked.
+fn in_out_item(
+    menu: PopupMenu,
+    panel: &Entity<TimelinePanel>,
+    in_out: Option<koo_core::TimeRange>,
+) -> PopupMenu {
     match in_out.filter(|r| !r.is_empty()) {
         Some(range) => {
             let mention = panel.clone();
@@ -452,9 +527,8 @@ fn color_items(menu: PopupMenu, panel: &Entity<TimelinePanel>) -> PopupMenu {
         menu.item(
             PopupMenuItem::element(move |_, _| {
                 h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().size(px(10.)).rounded_sm().bg(rgb(color.rgb())))
+                    .gap(px(8.))
+                    .child(div().size(px(10.)).rounded(px(3.)).bg(rgb(color.rgb())))
                     .child(color.label())
             })
             .on_click(move |_, _, cx| panel.update(cx, |this, cx| this.set_color(Some(color), cx))),

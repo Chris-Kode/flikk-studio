@@ -5,6 +5,7 @@
 
 pub mod badge;
 pub mod button;
+pub mod color;
 pub mod dialog;
 pub mod empty;
 pub mod icon;
@@ -26,6 +27,7 @@ pub mod toggle;
 pub mod tooltip;
 
 pub use button::{Button, Size, Variant};
+pub use color::ColorField;
 pub use dialog::{Dialog, DialogExt};
 pub use gpui_kit::base::{h_flex, v_flex};
 pub use icon::{Icon, IconName};
