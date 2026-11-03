@@ -410,13 +410,12 @@ impl KooEditor {
                 .fixed()
                 .child(self.chat.clone())
         });
+        // A group's `children` replaces its panels, so they go in at once.
         h_flex()
             .size_full()
             .child(
                 div().flex_1().min_w_0().h_full().child(
-                    h_resizable((id, open as usize))
-                        .children(panels)
-                        .children(chat),
+                    h_resizable((id, open as usize)).children(panels.into_iter().chain(chat)),
                 ),
             )
             .when(!open, |row| row.child(self.rail(cx)))
