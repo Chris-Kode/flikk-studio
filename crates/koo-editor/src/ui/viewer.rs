@@ -1438,16 +1438,16 @@ impl ViewerPanel {
         let rate = project.timeline.settings.rate;
         let playing = state.monitor_playing();
         let source = state.source_picture();
+        // Narrow viewers lose the duration first; the timecode stays whole.
         let timecode = h_flex()
             .flex_1()
-            .min_w_0()
             .items_baseline()
             .gap(px(10.))
-            .overflow_hidden()
             .whitespace_nowrap()
             .font_family(t::mono())
             .child(
                 div()
+                    .flex_none()
                     .text_size(px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t::T1)
@@ -1455,6 +1455,8 @@ impl ViewerPanel {
             )
             .child(
                 div()
+                    .min_w_0()
+                    .overflow_hidden()
                     .text_size(px(11.))
                     .text_color(t::T3)
                     .child(format!("/ {}", project.timeline.duration().timecode(rate))),

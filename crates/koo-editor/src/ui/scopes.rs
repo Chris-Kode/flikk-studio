@@ -319,17 +319,23 @@ impl ScopesPanel {
             .child(div().flex_1())
             .children((!narrow).then_some(readout))
             .children(zoom);
-        v_flex().flex_1().min_w_0().min_h_0().child(title).child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .rounded(t::RADIUS_SM)
-                .border_1()
-                .border_color(t::LN)
-                .bg(t::SCOPE)
-                .overflow_hidden()
-                .child(well(kind, scopes.images[kind].clone(), scopes.zoom)),
-        )
+        v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .child(title)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(t::RADIUS_SM)
+                    .border_1()
+                    .border_color(t::LN)
+                    .bg(t::SCOPE)
+                    .overflow_hidden()
+                    .child(well(kind, scopes.images[kind].clone(), scopes.zoom)),
+            )
     }
 }
 

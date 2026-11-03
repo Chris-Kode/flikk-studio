@@ -33,10 +33,12 @@ impl CaptionStylePanel {
                     .h(px(26.))
                     .gap(px(4.))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Select::new(&self.fonts).small()),
+                        div().flex_1().min_w_0().child(
+                            // A font that isn't installed still names itself.
+                            Select::new(&self.fonts)
+                                .small()
+                                .placeholder(style.font.clone()),
+                        ),
                     )
                     .child(
                         toggle(
