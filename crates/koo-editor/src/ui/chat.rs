@@ -314,7 +314,7 @@ impl ChatPanel {
                         div()
                             .id("chat-backend")
                             .flex_none()
-                            .child(Icon::new(IconName::Sparkles).size(px(13.)))
+                            .child(Icon::new(IconName::MessageSquareText).size(px(13.)))
                             .tooltip(Tooltip::text(backend)),
                     )
                     .child(div().flex_none().text_color(t::T1).child("Agent"))

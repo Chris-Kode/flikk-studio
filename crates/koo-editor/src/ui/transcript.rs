@@ -454,7 +454,7 @@ impl TranscriptPanel {
                 Button::new("transcript-add-to-chat")
                     .ghost()
                     .small()
-                    .icon(IconName::Sparkles)
+                    .icon(IconName::MessageSquarePlus)
                     .label("Add to chat")
                     .on_click(cx.listener(|this, _, _, cx| this.add_to_chat(cx))),
             )
@@ -528,7 +528,7 @@ impl TranscriptPanel {
                         ),
                     )
                     .item(
-                        PopupMenuItem::new(format!("Clone {name}’s Voice…")).on_click(
+                        PopupMenuItem::new(format!("Clone {name}’s voice…")).on_click(
                             move |_, window, cx| {
                                 p2.update(cx, |this, cx| this.speaker_voice(true, window, cx))
                             },

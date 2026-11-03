@@ -276,12 +276,12 @@ impl MediaPoolPanel {
             .aspect_ratio(16. / 9.)
             .rounded(t::RADIUS_SM)
             .overflow_hidden()
-            .bg(t::alpha(t::C, 0.1))
+            .bg(t::R1)
             .child(center)
             .child(
                 thumb_badge()
-                    .text_color(t::TI)
-                    .child(Icon::new(IconName::Sparkles).size(px(9.)))
+                    .text_color(t::T2)
+                    .child(Icon::new(IconName::AudioLines).size(px(9.)))
                     .child(g.request.capability().label()),
             )
             .child(

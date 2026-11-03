@@ -597,7 +597,7 @@ impl InspectorPanel {
         let reframe = Button::new("reframe")
             .ghost()
             .xsmall()
-            .icon(IconName::Sparkles)
+            .icon(IconName::Crop)
             .label("Reframe")
             .disabled(busy)
             .tooltip("Ask the agent to keep each subject in shot")

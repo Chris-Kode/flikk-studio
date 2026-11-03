@@ -2237,7 +2237,7 @@ impl TimelinePanel {
                 })
                 .when(audio, |el| {
                     el.child(
-                        mix_toggle(key("mute"), "M", track.mix.mute, t::ERR, "Mute").on_click(
+                        mix_toggle(key("mute"), "M", track.mix.mute, t::T2, "Mute").on_click(
                             cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
                         ),
                     )

@@ -80,7 +80,7 @@ impl RefKind {
     pub fn mark(self, project: &Project, token: &str) -> Mark {
         match self {
             Self::Clip => Mark::Dot(clip_tint(project, token).unwrap_or(t::T3)),
-            Self::Effect | Self::Transition | Self::Fx => Mark::Dot(t::C),
+            Self::Effect | Self::Transition | Self::Fx => Mark::Dot(t::T2),
             Self::AudioFx => Mark::Dot(t::A),
             Self::Media => Mark::Icon(IconName::Film, t::T2),
             Self::Marker => Mark::Icon(IconName::MapPin, t::T2),

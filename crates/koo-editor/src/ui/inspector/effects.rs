@@ -85,7 +85,7 @@ impl InspectorPanel {
             }))
             .child(header)
             .when(cards.is_empty(), |v| {
-                v.child(EmptyState::new(IconName::Sparkles, "No effects").compact())
+                v.child(EmptyState::new(IconName::Layers, "No effects").compact())
             })
             .child(v_flex().gap(px(6.)).px(px(8.)).children(cards))
             .child(footer)

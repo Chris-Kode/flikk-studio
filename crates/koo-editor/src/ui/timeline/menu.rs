@@ -327,17 +327,17 @@ pub fn build(
                         .disabled(locked)
                         .on_click(open(PopupKind::Rename)),
                 )
-                .submenu("Clip Color", window, cx, move |menu, _, _| {
+                .submenu("Clip color", window, cx, move |menu, _, _| {
                     color_items(menu, &colors)
                 })
                 .item(
-                    PopupMenuItem::new("Change Speed…")
+                    PopupMenuItem::new("Change speed…")
                         .icon(IconName::Gauge)
                         .disabled(locked || !media)
                         .on_click(open(PopupKind::Speed { ripple: false })),
                 );
             let menu = if music {
-                menu.submenu("Fit To", window, cx, move |menu, _, _| {
+                menu.submenu("Fit to", window, cx, move |menu, _, _| {
                     fit_items(menu, &fit, id, locked, in_out, fit_duration.clone())
                 })
             } else {
@@ -420,7 +420,7 @@ pub fn build(
     }
 }
 
-/// "Sync by Audio" for the selected clips, and keeping only the
+/// "Sync by audio" for the selected clips, and keeping only the
 /// recorder's sound when there is one.
 fn sync_items(
     menu: PopupMenu,
@@ -438,9 +438,9 @@ fn sync_items(
             })
         })
     };
-    let menu = menu.item(item("Sync by Audio", false).icon(IconName::AudioWaveform));
+    let menu = menu.item(item("Sync by audio", false).icon(IconName::AudioWaveform));
     if recorder {
-        menu.item(item("Sync by Audio, Recorder Sound", true))
+        menu.item(item("Sync by audio, recorder sound", true))
     } else {
         menu
     }

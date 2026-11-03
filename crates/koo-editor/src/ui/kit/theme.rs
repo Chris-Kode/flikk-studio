@@ -60,8 +60,10 @@ pub const T1: Rgba = hex(0xEDEDEF);
 pub const T2: Rgba = hex(0x9A9AA2);
 /// Meta, placeholders.
 pub const T3: Rgba = hex(0x5E5E66);
-/// Text on an accent or danger fill.
+/// Text on an accent fill.
 pub const ON_AC: Rgba = hex(0xFFFFFF);
+/// Text on a danger fill; white on `ERR` does not reach 4.5:1.
+pub const ON_ERR: Rgba = hex(0x2A0A0A);
 
 /// Signal blue: focus, selection, primary actions.
 pub const AC: Rgba = hex(0x3D8BFF);
@@ -79,6 +81,9 @@ pub const WARN: Rgba = hex(0xF5C04A);
 pub const ERR: Rgba = hex(0xFF6B6B);
 /// Danger text on a danger wash.
 pub const ERR_TX: Rgba = hex(0xFF8585);
+/// Danger fill, hovered and pressed.
+pub const ERR_HV: Rgba = hex(0xFF8080);
+pub const ERR_PS: Rgba = hex(0xE85A5A);
 
 /// Video track tint.
 pub const V: Rgba = hex(0x5B8DEF);
@@ -183,7 +188,7 @@ pub(super) fn install(cx: &mut App) {
     c.accent = HV.into();
     c.accent_foreground = T1.into();
     c.destructive = ERR.into();
-    c.destructive_foreground = ON_AC.into();
+    c.destructive_foreground = ON_ERR.into();
     c.border = LN.into();
     c.input = LN.into();
     c.ring = AC.into();

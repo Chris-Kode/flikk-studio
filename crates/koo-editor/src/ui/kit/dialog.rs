@@ -172,7 +172,7 @@ impl Dialog {
         self
     }
 
-    /// A second choice between Cancel and confirm ("Don't Save").
+    /// A second choice between Cancel and confirm ("Don't save").
     pub fn secondary(
         mut self,
         label: impl Into<SharedString>,

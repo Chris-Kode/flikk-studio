@@ -159,7 +159,7 @@ fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut
         let (save_then_do, discard_then_do) = (then.clone(), then.clone());
         dialog
             .title(format!("Save changes to “{name}”?"))
-            .secondary("Don't Save", move |window, cx| {
+            .secondary("Don't save", move |window, cx| {
                 discard_state.update(cx, |s, _| s.discard_changes());
                 run(&discard_state, discard_then_do.clone(), window, cx);
                 true

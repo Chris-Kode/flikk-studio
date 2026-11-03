@@ -46,6 +46,6 @@ pub fn icon(name: &str) -> IconName {
         "zooms" => IconName::ZoomIn,
         "music" => IconName::Music,
         "feedback" => IconName::MessageSquareText,
-        _ => IconName::WandSparkles,
+        _ => IconName::ListChecks,
     }
 }

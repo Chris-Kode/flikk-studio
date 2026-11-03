@@ -226,7 +226,7 @@ impl ChatPanel {
                     .size(px(20.))
                     .rounded(t::RADIUS)
                     .bg(t::alpha(t::AC, 0.15))
-                    .child(Icon::new(IconName::Sparkles).size(px(12.)).color(t::AC)),
+                    .child(Icon::new(IconName::ListChecks).size(px(12.)).color(t::AC)),
             )
             .child(
                 div()

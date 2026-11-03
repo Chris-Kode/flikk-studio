@@ -180,7 +180,7 @@ impl MixerPanel {
             .px(px(8.))
             .pb(px(8.))
             .child(
-                mix_toggle(("mute", ix), "M", track.mix.mute, t::ERR, "Mute").on_click(
+                mix_toggle(("mute", ix), "M", track.mix.mute, t::T2, "Mute").on_click(
                     move |_, _, cx| set_mix(&mute_state, &mute_track, |m| m.mute = !m.mute, cx),
                 ),
             )

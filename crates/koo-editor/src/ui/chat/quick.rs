@@ -175,7 +175,7 @@ impl Render for QuickCommand {
         let items = rows.into_iter().enumerate().map(|(ix, row)| {
             let picked = ix == selected;
             let (icon, label, name) = match row {
-                Row::Request(q) => (IconName::Sparkles, q, None),
+                Row::Request(q) => (IconName::MessageSquareText, q, None),
                 Row::Recipe(name, title) => (recipes::icon(&name), title.into(), Some(name)),
             };
             v_flex()
@@ -235,7 +235,11 @@ impl Render for QuickCommand {
             .on_action(cx.listener(|_, _: &QuickDismiss, window, cx| window.close_dialog(cx)))
             .child(
                 Input::new(&self.query)
-                    .prefix(Icon::new(IconName::Sparkles).size(px(16.)).color(t::AC))
+                    .prefix(
+                        Icon::new(IconName::MessageSquareText)
+                            .size(px(16.))
+                            .color(t::T2),
+                    )
                     .suffix(div().text_color(t::T2).child(Kbd::new("Esc")))
                     .h(px(46.))
                     .px(px(14.))

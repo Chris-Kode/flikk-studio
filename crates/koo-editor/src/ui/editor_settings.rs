@@ -56,7 +56,7 @@ impl SettingsTab {
 
     fn icon(self) -> IconName {
         match self {
-            SettingsTab::Agent => IconName::Sparkles,
+            SettingsTab::Agent => IconName::MessageSquareText,
             SettingsTab::Integrations => IconName::Plug,
             SettingsTab::Analysis => IconName::ScanSearch,
             SettingsTab::Models => IconName::Box,

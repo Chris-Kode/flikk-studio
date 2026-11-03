@@ -474,7 +474,7 @@ impl MediaPoolPanel {
         let generate = Button::new("generate")
             .ghost()
             .small()
-            .icon(IconName::Sparkles)
+            .icon(IconName::Clapperboard)
             .tooltip("Generate");
         h_flex()
             .gap(px(2.))
@@ -1056,7 +1056,7 @@ impl MediaPoolPanel {
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let generate = Button::new("empty-generate")
             .ghost()
-            .icon(IconName::Sparkles)
+            .icon(IconName::Clapperboard)
             .label("Generate");
         EmptyState::new(IconName::Film, "No media yet")
             .hint("Drop files or folders here")

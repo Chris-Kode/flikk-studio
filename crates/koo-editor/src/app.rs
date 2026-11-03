@@ -522,7 +522,7 @@ impl KooEditor {
                 Button::new("agent-rail")
                     .ghost()
                     .relative()
-                    .icon(IconName::Sparkles)
+                    .icon(IconName::MessageSquareText)
                     .tooltip("Agent")
                     .when(pending > 0, |b| b.child(Indicator::Count(pending)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_agent(cx))),
@@ -756,7 +756,6 @@ impl KooEditor {
             })
             .child(h_flex().gap(px(4.)).child(place.0).child(mono(place.1)))
             .child(hint(&["J", "K", "L"], "shuttle"))
-            .child(hint(&[&format!("{MOD} K")], "ask the agent"))
     }
 
     /// Redraw the status bar until the running render finishes.

@@ -222,7 +222,7 @@ impl RenderOnce for Button {
             Variant::Primary => (t::AC, t::AC, t::ON_AC, t::AC_HV, t::AC_PS),
             Variant::Secondary => (t::R1, t::LN, t::T1, t::HV, t::PS),
             Variant::Ghost => (t::alpha(t::G, 0.), t::alpha(t::G, 0.), t::T2, t::HV, t::PS),
-            Variant::Destructive => (t::ERR, t::ERR, t::ON_AC, t::hex(0xFF8080), t::hex(0xE85A5A)),
+            Variant::Destructive => (t::ERR, t::ERR, t::ON_ERR, t::ERR_HV, t::ERR_PS),
         };
         let bg = match self.variant {
             _ if self.loading && on_fill => t::alpha(bg, 0.7),
