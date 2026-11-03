@@ -1,4 +1,4 @@
-"""Beat This! (MIT, CPJKU) as ONNX for koo-analysis's beat tracker.
+"""Beat This! (MIT, CPJKU) as ONNX for flikk-analysis's beat tracker.
 
 The graph takes 32 kHz mono samples and returns beat and downbeat logits
 for each 20 ms frame, centred on multiples of 20 ms from the first sample.

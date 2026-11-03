@@ -1,0 +1,12 @@
+[package]
+name = "flikk-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flikk-core.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+naga = { version = "29", features = ["glsl-in"] }
+pollster = "0.4"
+wgpu = { version = "29", features = ["naga-ir"] }

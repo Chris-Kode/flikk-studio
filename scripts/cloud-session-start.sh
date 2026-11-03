@@ -17,7 +17,7 @@ if ! command -v glslc >/dev/null && command -v apt-get >/dev/null; then
 fi
 
 # Software Vulkan (lavapipe) so the GPUI window opens under Xvfb for screenshots:
-#   xvfb-run -a -s "-screen 0 1440x900x24" target/debug/koo-editor
+#   xvfb-run -a -s "-screen 0 1440x900x24" target/debug/flikk
 if [ ! -e /usr/share/vulkan/icd.d/lvp_icd.json ] && command -v apt-get >/dev/null; then
   apt-get install -y -q mesa-vulkan-drivers >/dev/null 2>&1 \
     || { apt-get update -q >/dev/null 2>&1 && apt-get install -y -q mesa-vulkan-drivers >/dev/null 2>&1; } \

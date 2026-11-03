@@ -1,0 +1,19 @@
+[package]
+name = "flikk-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "flikk-mcp"
+path = "src/bin/flikk-mcp.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+flikk-core.workspace = true
+png = "0.18"
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+uuid.workspace = true

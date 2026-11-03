@@ -1,0 +1,11 @@
+[package]
+name = "flikk-deliver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cosmic-text = "0.19"
+flikk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

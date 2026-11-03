@@ -1,5 +1,5 @@
 """Shared pieces of the model exports: every graph takes 32 kHz mono samples,
-so koo-analysis decodes each file once for all three sound models."""
+so flikk-analysis decodes each file once for all three sound models."""
 
 import math
 import os
