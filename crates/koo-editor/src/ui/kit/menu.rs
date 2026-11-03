@@ -15,7 +15,14 @@ use gpui_kit::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRig
 use gpui_kit::base::{ElementExt as _, POPUP_PRIORITY, Popover};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
 use std::rc::Rc;
+
+thread_local! {
+    /// Set while a right click is being dispatched once the innermost
+    /// context menu has taken it, so the menus around it stay shut.
+    static CLAIMED: Cell<bool> = const { Cell::new(false) };
+}
 
 const CONTEXT: &str = "FlikkMenu";
 const ROW: Pixels = px(26.);
@@ -805,12 +812,17 @@ impl<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
         let weak = state.downgrade();
         self.element
             .on_mouse_down(MouseButton::Right, move |e, window, cx| {
-                cx.stop_propagation();
+                // Not stop_propagation: GPUI runs this before the element's
+                // own right-click listeners, which record what was hit.
+                if CLAIMED.replace(true) {
+                    return;
+                }
                 let (builder, weak, at) = (builder.clone(), weak.clone(), e.position);
                 let previous = window.focused(cx);
                 // Built after this event, so whatever the press itself
                 // updated (the row it hit) is what the menu reads.
                 window.defer(cx, move |window, cx| {
+                    CLAIMED.set(false);
                     let menu = PopupMenu::build(window, cx, move |mut menu, window, cx| {
                         menu.previous_focus = previous;
                         builder(menu, window, cx)
