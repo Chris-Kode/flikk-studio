@@ -5,8 +5,8 @@
 //! the viewer in Captions and under a caption's text in the inspector.
 //!
 //! Edits save to the style profile (`EditorState::edit_caption_style`).
-//! Sliders and colors show in the viewer while they move and save once
-//! they settle.
+//! Scrubbed numbers and picked colours show in the viewer while they move
+//! and save once they settle.
 
 mod animation;
 mod controls;
@@ -14,14 +14,14 @@ mod looks;
 mod text;
 
 use crate::state::EditorState;
-use controls::{Field, Number, Paint};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::select::{SearchableVec, SelectEvent, SelectState};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, ContextMenuExt as _, IconName, Input, NumberFieldState, PopupMenuItem, Segmented,
+    SelectEvent, SelectState, h_flex, v_flex,
+};
+use controls::{Field, Paint};
+use gpui_kit::base::input::{InputEvent, InputState};
+use gpui_kit::base::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::TrackId;
@@ -33,7 +33,7 @@ use std::time::Duration;
 /// How long a color rests before it is saved.
 const COLOR_SETTLE: Duration = Duration::from_millis(400);
 
-type FontSelect = SelectState<SearchableVec<SharedString>>;
+type FontSelect = SelectState<SharedString>;
 
 /// Which style the panel edits.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,11 +51,17 @@ enum Page {
     Animation,
 }
 
+const PAGES: [(Page, &str); 3] = [
+    (Page::Looks, "Looks"),
+    (Page::Text, "Text"),
+    (Page::Animation, "Animation"),
+];
+
 pub struct CaptionStylePanel {
     state: Entity<EditorState>,
     target: Target,
     page: Page,
-    numbers: HashMap<Field, Number>,
+    numbers: HashMap<Field, Entity<NumberFieldState>>,
     /// Color pickers, with the color each last showed.
     colors: HashMap<Paint, (Entity<ColorPickerState>, koo_core::memory::Color)>,
     color_pending: Option<PendingColor>,
@@ -81,21 +87,15 @@ impl CaptionStylePanel {
             .into_iter()
             .map(Into::into)
             .collect();
-        let fonts = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(names), None, window, cx).searchable(true)
-        });
+        let fonts = cx.new(|cx| SelectState::new(names, None, window, cx).searchable(true));
         let name = cx.new(|cx| InputState::new(window, cx));
         let mut _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
-            cx.subscribe(
-                &fonts,
-                |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, cx| {
-                    if let SelectEvent::Confirm(Some(font)) = ev {
-                        let font = font.to_string();
-                        this.edit(move |s| s.font = font, cx);
-                    }
-                },
-            ),
+            cx.subscribe(&fonts, |this, _, ev: &SelectEvent<SharedString>, cx| {
+                let SelectEvent::Confirm(font) = ev;
+                let font = font.to_string();
+                this.edit(move |s| s.font = font, cx);
+            }),
             cx.subscribe_in(&name, window, |this, input, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let name = input.read(cx).value().trim().to_owned();
@@ -119,11 +119,17 @@ impl CaptionStylePanel {
             ));
             colors.insert(paint, (picker, color));
         }
+        let mut numbers = HashMap::new();
+        for field in Field::ALL {
+            let (number, sub) = controls::number(field, field.get(&style), window, cx);
+            _subscriptions.push(sub);
+            numbers.insert(field, number);
+        }
         Self {
             state,
             target,
             page: Page::Text,
-            numbers: HashMap::new(),
+            numbers,
             colors,
             color_pending: None,
             fonts,
@@ -326,16 +332,9 @@ impl CaptionStylePanel {
                 picker.update(cx, |p, cx| p.set_value(lettering_hsla(color), window, cx));
             }
         }
-        for field in Field::ALL {
-            let value = field.get(style);
-            match self.numbers.entry(field) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    e.into_mut().sync(value, window, cx)
-                }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Number::new(field, value, window, cx));
-                }
-            }
+        for (field, number) in &self.numbers {
+            let value = f64::from(field.get(style));
+            number.update(cx, |n, cx| n.set_value(value, cx));
         }
     }
 
@@ -350,37 +349,42 @@ impl CaptionStylePanel {
             .collect();
         let many = names.len() > 1;
         let active = self.index(cx);
-        let theme = cx.theme();
-        let (muted, chip_bg, hover, fg) = (
-            theme.muted_foreground,
-            theme.secondary,
-            theme.secondary_hover,
-            theme.foreground,
-        );
         let panel = cx.entity();
         h_flex()
-            .gap_1()
+            .gap(px(4.))
             .flex_wrap()
             .children(names.into_iter().enumerate().map(|(i, name)| {
                 if self.renaming == Some(i) {
                     return div()
                         .w(px(110.))
-                        .child(Input::new(&self.name).xsmall())
+                        .child(Input::new(&self.name).small())
                         .into_any_element();
                 }
                 let panel = panel.clone();
+                let on = i == active;
                 div()
                     .id(("caption-style", i))
-                    .px_2()
-                    .h(px(22.))
                     .flex()
                     .items_center()
-                    .rounded_md()
-                    .text_xs()
+                    .h(px(22.))
+                    .px(px(8.))
+                    .rounded(t::RADIUS)
+                    .border_1()
+                    .text_size(px(11.))
+                    .whitespace_nowrap()
                     .cursor_pointer()
-                    .when(i == active, |d| d.bg(chip_bg).text_color(fg))
-                    .when(i != active, |d| d.text_color(muted))
-                    .hover(move |s| s.bg(hover))
+                    .when(on, |d| {
+                        d.bg(t::alpha(t::AC, 0.12))
+                            .border_color(t::AC)
+                            .text_color(t::T1)
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!on, |d| {
+                        d.bg(t::R1)
+                            .border_color(t::LN)
+                            .text_color(t::T2)
+                            .hover(|s| s.bg(t::HV).text_color(t::T1))
+                    })
                     .child(name)
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         if ev.click_count() >= 2 {
@@ -401,10 +405,14 @@ impl CaptionStylePanel {
                                 this.duplicate(cx);
                             })
                         }))
+                        .separator()
                         .item(
-                            PopupMenuItem::new("Delete").disabled(!many).on_click(
-                                move |_, _, cx| delete.update(cx, |this, cx| this.delete(i, cx)),
-                            ),
+                            PopupMenuItem::new("Delete")
+                                .destructive()
+                                .disabled(!many)
+                                .on_click(move |_, _, cx| {
+                                    delete.update(cx, |this, cx| this.delete(i, cx))
+                                }),
                         )
                     })
                     .into_any_element()
@@ -412,7 +420,7 @@ impl CaptionStylePanel {
             .child(
                 Button::new("add-caption-style")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(IconName::Plus)
                     .tooltip("New style")
                     .on_click(cx.listener(|this, _, _, cx| this.duplicate(cx))),
@@ -474,28 +482,19 @@ impl Render for CaptionStylePanel {
             Page::Animation => self.animation_page(&style, cx).into_any_element(),
         };
         v_flex()
-            .gap_3()
+            .px(px(12.))
+            .py(px(10.))
+            .gap(px(10.))
             .child(self.chips(cx))
             .child(looks::preview(&style, self.sample(cx)))
             .child(
-                TabBar::new("caption-style-page")
-                    .segmented()
-                    .xsmall()
-                    .w_full()
-                    .selected_index(match page {
-                        Page::Looks => 0,
-                        Page::Text => 1,
-                        Page::Animation => 2,
-                    })
-                    .child(Tab::new().label("Looks").flex_1())
-                    .child(Tab::new().label("Text").flex_1())
-                    .child(Tab::new().label("Animation").flex_1())
+                Segmented::new("caption-style-page")
+                    .compact()
+                    .fill()
+                    .items(PAGES.map(|(_, label)| label))
+                    .selected(PAGES.iter().position(|(p, _)| *p == page).unwrap_or(0))
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.page = match ix {
-                            0 => Page::Looks,
-                            1 => Page::Text,
-                            _ => Page::Animation,
-                        };
+                        this.page = PAGES[(*ix).min(PAGES.len() - 1)].0;
                         cx.notify();
                     })),
             )

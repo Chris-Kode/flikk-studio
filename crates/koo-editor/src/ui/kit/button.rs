@@ -1,4 +1,4 @@
-//! Buttons: primary, secondary, ghost, danger and destructive, at 26, 22 or
+//! Buttons: primary, secondary, ghost and destructive, at 26, 22 or
 //! 20 px, with an optional leading icon, label, shortcut chip and trailing
 //! icon. Without a label a button is a square icon button.
 
@@ -8,7 +8,7 @@ use gpui_kit::*;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Variant {
+enum Variant {
     /// Raised: the default.
     #[default]
     Secondary,
@@ -16,14 +16,12 @@ pub enum Variant {
     Primary,
     /// Text and icon only until hovered.
     Ghost,
-    /// Red outline on a red wash: deleting from a list or panel.
-    Danger,
     /// Solid red: the confirm button of a destructive dialog.
     Destructive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Size {
+enum Size {
     /// 26 px.
     #[default]
     Md,
@@ -87,40 +85,31 @@ impl Button {
         }
     }
 
-    pub fn variant(mut self, variant: Variant) -> Self {
-        self.variant = variant;
+    pub fn primary(mut self) -> Self {
+        self.variant = Variant::Primary;
         self
     }
 
-    pub fn primary(self) -> Self {
-        self.variant(Variant::Primary)
+    pub fn ghost(mut self) -> Self {
+        self.variant = Variant::Ghost;
+        self
     }
 
-    pub fn ghost(self) -> Self {
-        self.variant(Variant::Ghost)
-    }
-
-    pub fn danger(self) -> Self {
-        self.variant(Variant::Danger)
-    }
-
-    pub fn destructive(self) -> Self {
-        self.variant(Variant::Destructive)
-    }
-
-    pub fn size(mut self, size: Size) -> Self {
-        self.size = size;
+    pub fn destructive(mut self) -> Self {
+        self.variant = Variant::Destructive;
         self
     }
 
     /// 22 px.
-    pub fn small(self) -> Self {
-        self.size(Size::Sm)
+    pub fn small(mut self) -> Self {
+        self.size = Size::Sm;
+        self
     }
 
     /// 20 px.
-    pub fn xsmall(self) -> Self {
-        self.size(Size::Xs)
+    pub fn xsmall(mut self) -> Self {
+        self.size = Size::Xs;
+        self
     }
 
     pub fn icon(mut self, icon: IconName) -> Self {
@@ -233,13 +222,6 @@ impl RenderOnce for Button {
             Variant::Primary => (t::AC, t::AC, t::ON_AC, t::AC_HV, t::AC_PS),
             Variant::Secondary => (t::R1, t::LN, t::T1, t::HV, t::PS),
             Variant::Ghost => (t::alpha(t::G, 0.), t::alpha(t::G, 0.), t::T2, t::HV, t::PS),
-            Variant::Danger => (
-                t::alpha(t::ERR, 0.08),
-                t::alpha(t::ERR, 0.25),
-                t::ERR_TX,
-                t::alpha(t::ERR, 0.15),
-                t::alpha(t::ERR, 0.21),
-            ),
             Variant::Destructive => (t::ERR, t::ERR, t::ON_AC, t::hex(0xFF8080), t::hex(0xE85A5A)),
         };
         let bg = match self.variant {

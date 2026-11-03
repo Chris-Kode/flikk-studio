@@ -1,6 +1,6 @@
 //! The grade's scalar fields as slider specs, and the wheels' ranges.
 
-use super::super::param::{Key, Spec};
+use super::super::param::Spec;
 use koo_core::model::Grade;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ pub const PRIMARY: [Field; 7] = [
 pub const TONE: [Field; 2] = [Field::Shadows, Field::Highlights];
 
 impl Field {
-    /// Shared with the inspector's other sliders where one exists.
+    /// Range and display; fields work in display units (`model × factor`).
     pub fn spec(self) -> Spec {
         let s = |label, min, max, step, decimals, factor, default| Spec {
             label,
@@ -39,19 +39,28 @@ impl Field {
             decimals,
             factor,
             default,
-            field: true,
         };
         match self {
-            Field::Exposure => Key::Exposure.spec(),
-            Field::Contrast => Key::Contrast.spec(),
-            Field::Saturation => Key::Saturation.spec(),
-            Field::Gamma => Key::Gamma.spec(),
-            Field::Temperature => Key::Temperature.spec(),
-            Field::Tint => Key::Tint.spec(),
+            Field::Exposure => s("Exposure", -4., 4., 0.01, 2, 1., 0.),
+            Field::Contrast => s("Contrast", 0., 200., 1., 0, 100., 1.),
+            Field::Saturation => s("Saturation", 0., 200., 1., 0, 100., 1.),
             Field::Hue => s("Hue", -180., 180., 1., 0, 1., 0.),
+            Field::Temperature => s("Temp", -100., 100., 1., 0, 100., 0.),
+            Field::Tint => s("Tint", -100., 100., 1., 0, 100., 0.),
+            Field::Gamma => s("Gamma", 0.2, 3., 0.01, 2, 1., 1.),
             Field::Shadows => s("Shadows", -100., 100., 1., 0, 100., 0.),
             Field::Highlights => s("Highlights", -100., 100., 1., 0, 100., 0.),
         }
+    }
+
+    /// An offset from zero, shown with its sign.
+    pub fn signed(self) -> bool {
+        !matches!(self, Field::Contrast | Field::Saturation | Field::Gamma)
+    }
+
+    /// Neutral sits mid-range, so the slider fills from the centre.
+    pub fn centred(self) -> bool {
+        self != Field::Gamma
     }
 
     pub fn get(self, g: &Grade) -> f32 {
@@ -113,16 +122,11 @@ impl Wheel {
 
     /// Largest master change either way, in model units.
     pub fn range(self) -> f32 {
-        let spec = match self {
-            Wheel::Lift => Key::Lift(0).spec(),
-            Wheel::Gamma => Key::GammaRgb(0).spec(),
-            Wheel::Gain => Key::Gain(0).spec(),
-            Wheel::Offset => return 0.25,
-        };
-        (spec.max / spec.factor - self.neutral())
-            .abs()
-            .min((spec.min / spec.factor - self.neutral()).abs())
-            .max(0.25)
+        match self {
+            Wheel::Lift | Wheel::Gamma => 0.5,
+            Wheel::Gain => 1.0,
+            Wheel::Offset => 0.25,
+        }
     }
 
     pub fn get(self, g: &Grade) -> [f32; 3] {

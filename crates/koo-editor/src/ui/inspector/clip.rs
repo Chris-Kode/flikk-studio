@@ -360,10 +360,7 @@ impl InspectorPanel {
             .unwrap_or(PictureTab::Video);
         let linked = sound.as_ref().map(|(_, a)| a.id);
         let body = match (tab, sound) {
-            (PictureTab::Color, _) => div()
-                .p(px(12.))
-                .child(self.color_view(window, cx))
-                .into_any_element(),
+            (PictureTab::Color, _) => self.color_view(window, cx),
             (PictureTab::Speed, _) => {
                 let speed = self.speed_group(clip, cx);
                 let state = self.state.clone();

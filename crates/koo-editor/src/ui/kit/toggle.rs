@@ -1,7 +1,7 @@
 //! Switch, checkbox and radio: a 26 × 14 track, a 14 px box and a 14 px
-//! dot, each with an optional label to its right. The control and its label
-//! are one click target; keyboard focus rings the control alone, and a
-//! disabled control fades to 40 %.
+//! dot. A switch or checkbox can have a label to its right; the control and
+//! its label are one click target, and keyboard focus rings the control
+//! alone. A disabled switch fades to 40 %.
 
 use super::{icon::Icon, icon::IconName, theme as t, tooltip::Tooltip};
 use gpui_kit::base::{
@@ -148,12 +148,11 @@ impl RenderOnce for Switch {
     }
 }
 
-/// A checkbox: unchecked, checked, or indeterminate for a mixed group.
+/// A checkbox.
 #[derive(IntoElement)]
 pub struct Checkbox {
     id: ElementId,
-    state: CheckboxState,
-    disabled: bool,
+    checked: bool,
     label: Option<SharedString>,
     on_click: Option<ChangeHandler>,
 }
@@ -162,32 +161,14 @@ impl Checkbox {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
-            state: CheckboxState::Unchecked,
-            disabled: false,
+            checked: false,
             label: None,
             on_click: None,
         }
     }
 
     pub fn checked(mut self, checked: bool) -> Self {
-        self.state = if checked {
-            CheckboxState::Checked
-        } else {
-            CheckboxState::Unchecked
-        };
-        self
-    }
-
-    /// Part of a group is checked: a dash. Clicking checks it.
-    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
-        if indeterminate {
-            self.state = CheckboxState::Indeterminate;
-        }
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
+        self.checked = checked;
         self
     }
 
@@ -207,7 +188,6 @@ impl RenderOnce for Checkbox {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus = focus_handle(&self.id, window, cx);
         let ring = focus_visible(&focus, window);
-        let filled = self.state != CheckboxState::Unchecked;
 
         let mut mark = div()
             .flex()
@@ -217,32 +197,26 @@ impl RenderOnce for Checkbox {
             .size(px(14.))
             .rounded(px(3.))
             .border_1();
-        mark = if filled {
-            mark.bg(t::AC).border_color(t::AC).text_color(t::ON_AC)
+        mark = if self.checked {
+            mark.bg(t::AC)
+                .border_color(t::AC)
+                .text_color(t::ON_AC)
+                .child(Icon::new(IconName::Check).size(px(11.)))
         } else {
-            mark.bg(t::G).border_color(t::LN_CTL)
+            mark.bg(t::G)
+                .border_color(t::LN_CTL)
+                .group_hover(GROUP, |s| s.bg(t::HV).border_color(t::LN_CTL_HV))
         };
-        if !filled && !self.disabled {
-            mark = mark.group_hover(GROUP, |s| s.bg(t::HV).border_color(t::LN_CTL_HV));
-        }
         if ring {
             mark = mark.shadow(t::focus_ring());
         }
-        mark = match self.state {
-            CheckboxState::Checked => mark.child(Icon::new(IconName::Check).size(px(11.))),
-            CheckboxState::Indeterminate => {
-                mark.child(div().w(px(7.)).h(px(1.5)).rounded(px(1.)).bg(t::ON_AC))
-            }
-            CheckboxState::Unchecked => mark,
-        };
 
-        let mut base = row(
-            BaseCheckbox::new(self.id)
-                .state(self.state)
-                .disabled(self.disabled),
-            self.disabled,
-        )
-        .track_focus(&focus);
+        let state = if self.checked {
+            CheckboxState::Checked
+        } else {
+            CheckboxState::Unchecked
+        };
+        let mut base = row(BaseCheckbox::new(self.id).state(state), false).track_focus(&focus);
         if let Some(label) = &self.label {
             base = base.accessibility_label(label.clone());
         }
@@ -260,8 +234,6 @@ impl RenderOnce for Checkbox {
 pub struct Radio {
     id: ElementId,
     checked: bool,
-    disabled: bool,
-    label: Option<SharedString>,
     on_click: Option<ChangeHandler>,
 }
 
@@ -270,24 +242,12 @@ impl Radio {
         Self {
             id: id.into(),
             checked: false,
-            disabled: false,
-            label: None,
             on_click: None,
         }
     }
 
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-
-    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
-        self.label = Some(label.into());
         self
     }
 
@@ -307,28 +267,20 @@ impl RenderOnce for Radio {
         dot = if self.checked {
             dot.border(px(4.)).border_color(t::AC).bg(t::ON_AC)
         } else {
-            dot.border_1().border_color(t::LN_CTL).bg(t::G)
+            dot.border_1()
+                .border_color(t::LN_CTL)
+                .bg(t::G)
+                .group_hover(GROUP, |s| s.bg(t::HV).border_color(t::LN_CTL_HV))
         };
-        if !self.checked && !self.disabled {
-            dot = dot.group_hover(GROUP, |s| s.bg(t::HV).border_color(t::LN_CTL_HV));
-        }
         if ring {
             dot = dot.shadow(t::focus_ring());
         }
 
-        let mut base = row(
-            BaseRadio::new(self.id)
-                .checked(self.checked)
-                .disabled(self.disabled),
-            self.disabled,
-        )
-        .track_focus(&focus);
-        if let Some(label) = &self.label {
-            base = base.accessibility_label(label.clone());
-        }
+        let mut base =
+            row(BaseRadio::new(self.id).checked(self.checked), false).track_focus(&focus);
         if let Some(handler) = self.on_click {
             base = base.on_change(move |next, _, window, cx| handler(&next, window, cx));
         }
-        base.child(dot).children(self.label)
+        base.child(dot)
     }
 }

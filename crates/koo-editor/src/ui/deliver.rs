@@ -1,29 +1,25 @@
-//! Deliver workspace (PRD D1–D3, C6): preset, output file, render queue,
-//! and caption/timeline/still exports.
+//! Deliver workspace (PRD D1–D3, C6): preset cards, the format, encoder
+//! and range, loudness and burn-in, the output file, caption/timeline/still
+//! exports and the render queue.
 
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::progress::Progress;
-use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
-    h_flex, v_flex,
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, Checkbox, Icon, IconName, Input, Panel, PanelHeader, Progress, ScrollableElement as _,
+    Segmented, Select, SelectEvent, SelectState, Spinner, Tooltip, h_flex, v_flex,
 };
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::Rate;
 use koo_core::memory::{CaptionStyle, Presets};
-use koo_core::model::Project;
+use koo_core::model::{Project, SequenceSettings};
 use koo_deliver::{
-    Encoder, LoudnessTarget, RenderJob, RenderQueue, RenderRequest, RenderSettings, RenderState,
-    VideoCodec,
+    AudioCodec, Encoder, LoudnessTarget, RenderJob, RenderQueue, RenderRequest, RenderSettings,
+    RenderState, VideoCodec,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-type PresetSelect = SelectState<SearchableVec<SharedString>>;
 
 /// What an export button writes.
 #[derive(Clone, Copy)]
@@ -36,12 +32,11 @@ enum Export {
 }
 
 impl Export {
-    const ALL: [Export; 5] = [
-        Export::Srt,
-        Export::Ass,
-        Export::Otio,
-        Export::Fcpxml,
-        Export::Still,
+    /// The export rows: a label and its buttons.
+    const GROUPS: [(&'static str, &'static [Export]); 3] = [
+        ("Captions", &[Export::Srt, Export::Ass]),
+        ("Timeline", &[Export::Otio, Export::Fcpxml]),
+        ("Still", &[Export::Still]),
     ];
 
     fn label(self) -> &'static str {
@@ -50,7 +45,7 @@ impl Export {
             Export::Ass => "ASS",
             Export::Otio => "OTIO",
             Export::Fcpxml => "FCPXML",
-            Export::Still => "PNG",
+            Export::Still => "PNG at playhead",
         }
     }
 
@@ -65,12 +60,22 @@ impl Export {
     }
 }
 
+/// A preset card. Presets that differ only in codec share one and are
+/// told apart in the Format row.
+struct Card {
+    title: String,
+    /// Indices into the presets.
+    presets: Vec<usize>,
+}
+
 pub struct DeliverPanel {
     state: Entity<EditorState>,
     queue: RenderQueue,
     presets: Vec<RenderSettings>,
+    cards: Vec<Card>,
     preset: usize,
-    preset_select: Entity<PresetSelect>,
+    /// The formats of the chosen card, when it has more than one.
+    format_select: Entity<SelectState<SharedString>>,
     /// Custom preset: width, height, fps, CRF.
     custom: [Entity<InputState>; 4],
     /// Sequence size the custom width and height were last filled from.
@@ -78,6 +83,8 @@ pub struct DeliverPanel {
     output: Option<PathBuf>,
     loudness: bool,
     burn_captions: bool,
+    /// Ignore the in and out marks.
+    whole_timeline: bool,
     /// For H.264 and HEVC; saved for the user.
     encoder: Encoder,
     polling: bool,
@@ -87,31 +94,34 @@ pub struct DeliverPanel {
 impl DeliverPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let presets = RenderSettings::presets();
-        let names: Vec<SharedString> = presets.iter().map(|p| p.name.clone().into()).collect();
-        let preset_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(names),
-                Some(IndexPath::new(0)),
-                window,
-                cx,
-            )
-        });
+        let mut cards: Vec<Card> = Vec::new();
+        for (ix, preset) in presets.iter().enumerate() {
+            let title = card_title(preset);
+            match cards.iter_mut().find(|c| c.title == title) {
+                Some(card) => card.presets.push(ix),
+                None => cards.push(Card {
+                    title,
+                    presets: vec![ix],
+                }),
+            }
+        }
         let seq = state.read(cx).bus.project().timeline.settings.clone();
-        let input =
-            |placeholder: &'static str, value: String, window: &mut Window, cx: &mut App| {
-                cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(placeholder)
-                        .default_value(value)
-                })
-            };
+        let formats = cards[0]
+            .presets
+            .iter()
+            .map(|&ix| format_label(&presets[ix], &seq))
+            .collect();
+        let format_select = cx.new(|cx| SelectState::new(formats, Some(0), window, cx));
+        let input = |value: String, window: &mut Window, cx: &mut App| {
+            cx.new(|cx| InputState::new(window, cx).default_value(value))
+        };
         let custom = [
-            input("Width", seq.width.to_string(), window, cx),
-            input("Height", seq.height.to_string(), window, cx),
-            input("FPS", format_fps(seq.rate), window, cx),
-            input("CRF", "18".into(), window, cx),
+            input(seq.width.to_string(), window, cx),
+            input(seq.height.to_string(), window, cx),
+            input(format_fps(seq.rate), window, cx),
+            input("18".into(), window, cx),
         ];
-        let _subscriptions = vec![
+        let mut _subscriptions = vec![
             cx.observe_in(&state, window, |this: &mut Self, state, window, cx| {
                 let seq = &state.read(cx).bus.project().timeline.settings;
                 let size = (seq.width, seq.height);
@@ -124,22 +134,28 @@ impl DeliverPanel {
                 cx.notify();
             }),
             cx.subscribe(
-                &preset_select,
-                |this, _, event: &SelectEvent<SearchableVec<SharedString>>, cx| {
-                    let SelectEvent::Confirm(Some(name)) = event else {
-                        return;
-                    };
-                    if let Some(ix) = this.presets.iter().position(|p| p.name == name.as_ref()) {
-                        this.preset = ix;
-                        let ext = this.presets[ix].extension();
-                        if let Some(out) = &mut this.output {
-                            out.set_extension(ext);
-                        }
-                        cx.notify();
+                &format_select,
+                |this, _, event: &SelectEvent<SharedString>, cx| {
+                    let SelectEvent::Confirm(label) = event;
+                    let seq = this.sequence(cx);
+                    let card = this.card_of(this.preset);
+                    let picked = this.cards[card]
+                        .presets
+                        .iter()
+                        .copied()
+                        .find(|&ix| format_label(&this.presets[ix], &seq) == *label);
+                    if let Some(ix) = picked {
+                        this.select_preset(ix, cx);
                     }
                 },
             ),
         ];
+        // Custom fields: the Render button and the summary follow them.
+        _subscriptions.extend(
+            custom
+                .iter()
+                .map(|input| cx.subscribe(input, |_, _, _: &InputEvent, cx| cx.notify())),
+        );
         // Which hardware encoders work, found off the UI thread.
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -154,13 +170,15 @@ impl DeliverPanel {
             state,
             queue,
             presets,
+            cards,
             preset: 0,
-            preset_select,
+            format_select,
             custom,
             sequence_size: (seq.width, seq.height),
             output: None,
             loudness: false,
             burn_captions: true,
+            whole_timeline: false,
             encoder: saved_encoder(),
             polling: false,
             _subscriptions,
@@ -169,6 +187,43 @@ impl DeliverPanel {
 
     fn project(&self, cx: &App) -> Project {
         self.state.read(cx).bus.project().clone()
+    }
+
+    fn sequence(&self, cx: &App) -> SequenceSettings {
+        self.state.read(cx).bus.project().timeline.settings.clone()
+    }
+
+    fn card_of(&self, preset: usize) -> usize {
+        self.cards
+            .iter()
+            .position(|c| c.presets.contains(&preset))
+            .unwrap_or(0)
+    }
+
+    fn select_preset(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.preset = ix;
+        let ext = self.presets[ix].extension();
+        if let Some(out) = &mut self.output {
+            out.set_extension(ext);
+        }
+        cx.notify();
+    }
+
+    fn select_card(&mut self, card: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let members = self.cards[card].presets.clone();
+        if members.contains(&self.preset) {
+            return;
+        }
+        let seq = self.sequence(cx);
+        let formats = members
+            .iter()
+            .map(|&ix| format_label(&self.presets[ix], &seq))
+            .collect();
+        self.format_select.update(cx, |s, cx| {
+            s.set_items(formats, window, cx);
+            s.set_selected_index(Some(0), window, cx);
+        });
+        self.select_preset(members[0], cx);
     }
 
     fn set_status(&self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -238,6 +293,11 @@ impl DeliverPanel {
         }
         settings.loudness = self.loudness.then(|| self.loudness_target());
         settings.burn_captions = settings.video.is_some() && self.burn_captions;
+        settings.range = self
+            .state
+            .read(cx)
+            .in_out
+            .filter(|r| !r.is_empty() && !self.whole_timeline);
         settings.encoder = self.encoder;
         Ok(settings)
     }
@@ -373,8 +433,85 @@ impl DeliverPanel {
         cx.notify();
     }
 
+    /// The preset cards, three to a row.
+    fn render_cards(&self, seq: &SequenceSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let cards: Vec<AnyElement> = self
+            .cards
+            .iter()
+            .enumerate()
+            .map(|(ix, card)| {
+                let selected = card.presets.contains(&self.preset);
+                let shown = &self.presets[if selected {
+                    self.preset
+                } else {
+                    card.presets[0]
+                }];
+                div()
+                    .id(("preset", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .p(px(8.))
+                    .rounded(t::RADIUS)
+                    .border_1()
+                    .map(|d| {
+                        if selected {
+                            d.border_color(t::AC)
+                                .bg(t::alpha(t::AC, 0.06))
+                                .shadow(t::field_ring())
+                        } else {
+                            d.border_color(t::LN)
+                                .bg(t::R1)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t::HV))
+                        }
+                    })
+                    .child(
+                        div().mb(px(4.)).child(
+                            Icon::new(card_icon(shown, seq))
+                                .size(px(15.))
+                                .color(if selected { t::AC } else { t::T2 }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(card.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family(t::mono())
+                            .text_size(px(10.))
+                            .text_color(t::T3)
+                            .child(card_spec(shown, seq)),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.select_card(ix, window, cx)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let mut grid = v_flex().gap(px(6.));
+        let mut cards = cards.into_iter().peekable();
+        while cards.peek().is_some() {
+            let mut row = h_flex().gap(px(6.)).items_stretch();
+            for _ in 0..3 {
+                row = row.child(match cards.next() {
+                    Some(card) => card,
+                    None => div().flex_1().into_any_element(),
+                });
+            }
+            grid = grid.child(row);
+        }
+        section().child(grid)
+    }
+
     /// Auto, Hardware, Software, for presets a hardware encoder can take.
-    fn render_encoder(&self, preset: &RenderSettings, cx: &mut Context<Self>) -> ButtonGroup {
+    fn render_encoder(&self, preset: &RenderSettings, cx: &mut Context<Self>) -> impl IntoElement {
         let codec = preset.hardware_codec().map(|(codec, _)| codec);
         let probe = koo_deliver::hw::probed();
         let found = probe
@@ -383,206 +520,579 @@ impl DeliverPanel {
             .map(|e| e.api.label());
         // Known to be missing only once the probe is done.
         let missing = probe.is_some() && found.is_none();
-        ButtonGroup::new("encoder")
-            .outline()
-            .small()
-            .children(Encoder::ALL.iter().map(|&e| {
-                Button::new(e.key())
-                    .label(e.label())
-                    .selected(e == self.encoder)
-                    .when(e == Encoder::Hardware && missing, |b| b.disabled(true))
-                    .when_some(found.filter(|_| e != Encoder::Software), |b, api| {
-                        b.tooltip(api)
-                    })
-            }))
-            .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
-                if let Some(&ix) = clicked.first() {
-                    this.set_encoder(Encoder::ALL[ix], cx);
-                }
-            }))
+        let position = |e: Encoder| Encoder::ALL.iter().position(|&x| x == e).unwrap_or(0);
+        div()
+            .id("encoder")
+            .when_some(found, |d, api| d.tooltip(Tooltip::text(api)))
+            .child(
+                Segmented::new("encoder-choice")
+                    .compact()
+                    .fill()
+                    .items(Encoder::ALL.iter().map(|e| e.label()))
+                    .selected(position(self.encoder))
+                    .disabled_item(position(Encoder::Hardware), missing)
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.set_encoder(Encoder::ALL[*ix], cx)
+                    })),
+            )
     }
 
-    fn render_job(&self, job: &RenderJob, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, red, green) = (theme.muted_foreground, theme.red, theme.green);
-        let id = job.id;
-        let name: SharedString = job
-            .output
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
-        let finished = job.state.is_finished();
-        let status: AnyElement = match &job.state {
-            RenderState::Queued => Progress::new(("queued", id.0.as_u128() as u64))
-                .value(0.)
-                .into_any_element(),
-            RenderState::Running { fraction } => Progress::new(("progress", id.0.as_u128() as u64))
-                .value(fraction * 100.)
-                .into_any_element(),
-            RenderState::Done => Icon::new(IconName::Check)
-                .small()
-                .text_color(green)
-                .into_any_element(),
-            RenderState::Failed { .. } => Icon::new(IconName::CircleAlert)
-                .small()
-                .text_color(red)
-                .into_any_element(),
-            RenderState::Canceled => Icon::new(IconName::Ban)
-                .small()
-                .text_color(muted)
-                .into_any_element(),
+    /// Format, custom size and rate, encoder and range.
+    fn render_settings(&self, seq: &SequenceSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let preset = &self.presets[self.preset];
+        let custom = preset.name == RenderSettings::custom().name;
+        let choices = self.cards[self.card_of(self.preset)].presets.len() > 1;
+        let format = if choices {
+            Select::new(&self.format_select).small().into_any_element()
+        } else {
+            format_field(format_parts(preset, seq)).into_any_element()
         };
-        let output = job.output.clone();
-        let queue = self.queue.clone();
-        v_flex()
-            .gap_1()
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .gap_2()
-                    .child(
-                        div()
-                            .id(("job", id.0.as_u128() as u64))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .when(job.state == RenderState::Done, |d| {
-                                d.cursor_pointer()
-                                    .on_click(move |_, _, cx| cx.reveal_path(&output))
-                            })
-                            .child(name),
-                    )
-                    .child(div().w(px(96.)).flex().justify_end().child(status))
-                    .child(
-                        Button::new(("job-close", id.0.as_u128() as u64))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if finished {
-                                    queue.remove(id);
-                                } else {
-                                    this.queue.cancel(id);
-                                }
-                                cx.notify();
-                            })),
+        let in_out = self.state.read(cx).in_out.filter(|r| !r.is_empty());
+        let field = |input: Input| div().flex_1().min_w_0().child(input.font_family(t::mono()));
+        let pair = |a: Input, b: Input| h_flex().gap(px(6.)).child(field(a)).child(field(b));
+        let [w, h, fps, crf] = &self.custom;
+
+        section()
+            .gap(px(4.))
+            .child(row("Format", format))
+            .when(custom, |el| {
+                el.child(row(
+                    "Size",
+                    pair(
+                        Input::new(w).small().prefix("W"),
+                        Input::new(h).small().prefix("H"),
                     ),
-            )
-            .when_some(
-                match &job.state {
-                    RenderState::Failed { message } => Some(message.clone()),
-                    _ => None,
-                },
-                |el, message| {
-                    el.child(div().text_xs().text_color(red).line_clamp(3).child(message))
-                },
-            )
+                ))
+                .child(row(
+                    "Frame rate",
+                    pair(
+                        Input::new(fps).small().suffix("fps"),
+                        Input::new(crf).small().prefix("CRF"),
+                    ),
+                ))
+            })
+            .when(preset.hardware_codec().is_some(), |el| {
+                el.child(row("Encoder", self.render_encoder(preset, cx)))
+            })
+            .when(in_out.is_some(), |el| {
+                el.child(row(
+                    "Range",
+                    Segmented::new("range")
+                        .compact()
+                        .fill()
+                        .item("Whole timeline")
+                        .item("In → Out")
+                        .selected(if self.whole_timeline { 0 } else { 1 })
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            this.whole_timeline = *ix == 0;
+                            cx.notify();
+                        })),
+                ))
+            })
     }
 }
 
-impl Render for DeliverPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let preset = &self.presets[self.preset];
-        let custom = preset.name == RenderSettings::custom().name;
-        let has_video = preset.video.is_some();
-        let encoder = preset
-            .hardware_codec()
-            .is_some()
-            .then(|| self.render_encoder(preset, cx));
-        let output = self.output(cx);
-        let output_name: SharedString = output
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
-        let jobs = self.queue.jobs();
-        let job_rows: Vec<AnyElement> = jobs
-            .iter()
-            .rev()
-            .map(|j| self.render_job(j, cx).into_any_element())
-            .collect();
-
-        v_flex()
-            .id("deliver")
-            .size_full()
-            .p_3()
-            .gap_3()
-            .overflow_y_scroll()
+impl DeliverPanel {
+    /// Loudness normalization and caption burn-in.
+    fn render_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = self.loudness_target();
+        let has_video = self.presets[self.preset].video.is_some();
+        section()
+            .py(px(8.))
             .child(
-                div()
-                    .flex_none()
-                    .child(Select::new(&self.preset_select).small()),
-            )
-            .when(custom, |el| {
-                el.child(
-                    h_flex()
-                        .gap_2()
-                        .children(self.custom.iter().map(|i| Input::new(i).small())),
-                )
-            })
-            .when_some(encoder, |el, group| el.child(group))
-            .child(
-                v_flex()
-                    .gap_2()
+                h_flex()
+                    .h(px(26.))
                     .child(
                         Checkbox::new("loudness")
-                            .label(format!("Normalize to {} LUFS", self.loudness_target().lufs))
+                            .label(format!("Normalize to {} LUFS", minus(target.lufs)))
                             .checked(self.loudness)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.loudness = *checked;
                                 cx.notify();
                             })),
                     )
-                    .when(has_video, |el| {
-                        el.child(
-                            Checkbox::new("burn-captions")
-                                .label("Burn in captions")
-                                .checked(self.burn_captions)
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.burn_captions = *checked;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
+                    .child(div().flex_1())
+                    .child(
+                        meta(format!("{} dBTP", minus(target.true_peak_db))).font_family(t::mono()),
+                    ),
             )
+            .when(has_video, |el| {
+                el.child(
+                    h_flex().h(px(26.)).child(
+                        Checkbox::new("burn-captions")
+                            .label("Burn in captions")
+                            .checked(self.burn_captions)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.burn_captions = *checked;
+                                cx.notify();
+                            })),
+                    ),
+                )
+            })
+    }
+
+    /// The output file, Render, and what it will write.
+    fn render_output(&self, seq: &SequenceSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let output = self.output(cx);
+        let name: SharedString = output
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        let settings = self.settings(cx);
+        let summary = match &settings {
+            Ok(s) => {
+                let duration = s
+                    .range
+                    .map(|r| r.duration())
+                    .unwrap_or_else(|| self.state.read(cx).bus.project().timeline.duration());
+                let lead = if s.video.is_some() {
+                    let (w, h) = s.size(seq);
+                    format!("{w}×{h} · {} fps ·", format_fps(s.rate.unwrap_or(seq.rate)))
+                } else {
+                    format!("{} kHz · {} ·", khz(seq.sample_rate), audio_label(s.audio))
+                };
+                h_flex()
+                    .gap(px(4.))
+                    .child(lead)
+                    .child(
+                        div()
+                            .font_family(t::mono())
+                            .child(duration.timecode(seq.rate)),
+                    )
+                    .into_any_element()
+            }
+            Err(e) => div().text_color(t::ERR).child(e.clone()).into_any_element(),
+        };
+        section()
+            .gap(px(8.))
             .child(
-                Button::new("output")
-                    .outline()
-                    .small()
-                    .icon(IconName::FolderOpen)
-                    .label(output_name)
-                    .tooltip(output.to_string_lossy().into_owned())
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_output(cx))),
+                h_flex()
+                    .h(px(40.))
+                    .gap(px(8.))
+                    .pl(px(10.))
+                    .pr(px(8.))
+                    .rounded(t::RADIUS)
+                    .border_1()
+                    .border_color(t::LN)
+                    .bg(t::G)
+                    .child(Icon::new(IconName::FolderOpen).color(t::T2))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(name))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(t::mono())
+                                    .text_size(px(10.))
+                                    .text_color(t::T3)
+                                    .child(display_dir(&output)),
+                            ),
+                    )
+                    .child(
+                        Button::new("output")
+                            .ghost()
+                            .small()
+                            .label("Change")
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_output(cx))),
+                    ),
             )
             .child(
                 Button::new("render")
                     .primary()
+                    .icon(IconName::Upload)
                     .label("Render")
+                    .disabled(settings.is_err())
+                    .w_full()
+                    .h(px(32.))
+                    .text_size(px(13.))
                     .on_click(cx.listener(|this, _, _, cx| this.start_render(cx))),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .children(Export::ALL.iter().map(|kind| {
-                        let kind = *kind;
+            .child(div().text_size(px(11.)).text_color(t::T3).child(summary))
+    }
+
+    /// Caption, timeline and still exports.
+    fn render_exports(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<AnyElement> = Export::GROUPS
+            .iter()
+            .map(|&(label, kinds)| {
+                let buttons: Vec<Button> = kinds
+                    .iter()
+                    .map(|&kind| {
                         Button::new(kind.label())
-                            .ghost()
-                            .xsmall()
+                            .small()
                             .label(kind.label())
                             .when(matches!(kind, Export::Still), |b| b.icon(IconName::Frame))
                             .on_click(cx.listener(move |this, _, _, cx| this.export(kind, cx)))
-                    })),
-            )
-            .when(!job_rows.is_empty(), |el| {
-                el.child(div().h(px(1.)).bg(border))
-                    .child(v_flex().gap_1().children(job_rows))
+                    })
+                    .collect();
+                h_flex()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(t::T2)
+                            .child(label),
+                    )
+                    .child(h_flex().gap(px(4.)).children(buttons))
+                    .into_any_element()
             })
+            .collect();
+        section().gap(px(8.)).children(rows)
     }
+
+    /// Running and queued jobs in order, then finished ones, newest first.
+    fn render_queue(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let jobs = self.queue.jobs();
+        if jobs.is_empty() {
+            return None;
+        }
+        let count = jobs.len();
+        let (finished, active): (Vec<_>, Vec<_>) =
+            jobs.into_iter().partition(|j| j.state.is_finished());
+        let any_finished = !finished.is_empty();
+        let jobs: Vec<RenderJob> = active
+            .into_iter()
+            .chain(finished.into_iter().rev())
+            .collect();
+        let last = jobs.len() - 1;
+        let rows: Vec<AnyElement> = jobs
+            .iter()
+            .enumerate()
+            .map(|(ix, job)| self.render_job(job, ix == last, cx))
+            .collect();
+        Some(
+            v_flex()
+                .child(
+                    PanelHeader::new()
+                        .title("Render queue")
+                        .context(count.to_string())
+                        .child(
+                            Button::new("clear-finished")
+                                .ghost()
+                                .xsmall()
+                                .label("Clear finished")
+                                .disabled(!any_finished)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.queue.clear_finished();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .children(rows),
+        )
+    }
+
+    fn render_job(&self, job: &RenderJob, last: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = job.id;
+        let key = id.0.as_u128() as u64;
+        let name: SharedString = job
+            .output
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        let status = |name: IconName, color: Rgba| {
+            Icon::new(name)
+                .size(px(13.))
+                .color(color)
+                .into_any_element()
+        };
+        let (icon, trailing, running) = match &job.state {
+            RenderState::Queued => (status(IconName::Clock, t::T3), Some(meta("Queued")), None),
+            RenderState::Running { fraction } => (
+                Spinner::new().size(px(13.)).color(t::AC).into_any_element(),
+                Some(
+                    meta(format!("{:.0} %", fraction * 100.))
+                        .font_family(t::mono())
+                        .text_color(t::T2),
+                ),
+                Some(*fraction),
+            ),
+            RenderState::Done => (
+                status(IconName::Check, t::OK),
+                file_size(&job.output).map(|size| meta(size).font_family(t::mono())),
+                None,
+            ),
+            RenderState::Failed { .. } => (status(IconName::CircleAlert, t::ERR), None, None),
+            RenderState::Canceled => (status(IconName::Ban, t::T3), Some(meta("Canceled")), None),
+        };
+        let action = if job.state == RenderState::Done {
+            let output = job.output.clone();
+            Button::new(("job-reveal", key))
+                .ghost()
+                .xsmall()
+                .icon(IconName::FolderSearch)
+                .tooltip(REVEAL)
+                .on_click(move |_, _, cx| cx.reveal_path(&output))
+        } else {
+            let finished = job.state.is_finished();
+            Button::new(("job-close", key))
+                .ghost()
+                .xsmall()
+                .icon(IconName::X)
+                .tooltip(if finished { "Remove" } else { "Cancel" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if finished {
+                        this.queue.remove(id);
+                    } else {
+                        this.queue.cancel(id);
+                    }
+                    cx.notify();
+                }))
+        };
+        let dim = matches!(job.state, RenderState::Queued | RenderState::Canceled);
+        let message = match &job.state {
+            RenderState::Failed { message } => Some(message.clone()),
+            _ => None,
+        };
+        let note = |text: SharedString| {
+            div()
+                .pl(px(21.))
+                .mt(px(2.))
+                .text_size(px(10.))
+                .text_color(t::T3)
+                .child(text)
+        };
+        v_flex()
+            .px(px(12.))
+            .py(px(9.))
+            .when(running.is_some(), |d| d.bg(t::alpha(t::AC, 0.04)))
+            .when(!last, |d| d.border_b_1().border_color(t::LN))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(icon)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(dim, |d| d.text_color(t::T2))
+                            .child(name),
+                    )
+                    .children(trailing)
+                    .child(action),
+            )
+            .when_some(running, |el, fraction| {
+                el.child(Progress::new().value(fraction).mt(px(7.))).child(
+                    div()
+                        .mt(px(4.))
+                        .text_size(px(10.))
+                        .text_color(t::T3)
+                        .child(job.label.clone()),
+                )
+            })
+            .when(job.state == RenderState::Done, |el| {
+                el.child(note(job.label.clone().into()))
+            })
+            .when_some(message, |el, message| {
+                el.child(
+                    note(message.into())
+                        .mt(px(3.))
+                        .text_size(px(11.))
+                        .text_color(t::ERR)
+                        .line_clamp(3),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+impl Render for DeliverPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Renders the agent queued keep the progress moving too.
+        if self.queue.is_busy() {
+            self.poll(cx);
+        }
+        let seq = self.sequence(cx);
+        Panel::new()
+            .child(PanelHeader::new().title("Deliver"))
+            .child(
+                div()
+                    .id("deliver")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(
+                        v_flex()
+                            .child(self.render_cards(&seq, cx))
+                            .child(self.render_settings(&seq, cx))
+                            .child(self.render_options(cx))
+                            .child(self.render_output(&seq, cx))
+                            .child(self.render_exports(cx))
+                            .children(self.render_queue(cx)),
+                    ),
+            )
+    }
+}
+
+/// "Show in Finder" and its equivalents.
+const REVEAL: &str = if cfg!(target_os = "macos") {
+    "Show in Finder"
+} else {
+    "Show in folder"
+};
+
+/// A block of the panel, ruled off below.
+fn section() -> Div {
+    v_flex().p(px(12.)).border_b_1().border_color(t::LN)
+}
+
+/// A settings row: the label, then its control.
+fn row(label: &'static str, control: impl IntoElement) -> Div {
+    h_flex()
+        .min_h(px(30.))
+        .gap(px(8.))
+        .child(div().w(px(78.)).flex_none().text_color(t::T2).child(label))
+        .child(div().flex_1().min_w_0().child(control))
+}
+
+/// Small meta text.
+fn meta(text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(11.))
+        .text_color(t::T3)
+        .child(text.into())
+}
+
+/// The format of a card with a single preset, read-only.
+fn format_field(parts: Vec<String>) -> Div {
+    let mut field = h_flex()
+        .h(px(22.))
+        .px(px(8.))
+        .gap(px(6.))
+        .rounded(t::RADIUS_SM)
+        .border_1()
+        .border_color(t::LN)
+        .bg(t::G)
+        .text_size(px(11.))
+        .whitespace_nowrap()
+        .overflow_hidden();
+    for (ix, part) in parts.into_iter().enumerate() {
+        if ix > 0 {
+            field = field.child(div().text_color(t::T3).child("·"));
+        }
+        field = field.child(part);
+    }
+    field
+}
+
+fn is_custom(preset: &RenderSettings) -> bool {
+    preset.name == RenderSettings::custom().name
+}
+
+/// `1080p60`, `4K30`, `Master`, `Audio`, `Custom`.
+fn card_title(preset: &RenderSettings) -> String {
+    match (preset.video, preset.short_side, preset.rate) {
+        _ if is_custom(preset) => "Custom".into(),
+        (None, ..) => "Audio".into(),
+        (Some(VideoCodec::ProRes422Hq), ..) => "Master".into(),
+        (Some(_), Some(short), Some(rate)) => {
+            let size = if short >= 2160 {
+                "4K".to_string()
+            } else {
+                format!("{short}p")
+            };
+            format!("{size}{}", rate.rounded_fps())
+        }
+        _ => preset.name.clone(),
+    }
+}
+
+fn card_icon(preset: &RenderSettings, seq: &SequenceSettings) -> IconName {
+    match preset.video {
+        _ if is_custom(preset) => IconName::SlidersHorizontal,
+        None => IconName::AudioLines,
+        Some(VideoCodec::ProRes422Hq) => IconName::Film,
+        Some(_) if preset.short_side.is_some_and(|s| s >= 2160) => IconName::Clapperboard,
+        Some(_) if seq.height > seq.width => IconName::Smartphone,
+        Some(_) => IconName::MonitorPlay,
+    }
+}
+
+/// The line under a card's title: size and codec, or the audio format.
+fn card_spec(preset: &RenderSettings, seq: &SequenceSettings) -> String {
+    match preset.video {
+        _ if is_custom(preset) => "W × H · CRF".into(),
+        None => format!(
+            "{} · {} kHz",
+            preset.extension().to_uppercase(),
+            khz(seq.sample_rate)
+        ),
+        Some(VideoCodec::ProRes422Hq) => codec_label(VideoCodec::ProRes422Hq).into(),
+        Some(codec) => {
+            let (w, h) = preset.size(seq);
+            format!("{w}×{h} · {}", codec_label(codec))
+        }
+    }
+}
+
+fn codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 { .. } => "H.264",
+        VideoCodec::H265 { .. } => "HEVC",
+        VideoCodec::ProRes422Hq => "ProRes 422 HQ",
+    }
+}
+
+fn audio_label(codec: AudioCodec) -> String {
+    match codec {
+        AudioCodec::Aac { kbps } => format!("AAC {kbps}"),
+        AudioCodec::Pcm24 => "PCM 24-bit".into(),
+    }
+}
+
+/// Container, video codec, audio codec, and the sample rate for audio only.
+fn format_parts(preset: &RenderSettings, seq: &SequenceSettings) -> Vec<String> {
+    let mut parts = vec![preset.extension().to_uppercase()];
+    parts.extend(preset.video.map(|v| codec_label(v).to_string()));
+    parts.push(audio_label(preset.audio));
+    if preset.video.is_none() {
+        parts.push(format!("{} kHz", khz(seq.sample_rate)));
+    }
+    parts
+}
+
+fn format_label(preset: &RenderSettings, seq: &SequenceSettings) -> SharedString {
+    format_parts(preset, seq).join(" · ").into()
+}
+
+/// `48`, `44.1`.
+fn khz(sample_rate: u32) -> String {
+    (sample_rate as f32 / 1000.).to_string()
+}
+
+/// A number with a typographic minus.
+fn minus(v: f32) -> String {
+    v.to_string().replace('-', "\u{2212}")
+}
+
+/// The output's folder, with the home folder as `~`.
+fn display_dir(output: &Path) -> String {
+    let dir = output.parent().unwrap_or(output);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => dir.display().to_string(),
+    }
+}
+
+/// A finished render's size on disk.
+fn file_size(path: &Path) -> Option<String> {
+    let bytes = std::fs::metadata(path).ok()?.len() as f64;
+    Some(if bytes >= 1e9 {
+        format!("{:.1} GB", bytes / 1e9)
+    } else if bytes >= 1e6 {
+        format!("{:.0} MB", bytes / 1e6)
+    } else {
+        format!("{:.0} KB", (bytes / 1e3).max(1.))
+    })
 }
 
 fn format_fps(rate: Rate) -> String {

@@ -2,13 +2,8 @@
 //! line rules captions are wrapped by.
 
 use super::CaptionStylePanel;
-use super::controls::{Field, Paint, number_row, row, swatch};
-use crate::ui::inspector::{section, section_with};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::select::Select;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{IconName, Sizable as _, h_flex, v_flex};
+use super::controls::{Field, Paint, label, pairs, section, wide};
+use crate::ui::kit::{Button, Segmented, Select, Switch, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::memory::{CaptionPosition, CaptionStyle};
@@ -19,119 +14,142 @@ const POSITIONS: [CaptionPosition; 3] = [
     CaptionPosition::Bottom,
 ];
 
+/// A 22 px square toggle holding `face`.
+fn toggle(id: &'static str, on: bool, face: Div) -> Button {
+    Button::new(id)
+        .small()
+        .selected(on)
+        .w(px(22.))
+        .px(px(0.))
+        .child(face)
+}
+
 impl CaptionStylePanel {
     pub(super) fn text_page(&mut self, style: &CaptionStyle, cx: &mut Context<Self>) -> Div {
         let (bold, italic, upper) = (style.bold, style.italic, style.uppercase);
-        let toggle = |id: &'static str, on: bool| Button::new(id).ghost().small().toggled(on);
-        let face = h_flex()
-            .gap_0p5()
-            .child(
-                toggle("caption-bold", bold)
-                    .child(div().font_weight(FontWeight::BOLD).child("B"))
-                    .tooltip("Bold")
-                    .on_click(cx.listener(move |this, _, _, cx| this.edit(|s| s.bold = !bold, cx))),
-            )
-            .child(
-                toggle("caption-italic", italic)
-                    .child(div().italic().child("I"))
-                    .tooltip("Italic")
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.edit(|s| s.italic = !italic, cx)),
-                    ),
-            )
-            .child(
-                toggle("caption-case", upper)
-                    .icon(IconName::CaseSensitive)
-                    .tooltip("Uppercase")
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.edit(|s| s.uppercase = !upper, cx)),
-                    ),
-            );
-        let font = section("Font", cx)
+        let font = section("Font", true, Empty)
             .child(
                 h_flex()
-                    .gap_2()
+                    .h(px(26.))
+                    .gap(px(4.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .child(Select::new(&self.fonts).small()),
                     )
-                    .child(face),
+                    .child(
+                        toggle(
+                            "caption-bold",
+                            bold,
+                            div().font_weight(FontWeight::SEMIBOLD).child("B"),
+                        )
+                        .tooltip("Bold")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.edit(|s| s.bold = !bold, cx)),
+                        ),
+                    )
+                    .child(
+                        toggle("caption-italic", italic, div().italic().child("I"))
+                            .tooltip("Italic")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit(|s| s.italic = !italic, cx)
+                            })),
+                    )
+                    .child(
+                        toggle(
+                            "caption-case",
+                            upper,
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("AA"),
+                        )
+                        .tooltip("Uppercase")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(|s| s.uppercase = !upper, cx)
+                        })),
+                    ),
             )
-            .child(number_row(self, Field::Size, cx))
-            .child(row("Color", swatch(self, Paint::Text), cx))
-            .child(number_row(self, Field::Spacing, cx));
+            .child(pairs([
+                self.number(Field::Size, cx),
+                self.number(Field::Spacing, cx),
+            ]))
+            .child(wide(label("Color"), self.color(Paint::Text)));
 
-        let stroke = section("Stroke", cx)
-            .child(row("Color", swatch(self, Paint::Stroke), cx))
-            .child(number_row(self, Field::Outline, cx));
+        let stroke = section("Stroke", false, Empty).child(pairs([
+            (label("Color"), self.color(Paint::Stroke)),
+            self.number(Field::Outline, cx),
+        ]));
 
         let boxed = style.background.enabled;
-        let background = section_with(
+        let background = section(
             "Background",
+            false,
             Switch::new("caption-background")
-                .small()
                 .checked(boxed)
                 .on_click(cx.listener(|this, on: &bool, _, cx| {
                     let on = *on;
                     this.edit(|s| s.background.enabled = on, cx)
                 })),
-            cx,
         )
         .when(boxed, |d| {
-            d.child(row("Color", swatch(self, Paint::Background), cx))
-                .child(number_row(self, Field::Padding, cx))
+            d.child(pairs([
+                (label("Color"), self.color(Paint::Background)),
+                self.number(Field::Padding, cx),
+            ]))
         });
 
-        let shadow = section("Shadow", cx)
-            .child(row("Color", swatch(self, Paint::Shadow), cx))
-            .child(number_row(self, Field::Shadow, cx))
+        let shadow = section("Shadow", false, Empty)
+            .child(pairs([
+                (label("Color"), self.color(Paint::Shadow)),
+                self.number(Field::Shadow, cx),
+            ]))
             .when(style.shadow > 0., |d| {
-                d.child(number_row(self, Field::Angle, cx))
+                d.child(pairs([self.number(Field::Angle, cx)]))
             });
 
         let position = POSITIONS
             .iter()
             .position(|p| *p == style.position)
             .unwrap_or(2);
-        let place = section("Position", cx)
+        let place = section("Position", false, Empty)
             .child(
-                TabBar::new("caption-position")
-                    .segmented()
-                    .xsmall()
-                    .w_full()
-                    .selected_index(position)
-                    .child(Tab::new().label("Top").flex_1())
-                    .child(Tab::new().label("Middle").flex_1())
-                    .child(Tab::new().label("Bottom").flex_1())
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        let p = POSITIONS[(*ix).min(2)];
-                        this.edit(|s| s.position = p, cx);
-                    })),
+                h_flex().h(px(26.)).child(
+                    Segmented::new("caption-position")
+                        .compact()
+                        .fill()
+                        .items(["Top", "Middle", "Bottom"])
+                        .selected(position)
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            let p = POSITIONS[(*ix).min(2)];
+                            this.edit(|s| s.position = p, cx);
+                        })),
+                ),
             )
-            .child(number_row(self, Field::X, cx))
-            .child(number_row(self, Field::Y, cx));
+            .child(pairs([
+                self.number(Field::X, cx),
+                self.number(Field::Y, cx),
+            ]));
 
-        let lines = section("Lines", cx)
-            .child(number_row(self, Field::LineLength, cx))
-            .child(row(
-                "Lines",
-                TabBar::new("caption-lines")
-                    .segmented()
-                    .xsmall()
-                    .w_full()
-                    .selected_index((style.max_lines.clamp(1, 3) - 1) as usize)
-                    .children((1..=3).map(|n| Tab::new().label(n.to_string()).flex_1()))
+        let lines = section("Lines", false, Empty).child(pairs([
+            self.number(Field::LineLength, cx),
+            (
+                label("Lines"),
+                Segmented::new("caption-lines")
+                    .compact()
+                    .fill()
+                    .items(["1", "2", "3"])
+                    .selected((style.max_lines.clamp(1, 3) - 1) as usize)
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         let n = *ix as u32 + 1;
                         this.edit(|s| s.max_lines = n, cx);
-                    })),
-                cx,
-            ));
+                    }))
+                    .into_any_element(),
+            ),
+        ]));
 
         v_flex()
-            .gap_4()
             .child(font)
             .child(stroke)
             .child(background)

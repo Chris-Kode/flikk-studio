@@ -1,13 +1,13 @@
-//! The style's numbers and colors. A number is a slider plus a field, like
-//! the inspector's (`inspector::param`): dragging shows the value in the
-//! viewer, release or Enter saves it, double-clicking the label resets it.
+//! The style's numbers and colours, and the rows they sit in. A number is a
+//! scrub label and a field, like the inspector's: scrubbing shows the value
+//! in the viewer, release or Enter saves it, double-clicking the label
+//! resets it.
 
 use super::CaptionStylePanel;
-use crate::ui::inspector::format_value;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    ColorField, NumberField, NumberFieldEvent, NumberFieldState, ScrubLabel, h_flex, v_flex,
+};
 use gpui_kit::*;
 use koo_core::memory::{CaptionStyle, Color};
 
@@ -32,6 +32,7 @@ pub struct Spec {
     pub max: f32,
     pub step: f32,
     pub decimals: usize,
+    pub unit: Option<&'static str>,
 }
 
 impl Field {
@@ -50,24 +51,25 @@ impl Field {
     ];
 
     pub fn spec(self) -> Spec {
-        let s = |label, min, max, step, decimals| Spec {
+        let s = |label, min, max, step, decimals, unit| Spec {
             label,
             min,
             max,
             step,
             decimals,
+            unit,
         };
         match self {
-            Self::Size => s("Size", 12., 160., 1., 0),
-            Self::Spacing => s("Spacing", -5., 30., 0.5, 1),
-            Self::Outline => s("Width", 0., 12., 0.5, 1),
-            Self::Shadow => s("Distance", 0., 20., 0.5, 1),
-            Self::Angle => s("Angle", 0., 360., 5., 0),
-            Self::Padding => s("Padding", 0., 40., 1., 0),
-            Self::X => s("X", -50., 50., 0.5, 1),
-            Self::Y => s("Y", -50., 50., 0.5, 1),
-            Self::LineLength => s("Length", 12., 60., 1., 0),
-            Self::Intro | Self::Outro => s("Duration", 0.05, 2., 0.05, 2),
+            Self::Size => s("Size", 12., 160., 1., 0, Some("px")),
+            Self::Spacing => s("Spacing", -5., 30., 0.5, 1, None),
+            Self::Outline => s("Width", 0., 12., 0.5, 1, Some("px")),
+            Self::Shadow => s("Distance", 0., 20., 0.5, 1, Some("px")),
+            Self::Angle => s("Angle", 0., 360., 5., 0, Some("°")),
+            Self::Padding => s("Padding", 0., 40., 1., 0, Some("px")),
+            Self::X => s("X", -50., 50., 0.5, 1, Some("%")),
+            Self::Y => s("Y", -50., 50., 0.5, 1, Some("%")),
+            Self::LineLength => s("Length", 12., 60., 1., 0, Some("ch")),
+            Self::Intro | Self::Outro => s("Duration", 0.05, 2., 0.05, 2, Some("s")),
         }
     }
 
@@ -106,162 +108,126 @@ impl Field {
     }
 }
 
-pub struct Number {
+/// `field`'s scrub field, showing `value`: a scrub previews, a commit saves.
+pub fn number(
     field: Field,
-    slider: Entity<SliderState>,
-    input: Entity<InputState>,
-    /// Last value shown.
     value: f32,
-    dragging: bool,
-    /// The input holds an unsaved edit.
-    typing: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl Number {
-    pub fn new(
-        field: Field,
-        value: f32,
-        window: &mut Window,
-        cx: &mut Context<CaptionStylePanel>,
-    ) -> Self {
-        let spec = field.spec();
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(spec.min)
-                .max(spec.max)
-                .step(spec.step)
-                .default_value(value)
-        });
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(format_value(value, spec.decimals))
-        });
-        let _subscriptions = vec![
-            cx.subscribe_in(
-                &slider,
-                window,
-                move |this, _, ev: &SliderEvent, window, cx| match ev {
-                    SliderEvent::Change(v) => {
-                        let v = v.start();
-                        if let Some(n) = this.numbers.get_mut(&field) {
-                            n.dragging = true;
-                            n.show(v, window, cx);
-                        }
-                        this.show(|s| field.set(s, v), cx);
-                    }
-                    SliderEvent::Release(v) => {
-                        let v = v.start();
-                        if let Some(n) = this.numbers.get_mut(&field) {
-                            n.dragging = false;
-                            n.value = f32::NAN;
-                        }
-                        this.edit(|s| field.set(s, v), cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &input,
-                window,
-                move |this, input, ev: &InputEvent, _, cx| {
-                    if let Some(n) = this.numbers.get_mut(&field) {
-                        n.typing = matches!(ev, InputEvent::Change);
-                    }
-                    if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                        && let Ok(v) = input.read(cx).value().trim().parse::<f32>()
-                    {
-                        if let Some(n) = this.numbers.get_mut(&field) {
-                            n.value = f32::NAN;
-                        }
-                        this.edit(|s| field.set(s, v), cx);
-                    }
-                },
-            ),
-        ];
-        Self {
-            field,
-            slider,
-            input,
-            value,
-            dragging: false,
-            typing: false,
-            _subscriptions,
-        }
-    }
-
-    fn show(&self, v: f32, window: &mut Window, cx: &mut App) {
-        let text = format_value(v, self.field.spec().decimals);
-        self.input.update(cx, |f, cx| f.set_value(text, window, cx));
-    }
-
-    /// Follow the model, except while dragged or typed in.
-    pub fn sync(&mut self, value: f32, window: &mut Window, cx: &mut App) {
-        if self.dragging || value == self.value {
-            return;
-        }
-        self.value = value;
-        self.slider
-            .update(cx, |s, cx| s.set_value(value, window, cx));
-        if !self.typing {
-            self.show(value, window, cx);
-        }
-    }
-}
-
-/// Label, slider and field on one row.
-pub fn number_row(
-    panel: &CaptionStylePanel,
-    field: Field,
+    window: &mut Window,
     cx: &mut Context<CaptionStylePanel>,
-) -> AnyElement {
-    let Some(n) = panel.numbers.get(&field) else {
-        return div().into_any_element();
-    };
-    let reset = field.get(&CaptionStyle::default());
-    h_flex()
-        .h(px(28.))
-        .gap_2()
-        .child(
-            label(field.spec().label, cx)
-                .id(SharedString::from(format!("{field:?}")))
-                .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    if ev.click_count() >= 2 {
-                        this.edit(|s| field.set(s, reset), cx);
-                    }
-                })),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(Slider::new(&n.slider).w_full()),
-        )
-        .child(
-            div()
-                .w(px(52.))
-                .flex_none()
-                .child(Input::new(&n.input).xsmall()),
-        )
+) -> (Entity<NumberFieldState>, Subscription) {
+    let spec = field.spec();
+    let state = cx.new(|cx| {
+        NumberFieldState::new(window, cx)
+            .min(spec.min.into())
+            .max(spec.max.into())
+            .step(spec.step.into())
+            .decimals(spec.decimals)
+            .default_value(value.into())
+    });
+    let sub = cx.subscribe(
+        &state,
+        move |this, _, ev: &NumberFieldEvent, cx| match *ev {
+            NumberFieldEvent::Change(v) => this.show(|s| field.set(s, v as f32), cx),
+            NumberFieldEvent::Commit(v) => this.edit(|s| field.set(s, v as f32), cx),
+        },
+    );
+    (state, sub)
+}
+
+/// The muted label of a row.
+pub fn label(text: &'static str) -> AnyElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(px(11.))
+        .text_color(t::T2)
+        .child(text)
         .into_any_element()
 }
 
-/// The muted label column of a row.
-pub fn label(text: &'static str, cx: &App) -> Div {
-    div()
-        .w(px(64.))
-        .flex_none()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .truncate()
-        .child(text)
+/// A group: its 26 px title with `actions` on the right, then its rows.
+/// Groups after the first are ruled off.
+pub fn section(title: &'static str, first: bool, actions: impl IntoElement) -> Div {
+    let group = v_flex().flex_none().child(
+        h_flex()
+            .h(px(26.))
+            .gap(px(6.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(t::T2)
+            .child(div().flex_1().child(title))
+            .child(actions),
+    );
+    if first {
+        group
+    } else {
+        group.mt(px(4.)).pt(px(2.)).border_t_1().border_color(t::LN)
+    }
 }
 
-/// A labelled row holding `control`.
-pub fn row(text: &'static str, control: impl IntoElement, cx: &App) -> Div {
+/// One or two label and control pairs on a 26 px row. A lone pair keeps to
+/// the left half, so its field lines up with the rows around it.
+pub fn pairs(pairs: impl IntoIterator<Item = (AnyElement, AnyElement)>) -> Div {
+    let mut row = h_flex().h(px(26.)).gap(px(8.));
+    let mut n = 0;
+    for (label, control) in pairs {
+        row = row
+            .child(cell(label))
+            .child(div().flex_1().min_w_0().child(control));
+        n += 1;
+    }
+    if n == 1 {
+        row = row
+            .child(cell(Empty.into_any_element()))
+            .child(div().flex_1());
+    }
+    row
+}
+
+/// A label and a control spanning the rest of the row.
+pub fn wide(label: AnyElement, control: impl IntoElement) -> Div {
     h_flex()
-        .min_h(px(28.))
-        .gap_2()
-        .child(label(text, cx))
+        .h(px(26.))
+        .gap(px(8.))
+        .child(cell(label))
         .child(div().flex_1().min_w_0().child(control))
+}
+
+fn cell(label: AnyElement) -> Div {
+    div().w(px(52.)).flex_none().min_w_0().child(label)
+}
+
+impl CaptionStylePanel {
+    /// `field`'s scrub label and field.
+    pub(super) fn number(&self, field: Field, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        let Some(state) = self.numbers.get(&field) else {
+            return (Empty.into_any_element(), Empty.into_any_element());
+        };
+        let spec = field.spec();
+        let reset = field.get(&CaptionStyle::default());
+        let panel = cx.entity().downgrade();
+        let label = ScrubLabel::new(state, spec.label)
+            .on_reset(move |_, cx| {
+                let _ = panel.update(cx, |this, cx| this.edit(|s| field.set(s, reset), cx));
+            })
+            .into_any_element();
+        let mut value = NumberField::new(state);
+        if let Some(unit) = spec.unit {
+            value = value.unit(unit);
+        }
+        (label, value.into_any_element())
+    }
+
+    /// `paint`'s colour field.
+    pub(super) fn color(&self, paint: Paint) -> AnyElement {
+        match self.colors.get(&paint) {
+            Some((picker, _)) => {
+                ColorField::new(SharedString::from(format!("caption-{paint:?}")), picker)
+                    .into_any_element()
+            }
+            None => Empty.into_any_element(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -311,14 +277,5 @@ pub fn color_of(c: Hsla) -> Color {
         g: byte(rgb.g),
         b: byte(rgb.b),
         a: byte(rgb.a),
-    }
-}
-
-/// The swatch that opens `paint`'s picker.
-pub fn swatch(panel: &CaptionStylePanel, paint: Paint) -> AnyElement {
-    let picker: Option<&Entity<ColorPickerState>> = panel.colors.get(&paint).map(|(p, _)| p);
-    match picker {
-        Some(p) => ColorPicker::new(p).small().into_any_element(),
-        None => div().into_any_element(),
     }
 }

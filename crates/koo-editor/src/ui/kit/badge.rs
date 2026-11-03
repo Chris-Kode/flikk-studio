@@ -1,7 +1,6 @@
-//! Pills and indicators. A [`Badge`] is an 18 px pill on a wash of its tone:
-//! mono for change counts and diffs (+4, −2, 1 conflict), with a dot for a
-//! status (Ready, Offline, Failed). An [`Indicator`] marks an icon button:
-//! a dot for "something here", a count for how many.
+//! Pills and indicators. A [`Badge`] is an 18 px pill on a wash of its tone,
+//! mono for change counts and diffs (+4, −2). An [`Indicator`] marks an icon
+//! button: a dot for "something here", a count for how many.
 
 use super::theme as t;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,8 +11,6 @@ pub enum Tone {
     /// Grey on a raised surface: drafts, plain tags.
     #[default]
     Neutral,
-    /// Added, ready, saved.
-    Ok,
     /// Changed, offline, conflict.
     Warn,
     /// Removed, failed.
@@ -24,7 +21,6 @@ impl Tone {
     fn solid(self) -> Rgba {
         match self {
             Tone::Neutral => t::T2,
-            Tone::Ok => t::OK,
             Tone::Warn => t::WARN,
             Tone::Err => t::ERR,
         }
@@ -43,7 +39,6 @@ pub struct Badge {
     label: SharedString,
     tone: Tone,
     mono: bool,
-    dot: bool,
 }
 
 impl Badge {
@@ -52,36 +47,17 @@ impl Badge {
             label: label.into(),
             tone: Tone::default(),
             mono: false,
-            dot: false,
         }
     }
 
-    pub fn tone(mut self, tone: Tone) -> Self {
-        self.tone = tone;
+    pub fn err(mut self) -> Self {
+        self.tone = Tone::Err;
         self
-    }
-
-    pub fn ok(self) -> Self {
-        self.tone(Tone::Ok)
-    }
-
-    pub fn warn(self) -> Self {
-        self.tone(Tone::Warn)
-    }
-
-    pub fn err(self) -> Self {
-        self.tone(Tone::Err)
     }
 
     /// Numbers: change counts and diffs.
     pub fn mono(mut self) -> Self {
         self.mono = true;
-        self
-    }
-
-    /// A status: a dot before the label.
-    pub fn dot(mut self) -> Self {
-        self.dot = true;
         self
     }
 }
@@ -91,65 +67,44 @@ impl RenderOnce for Badge {
         let fg = self.tone.text();
         let bg = match self.tone {
             Tone::Neutral => t::R1,
-            tone => t::alpha(tone.solid(), if self.dot { 0.1 } else { 0.12 }),
+            tone => t::alpha(tone.solid(), 0.12),
         };
-        let pill = div()
+        div()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(4.))
             .h(px(18.))
             .px(px(6.))
             .rounded(t::RADIUS_SM)
             .bg(bg)
             .text_color(fg)
             .text_size(px(11.))
-            .whitespace_nowrap();
-        let pill = if self.mono {
-            pill.font_family(t::mono())
-        } else {
-            pill
-        };
-        pill.when(self.dot, |pill| {
-            pill.child(div().flex_none().size(px(5.)).rounded_full().bg(fg))
-        })
-        .child(self.label)
+            .whitespace_nowrap()
+            .when(self.mono, |pill| pill.font_family(t::mono()))
+            .child(self.label)
     }
 }
 
 /// A mark in the corner of an icon button; add it as the button's child.
 #[derive(IntoElement)]
-pub struct Indicator {
-    count: Option<usize>,
-    tone: Tone,
-}
-
-impl Indicator {
+pub enum Indicator {
     /// A 6 px dot in the tone's colour.
-    pub fn dot(tone: Tone) -> Self {
-        Self { count: None, tone }
-    }
-
+    Dot(Tone),
     /// A signal-blue count over the corner.
-    pub fn count(count: usize) -> Self {
-        Self {
-            count: Some(count),
-            tone: Tone::default(),
-        }
-    }
+    Count(usize),
 }
 
 impl RenderOnce for Indicator {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        match self.count {
-            None => div()
+        match self {
+            Indicator::Dot(tone) => div()
                 .absolute()
                 .top(px(4.))
                 .right(px(4.))
                 .size(px(6.))
                 .rounded_full()
-                .bg(self.tone.solid()),
-            Some(count) => div()
+                .bg(tone.solid()),
+            Indicator::Count(count) => div()
                 .absolute()
                 .top(px(-4.))
                 .right(px(-4.))

@@ -13,6 +13,7 @@ type ClickHandler = Rc<dyn Fn(&usize, &mut Window, &mut App)>;
 pub struct Segmented {
     id: ElementId,
     items: Vec<SharedString>,
+    disabled: Vec<usize>,
     selected: usize,
     compact: bool,
     fill: bool,
@@ -25,6 +26,7 @@ impl Segmented {
         Self {
             id: id.into(),
             items: Vec::new(),
+            disabled: Vec::new(),
             selected: 0,
             compact: false,
             fill: false,
@@ -40,6 +42,14 @@ impl Segmented {
 
     pub fn items<L: Into<SharedString>>(mut self, labels: impl IntoIterator<Item = L>) -> Self {
         self.items.extend(labels.into_iter().map(Into::into));
+        self
+    }
+
+    /// Shown at 40 % and not clickable.
+    pub fn disabled_item(mut self, ix: usize, disabled: bool) -> Self {
+        if disabled {
+            self.disabled.push(ix);
+        }
         self
     }
 
@@ -101,8 +111,10 @@ impl RenderOnce for Segmented {
 
         track.children(self.items.into_iter().enumerate().map(|(ix, label)| {
             let selected = ix == self.selected;
+            let disabled = self.disabled.contains(&ix);
             let mut item = BaseTab::new(ix)
                 .selected(selected)
+                .disabled(disabled)
                 .set_position(ix + 1, count)
                 .h(h)
                 .px(pad)
@@ -128,11 +140,13 @@ impl RenderOnce for Segmented {
                         inset: true,
                     }])
                 }
+            } else if disabled {
+                item.opacity(0.4)
             } else {
                 item.cursor_pointer()
                     .hover(|s| s.bg(t::alpha(t::ON_AC, 0.03)).text_color(t::T1))
             };
-            if let Some(handler) = self.on_click.clone() {
+            if let Some(handler) = self.on_click.clone().filter(|_| !disabled) {
                 item = item.on_click(move |_, window, cx| handler(&ix, window, cx));
             }
             item.child(label)

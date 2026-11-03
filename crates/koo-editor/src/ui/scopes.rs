@@ -7,8 +7,8 @@
 //! refreshes them a few times a second.
 
 use crate::state::EditorState;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, v_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{EmptyState, IconName, Panel, PanelHeader, Segmented, h_flex, v_flex};
 use gpui_kit::*;
 use koo_core::grade::{self, LUMA};
 use koo_core::model::{ClipContent, Grade, MediaItem, MediaKind, Project, TrackKind};
@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 const FRAME_WIDTH: u32 = 480;
 /// Least time between two refreshes during playback.
 const PLAYING_EVERY: Duration = Duration::from_millis(200);
+/// Height of a scope's title row, and the gap between scopes.
+const TITLE: f32 = 22.;
+const GAP: f32 = 8.;
+/// Narrowest scope whose title row fits its readout.
+const NARROW: f32 = 240.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -39,6 +44,12 @@ const MODES: [(Mode, &str); 5] = [
     (Mode::Histogram, "Histogram"),
 ];
 
+/// The scopes in drawing order, as indices into `Scopes::images`.
+const WAVEFORM: usize = 0;
+const PARADE: usize = 1;
+const VECTOR: usize = 2;
+const HISTOGRAM: usize = 3;
+
 /// What the scopes show: a clip's source frame through two grades.
 #[derive(Clone, PartialEq)]
 struct Request {
@@ -47,21 +58,34 @@ struct Request {
     source: Time,
     grade: Grade,
     timeline: Grade,
+    /// The vectorscope magnified 2×.
+    zoom: bool,
 }
 
-/// The four scopes as images, in `MODES` order after `All`.
+/// A level range in percent, the faintest tails left out.
+type Range = (u32, u32);
+
+/// The four scopes as images, and the levels the frame spans.
 #[derive(Clone)]
-struct Images([Arc<RenderImage>; 4]);
+struct Scopes {
+    images: [Arc<RenderImage>; 4],
+    luma: Range,
+    rgb: [Range; 3],
+    zoom: bool,
+}
 
 pub struct ScopesPanel {
     state: Entity<EditorState>,
     mode: Mode,
-    images: Option<Images>,
+    zoom: bool,
+    scopes: Option<Scopes>,
     requested: Option<Request>,
     generation: u64,
     busy: bool,
     last: Option<Instant>,
     timer: bool,
+    /// The body's size at the last paint, which "All" lays out to.
+    body: Size<Pixels>,
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
     _observe: Subscription,
@@ -73,20 +97,22 @@ impl ScopesPanel {
         Self {
             state,
             mode: Mode::All,
-            images: None,
+            zoom: false,
+            scopes: None,
             requested: None,
             generation: 0,
             busy: false,
             last: None,
             timer: false,
+            body: Size::default(),
             retired: Vec::new(),
             _observe,
         }
     }
 
-    fn show(&mut self, images: Option<Images>) {
-        if let Some(old) = std::mem::replace(&mut self.images, images) {
-            self.retired.extend(old.0);
+    fn show(&mut self, scopes: Option<Scopes>) {
+        if let Some(old) = std::mem::replace(&mut self.scopes, scopes) {
+            self.retired.extend(old.images);
         }
     }
 
@@ -121,6 +147,7 @@ impl ScopesPanel {
                     source: clip.to_source(t)?.floor_to_frame(rate),
                     grade: clip.grade.clone(),
                     timeline: project.timeline.grade.clone(),
+                    zoom: self.zoom,
                 })
             })
     }
@@ -164,20 +191,20 @@ impl ScopesPanel {
         self.last = Some(Instant::now());
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let images = cx
+            let scopes = cx
                 .background_executor()
                 .spawn(async move {
                     let frame = media
                         .frame(&request.item, request.source, FRAME_WIDTH)
                         .ok()?;
                     let frame = grade::graded(&frame, &[&request.grade, &request.timeline]);
-                    draw(&frame)
+                    draw(&frame, request.zoom)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 if this.generation == generation {
-                    this.show(images);
+                    this.show(scopes);
                 }
                 // A newer request may be waiting.
                 cx.notify();
@@ -185,6 +212,137 @@ impl ScopesPanel {
         })
         .detach();
     }
+
+    /// The scopes `mode` shows, as rows of indices: "All" takes the grid
+    /// (one, two or four columns) that shows them largest. Also whether
+    /// the cells are too narrow for the titles' readouts.
+    fn grid(&self) -> (Vec<Vec<usize>>, bool) {
+        let single = |i| (vec![vec![i]], false);
+        match self.mode {
+            Mode::Waveform => single(WAVEFORM),
+            Mode::Parade => single(PARADE),
+            Mode::Vector => single(VECTOR),
+            Mode::Histogram => single(HISTOGRAM),
+            Mode::All => {
+                let (w, h) = (f32::from(self.body.width), f32::from(self.body.height));
+                let width = |cols: usize| (w - GAP * (cols - 1) as f32) / cols as f32;
+                let scale = |cols: usize| {
+                    let rows = 4 / cols;
+                    let ch = (h - GAP * (rows - 1) as f32) / rows as f32 - TITLE;
+                    SIZES
+                        .iter()
+                        .map(|(iw, ih)| (width(cols) / *iw as f32).min(ch / *ih as f32))
+                        .fold(f32::INFINITY, f32::min)
+                };
+                let cols = [1, 2, 4]
+                    .into_iter()
+                    .max_by(|a, b| scale(*a).total_cmp(&scale(*b)))
+                    .unwrap_or(1);
+                let rows = (0..4)
+                    .collect::<Vec<_>>()
+                    .chunks(cols)
+                    .map(<[usize]>::to_vec)
+                    .collect();
+                (rows, width(cols) < NARROW)
+            }
+        }
+    }
+
+    /// One scope: its title row over its well. A narrow one leaves out the
+    /// title's readout.
+    fn scope(&self, kind: usize, scopes: &Scopes, narrow: bool, cx: &mut Context<Self>) -> Div {
+        let levels = |(lo, hi): Range| mono(format!("{lo} \u{2013} {hi}"));
+        let (name, note) = match kind {
+            WAVEFORM => ("Waveform", Some("Luma")),
+            PARADE => ("Parade", Some("RGB")),
+            VECTOR => ("Vectorscope", None),
+            _ => ("Histogram", Some("RGB")),
+        };
+        let readout = match kind {
+            WAVEFORM => levels(scopes.luma).into_any_element(),
+            PARADE => h_flex()
+                .gap(px(6.))
+                .children(
+                    CHANNELS
+                        .iter()
+                        .zip(scopes.rgb)
+                        .map(|((letter, color), range)| {
+                            h_flex()
+                                .gap(px(4.))
+                                .child(mono(*letter).text_color(*color))
+                                .child(levels(range))
+                        }),
+                )
+                .into_any_element(),
+            VECTOR => h_flex()
+                .gap(px(4.))
+                .text_size(px(10.))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(t::T3)
+                .child(div().w(px(10.)).h(px(1.)).bg(t::WARN))
+                .child("Skin line")
+                .into_any_element(),
+            _ => h_flex()
+                .gap(px(6.))
+                .children(CHANNELS.iter().map(|(letter, color)| {
+                    h_flex()
+                        .gap(px(3.))
+                        .child(div().size(px(6.)).rounded(px(1.)).bg(*color))
+                        .child(mono(*letter))
+                }))
+                .into_any_element(),
+        };
+        let zoom = (kind == VECTOR).then(|| {
+            Segmented::new("vector-zoom")
+                .compact()
+                .items(["1×", "2×"])
+                .selected(self.zoom as usize)
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    this.zoom = *ix == 1;
+                    cx.notify();
+                }))
+        });
+        let title = h_flex()
+            .flex_none()
+            .h(px(TITLE))
+            .gap(px(6.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .whitespace_nowrap()
+            .child(div().text_color(t::T2).child(name))
+            .children(note.map(|n| {
+                div()
+                    .text_color(t::T3)
+                    .font_weight(FontWeight::NORMAL)
+                    .child(n)
+            }))
+            .child(div().flex_1())
+            .children((!narrow).then_some(readout))
+            .children(zoom);
+        v_flex().flex_1().min_w_0().min_h_0().child(title).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .rounded(t::RADIUS_SM)
+                .border_1()
+                .border_color(t::LN)
+                .bg(t::SCOPE)
+                .overflow_hidden()
+                .child(well(kind, scopes.images[kind].clone(), scopes.zoom)),
+        )
+    }
+}
+
+/// The parade's and histogram's channels: letter and colour.
+const CHANNELS: [(&str, Rgba); 3] = [("R", t::CH_R), ("G", t::CH_G), ("B", t::CH_B)];
+
+fn mono(text: impl Into<SharedString>) -> Div {
+    div()
+        .font_family(t::mono())
+        .text_size(px(10.))
+        .font_weight(FontWeight::NORMAL)
+        .text_color(t::T3)
+        .child(text.into())
 }
 
 impl Render for ScopesPanel {
@@ -193,110 +351,193 @@ impl Render for ScopesPanel {
             let _ = window.drop_image(image);
         }
         self.request(cx);
-        let theme = cx.theme();
-        let (bg, border, muted) = (theme.background, theme.border, theme.muted_foreground);
+        let (playhead, rate) = {
+            let state = self.state.read(cx);
+            (state.playhead, state.bus.project().timeline.settings.rate)
+        };
         let mode = self.mode;
-        let tabs = TabBar::new("scope-mode")
-            .segmented()
-            .xsmall()
-            .selected_index(MODES.iter().position(|(m, _)| *m == mode).unwrap_or(0))
-            .children(MODES.iter().map(|(_, l)| Tab::new().label(*l)))
+        let tabs = Segmented::new("scope-mode")
+            .compact()
+            .fill()
+            .items(MODES.iter().map(|(_, l)| *l))
+            .selected(MODES.iter().position(|(m, _)| *m == mode).unwrap_or(0))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 this.mode = MODES[*ix].0;
                 cx.notify();
             }));
-        let body = match &self.images {
-            None => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(muted)
-                .child("No picture")
-                .into_any_element(),
-            Some(images) => {
-                let shown: Vec<(usize, Arc<RenderImage>)> = match mode {
-                    Mode::All => images.0.iter().cloned().enumerate().collect(),
-                    m => {
-                        let i = MODES.iter().position(|(x, _)| *x == m).unwrap_or(1) - 1;
-                        vec![(i, images.0[i].clone())]
+        let content =
+            match self.scopes.clone() {
+                None => EmptyState::new(IconName::ImageOff, "No picture").into_any_element(),
+                Some(scopes) => {
+                    let (rows, narrow) = self.grid();
+                    v_flex()
+                        .size_full()
+                        .gap(px(GAP))
+                        .children(rows.into_iter().map(|row| {
+                            h_flex().flex_1().min_h_0().gap(px(GAP)).children(
+                                row.into_iter().map(|k| self.scope(k, &scopes, narrow, cx)),
+                            )
+                        }))
+                        .into_any_element()
+                }
+            };
+        let panel = cx.entity().downgrade();
+        // Measures the body, so "All" can pick its grid.
+        let measure = canvas(
+            move |bounds, _, cx| {
+                let _ = panel.update(cx, |this, cx| {
+                    if this.body != bounds.size {
+                        this.body = bounds.size;
+                        cx.notify();
                     }
-                };
-                scopes_canvas(shown, border).into_any_element()
-            }
-        };
-        v_flex()
-            .size_full()
-            .bg(bg)
-            .p_2()
-            .gap_2()
-            .child(div().flex().justify_center().child(tabs))
-            .child(body)
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        Panel::new()
+            .child(
+                PanelHeader::new()
+                    .title("Scopes")
+                    .child(mono(playhead.timecode(rate)).mr(px(4.))),
+            )
+            .child(div().flex_none().px(px(10.)).pt(px(8.)).child(tabs))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .px(px(10.))
+                    .pt(px(4.))
+                    .pb(px(10.))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(measure)
+                            .child(content),
+                    ),
+            )
     }
 }
 
-/// The scopes on one canvas: one fills it; four take the grid (one, two or
-/// four columns) that shows them largest. Each keeps its aspect.
-fn scopes_canvas(shown: Vec<(usize, Arc<RenderImage>)>, border: Hsla) -> impl IntoElement {
+/// A scope's well: the image as large as it fits, keeping its aspect, with
+/// the graticule's figures around it.
+fn well(kind: usize, image: Arc<RenderImage>, zoom: bool) -> impl IntoElement {
     canvas(
         |_, _, _| {},
-        move |bounds, _, window, _| {
-            let gap = px(6.);
-            let n = shown.len();
-            let grid = |cols: usize| {
-                let rows = n.div_ceil(cols);
-                let w = (bounds.size.width - gap * (cols - 1) as f32) / cols as f32;
-                let h = (bounds.size.height - gap * (rows - 1) as f32) / rows as f32;
-                let cells: Vec<Bounds<Pixels>> = (0..n)
-                    .map(|i| {
-                        let x = bounds.origin.x + (w + gap) * (i % cols) as f32;
-                        let y = bounds.origin.y + (h + gap) * (i / cols) as f32;
-                        Bounds::new(point(x, y), size(w, h))
-                    })
-                    .collect();
-                let scale = shown
-                    .iter()
-                    .map(|(k, _)| {
-                        let (iw, ih) = SIZES[*k];
-                        (w / px(iw as f32)).min(h / px(ih as f32))
-                    })
-                    .fold(f32::INFINITY, f32::min);
-                (scale, cells)
+        move |bounds, _, window, cx| {
+            // Room for the level figures left of the traces, or the
+            // histogram's below.
+            let (left, bottom) = match kind {
+                WAVEFORM | PARADE => (px(24.), px(4.)),
+                HISTOGRAM => (px(8.), px(16.)),
+                _ => (px(4.), px(4.)),
             };
-            let cells = [1, 2, 4]
-                .into_iter()
-                .filter(|c| *c <= n)
-                .map(grid)
-                .max_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(_, cells)| cells)
-                .unwrap_or_default();
-            for ((kind, image), cell) in shown.into_iter().zip(cells) {
-                let (iw, ih) = SIZES[kind];
-                let k = (cell.size.width / px(iw as f32)).min(cell.size.height / px(ih as f32));
-                let s = size(px(iw as f32) * k, px(ih as f32) * k);
-                let rect = Bounds::new(
-                    point(
-                        cell.origin.x + (cell.size.width - s.width) / 2.,
-                        cell.origin.y + (cell.size.height - s.height) / 2.,
-                    ),
-                    s,
-                );
-                let _ = window.paint_image(rect, rect, Corners::all(px(3.)), image, 0, false);
-                window.paint_quad(quad(
-                    rect,
-                    px(3.),
-                    transparent_black(),
-                    px(1.),
-                    border,
-                    BorderStyle::default(),
-                ));
+            let room = Bounds::new(
+                point(bounds.origin.x + left, bounds.origin.y + px(6.)),
+                size(
+                    bounds.size.width - left - px(8.),
+                    bounds.size.height - bottom - px(6.),
+                ),
+            );
+            if room.size.width <= px(0.) || room.size.height <= px(0.) {
+                return;
+            }
+            let (iw, ih) = SIZES[kind];
+            let k = (room.size.width / px(iw as f32)).min(room.size.height / px(ih as f32));
+            let s = size(px(iw as f32) * k, px(ih as f32) * k);
+            let rect = Bounds::new(
+                point(
+                    room.origin.x + (room.size.width - s.width) / 2.,
+                    room.origin.y + (room.size.height - s.height) / 2.,
+                ),
+                s,
+            );
+            let _ = window.paint_image(rect, rect, Corners::default(), image.clone(), 0, false);
+            let at = |x: f32, y: f32| point(rect.origin.x + px(x) * k, rect.origin.y + px(y) * k);
+            match kind {
+                WAVEFORM | PARADE => {
+                    for q in 0..=4 {
+                        let y = at(0., (PAD + 255 * q / 4) as f32).y;
+                        let text = format!("{}", 100 - 25 * q);
+                        figure(
+                            &text,
+                            point(rect.origin.x - px(6.), y),
+                            Align::Right,
+                            window,
+                            cx,
+                        );
+                    }
+                }
+                HISTOGRAM => {
+                    for q in 0..=4 {
+                        let x = rect.origin.x + rect.size.width * (q as f32 / 4.);
+                        let align = match q {
+                            0 => Align::Left,
+                            4 => Align::Right,
+                            _ => Align::Centre,
+                        };
+                        let y = rect.origin.y + rect.size.height + px(8.);
+                        figure(&format!("{}", 25 * q), point(x, y), align, window, cx);
+                    }
+                }
+                _ => {
+                    for (name, c) in TARGETS {
+                        let (cb, cr) = chroma(c);
+                        let (x, y) = vector_at(cb * 1.22, cr * 1.22, zoom);
+                        let (n, _) = SIZES[VECTOR];
+                        if (6.0..n as f32 - 6.0).contains(&x) && (6.0..n as f32 - 6.0).contains(&y)
+                        {
+                            figure(name, at(x, y), Align::Centre, window, cx);
+                        }
+                    }
+                }
             }
         },
     )
-    .flex_1()
-    .min_h_0()
-    .w_full()
+    .size_full()
+}
+
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Centre,
+    Right,
+}
+
+/// A graticule figure centred vertically on `at`, aligned on it.
+fn figure(text: &str, at: Point<Pixels>, align: Align, window: &mut Window, cx: &mut App) {
+    let run = TextRun {
+        len: text.len(),
+        font: font(t::mono()),
+        color: t::T3.into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line =
+        window
+            .text_system()
+            .shape_line(SharedString::from(text.to_string()), px(8.), &[run], None);
+    let x = match align {
+        Align::Left => at.x,
+        Align::Centre => at.x - line.width / 2.,
+        Align::Right => at.x - line.width,
+    };
+    let _ = line.paint(
+        point(x, at.y - px(5.)),
+        px(10.),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 // ----------------------------------------------------------------- drawing
@@ -305,6 +546,32 @@ fn scopes_canvas(shown: Vec<(usize, Arc<RenderImage>)>, border: Hsla) -> impl In
 /// Traces have one row per 8-bit level plus `PAD` above and below.
 const SIZES: [(usize, usize); 4] = [(320, 268), (390, 268), (220, 220), (320, 200)];
 const PAD: usize = 6;
+
+/// The 75 % colour targets on the vectorscope, by name.
+const TARGETS: [(&str, [f32; 3]); 6] = [
+    ("R", [0.75, 0.0, 0.0]),
+    ("YL", [0.75, 0.75, 0.0]),
+    ("G", [0.0, 0.75, 0.0]),
+    ("CY", [0.0, 0.75, 0.75]),
+    ("B", [0.0, 0.0, 0.75]),
+    ("MG", [0.75, 0.0, 0.75]),
+];
+
+fn rgb(c: Rgba) -> [f32; 3] {
+    [c.r, c.g, c.b]
+}
+
+/// What drawing `c` adds to the well's ground: `c` itself where nothing
+/// else is.
+fn over_ground(c: Rgba) -> [f32; 3] {
+    let g = rgb(t::SCOPE);
+    let c = rgb(c);
+    [c[0] - g[0], c[1] - g[1], c[2] - g[2]]
+}
+
+fn scaled(c: [f32; 3], k: f32) -> [f32; 3] {
+    c.map(|v| v * k)
+}
 
 /// A float RGB image drawn additively.
 struct Plot {
@@ -318,7 +585,7 @@ impl Plot {
         Self {
             w,
             h,
-            px: vec![[0.035, 0.035, 0.04]; w * h],
+            px: vec![rgb(t::SCOPE); w * h],
         }
     }
 
@@ -337,10 +604,14 @@ impl Plot {
         }
     }
 
-    /// A line from `a` to `b` in pixel coordinates.
-    fn line(&mut self, a: (f32, f32), b: (f32, f32), c: [f32; 3]) {
+    /// A line from `a` to `b` in pixel coordinates, dashed every `dash`
+    /// pixels when given.
+    fn line(&mut self, a: (f32, f32), b: (f32, f32), c: [f32; 3], dash: Option<usize>) {
         let n = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil() as usize + 1;
         for i in 0..=n {
+            if dash.is_some_and(|d| (i / d) % 2 == 1) {
+                continue;
+            }
             let t = i as f32 / n as f32;
             let x = a.0 + (b.0 - a.0) * t;
             let y = a.1 + (b.1 - a.1) * t;
@@ -362,8 +633,6 @@ impl Plot {
     }
 }
 
-const GRID: [f32; 3] = [0.09, 0.09, 0.1];
-
 /// Brightness of a density count, `per` being the average count per cell.
 fn glow(count: u32, per: f32) -> f32 {
     if count == 0 {
@@ -373,25 +642,73 @@ fn glow(count: u32, per: f32) -> f32 {
     }
 }
 
-fn draw(frame: &Frame) -> Option<Images> {
+fn luma(px: &[u8; 4]) -> f32 {
+    LUMA[0] * px[0] as f32 + LUMA[1] * px[1] as f32 + LUMA[2] * px[2] as f32
+}
+
+/// The levels `bins` spans in percent, its faintest 0.2 % at each end left
+/// out.
+fn span(bins: &[u32; 256]) -> Range {
+    let total: u32 = bins.iter().sum();
+    let tail = total / 500;
+    let percent = |level: usize| (level as u32 * 100 + 127) / 255;
+    let mut seen = 0;
+    let lo = bins
+        .iter()
+        .position(|n| {
+            seen += n;
+            seen > tail
+        })
+        .unwrap_or(0);
+    seen = 0;
+    let hi = 255
+        - bins
+            .iter()
+            .rev()
+            .position(|n| {
+                seen += n;
+                seen > tail
+            })
+            .unwrap_or(0);
+    (percent(lo), percent(hi))
+}
+
+fn draw(frame: &Frame, zoom: bool) -> Option<Scopes> {
     let (fw, fh) = (frame.width as usize, frame.height as usize);
     if fw == 0 || fh == 0 || frame.rgba.len() < fw * fh * 4 {
         return None;
     }
     let pixels = frame.rgba.as_chunks::<4>().0;
-    Some(Images([
-        waveform(pixels, fw, fh).image(),
-        parade(pixels, fw, fh).image(),
-        vectorscope(pixels).image(),
-        histogram(pixels).image(),
-    ]))
+    let mut luma_bins = [0u32; 256];
+    let mut bins = [[0u32; 256]; 3];
+    for px in pixels.iter().filter(|px| px[3] >= 8) {
+        luma_bins[luma(px).round().clamp(0.0, 255.0) as usize] += 1;
+        for c in 0..3 {
+            bins[c][px[c] as usize] += 1;
+        }
+    }
+    Some(Scopes {
+        images: [
+            waveform(pixels, fw).image(),
+            parade(pixels, fw).image(),
+            vectorscope(pixels, zoom).image(),
+            histogram(&bins).image(),
+        ],
+        luma: span(&luma_bins),
+        rgb: bins.each_ref().map(span),
+        zoom,
+    })
 }
 
-/// Graticule at 0, 25, 50, 75 and 100 %.
-fn levels(p: &mut Plot, pad: usize, x0: usize, x1: usize) {
-    for k in 0..=4 {
-        p.hline(pad + 255 * k / 4, x0, x1, GRID);
+/// Graticule at 0, 25, 50, 75 and 100 %, the top one dashed in the
+/// clipping colour.
+fn levels(p: &mut Plot) {
+    let w = p.w;
+    for k in 0..4 {
+        p.hline(PAD + 255 * (k + 1) / 4, 0, w, over_ground(t::LN));
     }
+    let clip = scaled(rgb(t::ERR), 0.33);
+    p.line((0., PAD as f32), (w as f32, PAD as f32), clip, Some(3));
 }
 
 /// Column-binned trace of one 0..255 value per pixel into `p` at columns
@@ -421,32 +738,37 @@ fn trace(
             let per = per_col[col] as f32 / 256.0 * 4.0;
             let g = glow(counts[row * cols + col], per.max(1e-3));
             if g > 0.0 {
-                p.add(x0 + col, PAD + row, color.map(|c| c * g));
+                p.add(x0 + col, PAD + row, scaled(color, g));
             }
         }
     }
 }
 
-fn waveform(pixels: &[[u8; 4]], fw: usize, _fh: usize) -> Plot {
-    let mut p = Plot::new(SIZES[0]);
+fn waveform(pixels: &[[u8; 4]], fw: usize) -> Plot {
+    let mut p = Plot::new(SIZES[WAVEFORM]);
+    levels(&mut p);
+    let (t1, ok) = (rgb(t::T1), rgb(t::OK));
+    let color = [0, 1, 2].map(|i| t1[i] * 0.8 + ok[i] * 0.2);
     let w = p.w;
-    levels(&mut p, PAD, 0, w);
-    let luma =
-        |px: &[u8; 4]| LUMA[0] * px[0] as f32 + LUMA[1] * px[1] as f32 + LUMA[2] * px[2] as f32;
-    trace(&mut p, pixels, fw, (0, w), luma, [0.75, 0.95, 0.8]);
+    trace(&mut p, pixels, fw, (0, w), luma, scaled(color, 0.9));
     p
 }
 
-fn parade(pixels: &[[u8; 4]], fw: usize, _fh: usize) -> Plot {
-    let mut p = Plot::new(SIZES[1]);
-    let w = p.w;
-    levels(&mut p, PAD, 0, w);
+fn parade(pixels: &[[u8; 4]], fw: usize) -> Plot {
+    let mut p = Plot::new(SIZES[PARADE]);
+    levels(&mut p);
     let gap = 6;
-    let cols = (w - 2 * gap) / 3;
-    let colors = [[1.0, 0.3, 0.25], [0.3, 1.0, 0.35], [0.35, 0.5, 1.0]];
-    for (c, color) in colors.into_iter().enumerate() {
+    let cols = (p.w - 2 * gap) / 3;
+    for (c, (_, color)) in CHANNELS.into_iter().enumerate() {
         let x0 = c * (cols + gap);
-        trace(&mut p, pixels, fw, (x0, cols), |px| px[c] as f32, color);
+        trace(
+            &mut p,
+            pixels,
+            fw,
+            (x0, cols),
+            |px| px[c] as f32,
+            rgb(color),
+        );
     }
     p
 }
@@ -457,48 +779,52 @@ fn chroma(c: [f32; 3]) -> (f32, f32) {
     ((c[2] - y) / 1.8556, (c[0] - y) / 1.5748)
 }
 
-fn vectorscope(pixels: &[[u8; 4]]) -> Plot {
-    let mut p = Plot::new(SIZES[2]);
+/// Where chroma `(cb, cr)` lands on the vectorscope image: ±0.5 reaches the
+/// rim at 1×.
+fn vector_at(cb: f32, cr: f32, zoom: bool) -> (f32, f32) {
+    let mid = SIZES[VECTOR].0 as f32 / 2.0;
+    let scale = mid * 0.92 / 0.5 * if zoom { 2.0 } else { 1.0 };
+    (mid + cb * scale, mid - cr * scale)
+}
+
+fn vectorscope(pixels: &[[u8; 4]], zoom: bool) -> Plot {
+    let mut p = Plot::new(SIZES[VECTOR]);
     let n = p.w;
-    let mid = n as f32 / 2.0;
-    // ±0.5 chroma reaches the rim.
-    let scale = mid * 0.92 / 0.5;
-    let at = |cb: f32, cr: f32| (mid + cb * scale, mid - cr * scale);
-    // Rim, axes, 75 % targets and the skin-tone line.
+    let at = |cb: f32, cr: f32| vector_at(cb, cr, zoom);
+    // Rim and half circle, axes, 75 % targets and the skin-tone line.
+    let rim = if zoom { 0.25 } else { 0.5 };
     let steps = 360;
-    for k in 0..steps {
-        let a0 = k as f32 / steps as f32 * std::f32::consts::TAU;
-        let a1 = (k + 1) as f32 / steps as f32 * std::f32::consts::TAU;
-        p.line(
-            at(a0.cos() * 0.5, a0.sin() * 0.5),
-            at(a1.cos() * 0.5, a1.sin() * 0.5),
-            GRID,
-        );
+    for (radius, color) in [(rim, t::LN_HV), (rim / 2., t::LN)] {
+        for k in 0..steps {
+            let a0 = k as f32 / steps as f32 * std::f32::consts::TAU;
+            let a1 = (k + 1) as f32 / steps as f32 * std::f32::consts::TAU;
+            p.line(
+                at(a0.cos() * radius, a0.sin() * radius),
+                at(a1.cos() * radius, a1.sin() * radius),
+                over_ground(color),
+                None,
+            );
+        }
     }
-    p.line(at(-0.5, 0.0), at(0.5, 0.0), GRID);
-    p.line(at(0.0, -0.5), at(0.0, 0.5), GRID);
+    let axis = over_ground(t::LN);
+    p.line(at(-rim, 0.0), at(rim, 0.0), axis, None);
+    p.line(at(0.0, -rim), at(0.0, rim), axis, None);
     let skin = 123f32.to_radians();
     p.line(
         at(0.0, 0.0),
-        at(skin.cos() * 0.5, skin.sin() * 0.5),
-        [0.22, 0.16, 0.1],
+        at(skin.cos() * rim, skin.sin() * rim),
+        scaled(rgb(t::WARN), 0.55),
+        Some(3),
     );
-    for c in [
-        [0.75, 0.0, 0.0],
-        [0.75, 0.75, 0.0],
-        [0.0, 0.75, 0.0],
-        [0.0, 0.75, 0.75],
-        [0.0, 0.0, 0.75],
-        [0.75, 0.0, 0.75],
-    ] {
+    let target = over_ground(t::LN_CTL);
+    for (_, c) in TARGETS {
         let (cb, cr) = chroma(c);
         let (x, y) = at(cb, cr);
-        let tint = c.map(|v| v * 0.3 + 0.05);
         let r = 4.0;
-        p.line((x - r, y - r), (x + r, y - r), tint);
-        p.line((x - r, y + r), (x + r, y + r), tint);
-        p.line((x - r, y - r), (x - r, y + r), tint);
-        p.line((x + r, y - r), (x + r, y + r), tint);
+        p.line((x - r, y - r), (x + r, y - r), target, None);
+        p.line((x - r, y + r), (x + r, y + r), target, None);
+        p.line((x - r, y - r), (x - r, y + r), target, None);
+        p.line((x + r, y - r), (x + r, y + r), target, None);
     }
     let mut counts = vec![0u32; n * n];
     let mut colors = vec![[0f32; 3]; n * n];
@@ -507,6 +833,9 @@ fn vectorscope(pixels: &[[u8; 4]]) -> Plot {
         let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
         let (cb, cr) = chroma(c);
         let (x, y) = at(cb, cr);
+        if x < 0.0 || y < 0.0 {
+            continue;
+        }
         let (x, y) = (x as usize, y as usize);
         if x < n && y < n {
             counts[y * n + x] += 1;
@@ -530,34 +859,33 @@ fn vectorscope(pixels: &[[u8; 4]]) -> Plot {
     p
 }
 
-fn histogram(pixels: &[[u8; 4]]) -> Plot {
-    let mut p = Plot::new(SIZES[3]);
+fn histogram(bins: &[[u32; 256]; 3]) -> Plot {
+    let mut p = Plot::new(SIZES[HISTOGRAM]);
     let (w, h) = (p.w, p.h);
     let pad = PAD;
     let rows = h - 2 * pad;
-    let mut bins = [[0u32; 256]; 3];
-    for px in pixels.iter().filter(|px| px[3] >= 8) {
-        for c in 0..3 {
-            bins[c][px[c] as usize] += 1;
-        }
-    }
     // Scale to the 99.5th percentile of bin counts, so a spike of pure
     // black or white doesn't flatten the rest.
     let mut all: Vec<u32> = bins.iter().flatten().copied().collect();
     all.sort_unstable();
     let top = all[(all.len() * 995 / 1000).min(all.len() - 1)].max(1) as f32;
-    for x in (0..w).step_by(w / 4) {
+    let grid = over_ground(t::LN);
+    for x in (0..w).step_by(w / 4).skip(1) {
         for y in pad..h - pad {
-            p.add(x, y, GRID);
+            p.add(x, y, grid);
         }
     }
-    let colors = [[0.55, 0.12, 0.1], [0.1, 0.5, 0.15], [0.12, 0.2, 0.6]];
-    for (c, color) in colors.into_iter().enumerate() {
+    for (c, (_, color)) in CHANNELS.into_iter().enumerate() {
+        let (fill, edge) = (scaled(rgb(color), 0.28), scaled(rgb(color), 0.7));
         for x in 0..w {
             let v = bins[c][x * 256 / w] as f32 / top;
             let height = (v.min(1.0) * rows as f32) as usize;
             for y in 0..height {
-                p.add(x, h - pad - 1 - y, color);
+                p.add(
+                    x,
+                    h - pad - 1 - y,
+                    if y + 1 == height { edge } else { fill },
+                );
             }
         }
     }

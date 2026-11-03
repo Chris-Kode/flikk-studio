@@ -3,15 +3,12 @@
 //! are deleted one by one on the Models page. The render cache's row also
 //! turns background rendering on and off and sets its size limit.
 
-use super::{row, size_label};
+use super::{meta, page, row, size_label};
 use crate::render_cache;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+use crate::ui::kit::{
+    Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, ScrollableElement as _,
+    Switch, h_flex, theme as t,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::paths;
 use std::path::{Path, PathBuf};
@@ -164,6 +161,7 @@ impl StorageTab {
                     .ghost()
                     .xsmall()
                     .label(format!("{} GB", settings.limit_gb))
+                    .trailing_icon(IconName::ChevronDown)
                     .tooltip("Size limit")
                     .dropdown_menu({
                         let settings = settings.clone();
@@ -186,7 +184,6 @@ impl StorageTab {
             )
             .child(
                 Switch::new("render-background")
-                    .small()
                     .checked(settings.background)
                     .tooltip("Render in the background")
                     .on_click(cx.listener(move |this, on: &bool, _, cx| {
@@ -212,6 +209,11 @@ impl StorageTab {
         }));
     }
 
+    /// Everything the user-data folder holds, once measured.
+    pub fn total(&self) -> Option<u64> {
+        self.sizes.iter().copied().sum()
+    }
+
     fn clear(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(place, Place::Previews | Place::Render) {
             place.clear();
@@ -219,15 +221,13 @@ impl StorageTab {
             return;
         }
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_confirm(cx, move |dialog, _, _| {
             let this = this.clone();
-            alert
+            dialog
                 .title("Clear analysis results?")
                 .description("Analyzed media will need to be analyzed again.")
-                .ok_text("Clear")
-                .ok_variant(ButtonVariant::Danger)
-                .show_cancel(true)
-                .on_ok(move |_, _, cx| {
+                .destructive()
+                .confirm("Clear", move |_, cx| {
                     place.clear();
                     let _ = this.update(cx, |this, cx| this.measure(cx));
                     true
@@ -238,7 +238,6 @@ impl StorageTab {
 
 impl Render for StorageTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
         let mut render = Some(self.render_controls(cx));
         let rows: Vec<_> = Place::ALL
             .iter()
@@ -250,35 +249,57 @@ impl Render for StorageTab {
                     None => String::new(),
                 };
                 let render = (place == Place::Render).then(|| render.take()).flatten();
-                row(place.label(), cx)
-                    .child(div().flex_1().text_xs().text_color(muted).child(size))
+                row(place.label(), 130.)
+                    .child(meta(size).flex_1().text_size(px(11.)))
+                    .children(render)
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .children(render)
-                            .child(
-                                Button::new(("storage-open", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::FolderOpen)
-                                    .tooltip("Show in folder")
-                                    .on_click(move |_, _, cx| cx.reveal_path(&place.dir())),
-                            )
-                            .when(place.clearable(), |el| {
-                                el.child(
-                                    Button::new(("storage-clear", ix))
-                                        .outline()
-                                        .xsmall()
-                                        .label("Clear")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.clear(place, window, cx)
-                                        })),
-                                )
-                            }),
+                        Button::new(("storage-open", ix))
+                            .ghost()
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .tooltip("Show in folder")
+                            .on_click(move |_, _, cx| cx.reveal_path(&place.dir())),
                     )
+                    // A slot for Clear on every row, so the folder buttons
+                    // line up.
+                    .child(h_flex().w(px(52.)).flex_none().justify_end().children(
+                        place.clearable().then(|| {
+                            Button::new(("storage-clear", ix))
+                                .small()
+                                .label("Clear")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.clear(place, window, cx)
+                                }))
+                        }),
+                    ))
                     .into_any_element()
             })
             .collect();
-        v_flex().size_full().children(rows)
+        page(
+            "Storage",
+            Some(meta(home_label()).text_size(px(11.)).into_any_element()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .border_t_1()
+                .border_color(t::LN)
+                .children(rows),
+        )
+        .overflow_y_scrollbar()
     }
+}
+
+/// The user-data folder, with the home folder as `~`.
+fn home_label() -> String {
+    let dir = paths::home();
+    std::env::var_os("HOME")
+        .and_then(|home| {
+            dir.strip_prefix(home)
+                .ok()
+                .map(|rest| Path::new("~").join(rest))
+        })
+        .unwrap_or(dir)
+        .display()
+        .to_string()
 }

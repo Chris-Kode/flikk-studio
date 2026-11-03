@@ -443,7 +443,7 @@ impl KooEditor {
                     .relative()
                     .icon(IconName::Sparkles)
                     .tooltip("Agent")
-                    .when(pending > 0, |b| b.child(Indicator::count(pending)))
+                    .when(pending > 0, |b| b.child(Indicator::Count(pending)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_agent(cx))),
             )
     }
@@ -498,7 +498,7 @@ impl KooEditor {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(div().p(px(12.)).child(self.caption_style.clone())),
+                    .child(self.caption_style.clone()),
             )
     }
 

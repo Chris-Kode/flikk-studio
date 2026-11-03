@@ -6,10 +6,8 @@
 
 use super::TranscriptPanel;
 use crate::state::voices::{SPEAKER_LIMIT, recording, spans_of};
+use crate::ui::kit::{Button, IconName, Input, h_flex};
 use crate::ui::voices::{OnKept, Start};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
-use gpui_kit::component::{IconName, Sizable as _, h_flex};
 use gpui_kit::*;
 use koo_core::MediaId;
 use koo_core::cloud::{Capability, Reading};
@@ -159,7 +157,7 @@ impl TranscriptPanel {
         let chars = self.retyper.read(cx).value().chars().count().max(8);
         let width = px((chars as f32 * 7.5 + 28.0).min(420.0));
         h_flex()
-            .gap_0p5()
+            .gap(px(2.))
             .px(px(2.5))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
@@ -167,11 +165,11 @@ impl TranscriptPanel {
                     cx.stop_propagation();
                 }
             }))
-            .child(div().w(width).child(Input::new(&self.retyper).xsmall()))
+            .child(div().w(width).child(Input::new(&self.retyper).small()))
             .child(
                 Button::new("say-it")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(IconName::Mic)
                     .tooltip("Say it in their voice")
                     .on_click(cx.listener(|this, _, window, cx| this.say_it(window, cx))),

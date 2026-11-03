@@ -19,7 +19,6 @@ mod tone_map;
 mod transition;
 
 pub(crate) use clip::sound_clip;
-pub(crate) use param::format_value;
 
 use crate::state::EditorState;
 use crate::ui::caption_style::{self, CaptionStylePanel};
@@ -320,32 +319,6 @@ impl InspectorPanel {
                     transition: Some(transition),
                 });
             }
-            Key::Exposure
-            | Key::Contrast
-            | Key::Saturation
-            | Key::Gamma
-            | Key::Temperature
-            | Key::Tint
-            | Key::Lift(_)
-            | Key::GammaRgb(_)
-            | Key::Gain(_) => {
-                if state.workspace == Workspace::Color {
-                    label = "set_timeline_grade";
-                    let mut grade = tl.grade.clone();
-                    color::set_grade_value(&mut grade, key, v);
-                    commands.push(Command::SetTimelineGrade { grade });
-                } else {
-                    label = "set_grade";
-                    for clip in clips.iter().filter(|c| is_media(c)) {
-                        let mut grade = clip.grade.clone();
-                        color::set_grade_value(&mut grade, key, v);
-                        commands.push(Command::SetGrade {
-                            clips: vec![clip.id],
-                            grade,
-                        });
-                    }
-                }
-            }
             Key::FadeIn | Key::FadeOut => {
                 label = "add_fade";
                 let edge = if key == Key::FadeIn {
@@ -436,14 +409,7 @@ impl InspectorPanel {
 impl Render for InspectorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = match self.state.read(cx).workspace {
-            Workspace::Color => View {
-                header: None,
-                tabs: None,
-                body: div()
-                    .p(px(12.))
-                    .child(self.timeline_color_view(window, cx))
-                    .into_any_element(),
-            },
+            Workspace::Color => self.timeline_color_view(window, cx),
             Workspace::Audio => self.timeline_audio_view(window, cx),
             _ => self.edit_view(window, cx),
         };
@@ -549,26 +515,6 @@ fn error_line(message: impl Into<SharedString>) -> Div {
         .text_size(px(11.))
         .text_color(t::ERR)
         .child(message.into())
-}
-
-/// A group of other panels' controls (caption styles) titled like the
-/// inspector's.
-pub(crate) fn section(title: &'static str, _: &App) -> Div {
-    section_frame(SectionHeader::new(title, title))
-}
-
-/// [`section`] with actions on the right of its header.
-pub(crate) fn section_with(title: &'static str, actions: impl IntoElement, _: &App) -> Div {
-    section_frame(SectionHeader::new(title, title).child(actions))
-}
-
-fn section_frame(header: SectionHeader) -> Div {
-    v_flex()
-        .flex_none()
-        .pb(px(6.))
-        .border_b_1()
-        .border_color(t::LN)
-        .child(header)
 }
 
 /// The empty state of a view with nothing to show.

@@ -3,7 +3,7 @@
 //! remove it.
 
 use super::editor::{CurveDrag, GradeUi};
-use gpui_kit::component::ActiveTheme as _;
+use crate::ui::kit::theme as t;
 use gpui_kit::*;
 use koo_core::grade::Curve;
 use koo_core::model::Grade;
@@ -67,16 +67,10 @@ fn from_px(b: &Bounds<Pixels>, p: Point<Pixels>) -> [f32; 2] {
     ]
 }
 
-fn channel_color(channel: usize, cx: &App) -> Hsla {
-    let t = cx.theme();
-    [t.foreground, t.red, t.green, t.blue][channel]
-}
+const COLORS: [Rgba; 4] = [t::T1, t::CH_R, t::CH_G, t::CH_B];
 
 /// The editor square for `ui`'s current channel.
-pub fn editor(ui: Entity<GradeUi>, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    let (grid, bg) = (theme.border, theme.secondary);
-    let colors: Vec<Hsla> = (0..4).map(|c| channel_color(c, cx)).collect();
+pub fn editor(ui: Entity<GradeUi>, height: f32) -> impl IntoElement {
     let state = ui.clone();
     canvas(
         move |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -89,27 +83,31 @@ pub fn editor(ui: Entity<GradeUi>, cx: &App) -> impl IntoElement {
                     .map(|d| (d.points.clone(), d.index, d.out));
                 (ui.shown().clone(), ui.channel, drag)
             };
-            paint(&bounds, &grade, channel, drag, &colors, grid, bg, window);
+            paint(&bounds, &grade, channel, drag, window);
             window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
             listen(state.clone(), bounds, hitbox, window);
         },
     )
     .w_full()
-    .h(px(200.))
+    .h(px(height))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint(
     b: &Bounds<Pixels>,
     grade: &Grade,
     channel: usize,
     drag: Option<(Vec<[f32; 2]>, usize, bool)>,
-    colors: &[Hsla],
-    grid: Hsla,
-    bg: Hsla,
     window: &mut Window,
 ) {
-    window.paint_quad(fill(*b, bg));
+    window.paint_quad(quad(
+        *b,
+        t::RADIUS_SM,
+        t::SCOPE,
+        px(1.),
+        t::LN,
+        BorderStyle::default(),
+    ));
+    let grid = t::alpha(t::ON_AC, 0.06);
     for i in 1..4 {
         let f = i as f32 / 4.0;
         let x = b.origin.x + b.size.width * f;
@@ -123,12 +121,23 @@ fn paint(
             grid,
         ));
     }
-    stroke(b, &[[0.0, 0.0], [1.0, 1.0]], grid.opacity(0.8), 1., window);
+    // The identity, dashed.
+    let dashes = 40;
+    for i in (0..dashes).step_by(2) {
+        let (f0, f1) = (i as f32 / dashes as f32, (i + 1) as f32 / dashes as f32);
+        stroke(
+            b,
+            &[[f0, f0], [f1, f1]],
+            t::alpha(t::ON_AC, 0.13),
+            1.,
+            window,
+        );
+    }
     // Other channels' curves, faint, under this one.
     for c in (0..4).filter(|c| *c != channel) {
         let pts = Curve::with_ends(points(grade, c));
         if let Some(curve) = Curve::new(&pts) {
-            stroke(b, &sample(&curve), colors[c].opacity(0.35), 1., window);
+            stroke(b, &sample(&curve), t::alpha(COLORS[c], 0.3), 1., window);
         }
     }
     let (pts, active, out) = match drag {
@@ -143,19 +152,32 @@ fn paint(
         Some(curve) => sample(&curve),
         None => vec![[0.0, 0.0], [1.0, 1.0]],
     };
-    let color = colors[channel];
-    stroke(b, &line, color, 1.5, window);
+    let color = COLORS[channel];
+    stroke(b, &line, color, 1.4, window);
     for (i, p) in pts.iter().enumerate() {
         if out && active == Some(i) {
             continue;
         }
         let c = to_px(b, *p);
-        let r = px(if active == Some(i) { 5. } else { 4. });
+        let dragged = active == Some(i);
+        let r = px(if dragged { 4.5 } else { 3.5 });
+        let point_bounds = Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.));
+        if dragged {
+            let ring = r + px(2.);
+            window.paint_quad(quad(
+                Bounds::new(point(c.x - ring, c.y - ring), size(ring * 2., ring * 2.)),
+                ring,
+                t::AC,
+                px(0.),
+                t::AC,
+                BorderStyle::default(),
+            ));
+        }
         window.paint_quad(quad(
-            Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)),
+            point_bounds,
             r,
-            if active == Some(i) { color } else { bg },
-            px(1.5),
+            color,
+            px(0.),
             color,
             BorderStyle::default(),
         ));
@@ -171,7 +193,13 @@ fn sample(curve: &Curve) -> Vec<[f32; 2]> {
         .collect()
 }
 
-fn stroke(b: &Bounds<Pixels>, line: &[[f32; 2]], color: Hsla, width: f32, window: &mut Window) {
+fn stroke(
+    b: &Bounds<Pixels>,
+    line: &[[f32; 2]],
+    color: impl Into<Hsla>,
+    width: f32,
+    window: &mut Window,
+) {
     let mut path = PathBuilder::stroke(px(width));
     for (i, p) in line.iter().enumerate() {
         if i == 0 {
@@ -181,6 +209,7 @@ fn stroke(b: &Bounds<Pixels>, line: &[[f32; 2]], color: Hsla, width: f32, window
         }
     }
     if let Ok(path) = path.build() {
+        let color: Hsla = color.into();
         window.paint_path(path, color);
     }
 }

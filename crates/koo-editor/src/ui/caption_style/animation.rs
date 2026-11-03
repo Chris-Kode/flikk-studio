@@ -2,10 +2,8 @@
 //! and leave.
 
 use super::CaptionStylePanel;
-use super::controls::{Field, Paint, number_row, row, swatch};
-use crate::ui::inspector::section;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{Sizable as _, v_flex};
+use super::controls::{Field, Paint, label, pairs, section};
+use crate::ui::kit::{Segmented, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::memory::{CaptionHighlight, CaptionMotion, CaptionStyle, MotionKind};
@@ -13,40 +11,39 @@ use koo_core::memory::{CaptionHighlight, CaptionMotion, CaptionStyle, MotionKind
 impl CaptionStylePanel {
     pub(super) fn animation_page(&mut self, style: &CaptionStyle, cx: &mut Context<Self>) -> Div {
         let mode = style.highlight;
-        let highlight = section("Highlight", cx)
+        let colored = matches!(
+            mode,
+            CaptionHighlight::Color | CaptionHighlight::Box | CaptionHighlight::Karaoke
+        );
+        let highlight = section("Highlight", true, Empty)
             .child(
-                TabBar::new("caption-highlight")
-                    .segmented()
-                    .xsmall()
-                    .w_full()
-                    .selected_index(
-                        CaptionHighlight::ALL
-                            .iter()
-                            .position(|h| *h == mode)
-                            .unwrap_or(0),
-                    )
-                    .children(
-                        CaptionHighlight::ALL
-                            .iter()
-                            .map(|h| Tab::new().label(h.label()).flex_1()),
-                    )
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        let h = CaptionHighlight::ALL[(*ix).min(CaptionHighlight::ALL.len() - 1)];
-                        this.edit(|s| s.highlight = h, cx);
-                    })),
-            )
-            .when(
-                matches!(
-                    mode,
-                    CaptionHighlight::Color | CaptionHighlight::Box | CaptionHighlight::Karaoke
+                h_flex().h(px(26.)).child(
+                    Segmented::new("caption-highlight")
+                        .compact()
+                        .fill()
+                        .items(CaptionHighlight::ALL.iter().map(|h| h.label()))
+                        .selected(
+                            CaptionHighlight::ALL
+                                .iter()
+                                .position(|h| *h == mode)
+                                .unwrap_or(0),
+                        )
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            let h =
+                                CaptionHighlight::ALL[(*ix).min(CaptionHighlight::ALL.len() - 1)];
+                            this.edit(|s| s.highlight = h, cx);
+                        })),
                 ),
-                |d| d.child(row("Color", swatch(self, Paint::Highlight), cx)),
             )
-            .when(mode == CaptionHighlight::Box, |d| {
-                d.child(number_row(self, Field::Padding, cx))
+            .when(colored, |d| {
+                let color = (label("Color"), self.color(Paint::Highlight));
+                d.child(if mode == CaptionHighlight::Box {
+                    pairs([color, self.number(Field::Padding, cx)])
+                } else {
+                    pairs([color])
+                })
             });
         v_flex()
-            .gap_4()
             .child(highlight)
             .child(self.motion("In", &style.intro, Field::Intro, cx))
             .child(self.motion("Out", &style.outro, Field::Outro, cx))
@@ -60,31 +57,28 @@ impl CaptionStylePanel {
         cx: &mut Context<Self>,
     ) -> Div {
         let kind = motion.kind;
-        section(title, cx)
+        section(title, false, Empty)
             .child(
-                TabBar::new(SharedString::from(format!("caption-{title}")))
-                    .segmented()
-                    .xsmall()
-                    .w_full()
-                    .selected_index(MotionKind::ALL.iter().position(|k| *k == kind).unwrap_or(0))
-                    .children(
-                        MotionKind::ALL
-                            .iter()
-                            .map(|k| Tab::new().label(k.label()).flex_1()),
-                    )
-                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                        let k = MotionKind::ALL[(*ix).min(MotionKind::ALL.len() - 1)];
-                        this.edit(
-                            |s| match field {
-                                Field::Intro => s.intro.kind = k,
-                                _ => s.outro.kind = k,
-                            },
-                            cx,
-                        );
-                    })),
+                h_flex().h(px(26.)).child(
+                    Segmented::new(SharedString::from(format!("caption-{title}")))
+                        .compact()
+                        .fill()
+                        .items(MotionKind::ALL.iter().map(|k| k.label()))
+                        .selected(MotionKind::ALL.iter().position(|k| *k == kind).unwrap_or(0))
+                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                            let k = MotionKind::ALL[(*ix).min(MotionKind::ALL.len() - 1)];
+                            this.edit(
+                                |s| match field {
+                                    Field::Intro => s.intro.kind = k,
+                                    _ => s.outro.kind = k,
+                                },
+                                cx,
+                            );
+                        })),
+                ),
             )
             .when(kind != MotionKind::None, |d| {
-                d.child(number_row(self, field, cx))
+                d.child(pairs([self.number(field, cx)]))
             })
     }
 }

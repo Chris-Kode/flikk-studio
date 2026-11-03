@@ -676,7 +676,7 @@ impl CodeEditorPanel {
             .text_size(px(11.))
             .line_height(px(17.))
             .text_color(t::T1)
-            .when(focused, |f| f.shadow(t::field_ring(t::AC)))
+            .when(focused, |f| f.shadow(t::field_ring()))
             .cursor_text()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 if !focus.read(cx).has_selection_focus(window, cx) {

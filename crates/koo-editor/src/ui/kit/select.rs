@@ -49,11 +49,6 @@ pub trait SelectItem: Clone + 'static {
     fn title(&self) -> SharedString;
 
     fn value(&self) -> &Self::Value;
-
-    /// Listed but not pickable.
-    fn disabled(&self) -> bool {
-        false
-    }
 }
 
 impl SelectItem for SharedString {
@@ -169,15 +164,11 @@ impl<T: SelectItem> SelectState<T> {
         self.highlighted = self
             .selected
             .and_then(|s| self.matches.iter().position(|&ix| ix == s))
-            .or_else(|| self.next_pickable(0..self.matches.len()));
+            .or_else(|| (!self.matches.is_empty()).then_some(0));
         if let Some(pos) = self.highlighted {
             self.scroll.scroll_to_item(pos, ScrollStrategy::Nearest);
         }
         cx.notify();
-    }
-
-    fn next_pickable(&self, mut positions: impl Iterator<Item = usize>) -> Option<usize> {
-        positions.find(|&pos| !self.items[self.matches[pos]].disabled())
     }
 
     fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,7 +195,7 @@ impl<T: SelectItem> SelectState<T> {
     }
 
     fn pick(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.items.get(ix).filter(|item| !item.disabled()) else {
+        let Some(item) = self.items.get(ix) else {
             return;
         };
         let value = item.value().clone();
@@ -215,19 +206,18 @@ impl<T: SelectItem> SelectState<T> {
 
     fn move_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
         let n = self.matches.len();
-        let from = self.highlighted;
-        let next = if down {
-            let start = from.map_or(0, |p| p + 1);
-            self.next_pickable((start..n).chain(0..start))
-        } else {
-            let end = from.unwrap_or(n);
-            self.next_pickable((0..end).rev().chain((end..n).rev()))
-        };
-        if let Some(pos) = next {
-            self.highlighted = Some(pos);
-            self.scroll.scroll_to_item(pos, ScrollStrategy::Nearest);
-            cx.notify();
+        if n == 0 {
+            return;
         }
+        let pos = match (self.highlighted, down) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(p), true) => (p + 1) % n,
+            (Some(p), false) => (p + n - 1) % n,
+        };
+        self.highlighted = Some(pos);
+        self.scroll.scroll_to_item(pos, ScrollStrategy::Nearest);
+        cx.notify();
     }
 }
 
@@ -339,7 +329,7 @@ impl<T: SelectItem> RenderOnce for Select<T> {
                 move |bounds, _, cx| state.update(cx, |s, _| s.trigger_width = bounds.size.width)
             });
         if lit {
-            trigger = trigger.shadow(t::field_ring(t::AC));
+            trigger = trigger.shadow(t::field_ring());
         }
         if disabled {
             trigger = trigger.opacity(0.4);
@@ -389,7 +379,6 @@ impl<T: SelectItem> RenderOnce for Select<T> {
                     .filter_map(|pos| {
                         let ix = *s.matches.get(pos)?;
                         let item = s.items.get(ix)?;
-                        let disabled = item.disabled();
                         let (hover, pick) = (state.clone(), state.clone());
                         Some(
                             div()
@@ -402,20 +391,17 @@ impl<T: SelectItem> RenderOnce for Select<T> {
                                 .rounded(t::RADIUS_SM)
                                 .whitespace_nowrap()
                                 .when(s.highlighted == Some(pos), |el| el.bg(t::HV))
-                                .when(disabled, |el| el.opacity(0.4))
-                                .when(!disabled, |el| {
-                                    el.cursor_pointer()
-                                        .on_hover(move |hovered, _, cx| {
-                                            if *hovered {
-                                                hover.update(cx, |s, cx| {
-                                                    s.highlighted = Some(pos);
-                                                    cx.notify();
-                                                })
-                                            }
+                                .cursor_pointer()
+                                .on_hover(move |hovered, _, cx| {
+                                    if *hovered {
+                                        hover.update(cx, |s, cx| {
+                                            s.highlighted = Some(pos);
+                                            cx.notify();
                                         })
-                                        .on_click(move |_, window, cx| {
-                                            pick.update(cx, |s, cx| s.pick(ix, window, cx))
-                                        })
+                                    }
+                                })
+                                .on_click(move |_, window, cx| {
+                                    pick.update(cx, |s, cx| s.pick(ix, window, cx))
                                 })
                                 .child(div().flex_1().min_w_0().truncate().child(item.title()))
                                 .when(s.selected == Some(ix), |el| {

@@ -4,16 +4,12 @@
 //! the user asks. While a provider transcribes, the speech tasks show its
 //! name: their models are not needed.
 
-use super::size_label;
+use super::{meta, page, row, size_label};
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::progress::Progress;
-use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex, v_flex,
+use crate::ui::kit::{
+    Button, Icon, IconName, Progress, ScrollableElement as _, Select, SelectEvent, SelectState,
+    Tooltip, h_flex, theme as t,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_models::{Model, Status, Task as ModelTask};
 use std::time::Duration;
@@ -21,12 +17,10 @@ use std::time::Duration;
 /// How often a running download's progress is redrawn.
 const PROGRESS_POLL: Duration = Duration::from_millis(200);
 
-type ModelList = SearchableVec<SharedString>;
-
 pub struct ModelsTab {
     state: Entity<EditorState>,
     /// Each task with the list of models that can do it.
-    pickers: Vec<(ModelTask, Entity<SelectState<ModelList>>)>,
+    pickers: Vec<(ModelTask, Entity<SelectState<SharedString>>)>,
     /// A download was running at the last poll.
     busy: bool,
     _observe: Subscription,
@@ -46,14 +40,7 @@ impl ModelsTab {
                     .iter()
                     .position(|m| m.id == task.model().id)
                     .unwrap_or(0);
-                let picker = cx.new(|cx| {
-                    SelectState::new(
-                        SearchableVec::new(names),
-                        Some(IndexPath::new(selected)),
-                        window,
-                        cx,
-                    )
-                });
+                let picker = cx.new(|cx| SelectState::new(names, Some(selected), window, cx));
                 (task, picker)
             })
             .collect();
@@ -62,10 +49,8 @@ impl ModelsTab {
             .map(|&(task, ref picker)| {
                 cx.subscribe(
                     picker,
-                    move |this, _, event: &SelectEvent<ModelList>, cx| {
-                        if let SelectEvent::Confirm(Some(name)) = event {
-                            this.pick(task, name, cx);
-                        }
+                    move |this, _, SelectEvent::Confirm(name): &SelectEvent<SharedString>, cx| {
+                        this.pick(task, name, cx)
                     },
                 )
             })
@@ -115,22 +100,18 @@ impl ModelsTab {
         status: Status,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let (muted, red, green) = (theme.muted_foreground, theme.red, theme.green);
         match status {
             Status::Downloaded => h_flex()
-                .gap_1()
+                .gap(px(8.))
                 .child(
-                    div()
-                        .id(("model-ready", ix))
-                        .child(Icon::new(IconName::Check).small().text_color(green))
-                        .tooltip(|window, cx| Tooltip::new("Downloaded").build(window, cx)),
+                    meta(size_label(model.files.iter().map(|f| f.size).sum())).text_size(px(11.)),
                 )
+                .child(Icon::new(IconName::Check).size(px(14.)).color(t::OK))
                 .child(
                     Button::new(("model-delete", ix))
                         .ghost()
-                        .xsmall()
-                        .icon(IconName::Delete)
+                        .small()
+                        .icon(IconName::Trash)
                         .tooltip("Delete")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.delete_model(model, cx))
@@ -139,60 +120,45 @@ impl ModelsTab {
                 .into_any_element(),
             Status::Missing => Button::new(("model-download", ix))
                 .small()
-                .outline()
-                .label(format!("Download {}", size_label(model.missing_bytes())))
+                .label("Download")
+                .child(sized(model.missing_bytes()))
                 .on_click(cx.listener(move |this, _, _, cx| this.download(model, cx)))
                 .into_any_element(),
             Status::Downloading(fraction) => h_flex()
-                .gap_2()
+                .gap(px(8.))
+                .child(Progress::new().value(fraction).w(px(120.)))
                 .child(
-                    div()
-                        .w(px(120.))
-                        .child(Progress::new(("model-progress", ix)).value(fraction * 100.)),
-                )
-                .child(
-                    div()
+                    meta(format!("{:.0}%", fraction * 100.))
                         .w(px(32.))
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("{:.0}%", fraction * 100.)),
+                        .text_size(px(11.))
+                        .text_color(t::T2),
                 )
                 .child(
                     Button::new(("model-cancel", ix))
                         .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
+                        .small()
+                        .icon(IconName::X)
                         .tooltip("Cancel")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.cancel_download(model, cx))
                         })),
                 )
                 .into_any_element(),
-            Status::Failed(message) => {
-                let message = SharedString::from(message);
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id(("model-failed", ix))
-                            .child(Icon::new(IconName::CircleAlert).small().text_color(red))
-                            .tooltip(move |window, cx| {
-                                let message = message.clone();
-                                Tooltip::element(move |_, _| {
-                                    div().max_w(px(320.)).child(message.clone())
-                                })
-                                .build(window, cx)
-                            }),
-                    )
-                    .child(
-                        Button::new(("model-retry", ix))
-                            .small()
-                            .outline()
-                            .label("Retry")
-                            .on_click(cx.listener(move |this, _, _, cx| this.download(model, cx))),
-                    )
-                    .into_any_element()
-            }
+            Status::Failed(message) => h_flex()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .id(("model-failed", ix))
+                        .child(Icon::new(IconName::CircleAlert).size(px(14.)).color(t::ERR))
+                        .tooltip(Tooltip::text(message)),
+                )
+                .child(
+                    Button::new(("model-retry", ix))
+                        .small()
+                        .label("Retry")
+                        .on_click(cx.listener(move |this, _, _, cx| this.download(model, cx))),
+                )
+                .into_any_element(),
         }
     }
 }
@@ -224,73 +190,61 @@ impl Render for ModelsTab {
             })
             .map(|(task, _, _)| task.model())
             .collect();
-        let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
-        v_flex()
-            .size_full()
-            .gap_2()
-            .when(missing.len() > 1, |el| {
-                let bytes = missing.iter().map(|m| m.missing_bytes()).sum();
-                el.child(
-                    h_flex().justify_end().child(
-                        Button::new("model-download-all")
-                            .small()
-                            .outline()
-                            .label(format!("Download all {}", size_label(bytes)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                for &model in &missing {
-                                    this.download(model, cx);
-                                }
-                            })),
-                    ),
-                )
+        let download_all = (missing.len() > 1).then(|| {
+            let bytes = missing.iter().map(|m| m.missing_bytes()).sum();
+            Button::new("model-download-all")
+                .small()
+                .icon(IconName::Download)
+                .label("Download all")
+                .child(sized(bytes))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    for &model in &missing {
+                        this.download(model, cx);
+                    }
+                }))
+                .into_any_element()
+        });
+        let rows: Vec<_> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (task, picker, status))| {
+                let provider = by(&task);
+                // Its model is not needed: only a copy on disk can be
+                // deleted.
+                let status_cell = match (provider, &status) {
+                    (Some(_), Status::Downloaded) | (None, _) => {
+                        self.render_status(ix, task.model(), status, cx)
+                    }
+                    (Some(name), _) => div()
+                        .text_size(px(11.))
+                        .text_color(t::T3)
+                        .child(name)
+                        .into_any_element(),
+                };
+                row(task.label(), 130.)
+                    .child(
+                        div().w(px(240.)).flex_none().child(
+                            Select::new(&picker)
+                                .small()
+                                .disabled(task.models().len() < 2 || provider.is_some()),
+                        ),
+                    )
+                    .child(h_flex().flex_1().min_w_0().justify_end().child(status_cell))
             })
+            .collect();
+        page("Models", download_all)
             .child(
-                v_flex()
-                    .id("model-tasks")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(
-                        rows.into_iter()
-                            .enumerate()
-                            .map(|(ix, (task, picker, status))| {
-                                let provider = by(&task);
-                                // Its model is not needed: only a copy on
-                                // disk can be deleted.
-                                let status_cell = match (provider, &status) {
-                                    (Some(_), Status::Downloaded) | (None, _) => {
-                                        self.render_status(ix, task.model(), status, cx)
-                                    }
-                                    (Some(name), _) => div()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(name)
-                                        .into_any_element(),
-                                };
-                                h_flex()
-                                    .flex_none()
-                                    .h(px(48.))
-                                    .gap_3()
-                                    .border_b_1()
-                                    .border_color(border)
-                                    .child(
-                                        div().w(px(130.)).flex_none().text_sm().child(task.label()),
-                                    )
-                                    .child(div().w(px(240.)).flex_none().child(
-                                        Select::new(&picker).small().disabled(
-                                            task.models().len() < 2 || provider.is_some(),
-                                        ),
-                                    ))
-                                    .child(
-                                        h_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .justify_end()
-                                            .child(status_cell),
-                                    )
-                            }),
-                    ),
+                div()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(t::LN)
+                    .children(rows),
             )
+            .overflow_y_scrollbar()
     }
+}
+
+/// A download's size, in a button after its label.
+fn sized(bytes: u64) -> Div {
+    div().font_family(t::mono()).child(size_label(bytes))
 }

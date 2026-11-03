@@ -14,7 +14,6 @@ type ClickHandler = Rc<dyn Fn(&usize, &mut Window, &mut App)>;
 pub struct Tab {
     label: SharedString,
     count: usize,
-    disabled: bool,
 }
 
 impl Tab {
@@ -22,18 +21,12 @@ impl Tab {
         Self {
             label: label.into(),
             count: 0,
-            disabled: false,
         }
     }
 
     /// How many items the page holds, after the label; hidden at zero.
     pub fn count(mut self, count: usize) -> Self {
         self.count = count;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 }
@@ -104,16 +97,13 @@ impl RenderOnce for Tabs {
             let selected = ix == self.selected;
             let mut item = BaseTab::new(ix)
                 .selected(selected)
-                .disabled(tab.disabled)
                 .set_position(ix + 1, count)
                 .relative()
                 .h(px(29.))
                 .gap(px(4.))
                 .whitespace_nowrap()
                 .text_color(if selected { t::T1 } else { t::T2 });
-            if tab.disabled {
-                item = item.opacity(0.4);
-            } else if !selected {
+            if !selected {
                 item = item.cursor_pointer().hover(|s| s.text_color(t::T1));
             }
             if let Some(handler) = self.on_click.clone() {
@@ -160,11 +150,6 @@ impl PanelTabs {
             selected: 0,
             on_click: None,
         }
-    }
-
-    pub fn item(mut self, label: impl Into<SharedString>) -> Self {
-        self.items.push(label.into());
-        self
     }
 
     pub fn items<L: Into<SharedString>>(mut self, labels: impl IntoIterator<Item = L>) -> Self {

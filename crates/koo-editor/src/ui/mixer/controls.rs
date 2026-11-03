@@ -1,11 +1,12 @@
-//! Sliders for the mixer and the clip effect stack. Each control commits
-//! once, on release, as a `Command` (faders and pan as `SetTrackMix`, clip
-//! volume as `SetGain` or a volume keyframe at the playhead, effect
-//! parameters as `SetTrackMix` or `SetAudioEffects`); while dragging, the
-//! readout follows the slider.
+//! Controls for the mixer and the clip effect stack. Each commits once as a
+//! `Command` (faders and pan as `SetTrackMix`, clip volume as `SetGain` or a
+//! volume keyframe at the playhead, effect parameters as `SetTrackMix` or
+//! `SetAudioEffects`): a slider on release, its readout following the drag;
+//! a number field when a scrub is released or a typed value entered.
 
 use crate::state::EditorState;
-use gpui_kit::component::slider::{SliderEvent, SliderScale, SliderState};
+use crate::ui::kit::{NumberFieldEvent, NumberFieldState};
+use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState};
 use gpui_kit::*;
 use koo_core::audiofx::AudioFx;
 use koo_core::command::Command;
@@ -29,15 +30,17 @@ pub enum Ctl {
     Param(Target, EffectId, String),
 }
 
-/// Range of a control in model units, and whether it moves on a log scale.
+/// Range of a control in model units, and whether a slider moves on a log
+/// scale.
+#[derive(Clone, Copy)]
 pub struct Range {
     pub min: f32,
     pub max: f32,
     pub log: bool,
 }
 
-pub struct Knob {
-    pub slider: Entity<SliderState>,
+struct Knob {
+    slider: Entity<SliderState>,
     /// Model value last shown.
     value: f32,
     /// Value under the pointer while dragging.
@@ -47,14 +50,20 @@ pub struct Knob {
 
 impl Knob {
     /// What the readout shows.
-    pub fn shown(&self) -> f32 {
+    fn shown(&self) -> f32 {
         self.live.unwrap_or(self.value)
     }
+}
+
+struct Field {
+    state: Entity<NumberFieldState>,
+    _sub: Subscription,
 }
 
 #[derive(Default)]
 pub struct Controls {
     knobs: HashMap<Ctl, Knob>,
+    fields: HashMap<Ctl, Field>,
 }
 
 /// A view that owns [`Controls`].
@@ -136,7 +145,48 @@ pub fn shown<T: ControlHost>(host: &mut T, ctl: &Ctl) -> Option<f32> {
     host.controls().knobs.get(ctl).map(Knob::shown)
 }
 
-fn commit(state: &Entity<EditorState>, ctl: &Ctl, v: f32, cx: &mut App) {
+/// The number field for `ctl`, created on first use and following `value`
+/// except while it is scrubbed or typed in.
+pub fn field<T: ControlHost>(
+    host: &mut T,
+    ctl: Ctl,
+    value: f32,
+    range: Range,
+    decimals: usize,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> Entity<NumberFieldState> {
+    if let Some(f) = host.controls().fields.get(&ctl) {
+        let state = f.state.clone();
+        state.update(cx, |s, cx| s.set_value(value as f64, cx));
+        return state;
+    }
+    let state = cx.new(|cx| {
+        NumberFieldState::new(window, cx)
+            .min(range.min as f64)
+            .max(range.max as f64)
+            .step(10f64.powi(-(decimals as i32)))
+            .decimals(decimals)
+            .default_value(value as f64)
+    });
+    let key = ctl.clone();
+    let _sub = cx.subscribe(&state, move |this: &mut T, _, ev: &NumberFieldEvent, cx| {
+        if let NumberFieldEvent::Commit(v) = *ev {
+            commit(this.editor(), &key, v as f32, cx);
+        }
+    });
+    host.controls().fields.insert(
+        ctl,
+        Field {
+            state: state.clone(),
+            _sub,
+        },
+    );
+    state
+}
+
+/// Set `ctl` to `v` in the model.
+pub fn commit(state: &Entity<EditorState>, ctl: &Ctl, v: f32, cx: &mut App) {
     let commands = {
         let s = state.read(cx);
         commands(s.bus.project(), s.playhead, ctl, v)
@@ -149,7 +199,7 @@ fn commit(state: &Entity<EditorState>, ctl: &Ctl, v: f32, cx: &mut App) {
 }
 
 /// The commands that set `ctl` to `v`.
-pub fn commands(project: &Project, playhead: Time, ctl: &Ctl, v: f32) -> Vec<Command> {
+fn commands(project: &Project, playhead: Time, ctl: &Ctl, v: f32) -> Vec<Command> {
     let tl = &project.timeline;
     let track_mix = |track: TrackId, f: &dyn Fn(&mut koo_core::model::TrackMix)| {
         tl.track(track).map(|t| {
@@ -230,7 +280,19 @@ pub fn split_label(label: &str) -> (&str, &str) {
     }
 }
 
-/// Compact readout: "1.2k" for kHz, one decimal for dB, whole ms.
+/// Decimals a value in `unit` is typed and shown with.
+pub fn decimals(unit: &str, range: Range) -> usize {
+    match unit {
+        "Hz" => 0,
+        "dB" => 1,
+        "ms" if range.min < 1. => 1,
+        "ms" => 0,
+        _ => 2,
+    }
+}
+
+/// Compact readout: "1.2k" for kHz, one decimal for dB, whole ms; minus
+/// signs as in the number fields.
 pub fn format(v: f32, unit: &str) -> String {
     let s = match unit {
         "Hz" if v >= 1000. => format!("{:.1}k", v / 1000.),
@@ -240,12 +302,9 @@ pub fn format(v: f32, unit: &str) -> String {
         "dB" => format!("{v:.1}"),
         _ => format!("{v:.2}"),
     };
-    if s.trim_start_matches('-')
-        .chars()
-        .all(|c| c == '0' || c == '.')
-    {
-        s.trim_start_matches('-').to_owned()
-    } else {
-        s
+    match s.strip_prefix('-') {
+        Some(abs) if abs.chars().all(|c| c == '0' || c == '.') => abs.to_owned(),
+        Some(abs) => format!("\u{2212}{abs}"),
+        None => s,
     }
 }

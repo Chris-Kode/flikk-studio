@@ -26,9 +26,9 @@ pub mod theme;
 pub mod toggle;
 pub mod tooltip;
 
-pub use button::{Button, Size, Variant};
+pub use button::Button;
 pub use color::ColorField;
-pub use dialog::{Dialog, DialogExt};
+pub use dialog::DialogExt;
 pub use gpui_kit::base::{h_flex, v_flex};
 pub use icon::{Icon, IconName};
 pub use kbd::Kbd;
@@ -40,8 +40,8 @@ pub use tooltip::Tooltip;
 
 pub use badge::{Badge, Indicator, Tone};
 pub use empty::EmptyState;
-pub use layout::{ScrollArea, ScrollableElement, h_resizable, resizable_panel, v_resizable};
-pub use panel::{Panel, PanelHeader, SectionHeader, SectionLabel};
+pub use layout::{ScrollableElement, h_resizable, resizable_panel, v_resizable};
+pub use panel::{Panel, PanelHeader, SectionHeader};
 pub use progress::Progress;
 pub use segmented::Segmented;
 pub use tabs::{PanelTabs, Tab, Tabs};

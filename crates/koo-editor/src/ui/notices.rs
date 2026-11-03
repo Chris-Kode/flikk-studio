@@ -35,7 +35,7 @@ pub fn button(
                 .icon(IconName::Bell)
                 .tooltip("Notifications")
                 .relative()
-                .children(level.map(|level| Indicator::dot(tone(level)))),
+                .children(level.map(|level| Indicator::Dot(tone(level)))),
         )
         .content(move |_, _, cx| list(&state, &on_action, cx))
 }

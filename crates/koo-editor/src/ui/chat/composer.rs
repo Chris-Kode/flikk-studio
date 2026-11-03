@@ -668,7 +668,7 @@ impl Render for Composer {
                     .border_1()
                     .border_color(if focused { t::AC } else { t::LN })
                     .bg(t::G)
-                    .when(focused, |el| el.shadow(t::field_ring(t::AC)))
+                    .when(focused, |el| el.shadow(t::field_ring()))
                     .when(!focused, |el| el.hover(|s| s.border_color(t::LN_HV)))
                     .child(
                         Textarea::new(&self.input)

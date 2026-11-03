@@ -11,11 +11,12 @@ mod words;
 
 use crate::state::EditorState;
 use crate::ui::RefDrag;
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, ContextMenuExt as _, EmptyState, IconName, Panel, PanelHeader, PopupMenuItem,
+    ScrollableElement as _, Segmented, h_flex, v_flex,
+};
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::captions::LOW_CONFIDENCE;
@@ -408,46 +409,76 @@ impl TranscriptPanel {
             View::Transcript => 0,
             View::Captions => 1,
         };
-        h_flex()
-            .p_2()
-            .gap_2()
+        PanelHeader::new().leading(
+            Segmented::new("transcript-view")
+                .compact()
+                .items(["Transcript", "Captions"])
+                .selected(selected)
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    this.view = if *ix == 0 {
+                        View::Transcript
+                    } else {
+                        View::Captions
+                    };
+                    cx.notify();
+                })),
+        )
+    }
+
+    /// What the selection is and what can be done with it.
+    fn selection_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (a, b) = self.selection()?;
+        let length = self.words[b].timeline.end - self.words[a].timeline.start;
+        let bar = footer()
             .child(
-                TabBar::new("transcript-view")
-                    .segmented()
-                    .small()
-                    .selected_index(selected)
-                    .child(Tab::new().label("Transcript"))
-                    .child(Tab::new().label("Captions"))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.view = if *ix == 0 {
-                            View::Transcript
-                        } else {
-                            View::Captions
-                        };
-                        cx.notify();
-                    })),
+                h_flex()
+                    .gap(px(4.))
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .font_family(t::mono())
+                            .text_color(t::T1)
+                            .child(format!("{:.1} s", length.as_secs_f64())),
+                    )
+                    .child("selected"),
             )
             .child(div().flex_1())
-            .child(self.generate_button(cx))
+            .child(
+                Button::new("transcript-retype")
+                    .ghost()
+                    .small()
+                    .label("Retype")
+                    .on_click(cx.listener(|this, _, window, cx| this.retype(window, cx))),
+            )
+            .child(
+                Button::new("transcript-add-to-chat")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Sparkles)
+                    .label("Add to chat")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_to_chat(cx))),
+            )
+            .child(
+                Button::new("transcript-cut")
+                    .small()
+                    .label("Cut")
+                    .kbd("Del")
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_selection(cx))),
+            );
+        Some(bar.into_any_element())
     }
 
     fn transcript_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.words.is_empty() {
-            return div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("No transcript")
-                .into_any_element();
+            return EmptyState::new(IconName::TextQuote, "No transcript").into_any_element();
         }
         let panel = cx.entity();
         div()
             .id("transcript-words")
+            .relative()
             .flex_1()
             .min_h_0()
+            .pt(px(2.))
             .track_focus(&self.focus)
             .on_key_down(
                 cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)),
@@ -466,8 +497,8 @@ impl TranscriptPanel {
                     cx.processor(|this, ix: usize, _, cx| this.paragraph(ix, cx)),
                 )
                 .size_full()
-                .text_sm()
-                .line_height(rems(1.6)),
+                .text_size(px(13.))
+                .line_height(px(22.)),
             )
             .vertical_scrollbar(&self.list)
             .context_menu(move |menu, _, cx| {
@@ -511,13 +542,6 @@ impl TranscriptPanel {
         let Some(p) = self.paragraphs.get(ix) else {
             return div().into_any_element();
         };
-        let theme = cx.theme();
-        let (muted, selection, accent, warn) = (
-            theme.muted_foreground,
-            theme.selection,
-            theme.accent,
-            theme.yellow,
-        );
         let playhead = self.state.read(cx).playhead;
         let sel = self.selection();
         let drag = self.selection_ref().map(|r| RefDrag { refs: vec![r] });
@@ -537,16 +561,28 @@ impl TranscriptPanel {
             let selected = sel.is_some_and(|(a, b)| a <= i && i <= b);
             let current = w.timeline.contains(playhead);
             let low = w.word.confidence < LOW_CONFIDENCE;
+            let ahead = w.timeline.start > playhead;
             div()
                 .id(("word", i))
                 .px(px(2.5))
+                .rounded(px(2.))
                 .cursor_text()
-                .when(selected, |d| d.bg(selection))
-                .when(current && !selected, |d| d.bg(accent))
+                .text_color(if ahead { t::alpha(t::T1, 0.8) } else { t::T1 })
                 .when(low, |d| {
                     d.underline()
                         .text_decoration_wavy()
-                        .text_decoration_color(warn)
+                        .text_decoration_color(t::WARN)
+                })
+                .when(selected, |d| {
+                    d.bg(t::alpha(t::AC, 0.2)).text_color(t::ON_AC)
+                })
+                .when(current && !selected, |d| {
+                    d.bg(t::alpha(t::PH, 0.12))
+                        .text_color(t::ON_AC)
+                        .underline()
+                        .text_decoration_solid()
+                        .text_decoration_2()
+                        .text_decoration_color(t::PH)
                 })
                 .when(generated, |d| d.italic())
                 .child(w.word.text.clone())
@@ -572,20 +608,67 @@ impl TranscriptPanel {
                 .into_any_element()
                 .into()
         });
+        let start = self.words[p.words.start].timeline.start;
         v_flex()
-            .px_3()
-            .pb_3()
-            .gap_0p5()
-            .children(p.label.clone().map(|l| {
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(muted)
-                    .child(l)
-            }))
-            .child(h_flex().flex_wrap().children(words))
+            .pt(px(10.))
+            .px(px(14.))
+            .pb(px(4.))
+            .children(p.label.clone().map(|l| speaker(l, start)))
+            .child(h_flex().flex_wrap().ml(px(-2.5)).children(words))
             .into_any_element()
     }
+}
+
+/// A paragraph's speaker: their initial, name and when they start.
+fn speaker(name: String, at: Time) -> impl IntoElement {
+    let initial: String = name
+        .chars()
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .collect();
+    let s = at.as_secs_f64().max(0.) as u64;
+    h_flex()
+        .gap(px(6.))
+        .mb(px(3.))
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(16.))
+                .rounded_full()
+                .bg(t::HV)
+                .text_size(px(9.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(t::T2)
+                .child(initial),
+        )
+        .child(div().font_weight(FontWeight::MEDIUM).child(name))
+        .child(
+            div()
+                .font_family(t::mono())
+                .text_size(px(10.))
+                .text_color(t::T3)
+                .child(format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)),
+        )
+}
+
+/// The 36 px bar along a view's foot.
+fn footer() -> Div {
+    h_flex()
+        .flex_none()
+        .h(px(36.))
+        .pl(px(12.))
+        .pr(px(8.))
+        .gap(px(8.))
+        .border_t_1()
+        .border_color(t::LN)
+        .text_size(px(11.))
+        .text_color(t::T3)
 }
 
 /// Splits the words at speaker changes and long pauses, and long monologues
@@ -641,14 +724,14 @@ impl Render for TranscriptPanel {
             self.head = Some(4);
             self.retype(window, cx);
         }
-        let body = match self.view {
-            View::Transcript => self.transcript_view(cx),
-            View::Captions => self.captions_view(cx),
+        let (body, foot) = match self.view {
+            View::Transcript => (self.transcript_view(cx), self.selection_bar(cx)),
+            View::Captions => (self.captions_view(cx), Some(self.captions_bar(cx))),
         };
-        v_flex()
-            .size_full()
-            .key_context("Transcript")
+        Panel::new()
+            .focused(self.focus.contains_focused(window, cx))
             .child(self.header(cx))
             .child(body)
+            .children(foot)
     }
 }

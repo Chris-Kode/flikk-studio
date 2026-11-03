@@ -11,7 +11,7 @@ pub const fn hex(v: u32) -> Rgba {
 }
 
 /// `0xRRGGBBAA` as a colour, usable in constants.
-pub const fn hexa(v: u32) -> Rgba {
+const fn hexa(v: u32) -> Rgba {
     Rgba {
         r: ((v >> 24) & 0xff) as f32 / 255.,
         g: ((v >> 16) & 0xff) as f32 / 255.,
@@ -92,6 +92,12 @@ pub const TI: Rgba = hex(0xD7B4FF);
 pub const LANE: Rgba = hex(0x0E0E10);
 /// Timeline markers and the marquee band.
 pub const MK: Rgba = hex(0x7FB0FF);
+/// Scope and curve-editor wells.
+pub const SCOPE: Rgba = hex(0x09090A);
+/// Red, green and blue channels: curves, parade, histogram.
+pub const CH_R: Rgba = hex(0xFF8A80);
+pub const CH_G: Rgba = hex(0x7FDC8F);
+pub const CH_B: Rgba = hex(0x82A8FF);
 /// Stands in for a picture behind caption lettering previews.
 pub const BACKDROP: Rgba = hex(0x2F343D);
 /// A dialog's sidebar and footer, a step below its body.
@@ -146,10 +152,10 @@ pub fn focus_ring() -> Vec<BoxShadow> {
     }]
 }
 
-/// Three-pixel wash around a focused field.
-pub fn field_ring(color: Rgba) -> Vec<BoxShadow> {
+/// Three-pixel accent wash around a focused field.
+pub fn field_ring() -> Vec<BoxShadow> {
     vec![BoxShadow {
-        color: alpha(color, 0.15).into(),
+        color: AC_WASH.into(),
         offset: point(px(0.), px(0.)),
         blur_radius: px(0.),
         spread_radius: px(3.),

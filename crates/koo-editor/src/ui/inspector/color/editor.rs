@@ -3,12 +3,11 @@
 //! panel needs no field for it. Drags show in the viewer uncommitted
 //! (`EditorState::show_live`) and commit once, on release, as one command.
 
-use super::super::param::format_value;
 use super::fields::Field;
 use crate::state::EditorState;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use crate::ui::kit::{NumberField, NumberFieldEvent, NumberFieldState, ScrubLabel, Slider, h_flex};
+use gpui_kit::base::slider::{SliderEvent, SliderState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::ClipId;
 use koo_core::command::Command;
@@ -21,6 +20,38 @@ pub enum Target {
     Timeline,
     /// The first clip's grade is shown; edits apply field by field to each.
     Clips(Vec<ClipId>),
+}
+
+/// Where the controls sit: the Color workspace's own panel, in titled
+/// sections, or a clip's Color tab, in plain groups.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Workspace,
+    Tab,
+}
+
+impl Layout {
+    /// Left inset of a row: past the section chevron in the workspace.
+    pub fn inset(self) -> Pixels {
+        px(match self {
+            Layout::Workspace => 22.,
+            Layout::Tab => 10.,
+        })
+    }
+
+    fn label_width(self) -> Pixels {
+        px(match self {
+            Layout::Workspace => 78.,
+            Layout::Tab => 64.,
+        })
+    }
+
+    pub fn wheel_size(self) -> f32 {
+        match self {
+            Layout::Workspace => 60.,
+            Layout::Tab => 54.,
+        }
+    }
 }
 
 /// A curve point being dragged.
@@ -51,12 +82,12 @@ pub struct GradeUi {
     pub matching: bool,
 }
 
+/// A slider and the number field beside it, both showing one field.
 struct Slot {
     slider: Entity<SliderState>,
-    field: Entity<InputState>,
-    value: f32,
+    field: Entity<NumberFieldState>,
+    /// The slider is held.
     dragging: bool,
-    typing: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -81,14 +112,17 @@ impl GradeUi {
         self.live.as_ref().unwrap_or(&self.base)
     }
 
-    pub fn dragging(&self) -> bool {
+    fn dragging(&self, cx: &App) -> bool {
         self.curve_drag.is_some()
             || self.wheel_drag.is_some()
-            || self.sliders.values().any(|s| s.dragging)
+            || self
+                .sliders
+                .values()
+                .any(|s| s.dragging || s.field.read(cx).is_scrubbing())
     }
 
     /// Follow the project: called on every render.
-    pub fn sync(&mut self, target: Target, base: Grade) {
+    pub fn sync(&mut self, target: Target, base: Grade, cx: &App) {
         if target != self.target {
             self.curve_drag = None;
             self.wheel_drag = None;
@@ -96,7 +130,7 @@ impl GradeUi {
         }
         self.target = target;
         self.base = base;
-        if !self.dragging() {
+        if !self.dragging(cx) {
             self.live = None;
         }
     }
@@ -165,123 +199,125 @@ impl GradeUi {
 
     // ------------------------------------------------------------- sliders
 
-    fn slot(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) -> &mut Slot {
+    fn slot(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) -> &Slot {
         if !self.sliders.contains_key(&field) {
             let spec = field.spec();
-            let value = field.get(&self.base);
+            let value = field.get(&self.base) * spec.factor;
             let slider = cx.new(|_| {
                 SliderState::new()
                     .min(spec.min)
                     .max(spec.max)
                     .step(spec.step)
-                    .default_value(value * spec.factor)
+                    .default_value(value)
             });
-            let text = format_value(value * spec.factor, spec.decimals);
-            let input = cx.new(|cx| InputState::new(window, cx).default_value(text));
+            let number = cx.new(|cx| {
+                let state = NumberFieldState::new(window, cx)
+                    .min(spec.min as f64)
+                    .max(spec.max as f64)
+                    .step(spec.step as f64)
+                    .decimals(spec.decimals)
+                    .default_value(value as f64);
+                if field.signed() {
+                    state.signed()
+                } else {
+                    state
+                }
+            });
+            let factor = spec.factor;
             let subs = vec![
-                cx.subscribe_in(
-                    &slider,
-                    window,
-                    move |this, _, ev: &SliderEvent, window, cx| {
-                        let (v, release) = match ev {
-                            SliderEvent::Change(v) => (v.start(), false),
-                            SliderEvent::Release(v) => (v.start(), true),
-                        };
-                        if let Some(s) = this.sliders.get_mut(&field) {
-                            s.dragging = !release;
-                            let text = format_value(v, spec.decimals);
-                            s.field.update(cx, |f, cx| f.set_value(text, window, cx));
-                        }
-                        let v = v / spec.factor;
-                        if release {
-                            this.commit(move |g| field.set(g, v), cx);
-                        } else {
+                cx.subscribe(&slider, move |this, _, ev: &SliderEvent, cx| {
+                    let (v, release) = match ev {
+                        SliderEvent::Change(v) => (v.start(), false),
+                        SliderEvent::Release(v) => (v.start(), true),
+                    };
+                    if let Some(s) = this.sliders.get_mut(&field) {
+                        s.dragging = !release;
+                    }
+                    let v = v / factor;
+                    if release {
+                        this.commit(move |g| field.set(g, v), cx);
+                    } else {
+                        this.preview(move |g| field.set(g, v), cx);
+                    }
+                    cx.notify();
+                }),
+                cx.subscribe(&number, move |this, _, ev: &NumberFieldEvent, cx| {
+                    match *ev {
+                        NumberFieldEvent::Change(v) => {
+                            let v = v as f32 / factor;
                             this.preview(move |g| field.set(g, v), cx);
                         }
-                    },
-                ),
-                cx.subscribe(&input, move |this, input, ev: &InputEvent, cx| {
-                    if let Some(s) = this.sliders.get_mut(&field) {
-                        s.typing = matches!(ev, InputEvent::Change);
-                    }
-                    if !matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        return;
-                    }
-                    let Ok(v) = input.read(cx).value().trim().parse::<f32>() else {
-                        return;
-                    };
-                    let v = v.clamp(spec.min, spec.max) / spec.factor;
-                    if (v - field.get(&this.base)).abs() > f32::EPSILON {
-                        if let Some(s) = this.sliders.get_mut(&field) {
-                            s.value = f32::NAN;
+                        NumberFieldEvent::Commit(v) => {
+                            let v = v as f32 / factor;
+                            this.commit(move |g| field.set(g, v), cx);
                         }
-                        this.commit(move |g| field.set(g, v), cx);
                     }
+                    cx.notify();
                 }),
             ];
             self.sliders.insert(
                 field,
                 Slot {
                     slider,
-                    field: input,
-                    value,
+                    field: number,
                     dragging: false,
-                    typing: false,
                     _subscriptions: subs,
                 },
             );
         }
-        let value = field.get(self.shown());
-        let slot = self.sliders.get_mut(&field).unwrap();
-        if !slot.dragging && (value - slot.value).abs() > 1e-6 {
-            slot.value = value;
-            let spec = field.spec();
-            let display = value * spec.factor;
+        let display = field.get(self.shown()) * field.spec().factor;
+        let slot = &self.sliders[&field];
+        if !slot.dragging && (slot.slider.read(cx).value().start() - display).abs() > 1e-6 {
             slot.slider
                 .update(cx, |s, cx| s.set_value(display, window, cx));
-            if !slot.typing {
-                let text = format_value(display, spec.decimals);
-                slot.field.update(cx, |f, cx| f.set_value(text, window, cx));
-            }
         }
+        slot.field
+            .update(cx, |f, cx| f.set_value(display as f64, cx));
         slot
     }
 
-    /// Label (double-click resets), slider and number field on a 28 px row.
-    pub fn slider_row(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    /// Label (drag to scrub, double-click to reset), slider and number field.
+    pub fn slider_row(
+        &mut self,
+        field: Field,
+        layout: Layout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let spec = field.spec();
-        let muted = cx.theme().muted_foreground;
-        let this = cx.entity();
+        let this = cx.entity().downgrade();
         let slot = self.slot(field, window, cx);
+        let label = ScrubLabel::new(&slot.field, spec.label).on_reset(move |_, cx| {
+            let _ = this.update(cx, |ui, cx| {
+                ui.commit(|g| field.set(g, spec.default), cx);
+                cx.notify();
+            });
+        });
         h_flex()
-            .h(px(28.))
-            .gap_2()
+            .flex_none()
+            .h(px(24.))
+            .gap(px(8.))
+            .pl(layout.inset())
+            .pr(px(10.))
             .child(
                 div()
-                    .id(SharedString::from(format!("grade-label-{field:?}")))
-                    .w(px(64.))
+                    .w(layout.label_width())
                     .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .truncate()
-                    .child(spec.label)
-                    .on_click(move |ev: &ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            this.update(cx, |ui, cx| ui.commit(|g| field.set(g, spec.default), cx));
-                        }
-                    }),
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(label),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Slider::new(&slot.slider).w_full()),
+                    .child(Slider::new(&slot.slider).when(field.centred(), |s| s.bipolar())),
             )
             .child(
                 div()
-                    .w(px(56.))
+                    .w(px(54.))
                     .flex_none()
-                    .child(Input::new(&slot.field).xsmall()),
+                    .child(NumberField::new(&slot.field).h(px(20.)).text_size(px(10.))),
             )
     }
 }

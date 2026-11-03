@@ -3,11 +3,11 @@
 //! [`InputState`] and [`TextareaState`]; these elements only draw the frame
 //! around them.
 
-use super::{icon::Icon, icon::IconName, kbd::Kbd, spinner::Spinner, theme as t};
+use super::{icon::Icon, icon::IconName, kbd::Kbd, theme as t};
 use gpui_kit::base::input::{
     InlineTokenContext, InputBaseState, InputEditorStyle, InputModeKind, InputState, TextareaState,
 };
-use gpui_kit::base::{Input as BaseInput, InputBase, Textarea as BaseTextarea, h_flex, v_flex};
+use gpui_kit::base::{Input as BaseInput, InputBase, Textarea as BaseTextarea, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -25,11 +25,9 @@ pub(super) fn project_style<M: InputModeKind>(state: &Entity<InputBaseState<M>>,
 }
 
 /// Border and wash of a field frame.
-fn frame_colors(focused: bool, error: bool) -> (Rgba, Option<Vec<BoxShadow>>) {
-    if error {
-        (t::alpha(t::ERR, 0.67), Some(t::field_ring(t::ERR)))
-    } else if focused {
-        (t::AC, Some(t::field_ring(t::AC)))
+fn frame_colors(focused: bool) -> (Rgba, Option<Vec<BoxShadow>>) {
+    if focused {
+        (t::AC, Some(t::field_ring()))
     } else {
         (t::LN, None)
     }
@@ -71,11 +69,8 @@ pub struct Input {
     small: bool,
     search: bool,
     kbd: Option<SharedString>,
-    matches: Option<usize>,
-    loading: bool,
     mask_toggle: bool,
     disabled: bool,
-    error: Option<SharedString>,
     prefix: Option<AnyElement>,
     suffix: Option<AnyElement>,
     style: StyleRefinement,
@@ -88,11 +83,8 @@ impl Input {
             small: false,
             search: false,
             kbd: None,
-            matches: None,
-            loading: false,
             mask_toggle: false,
             disabled: false,
-            error: None,
             prefix: None,
             suffix: None,
             style: StyleRefinement::default(),
@@ -117,18 +109,6 @@ impl Input {
         self
     }
 
-    /// How many results the typed query found.
-    pub fn matches(mut self, count: usize) -> Self {
-        self.matches = Some(count);
-        self
-    }
-
-    /// A spinner at the end while a search runs.
-    pub fn loading(mut self, loading: bool) -> Self {
-        self.loading = loading;
-        self
-    }
-
     /// An eye button that reveals a masked value.
     pub fn mask_toggle(mut self) -> Self {
         self.mask_toggle = true;
@@ -137,12 +117,6 @@ impl Input {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    /// A red frame and the message under it.
-    pub fn error(mut self, message: impl Into<SharedString>) -> Self {
-        self.error = Some(message.into());
         self
     }
 
@@ -179,8 +153,8 @@ impl RenderOnce for Input {
         } else {
             (px(26.), px(8.), px(6.), px(12.))
         };
-        let (border, ring) = frame_colors(focused, self.error.is_some());
-        let idle = !focused && self.error.is_none() && !self.disabled;
+        let (border, ring) = frame_colors(focused);
+        let idle = !focused && !self.disabled;
 
         let clear = (self.search && !empty && !self.disabled).then(|| {
             let state = state.clone();
@@ -230,7 +204,7 @@ impl RenderOnce for Input {
             });
         frame.style().refine(&self.style);
 
-        let frame = frame
+        frame
             .when(self.search, |f| {
                 f.child(Icon::new(IconName::Search).size(px(12.)).color(t::T3))
             })
@@ -239,45 +213,15 @@ impl RenderOnce for Input {
                     .map(|p| h_flex().flex_none().text_color(t::T3).child(p)),
             )
             .child(div().flex_1().min_w_0().child(BaseInput::new(&state)))
-            .when(self.loading, |f| {
-                f.child(Spinner::new().size(px(11.)).color(t::T2))
-            })
             .when_some(self.kbd.filter(|_| empty && !focused), |f, keys| {
                 f.child(div().text_color(t::T2).child(Kbd::new(keys)))
-            })
-            .when_some(self.matches.filter(|_| !empty), |f, n| {
-                f.child(
-                    div()
-                        .flex_none()
-                        .font_family(t::mono())
-                        .text_size(px(10.))
-                        .text_color(t::T3)
-                        .child(n.to_string()),
-                )
             })
             .children(clear)
             .children(reveal)
             .children(
                 self.suffix
                     .map(|p| h_flex().flex_none().text_color(t::T3).child(p)),
-            );
-
-        match self.error {
-            None => frame.into_any_element(),
-            Some(message) => v_flex()
-                .w_full()
-                .gap(px(6.))
-                .child(frame)
-                .child(
-                    h_flex()
-                        .gap(px(4.))
-                        .text_size(px(10.))
-                        .text_color(t::ERR)
-                        .child(Icon::new(IconName::CircleAlert).size(px(11.)))
-                        .child(message),
-                )
-                .into_any_element(),
-        }
+            )
     }
 }
 
@@ -289,7 +233,6 @@ pub struct Textarea {
     state: Entity<TextareaState>,
     small: bool,
     bare: bool,
-    disabled: bool,
     counter: Option<(usize, usize)>,
     token: Option<TokenRenderer>,
     style: StyleRefinement,
@@ -301,7 +244,6 @@ impl Textarea {
             state: state.clone(),
             small: false,
             bare: false,
-            disabled: false,
             counter: None,
             token: None,
             style: StyleRefinement::default(),
@@ -317,11 +259,6 @@ impl Textarea {
     /// No frame: the text area sits inside a surface that draws its own.
     pub fn bare(mut self) -> Self {
         self.bare = true;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 
@@ -363,8 +300,7 @@ impl RenderOnce for Textarea {
             px(0.)
         };
         project_style(&state, cx);
-        state.update(cx, |s, cx| {
-            s.set_disabled(self.disabled, cx);
+        state.update(cx, |s, _| {
             s.set_editor_paddings(Edges {
                 top: py,
                 right: pad,
@@ -372,14 +308,13 @@ impl RenderOnce for Textarea {
                 left: pad,
             });
         });
-        let focused = !self.disabled && state.read(cx).has_selection_focus(window, cx);
-        let (border, ring) = frame_colors(focused, false);
+        let focused = state.read(cx).has_selection_focus(window, cx);
+        let (border, ring) = frame_colors(focused);
         let framed = !self.bare;
 
         let mut frame = InputBase::new(("flikk-textarea", state.entity_id()))
             .role(Role::MultilineTextInput)
             .focused(focused)
-            .disabled(self.disabled)
             .relative()
             .flex()
             .w_full()
@@ -393,15 +328,10 @@ impl RenderOnce for Textarea {
                     .border_color(border)
                     .bg(t::G)
                     .when_some(ring, |f, ring| f.shadow(ring))
-                    .when(!focused && !self.disabled, |f| {
-                        f.hover(|s| s.border_color(t::LN_HV))
-                    })
+                    .when(!focused, |f| f.hover(|s| s.border_color(t::LN_HV)))
             })
-            .when(self.disabled, |f| f.opacity(0.4))
-            .when(!self.disabled, |f| {
-                f.cursor_text()
-                    .on_mouse_down(MouseButton::Left, focus_on_click(&state))
-            });
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, focus_on_click(&state));
         frame.style().refine(&self.style);
 
         let mut input = BaseTextarea::new(&state);

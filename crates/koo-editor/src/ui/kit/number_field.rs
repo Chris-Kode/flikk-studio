@@ -218,16 +218,13 @@ impl NumberFieldState {
     }
 }
 
-/// The field: the value in mono with an optional prefix and unit. Click to
-/// type a value.
+/// The field: the value in mono with an optional unit. Click to type a
+/// value.
 #[derive(IntoElement)]
 pub struct NumberField {
     state: Entity<NumberFieldState>,
-    prefix: Option<SharedString>,
     unit: Option<SharedString>,
-    mixed: bool,
     keyed: bool,
-    disabled: bool,
     style: StyleRefinement,
 }
 
@@ -235,19 +232,10 @@ impl NumberField {
     pub fn new(state: &Entity<NumberFieldState>) -> Self {
         Self {
             state: state.clone(),
-            prefix: None,
             unit: None,
-            mixed: false,
             keyed: false,
-            disabled: false,
             style: StyleRefinement::default(),
         }
-    }
-
-    /// A short name inside the field, before the value: `X`, `W`, `Pad`.
-    pub fn prefix(mut self, prefix: impl Into<SharedString>) -> Self {
-        self.prefix = Some(prefix.into());
-        self
     }
 
     pub fn unit(mut self, unit: impl Into<SharedString>) -> Self {
@@ -255,20 +243,9 @@ impl NumberField {
         self
     }
 
-    /// The selected clips disagree: show `—` until a value is typed.
-    pub fn mixed(mut self, mixed: bool) -> Self {
-        self.mixed = mixed;
-        self
-    }
-
     /// There is a keyframe at the playhead.
     pub fn keyed(mut self, keyed: bool) -> Self {
         self.keyed = keyed;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 }
@@ -285,26 +262,21 @@ impl RenderOnce for NumberField {
         let input = s.input.clone();
         let scrubbing = s.is_scrubbing();
         let fraction = s.fraction().filter(|_| scrubbing);
-        let shown = if self.mixed && !scrubbing {
-            String::new()
-        } else {
-            s.text(s.value)
-        };
+        let shown = s.text(s.value);
         let focused = input.read(cx).has_selection_focus(window, cx);
         if !s.edited && input.read(cx).value().as_ref() != shown {
             input.update(cx, |i, cx| i.set_value(shown, window, cx));
         }
         project_style(&input, cx);
-        input.update(cx, |i, cx| i.set_disabled(self.disabled, cx));
 
         let (border, ring) = if scrubbing || focused {
-            (t::AC, Some(t::field_ring(t::AC)))
+            (t::AC, Some(t::field_ring()))
         } else if self.keyed {
             (t::alpha(t::AC, 0.4), None)
         } else {
             (t::LN, None)
         };
-        let idle = !scrubbing && !focused && !self.keyed && !self.disabled;
+        let idle = !scrubbing && !focused && !self.keyed;
         let mut field = div()
             .id(("flikk-number", self.state.entity_id()))
             .relative()
@@ -324,15 +296,14 @@ impl RenderOnce for NumberField {
             .text_color(t::T1)
             .when_some(ring, |f, ring| f.shadow(ring))
             .when(idle, |f| f.hover(|s| s.border_color(t::LN_HV)))
-            .when(self.disabled, |f| f.opacity(0.4))
-            .when(!self.disabled, |f| {
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, {
                 let input = input.clone();
-                f.cursor_text()
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        if !input.read(cx).has_selection_focus(window, cx) {
-                            input.update(cx, |i, cx| i.focus(window, cx));
-                        }
-                    })
+                move |_, window, cx| {
+                    if !input.read(cx).has_selection_focus(window, cx) {
+                        input.update(cx, |i, cx| i.focus(window, cx));
+                    }
+                }
             });
         field.style().refine(&self.style);
 
@@ -348,17 +319,7 @@ impl RenderOnce for NumberField {
                     .border_r_1()
                     .border_color(t::AC)
             }))
-            .children(
-                self.prefix
-                    .map(|p| div().flex_none().mr(px(4.)).text_color(t::T3).child(p)),
-            )
-            .map(|f| {
-                if self.mixed && !focused && !scrubbing {
-                    f.child(div().flex_1().text_color(t::T3).child("\u{2014}"))
-                } else {
-                    f.child(div().flex_1().min_w_0().child(BaseInput::new(&input)))
-                }
-            })
+            .child(div().flex_1().min_w_0().child(BaseInput::new(&input)))
             .children(
                 self.unit
                     .map(|u| div().flex_none().pl(px(4.)).text_color(t::T3).child(u)),
@@ -384,7 +345,6 @@ pub struct ScrubLabel {
     state: Entity<NumberFieldState>,
     label: SharedString,
     keyed: bool,
-    disabled: bool,
     on_reset: Option<Handler>,
 }
 
@@ -394,7 +354,6 @@ impl ScrubLabel {
             state: state.clone(),
             label: label.into(),
             keyed: false,
-            disabled: false,
             on_reset: None,
         }
     }
@@ -402,11 +361,6 @@ impl ScrubLabel {
     /// There is a keyframe at the playhead.
     pub fn keyed(mut self, keyed: bool) -> Self {
         self.keyed = keyed;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 
@@ -443,14 +397,13 @@ impl RenderOnce for ScrubLabel {
             .min_w_0()
             .text_size(px(12.))
             .text_color(color)
-            .when(self.disabled, |l| l.opacity(0.4))
             .child(
                 div()
                     .min_w_0()
                     .truncate()
                     .text_decoration_1()
                     .text_decoration_color(underline)
-                    .when(!scrubbing && !self.disabled, |d| {
+                    .when(!scrubbing, |d| {
                         d.group_hover(group, |s| s.text_decoration_color(t::alpha(t::ON_AC, 0.44)))
                     })
                     .child(self.label),
@@ -462,42 +415,40 @@ impl RenderOnce for ScrubLabel {
                     .text_size(px(10.))
                     .child(d)
             }))
-            .when(!self.disabled, |l| {
-                l.cursor(CursorStyle::ResizeLeftRight)
-                    .when(!scrubbing, |l| l.hover(|s| s.text_color(t::T1)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        window.listener_for(&self.state, |s, e: &MouseDownEvent, _, _| {
-                            s.begin_scrub(e.position.x)
-                        }),
-                    )
-                    .on_drag(ScrubDrag(id), |drag, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.new(|_| drag.clone())
-                    })
-                    .on_drag_move(window.listener_for(
-                        &self.state,
-                        move |s, e: &DragMoveEvent<ScrubDrag>, _, cx| {
-                            if e.drag(cx).0 == id {
-                                s.scrub_to(e.event.position.x, e.event.modifiers.shift, cx);
-                            }
-                        },
-                    ))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        window.listener_for(&self.state, |s, _, _, cx| s.end_scrub(cx)),
-                    )
-                    .on_mouse_up_out(
-                        MouseButton::Left,
-                        window.listener_for(&self.state, |s, _, _, cx| s.end_scrub(cx)),
-                    )
-                    .when_some(self.on_reset, |l, reset| {
-                        l.on_click(move |e, window, cx| {
-                            if e.click_count() >= 2 {
-                                reset(window, cx);
-                            }
-                        })
-                    })
+            .cursor(CursorStyle::ResizeLeftRight)
+            .when(!scrubbing, |l| l.hover(|s| s.text_color(t::T1)))
+            .on_mouse_down(
+                MouseButton::Left,
+                window.listener_for(&self.state, |s, e: &MouseDownEvent, _, _| {
+                    s.begin_scrub(e.position.x)
+                }),
+            )
+            .on_drag(ScrubDrag(id), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(window.listener_for(
+                &self.state,
+                move |s, e: &DragMoveEvent<ScrubDrag>, _, cx| {
+                    if e.drag(cx).0 == id {
+                        s.scrub_to(e.event.position.x, e.event.modifiers.shift, cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                window.listener_for(&self.state, |s, _, _, cx| s.end_scrub(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                window.listener_for(&self.state, |s, _, _, cx| s.end_scrub(cx)),
+            )
+            .when_some(self.on_reset, |l, reset| {
+                l.on_click(move |e, window, cx| {
+                    if e.click_count() >= 2 {
+                        reset(window, cx);
+                    }
+                })
             })
     }
 }

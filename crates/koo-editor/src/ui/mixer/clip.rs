@@ -1,22 +1,42 @@
-//! A clip's sound for the inspector: volume with a keyframe toggle at the
+//! A clip's sound for the inspector: volume with its keyframe lane at the
 //! playhead (volume automation), and its effect stack with parameters.
 //! The inspector embeds it and sets the clip each render.
 
 use super::controls::{self, ControlHost, Controls, Ctl, Range, Target};
 use super::stack;
 use crate::state::EditorState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::slider::Slider;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use crate::ui::kit::theme as t;
+use crate::ui::kit::{
+    Button, DropdownMenu as _, Icon, IconName, Keyframe, KeyframeNav, NumberField, PopupMenuItem,
+    ScrubLabel, SectionHeader, Switch, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use koo_core::audiofx::AudioFx;
 use koo_core::command::Command;
 use koo_core::model::{Clip, Property};
-use koo_core::{ClipId, Time};
+use koo_core::{ClipId, EffectId, Time};
+use std::collections::HashSet;
+
+const VOLUME: Range = Range {
+    min: -48.,
+    max: 24.,
+    log: false,
+};
+
+/// What can be folded away.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Fold {
+    Clip,
+    Effects,
+    Effect(EffectId),
+}
 
 pub struct ClipAudioFx {
     state: Entity<EditorState>,
     controls: Controls,
     clip: Option<ClipId>,
+    folded: HashSet<Fold>,
     _observe: Subscription,
 }
 
@@ -37,6 +57,7 @@ impl ClipAudioFx {
             state,
             controls: Controls::default(),
             clip: None,
+            folded: HashSet::new(),
             _observe,
         }
     }
@@ -87,43 +108,229 @@ impl ClipAudioFx {
             s.execute(command, cx);
         });
     }
+
+    fn is_open(&self, fold: Fold) -> bool {
+        !self.folded.contains(&fold)
+    }
+
+    /// Fold or unfold `fold`.
+    fn toggler(&self, fold: Fold, cx: &Context<Self>) -> impl Fn(&mut App) + 'static {
+        let view = cx.entity().downgrade();
+        move |cx| {
+            let _ = view.update(cx, |this, cx| {
+                if !this.folded.remove(&fold) {
+                    this.folded.insert(fold);
+                }
+                cx.notify();
+            });
+        }
+    }
+
+    /// A group's collapsible header.
+    fn header(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        fold: Fold,
+        cx: &Context<Self>,
+    ) -> SectionHeader {
+        let toggle = self.toggler(fold, cx);
+        SectionHeader::new(id, title)
+            .open(self.is_open(fold))
+            .on_toggle(move |_, _, cx| toggle(cx))
+    }
+
+    /// The volume row: its label scrubs, the lane adds or removes a
+    /// keyframe at the playhead and seeks to the neighbouring ones.
+    fn volume_row(
+        &mut self,
+        clip: &Clip,
+        playhead: Time,
+        half: Time,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let rel = controls::clip_time(clip, playhead);
+        let keyed = Self::key_at(clip, playhead, half).is_some();
+        let times: Vec<Time> = clip
+            .keyframes
+            .iter()
+            .filter(|k| k.property == Property::Volume)
+            .map(|k| k.at)
+            .collect();
+        let keyframe = match (keyed, times.is_empty()) {
+            (true, _) => Keyframe::On,
+            (false, false) => Keyframe::Off,
+            (false, true) => Keyframe::None,
+        };
+        let inside = playhead >= clip.start && playhead < clip.start + clip.duration;
+        let prev = times.iter().copied().filter(|t| *t < rel - half).max();
+        let next = times.iter().copied().filter(|t| *t > rel + half).min();
+        let start = clip.start;
+        let seek = |to: Option<Time>| {
+            let state = self.state.clone();
+            to.map(|to| {
+                move |_: &mut Window, cx: &mut App| state.update(cx, |s, cx| s.seek(start + to, cx))
+            })
+        };
+        let (prev, next) = (seek(prev), seek(next));
+        let (key_state, key_clip) = (self.state.clone(), self.clip);
+        let nav = KeyframeNav::new("volume-key", keyframe)
+            .disabled(!inside)
+            .on_toggle(move |_, cx| Self::toggle_key(&key_state, key_clip, cx))
+            .when_some(prev, |nav, f| nav.on_prev(f))
+            .when_some(next, |nav, f| nav.on_next(f));
+
+        let volume = clip.value_at(Property::Volume, rel);
+        let ctl = Ctl::ClipVolume(clip.id);
+        let field = controls::field(self, ctl.clone(), volume, VOLUME, 1, window, cx);
+        let state = self.state.clone();
+        let label = ScrubLabel::new(&field, "Volume")
+            .keyed(keyed)
+            .on_reset(move |_, cx| controls::commit(&state, &ctl, 0., cx));
+        row(
+            label,
+            NumberField::new(&field).keyed(keyed).unit("dB"),
+            Some(nav.into_any_element()),
+        )
+    }
+
+    /// One effect: its header (fold, name, enable, menu), then its
+    /// parameters unless folded.
+    fn effect(
+        &mut self,
+        i: usize,
+        target: Target,
+        fx: &AudioFx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let open = self.is_open(Fold::Effect(fx.id));
+        let toggle = self.toggler(Fold::Effect(fx.id), cx);
+        let (on_state, rm_state, id) = (self.state.clone(), self.state.clone(), fx.id);
+        let menu = Button::new(("clip-fx-menu", i))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let state = rm_state.clone();
+                menu.item(
+                    PopupMenuItem::new("Remove")
+                        .icon(IconName::Trash)
+                        .destructive()
+                        .on_click(move |_, _, cx| stack::remove(&state, target, id, cx)),
+                )
+            });
+        let header = h_flex()
+            .id(("clip-fx", i))
+            .flex_none()
+            .h(px(26.))
+            .gap(px(6.))
+            .pl(px(18.))
+            .pr(px(6.))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| toggle(cx))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(px(12.))
+                .color(t::T3),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if fx.enabled { t::T1 } else { t::T3 })
+                    .child(fx.kind.label()),
+            )
+            .child(
+                // The controls' clicks are theirs, not the fold's.
+                h_flex()
+                    .gap(px(4.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Switch::new(("clip-fx-on", i))
+                            .checked(fx.enabled)
+                            .tooltip(if fx.enabled { "Bypass" } else { "Enable" })
+                            .on_click(move |_, _, cx| stack::toggle(&on_state, target, id, cx)),
+                    )
+                    .child(menu),
+            );
+        let rows = if open {
+            self.param_rows(target, fx, window, cx)
+        } else {
+            Vec::new()
+        };
+        v_flex().child(header).children(rows)
+    }
+
+    /// A row per parameter of `fx`: label (scrubs; double-click resets),
+    /// field and unit.
+    fn param_rows(
+        &mut self,
+        target: Target,
+        fx: &AudioFx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Div> {
+        let defaults = AudioFx::new(fx.kind);
+        fx.kind
+            .params()
+            .into_iter()
+            .map(|spec| {
+                let ctl = Ctl::Param(target, fx.id, spec.name.clone());
+                let range = controls::param_range(fx, &spec.name);
+                let (label, unit) = controls::split_label(&spec.label);
+                let decimals = controls::decimals(unit, range);
+                let value = fx.value(&spec.name) as f32;
+                let field = controls::field(self, ctl.clone(), value, range, decimals, window, cx);
+                let default = defaults.value(&spec.name) as f32;
+                let state = self.state.clone();
+                let label = ScrubLabel::new(&field, label.to_owned())
+                    .on_reset(move |_, cx| controls::commit(&state, &ctl, default, cx));
+                let number =
+                    NumberField::new(&field).when(!unit.is_empty(), |f| f.unit(unit.to_owned()));
+                row(label, number, None)
+            })
+            .collect()
+    }
 }
 
-fn header(title: &'static str, actions: impl IntoElement, cx: &App) -> Div {
+/// An inspector row: the 76 px label, the field, and the 54 px keyframe
+/// lane, kept empty where there is none so the fields line up.
+fn row(label: impl IntoElement, control: impl IntoElement, lane: Option<AnyElement>) -> Div {
     h_flex()
-        .h(px(22.))
-        .justify_between()
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(cx.theme().muted_foreground)
-        .child(title)
-        .child(actions)
+        .flex_none()
+        .h(px(26.))
+        .gap(px(6.))
+        .pl(px(22.))
+        .pr(px(10.))
+        .child(
+            div()
+                .w(px(76.))
+                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(control))
+        .child(h_flex().w(px(54.)).flex_none().justify_end().children(lane))
 }
 
-/// Keyframe diamond, filled when a key sits at the playhead.
-fn diamond(filled: bool, color: Hsla) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |b, _, window, _| {
-            let c = b.center();
-            let r = b.size.width.min(b.size.height) / 2. - px(1.);
-            let mut path = if filled {
-                PathBuilder::fill()
-            } else {
-                PathBuilder::stroke(px(1.2))
-            };
-            path.move_to(point(c.x, c.y - r));
-            path.line_to(point(c.x + r, c.y));
-            path.line_to(point(c.x, c.y + r));
-            path.line_to(point(c.x - r, c.y));
-            path.close();
-            if let Ok(p) = path.build() {
-                window.paint_path(p, color);
-            }
-        },
-    )
-    .size(px(10.))
-    .flex_none()
+/// A group under its header, ruled off below; folded, the header alone.
+fn group(header: SectionHeader, rows: Vec<Div>) -> Div {
+    v_flex()
+        .flex_none()
+        .border_b_1()
+        .border_color(t::LN)
+        .child(header)
+        .when(!rows.is_empty(), |g| {
+            g.child(v_flex().pb(px(6.)).children(rows))
+        })
 }
 
 impl Render for ClipAudioFx {
@@ -139,155 +346,45 @@ impl Render for ClipAudioFx {
         else {
             return v_flex();
         };
-        let rel = controls::clip_time(&clip, playhead);
-        let keyed = Self::key_at(&clip, playhead, half).is_some();
-        let automated = clip
-            .keyframes
-            .iter()
-            .any(|k| k.property == Property::Volume);
-        let volume = clip.value_at(Property::Volume, rel);
-        let slider = controls::knob(
-            self,
-            Ctl::ClipVolume(clip.id),
-            volume,
-            Range {
-                min: -48.,
-                max: 24.,
-                log: false,
-            },
-            window,
-            cx,
-        );
-        let shown = controls::shown(self, &Ctl::ClipVolume(clip.id)).unwrap_or(volume);
         let target = Target::Clip(clip.id);
-        let mut effects = Vec::new();
-        for (i, fx) in clip.audio.effects.iter().enumerate() {
-            let rows = stack::param_rows(self, target, fx, window, cx);
-            effects.push((i, fx.clone(), rows));
-        }
-        let theme = cx.theme();
-        let (fg, muted, accent, green) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.accent_foreground,
-            theme.green,
-        );
-        let (key_state, key_clip) = (self.state.clone(), self.clip);
-        let key_button = div()
-            .id("volume-key")
-            .size(px(20.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().secondary))
-            .tooltip(stack::tip(if keyed {
-                "Remove keyframe"
-            } else {
-                "Add keyframe"
-            }))
-            .child(diamond(
-                keyed,
-                if keyed || automated { accent } else { muted },
-            ))
-            .on_click(move |_, _, cx| Self::toggle_key(&key_state, key_clip, cx));
-        let volume_row = h_flex()
-            .h(px(28.))
-            .gap_2()
-            .child(
-                div()
-                    .w(px(76.))
-                    .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Volume"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Slider::new(&slider).w_full()),
-            )
-            .child(
-                div()
-                    .w(px(40.))
-                    .flex_none()
-                    .text_xs()
-                    .text_right()
-                    .text_color(muted)
-                    .child(controls::format(shown, "dB")),
-            )
-            .child(key_button);
 
-        let list = v_flex()
-            .id("clip-fx")
-            .gap_2()
-            .min_h(px(28.))
-            .children(effects.into_iter().map(|(i, fx, rows)| {
-                let (on_state, rm_state, id) = (self.state.clone(), self.state.clone(), fx.id);
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        h_flex()
-                            .h(px(24.))
-                            .gap_1()
-                            .text_xs()
-                            .text_color(if fx.enabled { fg } else { muted })
-                            .child(
-                                div()
-                                    .id(("clip-fx-on", i))
-                                    .size(px(14.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .tooltip(stack::tip(if fx.enabled {
-                                        "Bypass"
-                                    } else {
-                                        "Enable"
-                                    }))
-                                    .child(div().size(px(6.)).rounded_full().bg(if fx.enabled {
-                                        green
-                                    } else {
-                                        muted.opacity(0.4)
-                                    }))
-                                    .on_click(move |_, _, cx| {
-                                        stack::toggle(&on_state, target, id, cx)
-                                    }),
-                            )
-                            .child(div().flex_1().child(fx.kind.label()))
-                            .child(
-                                Button::new(("clip-fx-remove", i))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Close)
-                                    .tooltip("Remove")
-                                    .on_click(move |_, _, cx| {
-                                        stack::remove(&rm_state, target, id, cx)
-                                    }),
-                            ),
-                    )
-                    .children(rows.iter().map(|r| stack::param_row(r, muted)))
-            }));
-        let list = stack::drop_target(list, &self.state, target, cx);
+        let volume = if self.is_open(Fold::Clip) {
+            vec![self.volume_row(&clip, playhead, half, window, cx)]
+        } else {
+            Vec::new()
+        };
+        let effects = if self.is_open(Fold::Effects) {
+            let mut rows = Vec::new();
+            for (i, fx) in clip.audio.effects.iter().enumerate() {
+                rows.push(self.effect(i, target, fx, window, cx));
+            }
+            rows
+        } else {
+            Vec::new()
+        };
+        let add = stack::add_menu(
+            Button::new("clip-add-fx")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Add effect"),
+            &self.state,
+            target,
+        );
+        let effects = group(
+            self.header("clip-effects", "Effects", Fold::Effects, cx)
+                .child(add),
+            effects,
+        );
         v_flex()
-            .gap_4()
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(header("Clip", div(), cx))
-                    .child(volume_row),
-            )
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(header(
-                        "Effects",
-                        stack::add_button("clip-add-fx", &self.state, target),
-                        cx,
-                    ))
-                    .child(list),
-            )
+            .child(group(
+                self.header("clip-volume", "Clip", Fold::Clip, cx),
+                volume,
+            ))
+            .child(stack::drop_target(
+                div().id("clip-fx-drop").child(effects),
+                &self.state,
+                target,
+            ))
     }
 }

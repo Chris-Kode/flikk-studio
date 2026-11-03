@@ -1,7 +1,6 @@
 //! Modal dialogs over a scrim. A confirm asks one question: a title, an
 //! optional description, Cancel `Esc` and the confirm button `Enter`, which
-//! can be destructive, working (spinner, nothing pressable) or failed (an
-//! error banner). A form dialog has a title with a close button, the
+//! can be destructive or working (spinner, nothing pressable). A form dialog has a title with a close button, the
 //! caller's body, and the same footer when it has a confirm action.
 //!
 //! Open one with [`DialogExt::open_dialog`] or [`DialogExt::open_confirm`];
@@ -9,12 +8,7 @@
 //! reads. Escape cancels; Enter presses the focused footer button, else the
 //! confirm button.
 
-use super::{
-    button::Button,
-    icon::{Icon, IconName},
-    popover::surface,
-    theme as t,
-};
+use super::{button::Button, icon::IconName, popover::surface, theme as t};
 use gpui_kit::base::{Dialog as BaseDialog, Root, RootPlugin};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -116,7 +110,6 @@ pub struct Dialog {
     description: Option<SharedString>,
     close_button: bool,
     margin_top: Option<Pixels>,
-    error: Option<SharedString>,
     primary: Option<(SharedString, Press)>,
     secondary: Option<(SharedString, Press)>,
     destructive: bool,
@@ -134,7 +127,6 @@ impl Dialog {
             description: None,
             close_button: !confirm,
             margin_top: None,
-            error: None,
             primary: None,
             secondary: None,
             destructive: false,
@@ -166,12 +158,6 @@ impl Dialog {
     /// it.
     pub fn margin_top(mut self, margin: Pixels) -> Self {
         self.margin_top = Some(margin);
-        self
-    }
-
-    /// Why the last attempt failed, in a banner; the dialog stays open.
-    pub fn error(mut self, message: impl Into<SharedString>) -> Self {
-        self.error = Some(message.into());
         self
     }
 
@@ -365,8 +351,7 @@ fn render_dialog(
                     d.description
                         .clone()
                         .map(|text| div().mt(px(6.)).text_color(t::T2).child(text)),
-                )
-                .children(d.error.clone().map(|e| error_banner(e).mt(px(12.)))),
+                ),
         )
     } else if d.title.is_some() || d.close_button {
         Some(
@@ -460,8 +445,7 @@ fn render_dialog(
             .px(px(16.))
             .pt(px(12.))
             .when(!has_footer, |el| el.pb(px(16.)))
-            .children(d.children)
-            .children(d.error.clone().map(error_banner));
+            .children(d.children);
         body.style().refine(&d.style);
         body
     });
@@ -496,25 +480,4 @@ fn title(text: SharedString) -> Div {
         .text_size(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
         .child(text)
-}
-
-fn error_banner(message: SharedString) -> Div {
-    div()
-        .flex()
-        .items_start()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(8.))
-        .rounded(t::RADIUS)
-        .border_1()
-        .border_color(t::alpha(t::ERR, 0.33))
-        .bg(t::alpha(t::ERR, 0.07))
-        .text_color(t::ERR)
-        .child(
-            div()
-                .flex_none()
-                .pt(px(1.))
-                .child(Icon::new(IconName::CircleAlert).size(px(14.))),
-        )
-        .child(div().flex_1().min_w_0().child(message))
 }

@@ -1,7 +1,6 @@
 //! Panel anatomy: the panel surface with its 28 px header (title, context,
-//! trailing actions) and a 1 px accent line while it has focus; the
-//! inspector's collapsible section header; and the 11 px caps label over a
-//! group.
+//! trailing actions) and a 1 px accent line while it has focus; and the
+//! inspector's collapsible section header.
 
 use super::{icon::Icon, icon::IconName, theme as t};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -241,29 +240,5 @@ impl RenderOnce for SectionHeader {
                         .children(self.actions),
                 )
             })
-    }
-}
-
-/// The 11 px caps label over a group: RENDER QUEUE.
-#[derive(IntoElement)]
-pub struct SectionLabel {
-    text: SharedString,
-}
-
-impl SectionLabel {
-    pub fn new(text: impl Into<SharedString>) -> Self {
-        Self { text: text.into() }
-    }
-}
-
-impl RenderOnce for SectionLabel {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div()
-            .flex_none()
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(t::T2)
-            .whitespace_nowrap()
-            .child(self.text.to_uppercase())
     }
 }
