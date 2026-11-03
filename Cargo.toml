@@ -14,22 +14,22 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
-koo-core = { path = "crates/koo-core" }
-koo-store = { path = "crates/koo-store" }
-koo-media = { path = "crates/koo-media" }
-koo-analysis = { path = "crates/koo-analysis" }
-koo-cloud = { path = "crates/koo-cloud" }
-koo-agent = { path = "crates/koo-agent" }
-koo-deliver = { path = "crates/koo-deliver" }
-koo-gpu = { path = "crates/koo-gpu" }
-koo-html = { path = "crates/koo-html" }
-koo-models = { path = "crates/koo-models" }
+flikk-core = { path = "crates/flikk-core" }
+flikk-store = { path = "crates/flikk-store" }
+flikk-media = { path = "crates/flikk-media" }
+flikk-analysis = { path = "crates/flikk-analysis" }
+flikk-cloud = { path = "crates/flikk-cloud" }
+flikk-agent = { path = "crates/flikk-agent" }
+flikk-deliver = { path = "crates/flikk-deliver" }
+flikk-gpu = { path = "crates/flikk-gpu" }
+flikk-html = { path = "crates/flikk-html" }
+flikk-models = { path = "crates/flikk-models" }
 
 # whisper.cpp is unusably slow as a CMake Debug build.
 [profile.dev.package.whisper-rs-sys]
 opt-level = 3
 
-# Decoding HTML frames (koo-html) is several times slower unoptimized.
+# Decoding HTML frames (flikk-html) is several times slower unoptimized.
 [profile.dev.package.png]
 opt-level = 3
 
@@ -39,6 +39,6 @@ opt-level = 3
 [profile.dev.package.miniz_oxide]
 opt-level = 3
 
-# Cached frames (koo-editor's render cache) are QOI pictures, read during playback.
+# Cached frames (flikk's render cache) are QOI pictures, read during playback.
 [profile.dev.package.qoi]
 opt-level = 3

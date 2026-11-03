@@ -1,0 +1,426 @@
+//! Thin wrappers around the `ffmpeg` binary: audio extraction, scene and
+//! silence detection, EBU R128 loudness. Each run reports progress from
+//! `-progress pipe:2` against the known duration.
+
+use anyhow::{Context, Result, bail};
+use flikk_core::analysis::Loudness;
+use flikk_core::time::{Time, TimeRange};
+use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Sample rate the sound models hear.
+#[cfg(feature = "sounds")]
+pub use flikk_models::SOUND_RATE;
+/// Sample rate the speech models hear, and the energy VAD and levels are
+/// measured at.
+pub use flikk_models::SPEECH_RATE as SAMPLE_RATE;
+
+/// `$FLIKK_FFMPEG`, else `ffmpeg` from `PATH`.
+pub fn binary() -> PathBuf {
+    std::env::var_os("FLIKK_FFMPEG")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+/// What a run printed besides progress and its exit.
+struct Output {
+    log: Vec<String>,
+}
+
+/// Run ffmpeg with `args`, feeding stdout to `stdout` and calling `progress`
+/// with 0..1 when `duration` is known.
+fn run(
+    args: &[OsString],
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+    stdout: impl FnOnce(&mut dyn Read) -> Result<()>,
+) -> Result<Output> {
+    let bin = binary();
+    let mut child = Command::new(&bin)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-progress",
+            "pipe:2",
+        ])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run {} (set FLIKK_FFMPEG)", bin.display()))?;
+    let mut out = child.stdout.take().expect("piped stdout");
+    let err = child.stderr.take().expect("piped stderr");
+    let total = duration.map(|d| d.as_secs_f64()).filter(|d| *d > 0.0);
+
+    let (read, log) = std::thread::scope(|s| {
+        let log = s.spawn(move || {
+            let mut log = Vec::new();
+            for line in BufReader::new(err).lines().map_while(|l| l.ok()) {
+                if let Some(us) = line.strip_prefix("out_time_us=") {
+                    if let (Some(total), Ok(us)) = (total, us.trim().parse::<f64>()) {
+                        progress((us / 1e6 / total).clamp(0.0, 1.0) as f32);
+                    }
+                } else if !is_progress_line(&line) {
+                    log.push(line);
+                }
+            }
+            log
+        });
+        let read = stdout(&mut out);
+        // Drain whatever is left so ffmpeg never blocks on a full pipe.
+        let _ = std::io::copy(&mut out, &mut std::io::sink());
+        (read, log.join().unwrap_or_default())
+    });
+    let status = child.wait()?;
+    if !status.success() {
+        let tail: Vec<_> = log.iter().rev().take(4).rev().cloned().collect();
+        bail!("ffmpeg failed: {}", tail.join(" | "));
+    }
+    read?;
+    Ok(Output { log })
+}
+
+fn is_progress_line(line: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "frame=",
+        "fps=",
+        "stream_",
+        "bitrate=",
+        "total_size=",
+        "out_time",
+        "dup_frames=",
+        "drop_frames=",
+        "speed=",
+        "progress=",
+    ];
+    KEYS.iter().any(|k| line.starts_with(k))
+}
+
+fn discard(r: &mut dyn Read) -> Result<()> {
+    std::io::copy(r, &mut std::io::sink())?;
+    Ok(())
+}
+
+fn input(path: &Path) -> [OsString; 2] {
+    ["-i".into(), path.as_os_str().to_owned()]
+}
+
+fn strs<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(items: I) -> Vec<OsString> {
+    items.into_iter().map(|s| s.as_ref().to_owned()).collect()
+}
+
+/// True when ffmpeg failed because the requested stream does not exist.
+pub fn is_missing_stream(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("matches no streams") || msg.contains("does not contain any stream")
+}
+
+/// The `n`th audio stream (0 = first) as 16 kHz mono `f32`.
+pub fn extract_audio(
+    path: &Path,
+    n: u32,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<Vec<f32>> {
+    let mut bytes = Vec::new();
+    run(&pcm(path, n, SAMPLE_RATE, None), duration, progress, |r| {
+        r.read_to_end(&mut bytes)?;
+        Ok(())
+    })?;
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect())
+}
+
+/// The `n`th audio stream as lossless mono FLAC in `out`, at its own rate
+/// up to `max_rate`, for a provider to hear: nothing lost, and about half
+/// the size of the same samples as WAV.
+pub fn encode_flac(
+    path: &Path,
+    n: u32,
+    rate: Option<u32>,
+    max_rate: u32,
+    out: &Path,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<()> {
+    let mut args = strs(["-v", "error", "-y"]);
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        format!("0:a:{n}"),
+        "-vn".into(),
+        "-ac".into(),
+        "1".into(),
+    ]));
+    if rate.is_none_or(|r| r > max_rate) {
+        args.extend(strs(["-ar".to_string(), max_rate.to_string()]));
+    }
+    args.extend(strs(["-c:a", "flac", "-compression_level", "5"]));
+    args.push(out.as_os_str().to_owned());
+    run(&args, duration, progress, discard)?;
+    Ok(())
+}
+
+/// The `n`th audio stream as mono `f32` at `rate`, over the source range
+/// `range` when given, handed to `sink` about a second at a time so that a
+/// long file never sits in memory.
+#[cfg(feature = "sounds")]
+pub fn stream_audio(
+    path: &Path,
+    n: u32,
+    rate: u32,
+    range: Option<TimeRange>,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+    sink: &mut dyn FnMut(&[f32]) -> Result<()>,
+) -> Result<()> {
+    let duration = range.map(|r| r.duration()).or(duration);
+    run(&pcm(path, n, rate, range), duration, progress, |r| {
+        let mut buf = vec![0u8; rate as usize * 4];
+        let mut filled = 0;
+        let mut samples = Vec::with_capacity(rate as usize);
+        loop {
+            let read = r.read(&mut buf[filled..])?;
+            filled += read;
+            let whole = filled / 4 * 4;
+            if read == 0 || whole == buf.len() {
+                samples.clear();
+                samples.extend(
+                    buf[..whole]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b)),
+                );
+                if !samples.is_empty() {
+                    sink(&samples)?;
+                }
+                buf.copy_within(whole..filled, 0);
+                filled -= whole;
+            }
+            if read == 0 {
+                return Ok(());
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// The first audio stream of `path` over `spans` (source times, in order,
+/// not overlapping), joined into one mono 44.1 kHz WAV at `out`, at most
+/// `limit` long; the whole stream up to `limit` when `spans` is empty. For
+/// a provider to hear one voice.
+pub fn cut_speech(path: &Path, spans: &[TimeRange], limit: Time, out: &Path) -> Result<()> {
+    let mut args = strs(["-v", "error", "-y"]);
+    args.extend(input(path));
+    args.extend(strs(["-map", "0:a:0", "-vn", "-ac", "1", "-ar", "44100"]));
+    if !spans.is_empty() {
+        let keep: Vec<String> = spans
+            .iter()
+            .map(|r| {
+                format!(
+                    "between(t,{:.3},{:.3})",
+                    r.start.as_secs_f64(),
+                    r.end.as_secs_f64()
+                )
+            })
+            .collect();
+        args.extend(strs([
+            "-af".to_string(),
+            format!("aselect='{}',asetpts=N/SR/TB", keep.join("+")),
+        ]));
+    }
+    args.extend(strs([
+        "-t".to_string(),
+        format!("{:.3}", limit.as_secs_f64()),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+    ]));
+    args.push(out.as_os_str().to_owned());
+    run(&args, None, &|_| {}, discard)?;
+    Ok(())
+}
+
+/// ffmpeg arguments that write mono `f32` PCM at `rate` to stdout.
+fn pcm(path: &Path, n: u32, rate: u32, range: Option<TimeRange>) -> Vec<OsString> {
+    let mut args = strs(["-v", "error"]);
+    if let Some(r) = range {
+        args.extend(strs([
+            "-ss".to_string(),
+            format!("{:.6}", r.start.as_secs_f64()),
+            "-t".into(),
+            format!("{:.6}", r.duration().as_secs_f64().max(0.0)),
+        ]));
+    }
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        format!("0:a:{n}"),
+        "-vn".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        rate.to_string(),
+        "-f".into(),
+        "f32le".into(),
+        "-".into(),
+    ]));
+    args
+}
+
+/// Source times where the picture cuts, from ffmpeg's scene score.
+pub fn shot_changes(
+    path: &Path,
+    threshold: f32,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<Vec<Time>> {
+    let mut args = strs(["-v", "info"]);
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        "0:v:0".into(),
+        "-an".into(),
+        "-sn".into(),
+        "-vf".into(),
+        // Scoring a small picture is much faster and finds the same cuts.
+        format!("scale=320:-2,select='gt(scene,{threshold})',showinfo"),
+        "-f".into(),
+        "null".into(),
+        "-".into(),
+    ]));
+    let out = run(&args, duration, progress, discard)?;
+    let mut times: Vec<Time> = out
+        .log
+        .iter()
+        .filter(|l| l.contains("Parsed_showinfo"))
+        .filter_map(|l| field(l, "pts_time:"))
+        .map(Time::from_secs_f64)
+        .collect();
+    times.sort();
+    times.dedup();
+    Ok(times)
+}
+
+/// Silent gaps of at least `min`, from `silencedetect` on the `n`th audio
+/// stream. Uses the duration ffmpeg reports when `duration` is unknown.
+pub fn silences(
+    path: &Path,
+    n: u32,
+    min: Time,
+    duration: Option<Time>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<Vec<TimeRange>> {
+    let mut args = strs(["-v", "info"]);
+    args.extend(input(path));
+    args.extend(strs([
+        "-map".to_string(),
+        format!("0:a:{n}"),
+        "-vn".into(),
+        "-ac".into(),
+        "1".into(),
+        "-af".into(),
+        format!("silencedetect=n=-40dB:d={:.3}", min.as_secs_f64().max(0.01)),
+        "-f".into(),
+        "null".into(),
+        "-".into(),
+    ]));
+    let out = run(&args, duration, progress, discard)?;
+    let end = duration
+        .or_else(|| out.log.iter().find_map(|l| parse_duration(l)))
+        .unwrap_or(Time::ZERO);
+    let mut gaps = Vec::new();
+    let mut open: Option<Time> = None;
+    for line in &out.log {
+        if let Some(s) = field(line, "silence_start:") {
+            open = Some(Time::from_secs_f64(s.max(0.0)));
+        } else if let Some(e) = field(line, "silence_end:") {
+            let start = open.take().unwrap_or(Time::ZERO);
+            gaps.push(TimeRange::new(start, Time::from_secs_f64(e)));
+        }
+    }
+    if let Some(start) = open {
+        gaps.push(TimeRange::new(start, end.max(start)));
+    }
+    gaps.retain(|g| g.duration() >= min);
+    Ok(gaps)
+}
+
+/// Integrated loudness, true peak and loudness range of the first audio
+/// stream, over `range` when given (PRD A2).
+pub fn loudness(path: &Path, range: Option<TimeRange>) -> Result<Loudness> {
+    let mut args = strs(["-v", "info"]);
+    if let Some(r) = range {
+        args.extend(strs([
+            "-ss".to_string(),
+            format!("{:.6}", r.start.as_secs_f64()),
+            "-t".into(),
+            format!("{:.6}", r.duration().as_secs_f64().max(0.0)),
+        ]));
+    }
+    args.extend(input(path));
+    args.extend(strs([
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-af",
+        "ebur128=peak=true",
+        "-f",
+        "null",
+        "-",
+    ]));
+    let out = run(&args, None, &|_| {}, discard)?;
+    let summary = out
+        .log
+        .iter()
+        .position(|l| l.contains("Summary:"))
+        .context("ebur128 printed no summary")?;
+    let mut lufs = None;
+    let mut lra = None;
+    let mut peak = None;
+    for line in &out.log[summary..] {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("I:") {
+            lufs = first_number(v);
+        } else if let Some(v) = line.strip_prefix("LRA:") {
+            lra = first_number(v);
+        } else if let Some(v) = line.strip_prefix("Peak:") {
+            peak = first_number(v);
+        }
+    }
+    // Digital silence reports -inf; keep the values finite for JSON.
+    let finite = |v: f32| if v.is_finite() { v } else { -144.0 };
+    Ok(Loudness {
+        integrated_lufs: finite(lufs.context("no integrated loudness in ebur128 summary")?),
+        true_peak_db: finite(peak.context("no true peak in ebur128 summary")?),
+        range_lu: lra.unwrap_or(0.0),
+    })
+}
+
+fn first_number(s: &str) -> Option<f32> {
+    s.split_whitespace().next()?.parse().ok()
+}
+
+/// The number after `key` in a log line, e.g. `pts_time:12.3`.
+fn field(line: &str, key: &str) -> Option<f64> {
+    let rest = line[line.find(key)? + key.len()..].trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | 'e' | '+')))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// `  Duration: 00:01:00.04, start: …` from the input banner.
+fn parse_duration(line: &str) -> Option<Time> {
+    let rest = line.trim().strip_prefix("Duration:")?.trim();
+    Time::parse_clock(rest.split(',').next()?)
+}

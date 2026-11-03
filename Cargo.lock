@@ -1810,6 +1810,153 @@ dependencies = [
 ]
 
 [[package]]
+name = "flikk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "cpal",
+ "flikk-agent",
+ "flikk-analysis",
+ "flikk-cloud",
+ "flikk-core",
+ "flikk-deliver",
+ "flikk-gpu",
+ "flikk-html",
+ "flikk-media",
+ "flikk-models",
+ "flikk-store",
+ "gpui-kit",
+ "image",
+ "qoi",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "flikk-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flikk-core",
+ "image",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "flikk-analysis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flikk-core",
+ "flikk-models",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flikk-cloud"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flikk-core",
+ "keyring",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "flikk-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "flikk-deliver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cosmic-text",
+ "flikk-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flikk-gpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flikk-core",
+ "image",
+ "naga",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
+name = "flikk-html"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flikk-core",
+ "png 0.18.1",
+ "serde_json",
+ "tungstenite",
+]
+
+[[package]]
+name = "flikk-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "flikk-core",
+ "png 0.18.1",
+ "serde_json",
+]
+
+[[package]]
+name = "flikk-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flikk-core",
+ "mlx-rs",
+ "ort",
+ "serde_json",
+ "unicode-normalization",
+ "ureq",
+ "whisper-rs",
+]
+
+[[package]]
+name = "flikk-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flikk-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3499,153 +3646,6 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
-
-[[package]]
-name = "koo-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "image",
- "koo-core",
- "png 0.18.1",
- "serde",
- "serde_json",
- "ureq",
- "uuid",
-]
-
-[[package]]
-name = "koo-analysis"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "koo-core",
- "koo-models",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "koo-cloud"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "keyring",
- "koo-core",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "koo-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "koo-deliver"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cosmic-text",
- "koo-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "koo-editor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "cpal",
- "gpui-kit",
- "image",
- "koo-agent",
- "koo-analysis",
- "koo-cloud",
- "koo-core",
- "koo-deliver",
- "koo-gpu",
- "koo-html",
- "koo-media",
- "koo-models",
- "koo-store",
- "qoi",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "koo-gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
- "koo-core",
- "naga",
- "pollster",
- "wgpu",
-]
-
-[[package]]
-name = "koo-html"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "koo-core",
- "png 0.18.1",
- "serde_json",
- "tungstenite",
-]
-
-[[package]]
-name = "koo-media"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "koo-core",
- "png 0.18.1",
- "serde_json",
-]
-
-[[package]]
-name = "koo-models"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "koo-core",
- "mlx-rs",
- "ort",
- "serde_json",
- "unicode-normalization",
- "ureq",
- "whisper-rs",
-]
-
-[[package]]
-name = "koo-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "koo-core",
- "rusqlite",
- "serde",
- "serde_json",
- "uuid",
-]
 
 [[package]]
 name = "kurbo"

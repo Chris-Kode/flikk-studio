@@ -1,6 +1,6 @@
 # Tokens
 
-The values each pass reaches for. The source of truth is `crates/koo-editor/src/ui/kit/theme.rs`; if this file and the code disagree, the code wins and this file gets fixed. Add a token there rather than a literal in a panel.
+The values each pass reaches for. The source of truth is `crates/flikk/src/ui/kit/theme.rs`; if this file and the code disagree, the code wins and this file gets fixed. Add a token there rather than a literal in a panel.
 
 ## Spacing scale
 
@@ -108,4 +108,4 @@ One ease-out curve. Loops only for live work: `Spinner`, `Progress`, playback, r
 
 ---
 
-Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, CC BY 4.0. Changed for koo-editor's Flikk tokens. Keep this credit in copies and adaptations.
+Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, CC BY 4.0. Changed for Flikk's design tokens. Keep this credit in copies and adaptations.

@@ -1,0 +1,53 @@
+[package]
+name = "flikk-models"
+version.workspace = true
+edition.workspace = true
+
+# Each feature builds the runners of a family of tasks; without it the
+# models stay in the catalog (listed, downloadable) but cannot be run.
+[features]
+# Voice activity and transcription, run by whisper.cpp.
+whisper = ["dep:whisper-rs"]
+# whisper.cpp (and with `mlx`, MLX) on the GPU, with the CPU when the
+# machine has none. Each one needs its SDK at build time: Metal (Xcode),
+# Vulkan (the Vulkan SDK, or `glslc` and the Vulkan headers).
+metal = ["whisper-rs?/metal", "mlx-rs?/metal", "mlx-rs?/accelerate"]
+vulkan = ["whisper-rs?/vulkan"]
+# Word timing, run by ONNX Runtime, which is downloaded and linked
+# statically at build time.
+aligner = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+# Speakers, run by ONNX Runtime.
+diarizer = ["dep:ort"]
+# Sound tagging, beats and sound search, run by ONNX Runtime.
+sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
+# Subject masks: objects picked by clicks and followed through video, run
+# by ONNX Runtime.
+segment = ["dep:ort", "dep:serde_json"]
+# Depth maps for depth effects and masks, run by ONNX Runtime.
+depth = ["dep:ort"]
+# The same subject masks on MLX, Apple's array framework: on the Mac's GPU
+# with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
+# only.
+mlx = ["dep:mlx-rs"]
+# Frames between frames for smooth slow motion (RIFE), run by ONNX Runtime.
+interpolate = ["dep:ort"]
+# RIFE and depth on the GPU, one backend per build. Core ML links Apple's
+# frameworks, so it builds on macOS only. DirectML builds on Windows and
+# takes any DirectX 12 GPU. WebGPU has builds for x86-64 Linux, and takes
+# any GPU with Vulkan drivers; its Dawn library goes beside the binary.
+coreml = ["ort?/coreml"]
+directml = ["ort?/directml"]
+webgpu = ["ort?/webgpu", "ort?/copy-dylibs"]
+# Person masks: people cut out of their background by a matting model,
+# run by ONNX Runtime.
+matting = ["dep:ort"]
+
+[dependencies]
+anyhow.workspace = true
+flikk-core.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
+serde_json = { workspace = true, optional = true }
+unicode-normalization = { version = "0.1", optional = true }
+whisper-rs = { version = "0.16", optional = true }
+mlx-rs = { version = "0.33", default-features = false, optional = true }

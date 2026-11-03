@@ -1,17 +1,17 @@
 ---
 name: unslop
-description: Turns vibecoded, AI-looking UI in koo-editor (Flikk, GPUI) into designed interface with its own character. Audits the screen, sets a direction from the product, then fixes spacing, color, icons, copy, type, layout, details and motion in that order, using the Flikk tokens in crates/koo-editor/src/ui/kit/theme.rs. Use when the user asks to unslop, polish, clean up or redesign a panel, dialog or page so it stops looking AI-generated, or when a screen shows the usual tells like raw hex colors, glows, emoji labels, uppercase tracked labels, stray one-off sizes, pulsing elements, explanatory subtitles or shouty copy.
+description: Turns vibecoded, AI-looking UI in Flikk (GPUI) into designed interface with its own character. Audits the screen, sets a direction from the product, then fixes spacing, color, icons, copy, type, layout, details and motion in that order, using the Flikk tokens in crates/flikk/src/ui/kit/theme.rs. Use when the user asks to unslop, polish, clean up or redesign a panel, dialog or page so it stops looking AI-generated, or when a screen shows the usual tells like raw hex colors, glows, emoji labels, uppercase tracked labels, stray one-off sizes, pulsing elements, explanatory subtitles or shouty copy.
 license: CC-BY-4.0
 metadata:
   author: Damir Sokolovsky
   x: https://x.com/heydamir
   source: https://github.com/heydamir/unslop
-  adapted-for: koo-editor (GPUI, Flikk design system)
+  adapted-for: Flikk (GPUI, Flikk design system)
 ---
 
 # Unslop
 
-Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, licensed under CC BY 4.0. This version is changed for koo-editor: it works on GPUI Rust code and the Flikk tokens instead of web pages, and drops the landing-page, image-generation and story-video parts of the original. Keep this credit in any copy or adaptation.
+Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, licensed under CC BY 4.0. This version is changed for flikk: it works on GPUI Rust code and the Flikk tokens instead of web pages, and drops the landing-page, image-generation and story-video parts of the original. Keep this credit in any copy or adaptation.
 
 Vibecoded UI fails in the same predictable ways. Every surface glows, every label has an emoji, spacing is whatever the model typed that day, and the copy shouts. Unslopping fixes the craft and keeps the product. The features, content and order of sections stay. What changes is that every size, color and word becomes deliberate.
 
@@ -28,7 +28,7 @@ Work like a designer doing a redline pass, one layer at a time, across the whole
 - Let the layout do the explaining. No secondary labels or descriptions that restate what the layout already shows (CLAUDE.md).
 - Do not write tests, even when an issue asks for them. Say so in the report.
 - Do not rename the product. The app is Flikk.
-- Manual runs use `KOOEDITOR_HOME=/tmp/koo-editor-dev cargo run -p koo-editor`. Finish with `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings`.
+- Manual runs use `FLIKK_HOME=/tmp/flikk-dev cargo run -p flikk`. Finish with `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## What good looks like
 
@@ -40,7 +40,7 @@ Work like a designer doing a redline pass, one layer at a time, across the whole
 
 ## Run it
 
-1. **Look at the screen.** Find the files under `crates/koo-editor/src/ui/` that render it, and the kit components they use. If you can run the app and see it, do it, so you judge what people see and not only the code. On Linux, `scripts/screenshot.sh out.png` builds, launches and captures the window. On macOS, run the app and ask the user for a screenshot, or take one with `screencapture` if the user allows it. Without either, judge from the code and say so in the report.
+1. **Look at the screen.** Find the files under `crates/flikk/src/ui/` that render it, and the kit components they use. If you can run the app and see it, do it, so you judge what people see and not only the code. On Linux, `scripts/screenshot.sh out.png` builds, launches and captures the window. On macOS, run the app and ask the user for a screenshot, or take one with `screencapture` if the user allows it. Without either, judge from the code and say so in the report.
 2. **Audit.** Go through [references/signs.md](references/signs.md) and list every sign you find, one line each with `file:line`.
 3. **Decide how much to change.** Read the audit honestly before planning anything.
    - **Heavy slop**, many signs across color, type, icons and copy. Run the full process below.

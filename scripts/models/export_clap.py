@@ -1,5 +1,5 @@
 """LAION's larger_clap_general (Apache-2.0) as two ONNX graphs for
-koo-analysis's sound search.
+flikk-analysis's sound search.
 
 Audio: 10 s of 32 kHz mono samples, (windows, 320000), in; one unit-length
 512-number vector per window out. Shorter windows are repeated to fill the

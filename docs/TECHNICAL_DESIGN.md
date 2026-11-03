@@ -1,4 +1,4 @@
-# koo-editor — technical design
+# Flikk — technical design
 
 Engineering companion to the PRD ("AI-native video editor with agent chat",
 Oct 26 2026). The PRD says *what*; this file says *how* the code does it
@@ -9,22 +9,22 @@ described here, update the section in the same commit.
 ## 1. Shape of the system
 
 ```
-                 ┌──────────────────────────── koo-editor (GPUI app) ────────────────────────────┐
-  user ──input──▶│ workspaces (ui/*) ──▶ EditorState ──▶ CommandBus (koo-core) ◀── AgentLink     │
+                 ┌────────────────────────────── flikk (GPUI app) ───────────────────────────────┐
+  user ──input──▶│ workspaces (ui/*) ──▶ EditorState ──▶ CommandBus (flikk-core) ◀── AgentLink   │
                  │        ▲                    │  Services: media, analysis, fx, html, lettering │
                  │        └────── notify ──────┘                                    │            │
                  └──────────────────────────────────────────────────────────────────┼────────────┘
-     koo-media (FFmpeg)   koo-analysis + koo-models (Whisper, ONNX)                  │ TCP 127.0.0.1
-     koo-gpu (wgpu FX)    koo-html (headless Chromium)                               │ + token
-     koo-store (.koo files, SQLite)   koo-deliver (render, export)                   ▼
-     koo-cloud (online providers: ElevenLabs, fal, Pika)
-                                 claude -p / codex exec ──stdio──▶ koo-mcp (or `koo-editor mcp`)
-                                 external MCP clients  ──stdio──▶ koo-editor mcp ── bridge.json
+     flikk-media (FFmpeg)   flikk-analysis + flikk-models (Whisper, ONNX)            │ TCP 127.0.0.1
+     flikk-gpu (wgpu FX)    flikk-html (headless Chromium)                           │ + token
+     flikk-store (.flikk files, SQLite)   flikk-deliver (render, export)             ▼
+     flikk-cloud (online providers: ElevenLabs, fal, Pika)
+                                 claude -p / codex exec ──stdio──▶ flikk-mcp (or `flikk mcp`)
+                                 external MCP clients  ──stdio──▶ flikk mcp ── bridge.json
 ```
 
 * **One command bus.** Every change, from a button, a shortcut, the agent or a
-  recipe, is a `koo_core::command::Command` submitted to
-  `koo_core::bus::CommandBus`. Permissions, undo and change sets live there
+  recipe, is a `flikk_core::command::Command` submitted to
+  `flikk_core::bus::CommandBus`. Permissions, undo and change sets live there
   and nowhere else (PRD principles 1–3). Any UI action that changes the
   project goes through a `Command`, so the agent can do it too.
 * **Commands plan into ops.** `Command::plan(&Project) -> Result<Plan>` is
@@ -37,10 +37,10 @@ described here, update the section in the same commit.
   one undo step (`execute_batch` groups several). `Author::Agent` and
   `Author::Recipe` commands go into a change set for review (§4).
 * **Engines behind traits.** The UI, the compositor and the agent host call
-  the traits in `koo_core::services`: `MediaService` (`koo-media`),
-  `AnalysisService` (`koo-analysis`), `FxService` (`koo-gpu`), `HtmlService`
-  (`koo-html`), `LetteringService` (`koo-deliver`) and `GenerationService`
-  (`koo-cloud`). `EditorState.services` holds each as an
+  the traits in `flikk_core::services`: `MediaService` (`flikk-media`),
+  `AnalysisService` (`flikk-analysis`), `FxService` (`flikk-gpu`), `HtmlService`
+  (`flikk-html`), `LetteringService` (`flikk-deliver`) and `GenerationService`
+  (`flikk-cloud`). `EditorState.services` holds each as an
   `Option<Arc<dyn …>>`; an engine that fails to start (no ffmpeg, no GPU
   adapter, no browser) is `None` and callers degrade quietly.
 
@@ -48,21 +48,21 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `koo-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
-| `koo-store` | `.koo` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
-| `koo-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
-| `koo-analysis` | `AnalysisService`: the analysis pipeline over `koo-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
-| `koo-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
-| `koo-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
-| `koo-agent` | Backend adapters (Claude, Codex), MCP server (`koo-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
-| `koo-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
-| `koo-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
-| `koo-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
-| `koo-editor` | GPUI app (gpui-kit): `EditorState`, workspaces and panels, agent link, persistence, playback, wiring of all of the above | all, cpal, image |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
+| `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
+| `flikk-analysis` | `AnalysisService`: the analysis pipeline over `flikk-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
+| `flikk-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
+| `flikk-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
+| `flikk-agent` | Backend adapters (Claude, Codex), MCP server (`flikk-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
+| `flikk-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
+| `flikk-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
+| `flikk-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
+| `flikk` | GPUI app (gpui-kit): `EditorState`, workspaces and panels, agent link, persistence, playback, wiring of all of the above | all, cpal, image |
 
-Crates other than `koo-editor` depend only on `koo-core`, never on each other,
-except `koo-analysis`, which runs its models through `koo-models`. Analysis
-reaches an online transcriber only through `koo_core::cloud::SpeechService`,
+Crates other than `flikk` depend only on `flikk-core`, never on each other,
+except `flikk-analysis`, which runs its models through `flikk-models`. Analysis
+reaches an online transcriber only through `flikk_core::cloud::SpeechService`,
 which the editor hands it (`AnalysisService::configure`).
 
 ## 2. Key decisions
@@ -75,10 +75,10 @@ which the editor hands it (`AnalysisService::configure`).
 | Format | `SequenceSettings` sizes the frame by aspect (`Format::ALL`: 16:9, 9:16, 1:1, 4:5, 21:9, 4:3) and short side (720p–4K), changed by the undoable `SetFormat` | One project can be landscape, vertical or square; presets and lettering follow the short side |
 | Captions | Clips on `TrackKind::Caption` tracks, with per-word times | Ripple, move and undo retime captions for free (C3); highlights follow the speech |
 | Protected ranges | `Marker { kind: Protected }`; cut planners add `Warning::TouchesProtected` | F4 enforced in the bus for hand and agent edits alike |
-| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`KOOEDITOR_FFMPEG` / `KOOEDITOR_FFPROBE`, else `PATH`) | No libav linking on Windows/macOS |
+| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`FLIKK_FFMPEG` / `FLIKK_FFPROBE`, else `PATH`) | No libav linking on Windows/macOS |
 | Playback | A 720p proxy (`cache/proxies/<fp>.mp4`) is made on import and used once it exists; streams pipe RGBA from a long-lived ffmpeg (`-hwaccel auto`, software fallback); frames are composed on the GPU and painted as images | Smooth playback on a laptop without a GPU video surface |
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks (whole file under 10 MiB) | Fast on multi-GB files; good enough to detect replacement (F2) |
-| Compositor | One `koo_core::compose::program` draws the frame for the viewer, the agent's views and composited render ranges | The preview matches the export |
+| Compositor | One `flikk_core::compose::program` draws the frame for the viewer, the agent's views and composited render ranges | The preview matches the export |
 | Whisper | `whisper-rs` (whisper.cpp), ggml model in `paths::models()`; on the GPU (Metal on macOS, Vulkan on Windows and Linux), else the CPU | Local, word timestamps, any language; no per-use cost |
 | Word times | Forced alignment of Whisper's words with Qwen3-ForcedAligner-0.6B (Apache-2.0; our ONNX export, 4-bit weights, 589 MB) on ONNX Runtime (`ort`, linked statically at build time) | Whisper's own word times drift by up to a second in conversation; the aligner puts 94 % of word starts within 100 ms on hand-labelled English (Whisper: 48 %). One permissively licensed model for 11 languages |
 | Hearing | The model never hears audio: analysis turns it into the sound script (words, `[sounds]`, `♪` music with tempo and changes, silences), beats to cut on, vectors to search by description, and spectrogram pictures | Neither backend takes audio input, and models place sounds in time far worse than in text; the transcript and collages already work this way |
@@ -88,13 +88,13 @@ which the editor hands it (`AnalysisService::configure`).
 | Caches | Derived media data is keyed by fingerprint under `paths::cache()` | Re-opening a project never recomputes (principle 4, V6) |
 | Agent ↔ editor | The backend CLI launches an MCP server over stdio; it connects to the editor over `127.0.0.1:<port>` with a token, and the editor serves calls in `AgentLink::pump` on the UI thread | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments are seconds, `"M:SS.mmm"`, `"H:MM:SS.s"`, timecode `"HH:MM:SS:FF"`, frames `"f:1234"` or `@time`/`@range`; results are seconds to the millisecond | What models read and write reliably |
-| Persistence | Projects are `.koo` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
-| Library | FX programs (`.koofx`), presets (`.koopreset`: effects, audio effects or a grade with their values) sounds (`.koosound`, their audio in `paths::assets()`, a folder per content) and voices (`.koovoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`koo-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.koo` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
-| User data | Only under `paths::home()` (`$KOOEDITOR_HOME` or `~/.koo-editor`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
-| Online providers | `koo-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
-| API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "koo-editor"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.koo` files or logs |
+| Persistence | Projects are `.flikk` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
+| Library | FX programs (`.flikkfx`), presets (`.flikkpreset`: effects, audio effects or a grade with their values) sounds (`.flikksound`, their audio in `paths::assets()`, a folder per content) and voices (`.flikkvoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`flikk-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.flikk` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
+| User data | Only under `paths::home()` (`$FLIKK_HOME` or `~/.flikk`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
+| Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "flikk"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.flikk` files or logs |
 
-| Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`koo-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
+| Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`flikk-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
 | Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime, on the GPU (`onnx::GpuSessions`). Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
 | Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
 | Depth maps | Depth Anything V2 Small (Apache-2.0; onnx-community's ONNX export, pinned) on ONNX Runtime, per source frame at 518 on the longer side, spread over each frame's 2nd–98th percentile, smoothed over ±2 frames, kept by fingerprint and model; effects read it as `getDepth(uv)` | One permissively licensed model gives relative depth for any picture; what effects need is what is in front of what, not metres. The larger sizes are CC-BY-NC |
@@ -115,19 +115,19 @@ tools (views, previews, FFmpeg work) return a job that runs off-thread on a
 `Project` snapshot; its proposals are applied back on the UI thread.
 
 Heavy background work that must not pile up goes through
-`koo_core::jobs::JobQueue`: FIFO, at most `limit` jobs at once on threads of
+`flikk_core::jobs::JobQueue`: FIFO, at most `limit` jobs at once on threads of
 its own, a key already queued or running returns that job, and a job that
 panics fails without stopping the queue.
 
 ## 4. Editing model
 
-* **Project** (`koo-core/src/model.rs`): media, bins, one `Timeline` (tracks
+* **Project** (`flikk-core/src/model.rs`): media, bins, one `Timeline` (tracks
   of kind Video, Audio, Title, Caption, Overlay; markers; ducking; a timeline
   grade; `SequenceSettings`) and the project's FX programs.
 * **Clips** carry speed, enabled, name, color, a transform, a grade, an
   effect stack, audio effects, volume automation, `transition_in` /
   `transition_out` (resolved by `fx::transitions`), masks and a `retime`.
-* **Speed ramps** (`koo-core/src/speed.rs`, `Clip::retime`): speed keys
+* **Speed ramps** (`flikk-core/src/speed.rs`, `Clip::retime`): speed keys
   on clip time; between them the speed changes straight, before the first
   and after the last it holds. Source time is the integral
   (`Clip::source_offset`, inverse `Clip::timeline_offset`), behind
@@ -150,17 +150,17 @@ panics fails without stopping the queue.
   others through one affine matrix shared by the GPU and CPU compositors.
   `compose::GroupMove` moves, scales and turns several clips about a common
   pivot and turns that back into each clip's transform.
-* **Masks** (`koo-core/src/mask.rs`): rectangles, ellipses and closed paths
+* **Masks** (`flikk-core/src/mask.rs`): rectangles, ellipses and closed paths
   (straight or smooth) in the picture's own uv, with feather, expansion,
   opacity and invert, combined in order by add, subtract or intersect, each
   keyframable as a whole. Captions and titles take no masks or corner pins:
   renders burn them in with ASS, which cannot draw them.
-* **Stabilization** (`Clip::stabilization`, `koo-core/src/stabilize.rs`):
+* **Stabilization** (`Clip::stabilization`, `flikk-core/src/stabilize.rs`):
   on, a smoothness (0..1), Smooth or Locked, and a crop (Auto zoom or
-  None); off by default and left out of `.koo` files until set, so older
+  None); off by default and left out of `.flikk` files until set, so older
   files open unchanged. `Command::SetStabilization` sets it on video
   clips (see §7, "Stabilization").
-* **Subject masks** (`MaskShape::Subject`, `koo-core/src/subject.rs`): the
+* **Subject masks** (`MaskShape::Subject`, `flikk-core/src/subject.rs`): the
   mask keeps the object its `Subject`'s prompts pick: on some source
   frames, clicks on the object (or off it) and a box, in picture uv, so
   trims, splits and speed changes keep them on their frames. With `track`
@@ -168,13 +168,13 @@ panics fails without stopping the queue.
   frame shows the nearest prompted frame's matte. `refine` eases the edge
   onto the picture's (hair). Feather, expansion, opacity, invert and mode
   work as for shapes; the prompts are not keyframed.
-* **Person masks** (`MaskShape::Person { edge }`, `koo-core/src/person.rs`):
+* **Person masks** (`MaskShape::Person { edge }`, `flikk-core/src/person.rs`):
   the mask keeps every person a matting model finds in each frame, with no
   prompt; `edge` (0..1, keyframable with the rest of the state) eases the
   edge onto the picture's. Invert keeps the background instead. Feather,
   expansion, opacity and mode work as for shapes, so it combines with
   shape and subject masks. Old projects open unchanged (a new shape kind).
-* **Cuts in speech** (`koo-core/src/cuts.rs`) go in the pause between two
+* **Cuts in speech** (`flikk-core/src/cuts.rs`) go in the pause between two
   words, clear of both (40 ms after the earlier, 30 ms before the later), on
   a frame boundary when the pause holds one, with a 10 ms audio fade at the
   join. The transcript panel's word delete and the agent's `cut_words` use
@@ -189,7 +189,7 @@ panics fails without stopping the queue.
   grade or add an effect to one depth only, a copy of the clip on the track
   above takes the mask and the change. Without its map yet the mask is
   left out.
-* **Fixing words** (`koo-core/src/respeak*`): words typed over others in
+* **Fixing words** (`flikk-core/src/respeak*`): words typed over others in
   the transcript are said in the speaker's voice and cut in where the old
   ones were. `respeak::fix` takes the cuts either side of them from
   `Speech::around` (as a word delete places them), the rest of their
@@ -224,14 +224,14 @@ panics fails without stopping the queue.
   words keeps its ramp's shape, slower. A source with clips on audio tracks is now read
   for words there only (`query::words_in_range`), so the old words don't
   come back from the picture over them.
-* **Queries** (`koo-core/src/query.rs`): topmost clip at a time, sample
+* **Queries** (`flikk-core/src/query.rs`): topmost clip at a time, sample
   points, transcript↔timeline word mapping, typed timestamp and chat
   reference resolution, effective style rules.
 
 ### Change sets
 
 `Author::Agent { role }` and `Author::Recipe` commands go into the author's
-open `ChangeSet` (`koo-core/src/changeset.rs`, `bus.rs`), planned against that
+open `ChangeSet` (`flikk-core/src/changeset.rs`, `bus.rs`), planned against that
 set's *draft* (committed project + its own pending items), so the agent sees
 the effect of its earlier calls.
 
@@ -256,7 +256,7 @@ the effect of its earlier calls.
 ### Sync by sound
 
 A second camera or a separate audio recorder is lined up with the main clip
-by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
+by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 
 * **Measuring** (`sync/measure.rs`, pure Rust with its own radix-2 FFT in
   `sync/fft.rs`): each recording's stream is decoded through
@@ -302,7 +302,7 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   preview mixer uses it in place of WSOLA, and the render decodes such a
   clip's span the way the preview does, runs it through the same code and
   reads the result as FLAC from the job's work folder
-  (`koo-deliver/src/varispeed.rs`) instead of `atempo`, so preview and
+  (`flikk-deliver/src/varispeed.rs`) instead of `atempo`, so preview and
   export put every sample at the same time. WSOLA and `atempo` were not
   used for this: each wanders up to ±10 ms around the nominal time. A
   follower video at such a speed is composited in renders, as any retimed
@@ -320,7 +320,7 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
 
 ## 5. Compositor and FX
 
-* **One FX format** (`koo-core/src/fx/mod.rs`; its module docs are the
+* **One FX format** (`flikk-core/src/fx/mod.rs`; its module docs are the
   authoritative GLSL and HTML conventions). An `FxAsset` is a GLSL program
   (effect, transition or generator) or an HTML/CSS/JS document (generator:
   titles, lower thirds, motion graphics, image layouts) plus typed
@@ -333,24 +333,24 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   keyframes: on a clip's effect stack, as a transition, or as a generator
   clip's content.
 * **GLSL** follows ShaderToy/gl-transitions: authors write `effect(uv)`,
-  `transition(uv)` or `generate(uv)`; `koo-gpu` wraps it as `#version 450`,
+  `transition(uv)` or `generate(uv)`; `flikk-gpu` wraps it as `#version 450`,
   compiles it with naga on a thread with a 16 MiB stack, caches the result
   and reports errors against the author's lines. `iResolution` is in
   sequence pixels whatever size the effect runs at.
 * **HTML** renders in headless Chromium (Chrome, Chromium, Edge or Brave, or
-  `KOOEDITOR_CHROME`) over CDP with an engine-owned clock (`clock.js`: time,
+  `FLIKK_CHROME`) over CDP with an engine-owned clock (`clock.js`: time,
   timers, rAF, CSS animations, Web Animations and GSAP all follow clip time,
   `Math.random` is seeded), so frames are deterministic and exportable, with
-  alpha. GSAP 3.15 and its plugins are vendored in `koo-html/src/gsap` and
-  preloaded; templates build their animation in `kooTimeline`, which the
+  alpha. GSAP 3.15 and its plugins are vendored in `flikk-html/src/gsap` and
+  preloaded; templates build their animation in `flikkTimeline`, which the
   engine reruns when parameters or the clip length change. Pages lay out on
   the sequence's shape with a 1080 CSS px short side, so templates keep
   their proportions at any resolution; in portrait, bottom elements rise
   above the controls vertical apps draw. A render runs three browsers of its
-  own (`koo_html::crew`): each seeks through every frame, so scripts run as
+  own (`flikk_html::crew`): each seeks through every frame, so scripts run as
   in one browser, and they take turns capturing the frames the compositor
   will ask for next.
-* **Program frame** (`koo_core::compose::program`): for each layer, the
+* **Program frame** (`flikk_core::compose::program`): for each layer, the
   picture (a media frame at the speed-aware source time, an overlay, or a
   generator; a slowed clip that blends or flows shows the moment between
   two source frames: `Pictures::pair` reads both, the batch mixes them, or
@@ -363,14 +363,14 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   "Person masks") → transform and blend mode;
   transitions render each side onto its own canvas and mix them. Titles and
   captions are lettered on top by `LetteringService` (cosmic-text
-  `koo_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
+  `flikk_deliver::Letterer`). The whole frame is one `FxBatch` on the GPU: one
   upload per source picture, every pass in one submit, one readback (already
   BGRA); submit and wait are separate so playback pipelines frames.
   Without a GPU, `CpuBatch` and `compose/cpu.rs` composite in memory
   (transitions become a dissolve; effects and GLSL generators are skipped).
-* **Depth effects** (`koo-core/src/depth.rs`, `fx/depth.rs`): a GLSL
+* **Depth effects** (`flikk-core/src/depth.rs`, `fx/depth.rs`): a GLSL
   effect that calls `float getDepth(vec2 uv)` reads the picture's depth map
-  (distance 0 nearest to 1 farthest, sampled like `getColor`); `koo-gpu`
+  (distance 0 nearest to 1 farthest, sampled like `getColor`); `flikk-gpu`
   declares it and binds the map after the image parameters
   (`FxBatch::apply_depth`). The compositor asks the depth service for the
   map of the source frame a clip shows (only for clips with such an effect
@@ -392,18 +392,18 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   sets the focus to the distance there (a median over a small disc), keyed
   at the playhead when `focus` already has keyframes
   (`depth::focus_command`, `ui/viewer/focus.rs`).
-* **Grade** (`koo-core/src/grade.rs`): one pipeline (exposure, contrast, saturation,
+* **Grade** (`flikk-core/src/grade.rs`): one pipeline (exposure, contrast, saturation,
   temperature/tint, lift/gamma/gain, offset, shadows/highlights, hue,
   curves, a LUT file), baked into a 65³ LUT for export.
   `scopes.rs` reads waveform, parade, vectorscope and histogram and matches
   shots.
-* **Audio effects** (`koo-core/src/audiofx.rs`, `audiofx/dsp.rs`) run in the
-  preview mixer and map to FFmpeg filters in `koo-deliver/src/audio_fx.rs`,
+* **Audio effects** (`flikk-core/src/audiofx.rs`, `audiofx/dsp.rs`) run in the
+  preview mixer and map to FFmpeg filters in `flikk-deliver/src/audio_fx.rs`,
   table by table, so preview and export match.
 
 ## 6. Media and playback
 
-* `koo-media`: ffprobe (variable rates snapped to standard ones),
+* `flikk-media`: ffprobe (variable rates snapped to standard ones),
   fingerprints, single frames (96 MiB in-memory cache), playback streams
   (RGBA frames as PAM over a pipe) and f32 PCM streams, proxies (short side
   ≤ 720, x264 veryfast, no B-frames, half-second GOP), 6 × 5 collages stamped
@@ -423,7 +423,7 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   `hdr/` (tone-mapping tables), `respeak/` (a provider's takes of a fixed
   sentence, until the words are cut out of them). An HDR item's proxy is
   `proxies/<fp>-<mapping>.mp4` (below).
-* **HDR** (`koo-core/src/hdr.rs`): probing marks a video stream whose
+* **HDR** (`flikk-core/src/hdr.rs`): probing marks a video stream whose
   transfer is PQ (`smpte2084`: HDR10, Dolby Vision) or HLG (`arib-std-b67`:
   iPhone and Android HLG, the base layer of Dolby Vision 8.4) with an `Hdr`
   (primaries, matrix, range, bit depth, the peak from MaxCLL or the
@@ -444,7 +444,7 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
   BT.709. With `zscale` and `tonemap` in the installed FFmpeg (`ffmpeg
   -filters`, checked once per process) zimg does it; otherwise the same
   steps are baked into a 65³ `.cube` over the BT.2020 signal
-  (`cache/hdr/`) and applied with `lut3d` (`KOOEDITOR_TONEMAP=lut` forces
+  (`cache/hdr/`) and applied with `lut3d` (`FLIKK_TONEMAP=lut` forces
   this). Proxies of HDR items are made already mapped, one per mapping;
   changing an item's tone map starts its proxy again (the pool's poll), and
   until it exists the original is decoded and mapped. Frames between source
@@ -471,7 +471,7 @@ by what they both heard (`koo-core/src/sync/`), for podcasts and multicam.
 
 ### Render cache
 
-`koo-editor/src/render_cache*` keeps heavy frames on disk so playback stays
+`flikk/src/render_cache*` keeps heavy frames on disk so playback stays
 real time however heavy the edit (Resolve's smart cache, Premiere's render
 bar).
 
@@ -547,7 +547,7 @@ kept for the session and the job fails, naming the steps.
 sound vectors beside them, are not read, so the item is not analyzed until
 the user analyzes it again.
 
-### Models (`koo-models`)
+### Models (`flikk-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
 sound tagging, beats, sound search, segmentation, frame interpolation, matting, depth). Its `mod.rs` holds the
@@ -589,13 +589,13 @@ is left out. While a model is missing, the top bar's notices button lists
 them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
-Cargo features of `koo-analysis` (all default) gate the runners: `whisper`,
+Cargo features of `flikk-analysis` (all default) gate the runners: `whisper`,
 `aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
 subject masks keep nothing; without `interpolation`, optical flow blends;
-without `people`, person masks keep nothing). `koo-models`' `mlx` (macOS only: mlx-sys links
+without `people`, person masks keep nothing). `flikk-models`' `mlx` (macOS only: mlx-sys links
 Apple's frameworks) adds the MLX subject mask model and makes it the
-default; `koo-editor` turns it on with `metal` on macOS. mlx-sys builds
+default; `flikk` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
 as "Subject masks" and matting as "Person masks", but neither is part of
 analysis: `required_tasks` never asks for them. Frame interpolation ("Optical flow", RIFE) is listed the same way;
@@ -638,9 +638,9 @@ not retried with Whisper.
 
 * **Voice activity:** Silero VAD v6.2 (`voice_activity/silero/`;
   `ggml-silero-v6.2.0.bin` from ggml-org/whisper-vad at a pinned commit, or
-  `KOOEDITOR_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until under
+  `FLIKK_VAD_MODEL`), run by whisper.cpp: speech from 0.5 until under
   0.35, pauses under 250 ms kept, 60 ms before each range. Music is not
-  speech to it. The energy VAD (`koo-analysis/src/vad.rs`), which took a
+  speech to it. The energy VAD (`flikk-analysis/src/vad.rs`), which took a
   music bed for speech, stands in without the `whisper` feature, or for the
   session when the model can't be had. Silero hears the audio in one go and
   in 4 s blocks, each after the second before it, and a window is speech
@@ -650,13 +650,13 @@ not retried with Whisper.
   stays.
 * **Transcription:** Whisper small (264 MB, the default) or large
   (large-v3-turbo, 874 MB), both with 8-bit weights, picked in Settings →
-  Models, or `KOOEDITOR_WHISPER_MODEL` (a path or a ggml file name in
+  Models, or `FLIKK_WHISPER_MODEL` (a path or a ggml file name in
   `paths::models()`) for whichever size is picked. whisper.cpp is built for
   the GPU (Metal on macOS, Vulkan on Windows and Linux, with flash
   attention), so building needs Xcode or the Vulkan SDK (`glslc` and the
   Vulkan headers on Linux); without a GPU it runs on the CPU. On Windows
-  the editor delay-loads `vulkan-1.dll` (`koo-editor/build.rs`), and where
-  the DLL is missing `koo-editor/src/vulkan_fallback.rs` makes Vulkan fail
+  the editor delay-loads `vulkan-1.dll` (`flikk/build.rs`), and where
+  the DLL is missing `flikk/src/vulkan_fallback.rs` makes Vulkan fail
   to start, so Whisper runs on the CPU there too.
 
   Whisper hears only speech (`transcription/whisper/`): given music, a long
@@ -689,8 +689,8 @@ not retried with Whisper.
   against forced-aligned LibriSpeech). It knows English, Spanish, French,
   German, Italian, Portuguese, Russian, Chinese, Cantonese, Japanese and
   Korean. Its tokenizer comes from Qwen's repository and the model from
-  ours (below), or `KOOEDITOR_ALIGNER_MODEL`. Other languages keep word
-  edges measured on the audio levels (`koo-analysis/src/align.rs`), and so
+  ours (below), or `FLIKK_ALIGNER_MODEL`. Other languages keep word
+  edges measured on the audio levels (`flikk-analysis/src/align.rs`), and so
   does the result for the session when the model can't be loaded; words
   with neither letters nor digits stay between the aligned words around
   them. That measurement runs only where the aligner can't: run before it,
@@ -781,7 +781,7 @@ not retried with Whisper.
   leaves the sounds out, and what the others found is kept for the session.
   On 4 CPU threads the pass takes about 2 minutes per hour of audio for the
   tagger and 6 for CLAP, plus the beat tracker on music.
-* `koo-core/src/heard.rs` maps sounds, music, beats, level changes and
+* `flikk-core/src/heard.rs` maps sounds, music, beats, level changes and
   silences onto the timeline, and finds beats, downbeats and onsets (a 6 dB
   rise over the 50 ms before) near a cut.
 * **Sound model files:** our exports, built by `scripts/models/` and hosted
@@ -803,14 +803,14 @@ not retried with Whisper.
   float model) and `larger-clap-general-text.onnx` (141 MB; RoBERTa token
   ids in; 8-bit block weights and an int8 embedding table, cosine 0.998).
   The text tower's tokenizer comes from LAION's repository at a pinned
-  commit (`bpe.rs` encodes it). `KOOEDITOR_TAGGER_MODEL`,
-  `KOOEDITOR_BEATS_MODEL`, `KOOEDITOR_CLAP_AUDIO_MODEL`,
-  `KOOEDITOR_CLAP_TEXT_MODEL`, `KOOEDITOR_CLAP_VOCAB` and
-  `KOOEDITOR_CLAP_MERGES` point at local copies instead.
+  commit (`bpe.rs` encodes it). `FLIKK_TAGGER_MODEL`,
+  `FLIKK_BEATS_MODEL`, `FLIKK_CLAP_AUDIO_MODEL`,
+  `FLIKK_CLAP_TEXT_MODEL`, `FLIKK_CLAP_VOCAB` and
+  `FLIKK_CLAP_MERGES` point at local copies instead.
 
 ### Fitting music to a length
 
-`koo-core/src/music_fit*` makes a song end exactly where it should, on its
+`flikk-core/src/music_fit*` makes a song end exactly where it should, on its
 real ending, with seamless edits instead of a hard cut or a fade (like
 Premiere's Remix). The timeline's clip menu offers "Fit To" → Sequence End
 (the end of the other tracks), In/Out, or Duration… on a media clip on an
@@ -855,7 +855,7 @@ on the UI thread and run it off it:
 
 ### Subject masks
 
-* **Model** (`koo-models/src/segmentation/sam2/`): SAM 2.1 tiny (Meta,
+* **Model** (`flikk-models/src/segmentation/sam2/`): SAM 2.1 tiny (Meta,
   Apache-2.0) as square-zero-labs' ONNX export of `transformers`'
   `Sam2VideoModel` with the memory modules (190 MB; its authors checked it
   against `propagate_in_video_iterator`, worst per-frame IoU 0.9967), pinned
@@ -867,7 +867,7 @@ on the UI thread and run it off it:
   box is two corner points labelled 2 and 3 before the clicks. Checked
   here against a Python reference of the same loop on `transformers`'
   bedroom clip: per-frame IoU ≥ 0.9988.
-* **On MLX** (`koo-models/src/segmentation/sam2_mlx/`, feature `mlx`, the
+* **On MLX** (`flikk-models/src/segmentation/sam2_mlx/`, feature `mlx`, the
   default model on macOS): the same network written over `mlx-rs` from
   SAM 2's modules (Hiera with windowed and pooled attention, the FPN neck,
   the prompt encoder and two-way decoder, the memory encoder and the memory
@@ -894,7 +894,7 @@ on the UI thread and run it off it:
   the latest tracked, padded the same way), with temporal positions as
   `transformers` gives them. Occlusion is the model's: a hidden object
   gives an empty matte and is found again when it comes back.
-* **Service** (`koo-analysis/src/subjects.rs`, `LocalSubjects`): frames come
+* **Service** (`flikk-analysis/src/subjects.rs`, `LocalSubjects`): frames come
   from the media engine (the proxy when there is one), numbered on the
   media's rate as it decodes them; tracking reads forward with one stream
   and backward in chunks of 24. Each prompted frame is kept by
@@ -926,7 +926,7 @@ on the UI thread and run it off it:
 
 ### Stabilization
 
-* **Measuring** (`koo-analysis/src/motion.rs`, `LocalStabilizer`, Rust
+* **Measuring** (`flikk-analysis/src/motion.rs`, `LocalStabilizer`, Rust
   alone, no model): frames are read once in order through the media
   engine (the proxy when there is one) at most 320 px wide, in grey, with
   half- and quarter-size copies. Each frame is compared with the one
@@ -950,7 +950,7 @@ on the UI thread and run it off it:
   (`composed::measure_motion`, part of the progress), and the agent's
   `get_shake` waits for it. About 8 s per minute of 30 fps 720p footage
   in a release build here, decoding included.
-* **Correcting** (`koo-core/src/stabilize.rs`, `Plan`): the steps over the
+* **Correcting** (`flikk-core/src/stabilize.rs`, `Plan`): the steps over the
   source range the clip shows add up into the camera's pose per frame
   (where frame 0's centre went, its turn), composed exactly as
   similarities. Smooth runs a Gaussian over each part of the pose
@@ -992,14 +992,14 @@ on the UI thread and run it off it:
 
 ### Person masks
 
-* **Model** (`koo-models/src/matting/modnet/`): MODNet (Ke et al., Apache-2.0
+* **Model** (`flikk-models/src/matting/modnet/`): MODNet (Ke et al., Apache-2.0
   code and weights), the official photographic portrait checkpoint as
   Xenova's ONNX export (`Xenova/modnet`, Apache-2.0, pinned to commit
-  `fa2fa546`, 25.9 MB, full precision; `KOOEDITOR_MODNET` points at a local
+  `fa2fa546`, 25.9 MB, full precision; `FLIKK_MODNET` points at a local
   copy). One graph: a picture with its short side at 512 (the long side
   in proportion, at most 1024, both a multiple of 32), scaled to -1..1 →
   coverage 0..1 at that size. Pictures are resampled by area averaging.
-* **Service** (`koo-analysis/src/people.rs`, `LocalPeople`, behind
+* **Service** (`flikk-analysis/src/people.rs`, `LocalPeople`, behind
   `LocalSubjects`' person methods of `SubjectService`, sharing its media
   engine and version): frames are read at a 512 short side through the
   media engine (the proxy when there is one), matted in chunks of 32 and
@@ -1036,11 +1036,11 @@ on the UI thread and run it off it:
 
 ### Depth maps
 
-* **Model** (`koo-models/src/depth/depth_anything/`): Depth Anything V2
+* **Model** (`flikk-models/src/depth/depth_anything/`): Depth Anything V2
   Small (DINOv2 ViT-S and a DPT head; Apache-2.0, the Base and Large
   weights being CC-BY-NC), as onnx-community's `depth-anything-v2-small`
   export in full precision (99 MB, `onnx/model.onnx`), pinned to a commit
-  (`KOOEDITOR_DEPTH_MODEL` points at another copy). Pictures are decoded
+  (`FLIKK_DEPTH_MODEL` points at another copy). Pictures are decoded
   640 wide, resampled bilinearly to 518 on the longer side, both sides a
   multiple of 14 (518 × 294 for 16:9), and normalized as ImageNet; out
   comes relative disparity at that size. The model was trained at 518 on
@@ -1051,7 +1051,7 @@ on the UI thread and run it off it:
   (16:9; with Python's ONNX Runtime on the same graph), the first run
   1.4 s with loading; 62 frames of a 640 × 480 clip in 35.6 s through the
   service. So a second of 30 fps footage takes 12–18 s.
-* **Service** (`koo-analysis/src/depth.rs`, `LocalDepth`): frames come from
+* **Service** (`flikk-analysis/src/depth.rs`, `LocalDepth`): frames come from
   the media engine (the proxy when there is one), numbered on the media's
   rate (an image is one frame). Each frame's disparity is spread over its
   own 2nd to 98th percentile (the model's answer has an unknown scale and
@@ -1070,9 +1070,9 @@ on the UI thread and run it off it:
 
 ## 8. Agent
 
-* **Backends** (`koo-agent/src/backend/`): Claude runs as
+* **Backends** (`flikk-agent/src/backend/`): Claude runs as
   `claude -p --input-format stream-json --output-format stream-json` with
-  only the koo MCP server (`--strict-mcp-config`, `--tools ""`,
+  only the flikk MCP server (`--strict-mcp-config`, `--tools ""`,
   `--permission-mode dontAsk`, no setting sources or slash commands), the
   system prompt, `--model`/`--effort`, and `--resume` or `--session-id`.
   Codex runs as `codex exec --json --sandbox read-only` with the user's
@@ -1080,18 +1080,18 @@ on the UI thread and run it off it:
   developer instructions, model and reasoning effort as `-c` overrides,
   resuming its thread. Each turn runs in an empty workdir under
   `agent/work`, so the user's own CLAUDE.md/AGENTS.md are not picked up. A
-  backend that lost its session is retried fresh. `KOOEDITOR_CLAUDE` and
-  `KOOEDITOR_CODEX` point at the CLIs.
+  backend that lost its session is retried fresh. `FLIKK_CLAUDE` and
+  `FLIKK_CODEX` point at the CLIs.
 * **Models and thinking:** two pickers next to Send list what the installed
   CLI offers (Claude's stream-JSON `initialize` request, Codex's
   `model/list` on `codex app-server`), cached in `agent/models.json` and
   refreshed in the background; each model brings its thinking levels.
   Choices are kept per backend in the user settings.
-* **MCP server:** `koo_agent::mcp::run()`, launched by the backend as
-  `$KOOEDITOR_MCP`, else the `koo-mcp` binary next to the editor, else
-  `koo-editor mcp`. It connects to the editor over TCP on 127.0.0.1 with the
-  turn's token (`KOO_BRIDGE`/`KOO_TOKEN`).
-* **Roles and permissions** (`koo-core/src/bus.rs`): `AgentRole::Editor`
+* **MCP server:** `flikk_agent::mcp::run()`, launched by the backend as
+  `$FLIKK_MCP`, else the `flikk-mcp` binary next to the editor, else
+  `flikk mcp`. It connects to the editor over TCP on 127.0.0.1 with the
+  turn's token (`FLIKK_BRIDGE`/`FLIKK_TOKEN`).
+* **Roles and permissions** (`flikk-core/src/bus.rs`): `AgentRole::Editor`
   (default) or `Builder` (read tools, memory and FX authoring only), each
   with its own prompt and backend session. Permissions are per
   `ToolCategory`: read and view are always allowed; edit categories are Off
@@ -1107,7 +1107,7 @@ on the UI thread and run it off it:
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
   default) or Allow. A "Web" switch (off by default,
   overridable per project) gives Claude WebSearch/WebFetch and Codex web
-  search. Both read pages as text only, so the same switch lists the `koo`
+  search. Both read pages as text only, so the same switch lists the `flikk`
   tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
   25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
   the original under `paths::web()` and adds it to the pool's "Web Images"
@@ -1120,7 +1120,7 @@ on the UI thread and run it off it:
   Generated" bin, as the user's edit. The chat shows them as `generate_image`
   calls. Web calls show as `web_search` and `web_fetch`, read from each
   backend's stream, whatever the backend calls them.
-* **Tools** (`koo-agent/src/tools/`): 91 in the catalog (89 plus
+* **Tools** (`flikk-agent/src/tools/`): 91 in the catalog (89 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -1256,7 +1256,7 @@ on the UI thread and run it off it:
   box it needs. In the transcript, a speaker's words open the dialog as one
   WAV of where they speak (`state::voices::speaker_spans`, padded and
   joined stretches of the source they say most in, up to 3 minutes,
-  `koo_analysis::cut_speech`): to clone it, or to find shared voices that
+  `flikk_analysis::cut_speech`): to clone it, or to find shared voices that
   sound like the first 30 s (`/v1/similar-voices`). Whatever is picked,
   added or made is kept in the library (`library::save_voice`) and the next
   voiceover starts on it. The library's Voices section reads a voiceover on
@@ -1302,7 +1302,7 @@ on the UI thread and run it off it:
   proposes it the same way. `save_sound_to_library` waits for approval.
   The media pool's ♫ menu makes the same from a form (Music runs as long as
   In/Out).
-* **Prompt** (`koo-agent/src/prompt.rs`): the system prompt is the tool
+* **Prompt** (`flikk-agent/src/prompt.rs`): the system prompt is the tool
   guidance (with or without web and images), the shared rules (seeing and hearing,
   time formats, references, cutting in pauses, protected ranges), the
   role's part, the FX conventions, the language and the user's standing
@@ -1313,7 +1313,7 @@ on the UI thread and run it off it:
 * **Chat** (`ui/chat*`): sessions per project in
   `paths::projects()/<project>.chats.json`, each resuming its own backend
   conversation (`agent/sessions.json`). Tool calls stack into one card per
-  run. A call that runs off-thread (a `koo` job, or the backend's own web
+  run. A call that runs off-thread (a `flikk` job, or the backend's own web
   search and fetch) shows with a spinner from `AgentEvent::ToolStarted`
   until its `ToolFinished` replaces it; one still running when the turn ends
   is marked Stopped. The change-set card sits above the composer, once per set however
@@ -1339,14 +1339,14 @@ While the editor runs it publishes its MCP bridge in
 client can then use the same tools as the built-in agent:
 
 ```sh
-claude mcp add koo -- koo-editor mcp          # Claude Code
+claude mcp add flikk -- flikk mcp          # Claude Code
 ```
 
 or for Codex, in `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.koo]
-command = "koo-editor"
+[mcp_servers.flikk]
+command = "flikk"
 args = ["mcp"]
 ```
 
@@ -1357,29 +1357,29 @@ available to them.
 
 ## 9. Persistence
 
-* **Project files** (`koo-store/src/project_file.rs`): `.koo` JSON
-  (`format: "koo-project"`, `version: 1`), written atomically; media keeps
+* **Project files** (`flikk-store/src/project_file.rs`): `.flikk` JSON
+  (`format: "flikk-project"`, `version: 1`), written atomically; media keeps
   its absolute path and its path relative to the file, tried in that order;
   per-project agent setting overrides travel in the file. New, Open, Save,
   Save As and recent files (cmd/ctrl-N, O, S, shift-S) are in the project
-  menu (`koo-editor/src/projects.rs`), with a dot while there are unsaved
+  menu (`flikk/src/projects.rs`), with a dot while there are unsaved
   changes and a Save / Don't Save / Cancel question before New, Open, Quit
   or closing the window.
 * **Autosave and backups:** unsaved changes autosave to
-  `paths::autosave()/<id>.koo` (1 s after the last change, at most 5 s after
+  `paths::autosave()/<id>.flikk` (1 s after the last change, at most 5 s after
   the first) for crash recovery; saved files get a backup in
   `paths::backups()` at most every 5 minutes, 10 kept.
 * **Offline media** is flagged with a notice and relinked from a folder
-  (`koo-editor/src/relink.rs`): matched by file name, confirmed by
+  (`flikk/src/relink.rs`): matched by file name, confirmed by
   fingerprint when it can be.
 * **Database** (`paths::database()`, SQLite in WAL mode,
-  `koo-store/src/schema.rs`): `meta` (agent settings, model picks, analysis
+  `flikk-store/src/schema.rs`): `meta` (agent settings, model picks, analysis
   steps, the provider per capability, recent projects), `style_profiles` (caption styles), `style_rules`,
   `source_facts`, `media_fingerprints` and `recipes`. Nothing per project.
   Imported Markdown notes become proposed style rules, one per bullet or
   paragraph (S5); facts tied to a path are suspended when its media is
   replaced (F2); the seven built-in recipes are re-added on open.
-* **Caption styles** (`CaptionStyle`, `koo-core/src/memory.rs`): font,
+* **Caption styles** (`CaptionStyle`, `flikk-core/src/memory.rs`): font,
   weight, spacing, fill, stroke, shadow, background box, position and
   nudge, a spoken-word highlight (color, box, karaoke, word-by-word reveal)
   and intro/outro motion (fade, pop, slide), with twelve ready-made looks;
@@ -1392,7 +1392,7 @@ available to them.
 
 ## 10. Deliver
 
-* **Render graph** (`koo-deliver/src/graph.rs`): one FFmpeg `filter_complex`
+* **Render graph** (`flikk-deliver/src/graph.rs`): one FFmpeg `filter_complex`
   per job, sources opened inside it. Cuts, transforms, keyframes as FFmpeg
   expressions matching the viewer's curves, the grade as a `lut3d`, captions
   and titles burned in with ASS (libass; the viewer letters them with the
@@ -1456,7 +1456,7 @@ compositor and audio mixer while the timeline and playhead stay put. Sounds
 play from the pool and the library; pictures open in the viewer, with a bar
 to seek on, until the user goes back to Program or moves the timeline.
 
-Workspaces (`Workspace::ALL`, rendered in `koo-editor/src/app.rs`): Edit
+Workspaces (`Workspace::ALL`, rendered in `flikk/src/app.rs`): Edit
 (media pool and effects library on the left, viewer, inspector, timeline),
 Captions (transcript and caption style panel), Color (wheels, curves,
 scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
@@ -1488,31 +1488,31 @@ do the explaining":
 ### Looking at the app
 
 `scripts/screenshot.sh out.png [wait]` builds the editor and renders it
-under Xvfb (with `KOOEDITOR_HOME=/tmp/koo-editor-dev` by default). There is
+under Xvfb (with `FLIKK_HOME=/tmp/flikk-dev` by default). There is
 no input automation in the cloud containers, so seed the states you need to
 see:
 
 | Variable | Values | Seeds |
 | --- | --- | --- |
-| `KOOEDITOR_DEMO` | `1` | A demo project with stand-in engines |
-| `KOOEDITOR_DEMO_WORKSPACE` | `Edit`, `Captions`, `Color`, `Audio`, `Deliver` | The workspace to open |
-| `KOOEDITOR_DEMO_FX` | `effects`, `generator`, `transition`, `library`, `code` | An effects or library view |
-| `KOOEDITOR_DEMO_SELECTION` | `clips`, `transition` | A selection |
-| `KOOEDITOR_DEMO_CHAT` | any | Chat references |
-| `KOOEDITOR_DEMO_CHAT_PICKER` | `@query` | The composer's `@` list, open |
-| `KOOEDITOR_DEMO_VIEW` | `captions`, `retype` | The transcript's captions view, or typing over two words |
-| `KOOEDITOR_DEMO_PLAY` | `1` | Playback |
-| `KOOEDITOR_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
-| `KOOEDITOR_DEMO_DEPTH` | `1` | A lens blur (focus pick armed), a 3D camera and a depth mask on the selected clip |
-| `KOOEDITOR_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
-| `KOOEDITOR_DEMO_STABILIZE` | seconds | A shaky clip made with FFmpeg, stabilized and selected; `KOOEDITOR_DEMO_STABILIZE_MODE` = `off`, `locked` or `none` |
-| `KOOEDITOR_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
-| `KOOEDITOR_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
-| `KOOEDITOR_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
-| `KOOEDITOR_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
+| `FLIKK_DEMO` | `1` | A demo project with stand-in engines |
+| `FLIKK_DEMO_WORKSPACE` | `Edit`, `Captions`, `Color`, `Audio`, `Deliver` | The workspace to open |
+| `FLIKK_DEMO_FX` | `effects`, `generator`, `transition`, `library`, `code` | An effects or library view |
+| `FLIKK_DEMO_SELECTION` | `clips`, `transition` | A selection |
+| `FLIKK_DEMO_CHAT` | any | Chat references |
+| `FLIKK_DEMO_CHAT_PICKER` | `@query` | The composer's `@` list, open |
+| `FLIKK_DEMO_VIEW` | `captions`, `retype` | The transcript's captions view, or typing over two words |
+| `FLIKK_DEMO_PLAY` | `1` | Playback |
+| `FLIKK_DEMO_COMPOSE` | seconds | Every compositor feature on real FFmpeg-made media |
+| `FLIKK_DEMO_DEPTH` | `1` | A lens blur (focus pick armed), a 3D camera and a depth mask on the selected clip |
+| `FLIKK_DEMO_SETTINGS` | `agent`, `integrations`, `analysis`, `models`, `storage` | Settings, open on that page |
+| `FLIKK_DEMO_STABILIZE` | seconds | A shaky clip made with FFmpeg, stabilized and selected; `FLIKK_DEMO_STABILIZE_MODE` = `off`, `locked` or `none` |
+| `FLIKK_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
+| `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
+| `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
+| `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 
 ```sh
-KOOEDITOR_DEMO=1 KOOEDITOR_HOME=/tmp/koo-demo cargo run -p koo-editor
+FLIKK_DEMO=1 FLIKK_HOME=/tmp/flikk-demo cargo run -p flikk
 ```
 
 `scripts/cloud-session-start.sh` prepares cloud sessions: `cargo fetch`,
@@ -1525,30 +1525,30 @@ there.
 | PRD | Where |
 | --- | --- |
 | M1 import, bins, search | `ui/media_pool*`, `Command::ImportMedia` |
-| M2 inspector, M4 proxies | `koo-media`, `ui/media_pool*` |
-| M3 analysis | `koo-analysis`, `koo-models` |
-| E1, E2 timeline and tools | `ui/timeline*`, `koo-core/src/edit.rs` |
-| E3 transcript editing | `ui/transcript*`, `koo-core/src/query.rs`, `cuts.rs`; fixing words: `koo-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
+| M2 inspector, M4 proxies | `flikk-media`, `ui/media_pool*` |
+| M3 analysis | `flikk-analysis`, `flikk-models` |
+| E1, E2 timeline and tools | `ui/timeline*`, `flikk-core/src/edit.rs` |
+| E3 transcript editing | `ui/transcript*`, `flikk-core/src/query.rs`, `cuts.rs`; fixing words: `flikk-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
-| Subject masks | `koo-core/src/subject.rs`, `mask.rs`, `compose.rs`, `koo-models/src/segmentation/`, `koo-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
-| Stabilization | `koo-core/src/stabilize.rs`, `compose.rs`, `koo-analysis/src/motion.rs`, `ui/inspector/stabilize.rs`, `tools/stabilize.rs`, `koo-deliver/src/composed.rs` |
-| Person masks | `koo-core/src/person.rs`, `mask.rs`, `compose.rs`, `koo-models/src/matting/`, `koo-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
-| Depth maps, depth effects and masks | `koo-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `koo-gpu` (`wrap.rs`, `batch.rs`), `koo-models/src/depth/`, `koo-analysis/src/depth*`, `koo-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
+| Subject masks | `flikk-core/src/subject.rs`, `mask.rs`, `compose.rs`, `flikk-models/src/segmentation/`, `flikk-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
+| Stabilization | `flikk-core/src/stabilize.rs`, `compose.rs`, `flikk-analysis/src/motion.rs`, `ui/inspector/stabilize.rs`, `tools/stabilize.rs`, `flikk-deliver/src/composed.rs` |
+| Person masks | `flikk-core/src/person.rs`, `mask.rs`, `compose.rs`, `flikk-models/src/matting/`, `flikk-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
+| Depth maps, depth effects and masks | `flikk-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `flikk-gpu` (`wrap.rs`, `batch.rs`), `flikk-models/src/depth/`, `flikk-analysis/src/depth*`, `flikk-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
-| Speed ramps, slow motion | `koo-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `koo-models/src/interpolation/`, `koo-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `koo-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
-| C1–C3, C6 | `koo-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `koo-deliver` SRT/ASS, `ui/lettering.rs` |
-| K1 grade | `koo-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
+| Speed ramps, slow motion | `flikk-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `flikk-models/src/interpolation/`, `flikk-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `flikk-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
+| C1–C3, C6 | `flikk-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `flikk-deliver` SRT/ASS, `ui/lettering.rs` |
+| K1 grade | `flikk-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
-| Fit music to length | `koo-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
-| D1 render | `koo-deliver`, `ui/deliver.rs`; hardware encoders `koo-deliver/src/hw.rs` |
-| Render cache | `koo-editor/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `koo-store/src/render_cache.rs` |
-| AG1–AG10 | `koo-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
-| Online providers | `koo-cloud`, `koo-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
-| HDR tone mapping | `koo-core/src/hdr.rs`, `koo-media` probe, decode, proxy, `koo-deliver` graph, `ui/inspector/tone_map.rs`, `ui/media_pool/hdr.rs`, `set_tone_map` |
-| V1–V7 collages | `MediaService::collage`, `koo-agent` view tools |
-| S1, S3, S4, F1, F2, F4 | `koo-core::memory`, `koo-store`, cut planners |
-| Sync by sound (podcasts, multicam) | `koo-core/src/sync/`, `Command::SyncClips` / `PlaceSynced`, `state/sync.rs`, `ui/timeline/menu.rs`, `ui/media_pool.rs`, `ui/viewer/audio.rs`, `koo-deliver/src/varispeed.rs`, `tools/sync.rs` |
+| Fit music to length | `flikk-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
+| D1 render | `flikk-deliver`, `ui/deliver.rs`; hardware encoders `flikk-deliver/src/hw.rs` |
+| Render cache | `flikk/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `flikk-store/src/render_cache.rs` |
+| AG1–AG10 | `flikk-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
+| Online providers | `flikk-cloud`, `flikk-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
+| HDR tone mapping | `flikk-core/src/hdr.rs`, `flikk-media` probe, decode, proxy, `flikk-deliver` graph, `ui/inspector/tone_map.rs`, `ui/media_pool/hdr.rs`, `set_tone_map` |
+| V1–V7 collages | `MediaService::collage`, `flikk-agent` view tools |
+| S1, S3, S4, F1, F2, F4 | `flikk-core::memory`, `flikk-store`, cut planners |
+| Sync by sound (podcasts, multicam) | `flikk-core/src/sync/`, `Command::SyncClips` / `PlaceSynced`, `state/sync.rs`, `ui/timeline/menu.rs`, `ui/media_pool.rs`, `ui/viewer/audio.rs`, `flikk-deliver/src/varispeed.rs`, `tools/sync.rs` |
 
 ## 13. Known gaps
 
@@ -1619,7 +1619,7 @@ there.
   has no GPU, so the probe found none (its FFmpeg 6.1 lists NVENC, Quick
   Sync and VA-API; the trials fail as they should). The fallback and the
   NVENC argument path (graph, piped composited frames, audio) were checked
-  with a stand-in `KOOEDITOR_FFMPEG` that accepts `h264_nvenc`; VideoToolbox
+  with a stand-in `FLIKK_FFMPEG` that accepts `h264_nvenc`; VideoToolbox
   and AMF are written from FFmpeg's encoder options, VA-API's `hwupload`
   tail only parsed. The CRF-to-QP/bitrate mapping is not measured against
   libx264 (no VMAF runs), nor the speed-up.

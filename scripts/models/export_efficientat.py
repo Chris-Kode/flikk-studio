@@ -1,4 +1,4 @@
-"""EfficientAT mn10_as (MIT, Florian Schmid) as ONNX for koo-analysis's
+"""EfficientAT mn10_as (MIT, Florian Schmid) as ONNX for flikk-analysis's
 sound tagger.
 
 The graph takes 32 kHz mono samples, (windows, samples), and returns the

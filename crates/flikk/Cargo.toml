@@ -1,0 +1,43 @@
+[package]
+name = "flikk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+flikk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+flikk-store.workspace = true
+flikk-media.workspace = true
+flikk-analysis.workspace = true
+flikk-cloud.workspace = true
+flikk-agent.workspace = true
+flikk-deliver.workspace = true
+flikk-gpu.workspace = true
+flikk-html.workspace = true
+flikk-models.workspace = true
+cpal = "0.16"
+image = { version = "0.25", default-features = false }
+blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+qoi = "0.4"
+
+# Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
+# vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU. On
+# macOS subject masks run on MLX, on the GPU too, and slow motion and depth
+# on Core ML.
+[target.'cfg(target_os = "macos")'.dependencies]
+flikk-models = { workspace = true, features = ["metal", "mlx", "coreml"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+flikk-models = { workspace = true, features = ["vulkan"] }
+
+# Slow motion and depth on any GPU: DirectML on Windows, WebGPU on Linux.
+[target.'cfg(target_os = "windows")'.dependencies]
+flikk-models = { workspace = true, features = ["directml"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+flikk-models = { workspace = true, features = ["webgpu"] }

@@ -81,4 +81,4 @@ These are not slop, but they are what a cleaned-up screen falls back to when nob
 
 ---
 
-Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, CC BY 4.0. Changed for koo-editor's GPUI code. Keep this credit in copies and adaptations.
+Adapted from unslop by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)), https://github.com/heydamir/unslop, CC BY 4.0. Changed for Flikk's GPUI code. Keep this credit in copies and adaptations.

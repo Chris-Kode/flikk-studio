@@ -194,7 +194,7 @@ specifications say for every reference model; MiniMax H3's fields say
 
 ## What the editor uses
 
-`crates/koo-cloud/src/pika/`:
+`crates/flikk-cloud/src/pika/`:
 
 | Model (catalog id) | Text | First frame | First + last | References | Lengths | Shapes | Resolutions | Sound |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
