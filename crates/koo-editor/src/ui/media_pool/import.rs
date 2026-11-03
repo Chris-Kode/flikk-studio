@@ -22,7 +22,7 @@ const IMAGE: &[&str] = &[
 
 impl MediaPoolPanel {
     /// Bring `paths` into `bin`; folders give the media directly in them.
-    pub(super) fn import(
+    pub(crate) fn import(
         &mut self,
         paths: Vec<PathBuf>,
         bin: Option<BinId>,

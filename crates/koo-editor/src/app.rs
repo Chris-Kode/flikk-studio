@@ -15,18 +15,27 @@ use crate::ui::kit::{
     resizable_panel, v_resizable,
 };
 use crate::ui::{
-    chat::ChatPanel, code_editor::CodeEditorPanel, deliver::DeliverPanel,
-    inspector::InspectorPanel, library::LibraryPanel, media_pool::MediaPoolPanel,
-    mixer::MixerPanel, scopes::ScopesPanel, timeline::TimelinePanel, transcript::TranscriptPanel,
+    chat::ChatPanel,
+    code_editor::CodeEditorPanel,
+    deliver::DeliverPanel,
+    inspector::InspectorPanel,
+    library::LibraryPanel,
+    media_pool::MediaPoolPanel,
+    mixer::MixerPanel,
+    scopes::ScopesPanel,
+    timeline::TimelinePanel,
+    transcript::TranscriptPanel,
     viewer::ViewerPanel,
+    welcome::{Welcome, WelcomeEvent},
 };
 use gpui_kit::base::{InteractiveElementExt as _, ResizablePanel};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use koo_core::agent::Workspace;
 use koo_core::changeset::ChangeSetState;
-use koo_core::{Rate, TimeRange};
+use koo_core::{ProjectId, Rate, TimeRange};
 use koo_deliver::RenderState;
+use std::path::PathBuf;
 use std::time::Duration;
 
 actions!(
@@ -59,7 +68,7 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 /// The platform's command modifier as shortcut chips spell it.
-const MOD: &str = if cfg!(target_os = "macos") {
+pub(crate) const MOD: &str = if cfg!(target_os = "macos") {
     "Cmd"
 } else {
     "Ctrl"
@@ -105,7 +114,14 @@ pub struct KooEditor {
     moving: bool,
     /// The status bar is redrawing for a running render.
     render_poll: bool,
+    /// The welcome page, shown at launch until a project is picked, and the
+    /// project open underneath it.
+    welcome: Option<(Entity<Welcome>, ProjectId)>,
+    /// Footage dropped on the welcome page, imported once its new project
+    /// is open.
+    footage: Option<Vec<PathBuf>>,
     _observe: Subscription,
+    _welcome: Option<Subscription>,
 }
 
 impl KooEditor {
@@ -114,7 +130,29 @@ impl KooEditor {
         if crate::demo::enabled() {
             state.update(cx, crate::demo::seed);
         }
-        let _observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
+        // Every launch starts on the welcome page, unless the app was
+        // started for a file or a demo.
+        let welcome =
+            (!crate::demo::enabled() && !crate::persistence::launched_with_file()).then(|| {
+                let project = state.read(cx).bus.project().id;
+                (
+                    cx.new(|cx| Welcome::new(state.clone(), window, cx)),
+                    project,
+                )
+            });
+        let _welcome = welcome.as_ref().map(|(page, _)| {
+            cx.subscribe_in(page, window, |this, _, ev: &WelcomeEvent, window, cx| {
+                match ev {
+                    WelcomeEvent::Continue => this.welcome = None,
+                    WelcomeEvent::Create(paths) => {
+                        this.footage = Some(paths.clone());
+                        projects::new_project(&this.state, window, cx);
+                    }
+                }
+                cx.notify();
+            })
+        });
         let closing = state.clone();
         window.on_window_should_close(cx, move |window, cx| {
             projects::should_close(&closing, window, cx)
@@ -148,9 +186,33 @@ impl KooEditor {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
             },
+            welcome,
+            footage: None,
             state,
             _observe,
+            _welcome,
         }
+    }
+
+    /// Leave the welcome page once another project is open, importing the
+    /// footage it was started from.
+    fn state_changed(&mut self, cx: &mut Context<Self>) {
+        let project = self.state.read(cx).bus.project().id;
+        if self.welcome.as_ref().is_some_and(|(_, at)| *at != project) {
+            self.welcome = None;
+            if let Some(paths) = self.footage.take() {
+                if let [folder] = paths.as_slice()
+                    && folder.is_dir()
+                    && let Some(name) = folder.file_name()
+                {
+                    let name = name.to_string_lossy().into_owned();
+                    self.state.update(cx, |s, _| s.bus.rename_project(&name));
+                }
+                self.media_pool
+                    .update(cx, |pool, cx| pool.import(paths, None, cx));
+            }
+        }
+        cx.notify();
     }
 
     /// Open Settings on `tab`, or on the page shown last.
@@ -202,18 +264,32 @@ impl KooEditor {
                         }
                     }))
             })
-            .child(own(div()).child(self.project_menu(cx)))
-            .child(div().flex_1())
-            .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(own(div()).child(self.workspace_tabs(cx))),
-            )
+            .map(|bar| {
+                if self.welcome.is_some() {
+                    return bar
+                        .child(
+                            div()
+                                .pl(px(6.))
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Koo Editor"),
+                        )
+                        .child(div().flex_1())
+                        .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)));
+                }
+                bar.child(own(div()).child(self.project_menu(cx)))
+                    .child(div().flex_1())
+                    .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(own(div()).child(self.workspace_tabs(cx))),
+                    )
+            })
     }
 
     /// Project name, "Edited" while there are unsaved changes; opens the
@@ -359,6 +435,11 @@ impl KooEditor {
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)))
                 .into_any_element(),
         ];
+        if self.welcome.is_some() {
+            // Nothing to undo or render before a project is picked.
+            items.drain(..3);
+            return items;
+        }
         if !delivering {
             items.push(
                 Button::new("render")
@@ -702,6 +783,24 @@ impl KooEditor {
 }
 
 /// Change sets the agent closed for review.
+/// The status bar under the welcome page.
+fn welcome_status() -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .h(t::STATUS_BAR)
+        .px(px(12.))
+        .gap(px(6.))
+        .border_t_1()
+        .border_color(t::LN)
+        .bg(t::P)
+        .text_size(px(11.))
+        .text_color(t::T3)
+        .child("No project open")
+        .child(div().flex_1())
+        .child(Kbd::new(format!("{MOD} ,")))
+        .child("settings")
+}
+
 fn pending_reviews(s: &EditorState) -> usize {
     s.bus
         .change_sets()
@@ -777,7 +876,15 @@ impl Render for KooEditor {
                 cx.listener(|this, _: &Quit, window, cx| projects::quit(&this.state, window, cx)),
             )
             .child(self.title_bar(window, cx))
-            .child(div().flex_1().min_h_0().child(self.workspace(cx)))
-            .child(self.status_bar(cx))
+            .map(
+                |root| match self.welcome.as_ref().map(|(page, _)| page.clone()) {
+                    Some(page) => root
+                        .child(div().flex_1().min_h_0().child(page))
+                        .child(welcome_status()),
+                    None => root
+                        .child(div().flex_1().min_h_0().child(self.workspace(cx)))
+                        .child(self.status_bar(cx)),
+                },
+            )
     }
 }

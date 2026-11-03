@@ -20,6 +20,7 @@ pub mod timeline;
 pub mod transcript;
 pub mod viewer;
 pub mod voices;
+pub mod welcome;
 
 use gpui_kit::*;
 use kit::theme as t;

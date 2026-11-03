@@ -62,6 +62,11 @@ pub fn set_launch_file(path: PathBuf) {
     let _ = LAUNCH_FILE.set(path);
 }
 
+/// The app was started to open a project file.
+pub fn launched_with_file() -> bool {
+    LAUNCH_FILE.get().is_some()
+}
+
 /// Start the session and pick the first project: the file named at
 /// launch, else unsaved changes a crash left, else the most recent file,
 /// else a new "Untitled".

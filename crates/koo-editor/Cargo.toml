@@ -22,6 +22,7 @@ koo-models.workspace = true
 cpal = "0.16"
 image = { version = "0.25", default-features = false }
 blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 qoi = "0.4"
 
 # Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
