@@ -1,0 +1,9 @@
+[package]
+name = "wcli"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+whisper-rs = "=0.16.0"
+[workspace]
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3
