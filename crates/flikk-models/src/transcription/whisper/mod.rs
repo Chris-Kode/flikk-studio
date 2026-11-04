@@ -11,7 +11,9 @@
 //! own: one that starts with music taken for speech would throw the times
 //! of the speech after it. A stretch that fits one window starts with half
 //! a second of silence: Whisper drops speech from the very start of what
-//! it hears.
+//! it hears. Silero still lets some hum and noise through, where Whisper
+//! wrote a whole confident line, so a stretch Whisper itself doubts holds
+//! speech is left out; and a run of tokens said over and over is cut off.
 
 pub mod config;
 #[cfg(feature = "whisper")]

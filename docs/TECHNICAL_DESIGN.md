@@ -673,7 +673,21 @@ not retried with Whisper.
   windows whisper.cpp starts where Whisper finished a segment; silence
   before it moved those windows, and in conversation one then ended at its
   first sentence and skipped the rest. Decoding is a beam search of 5, as
-  OpenAI's transcribe does. Now and then Whisper gives one sentence a
+  OpenAI's transcribe does. Over the hum or noise Silero lets through,
+  Whisper small still wrote a whole line ("Subtítulos en español de…"),
+  sure of every word, and whisper.cpp's odds that a window holds no speech
+  come from a row of logits it never fills, so its no-speech check never
+  dropped it. A stretch that fits one window is first looked at as
+  language detection does, and the odds of no speech read there, before
+  the first word, as OpenAI reads them: above 0.6 the stretch is left out,
+  and above 0.35 its words are kept only if they average a log-probability
+  of -0.4 a token or more (those lines came at 0.4 to 0.85 and -0.55;
+  speech at most 0.22). The language comes from that look too, and is
+  kept for the other stretches only if this one is. While it decodes,
+  Whisper may not say a run of text tokens a third time in a row (a
+  fourth, for runs of one or two tokens): whisper.cpp falls back from a
+  loop to higher temperatures but keeps it when every one loops, and over
+  noise that was 220 tokens of one character. Now and then Whisper gives one sentence a
   segment that runs on over seconds of speech it skips, or takes the short
   last phrase of a stretch for silence; so once words are aligned, Silero's
   speech that no word comes within 250 ms of, for 600 ms or more, is heard

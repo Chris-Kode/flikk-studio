@@ -47,3 +47,21 @@ pub const FADE: usize = SPEECH_RATE as usize / 100;
 /// Beams searched, as OpenAI's transcribe does; one guess at a time drops
 /// and swaps more words.
 pub const BEAM_SIZE: i32 = 5;
+/// Whisper's odds that a stretch holds no speech, read where OpenAI reads
+/// them, before its first word (whisper.cpp reads a row of logits it never
+/// fills). Above this it is taken at its word and not heard out: given
+/// silence, hum or noise Silero let through, Whisper small wrote a
+/// confident line ("Subtítulos en español de…") at 0.4 to 0.85, and speech
+/// was at most 0.22.
+pub const NO_SPEECH: f32 = 0.6;
+/// Above this, the words are kept only if Whisper was sure of them: those
+/// lines came at -0.53 to -0.57 a token, speech at -0.05 to -0.5.
+pub const DOUBT: f32 = 0.35;
+pub const MIN_LOGPROB: f32 = -0.4;
+/// The most times a run of tokens is said in a row: twice, or three times
+/// for one or two ("no, no, no"). Past that, Whisper is in a loop, which
+/// whisper.cpp falls back from but keeps when every temperature loops (220
+/// tokens of one character, over noise).
+pub const fn repeats(tokens: usize) -> usize {
+    if tokens <= 2 { 3 } else { 2 }
+}
