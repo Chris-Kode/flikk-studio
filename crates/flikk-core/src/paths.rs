@@ -86,3 +86,9 @@ pub fn credentials() -> PathBuf {
 pub fn logs() -> PathBuf {
     sub("logs")
 }
+
+/// A new version of Flikk, downloaded and unpacked before it replaces the
+/// installed one.
+pub fn updates() -> PathBuf {
+    sub("updates")
+}

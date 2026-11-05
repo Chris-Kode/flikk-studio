@@ -24,6 +24,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 qoi = "0.4"
+# Updates: the latest release from GitHub, checked against its SHA-256.
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 
 # Whisper on the GPU: Metal on macOS; Vulkan on Windows and Linux, for any
 # vendor's GPU; without a GPU, or on Windows without Vulkan, the CPU. On

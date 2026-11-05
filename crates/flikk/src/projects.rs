@@ -41,6 +41,8 @@ enum Then {
     Create(PathBuf, SequenceSettings),
     Open(PathBuf),
     Quit,
+    /// Quit and start the version an update installed.
+    Restart,
 }
 
 /// Ask for the new project's name, folder and sequence.
@@ -109,6 +111,12 @@ pub fn save_as(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
 /// Quit, asking about unsaved changes first.
 pub fn quit(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
     settle(state, Then::Quit, window, cx);
+}
+
+/// Quit, asking about unsaved changes first, and start the version an
+/// update installed.
+pub fn restart(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+    settle(state, Then::Restart, window, cx);
 }
 
 /// For the window's close button: close at once when there is nothing to
@@ -210,5 +218,9 @@ fn run(state: &Entity<EditorState>, then: Then, _: &mut Window, cx: &mut App) {
             state.update(cx, |s, cx| s.open_project(&path, cx));
         }
         Then::Quit => cx.quit(),
+        Then::Restart => {
+            crate::update::relaunch_on_quit();
+            cx.quit();
+        }
     }
 }

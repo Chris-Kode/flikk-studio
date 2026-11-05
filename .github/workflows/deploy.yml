@@ -1,0 +1,124 @@
+# Deploy: build a published release on Windows, macOS and Linux and attach
+# each platform's archive and checksum to it. Installed copies of Flikk
+# find the new version through these (crates/flikk/src/update.rs).
+#
+# Starts when a release is published, and from Release, which can't start
+# it through the `release` event. Run it by hand to rebuild a release.
+name: Deploy
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, e.g. v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: write # upload release assets
+
+concurrency:
+  group: deploy-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  CARGO_TERM_COLOR: always
+  # Packaged builds look for updates in this repository.
+  FLIKK_UPDATES: "1"
+  FLIKK_UPDATE_REPO: ${{ github.repository }}
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86-64
+            runner: ubuntu-24.04
+          - platform: macOS Apple silicon
+            runner: macos-15
+          - platform: Windows x86-64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the tag matches the version
+        run: |
+          version=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version *=/ { gsub(/.*= *"|".*/, ""); print; exit }
+          ' Cargo.toml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::$TAG does not match Cargo.toml's version $version; release with the Release workflow"
+            exit 1
+          fi
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # whisper.cpp's Vulkan backend needs glslc and the Vulkan headers;
+      # GPUI and cpal their windowing, font and audio libraries.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            build-essential cmake pkg-config clang libclang-dev \
+            glslc libvulkan-dev \
+            libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev
+
+      - name: Install the Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VULKAN_VERSION: 1.4.313.2
+        run: |
+          $installer = "$env:RUNNER_TEMP\vulkan-sdk.exe"
+          curl.exe -fsSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          & $installer --accept-licenses --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\$env:VULKAN_VERSION\Bin" >> $env:GITHUB_PATH
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # The per-user installer (scripts/windows/flikk.iss). Runner images
+      # usually have Inno Setup 6 already.
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      # MLX compiles its Metal kernels with Xcode's Metal toolchain, a
+      # separate download in newer Xcodes.
+      - name: Check the Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          xcrun -sdk macosx metal -v 2>/dev/null || xcodebuild -downloadComponent MetalToolchain
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >>"$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked -p flikk -p flikk-agent
+
+      - name: Package
+        run: scripts/package.sh "$VERSION"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/flikk-* --clobber

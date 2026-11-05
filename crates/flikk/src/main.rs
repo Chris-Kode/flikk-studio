@@ -8,6 +8,7 @@ mod relink;
 mod render_cache;
 mod state;
 mod ui;
+mod update;
 #[cfg(all(windows, target_env = "msvc"))]
 mod vulkan_fallback;
 
@@ -34,6 +35,7 @@ fn main() {
     {
         persistence::set_launch_file(path);
     }
+    update::init();
     // What nothing has used for long goes, off the UI thread.
     let _ = std::thread::Builder::new()
         .name("flikk-cache-sweep".into())
@@ -47,7 +49,8 @@ fn main() {
             ui::chat::init(cx);
             cx.on_app_quit(|_| async {
                 agent_link::unpublish_bridge();
-                persistence::shutdown()
+                persistence::shutdown();
+                update::relaunch_if_asked();
             })
             .detach();
             let options = WindowOptions {

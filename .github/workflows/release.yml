@@ -1,0 +1,105 @@
+# Release: raise the version on main, tag it, publish a GitHub release and
+# start Deploy, which builds and attaches each platform's archive.
+#
+# Run it from Actions → Release → Run workflow, on main.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version to raise
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write # push the version commit and tag, create the release
+  actions: write # start Deploy
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # With branch protection on main, push as an admin: a fine-grained
+      # token with Contents read and write in the RELEASE_TOKEN secret.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Raise the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          current=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version *=/ { gsub(/.*= *"|".*/, ""); print; exit }
+          ' Cargo.toml)
+          if ! [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml's workspace version '$current' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          IFS=. read -r major minor patch <<<"$current"
+          case $BUMP in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          next="$major.$minor.$patch"
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            echo "::error::Tag v$next already exists"
+            exit 1
+          fi
+
+          # The workspace version, and every member's entry in Cargo.lock.
+          sed -i "0,/^version = \"$current\"\$/s//version = \"$next\"/" Cargo.toml
+          export CURRENT=$current NEXT=$next
+          perl -0pi -e 's/(\[\[package\]\]\nname = "flikk(?:-[a-z]+)?"\nversion = )"\Q$ENV{CURRENT}\E"/$1"$ENV{NEXT}"/g' Cargo.lock
+          members=$(ls -d crates/*/ | wc -l)
+          bumped=$(grep -A1 -E '^name = "flikk(-[a-z]+)?"$' Cargo.lock | grep -c "^version = \"$next\"$" || true)
+          if [ "$bumped" != "$members" ]; then
+            echo "::error::Raised $bumped of $members workspace crates in Cargo.lock"
+            exit 1
+          fi
+
+          echo "Flikk $current → $next"
+          echo "version=$next" >>"$GITHUB_OUTPUT"
+          echo "tag=v$next" >>"$GITHUB_OUTPUT"
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $TAG"
+          git tag -a "$TAG" -m "Flikk $VERSION"
+          git push --atomic origin HEAD:main "$TAG"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "Flikk $VERSION" --generate-notes
+
+      # A release made with GITHUB_TOKEN starts no `release` workflow, so
+      # Deploy is started here; releases made by hand start it themselves.
+      - name: Start Deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh workflow run deploy.yml --ref "$TAG" -f tag="$TAG"
+          echo "Deploy started for $TAG: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy.yml" >>"$GITHUB_STEP_SUMMARY"
