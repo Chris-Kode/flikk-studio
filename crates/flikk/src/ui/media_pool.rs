@@ -892,7 +892,7 @@ impl MediaPoolPanel {
         match look.progress {
             Some(Progress::Failed) => line.text_color(t::ERR).child("Analysis failed"),
             Some(Progress::Queued) => line.child("Queued for analysis"),
-            Some(Progress::Analyzing(f)) => line.child(format!("Analyzing · {:.0}%", f * 100.)),
+            Some(Progress::Analyzing(f)) => line.child(format!("Analyzing · {:.0} %", f * 100.)),
             Some(Progress::Proxy(_)) => line.child(format!("{} · proxy building", look.meta)),
             None => line.child(look.meta.clone()),
         }
@@ -940,7 +940,13 @@ impl MediaPoolPanel {
         Some(
             h_flex()
                 .gap(px(8.))
-                .child(listen_button("listen-selected", &self.state, item, cx))
+                .child(listen_dot(
+                    "listen-selected",
+                    &self.state,
+                    item,
+                    px(22.),
+                    cx,
+                ))
                 .child(bar)
                 .child(
                     div()
@@ -1600,7 +1606,7 @@ fn corner_badge(item: &MediaItem, progress: Option<Progress>) -> Option<Div> {
                 thumb_badge()
                     .font_family(t::mono())
                     .text_color(t::T2)
-                    .child(format!("Proxy {:.0}%", f * 100.)),
+                    .child(format!("Proxy {:.0} %", f * 100.)),
             );
         }
         Some(Progress::Queued) | None => {}
@@ -1780,14 +1786,36 @@ pub(crate) fn seek_bar(
         .child(bar3(fraction, t::T1).w_full())
 }
 
-/// Play or pause `item`, in the pool, the library or a dialog.
+/// Play or pause `item` from a row or form: an icon button that holds the
+/// hover surface while it plays.
 pub(crate) fn listen_button(
     id: impl Into<ElementId>,
     state: &Entity<EditorState>,
     item: &MediaItem,
     cx: &App,
-) -> Stateful<Div> {
-    listen_dot(id, state, item, px(22.), cx)
+) -> Button {
+    let preview = state.read(cx).source.as_ref();
+    let playing = preview.is_some_and(|p| p.is(item) && p.is_playing());
+    let (state, item) = (state.clone(), item.clone());
+    play_button(id, playing)
+        .tooltip(if playing { "Pause" } else { "Play" })
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |s, cx| s.toggle_source(&item, cx));
+        })
+}
+
+/// The row play button's look, without what it plays.
+pub(crate) fn play_button(id: impl Into<ElementId>, playing: bool) -> Button {
+    Button::new(id)
+        .ghost()
+        .small()
+        .icon(if playing {
+            IconName::Pause
+        } else {
+            IconName::Play
+        })
+        .selected(playing)
 }
 
 /// A round play button `size` across; white while `item` plays.

@@ -237,7 +237,7 @@ fn paint(
         let at = to_px(b, *p);
         let x = (at.x + px(8.)).min(b.origin.x + b.size.width - px(40.));
         let y = (at.y - px(20.)).max(b.origin.y + px(2.));
-        let shown = format!("{}%", (p[1] * 100.).round());
+        let shown = format!("{} %", (p[1] * 100.).round());
         paint_text(&shown, point(x, y), c.line, window, cx);
     }
 }

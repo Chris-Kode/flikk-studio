@@ -10,11 +10,11 @@ use crate::Model;
 use anyhow::Result;
 use flikk_core::services::Frame;
 
-/// The models that can do it, the default first: on MLX where the build
-/// has it (the Mac), else on ONNX Runtime.
-#[cfg(feature = "mlx")]
-pub const MODELS: &[&Model] = &[&sam2_mlx::MODEL, &sam2::MODEL];
-#[cfg(not(feature = "mlx"))]
+/// The one model this build runs it on, picked for the machine: MLX on
+/// Metal (the Mac's GPU), else ONNX Runtime. There is no choice to make.
+#[cfg(all(feature = "mlx", feature = "metal"))]
+pub const MODELS: &[&Model] = &[&sam2_mlx::MODEL];
+#[cfg(not(all(feature = "mlx", feature = "metal")))]
 pub const MODELS: &[&Model] = &[&sam2::MODEL];
 
 /// What picks the object in one frame, in the picture's uv (0..1 across

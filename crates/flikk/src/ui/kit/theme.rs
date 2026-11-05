@@ -108,6 +108,8 @@ pub const BACKDROP: Rgba = hex(0x2F343D);
 /// A dialog's sidebar and footer, a step below its body.
 pub const INSET: Rgba = hex(0x0F0F11);
 
+/// Keycaps, checkboxes and small handles inside a control.
+pub const RADIUS_XS: Pixels = px(3.);
 /// Clips and fields.
 pub const RADIUS_SM: Pixels = px(4.);
 /// Buttons.
@@ -146,15 +148,17 @@ pub fn floating_shadow() -> Vec<BoxShadow> {
     }]
 }
 
-/// Two-pixel accent focus ring around a control.
+/// Two-pixel accent focus ring around a control, one pixel off its edge.
+/// Shadows paint in order, so the gap goes last, over the ring.
 pub fn focus_ring() -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: alpha(AC, 0.6).into(),
+    let ring = |color: Rgba, spread: f32| BoxShadow {
+        color: color.into(),
         offset: point(px(0.), px(0.)),
         blur_radius: px(0.),
-        spread_radius: px(2.),
+        spread_radius: px(spread),
         inset: false,
-    }]
+    };
+    vec![ring(alpha(AC, 0.6), 3.), ring(G, 1.)]
 }
 
 /// Three-pixel accent wash around a focused field.

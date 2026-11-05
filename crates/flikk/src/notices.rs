@@ -12,7 +12,7 @@ pub enum Level {
 /// What a notice's button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeAction {
-    /// Open Settings on the Models tab.
+    /// Open Settings on the Integrations tab, where models download.
     OpenModels,
     /// Open Settings on the Integrations tab.
     OpenIntegrations,

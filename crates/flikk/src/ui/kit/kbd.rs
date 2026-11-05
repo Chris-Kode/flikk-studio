@@ -32,7 +32,7 @@ impl RenderOnce for Kbd {
             .items_center()
             .h(px(16.))
             .px(px(4.))
-            .rounded(px(3.))
+            .rounded(t::RADIUS_XS)
             .border_1()
             .border_color(t::alpha(t::ON_AC, if self.on_accent { 0.33 } else { 0.13 }))
             .text_size(px(10.))

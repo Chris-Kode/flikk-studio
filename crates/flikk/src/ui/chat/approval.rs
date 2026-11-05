@@ -8,7 +8,7 @@ use super::ChatPanel;
 use crate::state::voices::{VoiceSample, approval_voice};
 use crate::state::{ApprovalOutcome, EditorState};
 use crate::ui::kit::{Button, Icon, IconName, Progress, Spinner, Tooltip, h_flex, theme as t};
-use crate::ui::media_pool::listen_button;
+use crate::ui::media_pool::listen_dot;
 use crate::ui::voices::{self, OnKept, Start};
 use flikk_agent::PendingApproval;
 use flikk_agent::tools::ApprovalRequest;
@@ -101,7 +101,7 @@ impl ChatPanel {
         let key = ("approval-listen", id as usize);
         Some(match sample {
             VoiceSample::Here(item) => {
-                listen_button(key, &self.state, &item, cx).into_any_element()
+                listen_dot(key, &self.state, &item, px(22.), cx).into_any_element()
             }
             VoiceSample::Fetching => h_flex()
                 .flex_none()
@@ -267,7 +267,7 @@ fn settled(
                     h_flex().flex_none().gap(px(4.)).child("Rendering").child(
                         div()
                             .font_family(t::mono())
-                            .child(format!("{:.0}%", (fraction * 100.0).clamp(0.0, 100.0))),
+                            .child(format!("{:.0} %", (fraction * 100.0).clamp(0.0, 100.0))),
                     ),
                 )
                 .child(

@@ -6,12 +6,12 @@
 //! find, design or clone another, which this form then reads with. A voice
 //! in the library starts on the stability and similarity it last read with.
 
-use super::{MediaPoolPanel, form, listen_button, play_dot};
+use super::{MediaPoolPanel, form, listen_button, play_button};
 use crate::state::EditorState;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
-    SelectItem, SelectState, Spinner, Textarea, Tooltip, h_flex, v_flex,
+    SelectItem, SelectState, Spinner, Textarea, h_flex, v_flex,
 };
 use flikk_core::cloud::{
     self, Capability, CloudResult, GenerateRequest, Reading, SCRIPT_CHARS, Voice,
@@ -121,7 +121,7 @@ impl VoiceoverForm {
         let script = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 12)
-                .placeholder("[excited] Welcome back... today is the BIG one.")
+                .placeholder("[warm] The studio opened in 1974, two rooms and one tape machine.")
                 .default_value(script_text)
         });
         let picker = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx).searchable(true));
@@ -154,7 +154,10 @@ impl VoiceoverForm {
                     this.apply_saved_reading(&id.clone(), window, cx);
                 },
             ),
-            cx.subscribe(&script, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe_in(&script, window, |_, script, _: &InputEvent, window, cx| {
+                form::mark_tags(script, form::Tags::Bracketed, window, cx);
+                cx.notify();
+            }),
             cx.subscribe(&stability, |_, _, _: &SliderEvent, cx| cx.notify()),
             cx.subscribe(&similarity, |_, _, _: &SliderEvent, cx| cx.notify()),
         ];
@@ -379,9 +382,9 @@ impl VoiceoverForm {
             return listen_button("voice-sample", &self.state, item, cx).into_any_element();
         }
         let heard = voice.as_ref().is_some_and(|v| v.sample.is_some());
-        play_dot("voice-sample", false, px(22.))
-            .when(!heard, |d| d.opacity(0.4))
-            .tooltip(Tooltip::text("Play"))
+        play_button("voice-sample", false)
+            .disabled(!heard)
+            .tooltip("Play")
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(voice) = voice.clone().filter(|v| v.sample.is_some()) {
                     this.fetch_sample(voice, cx);
@@ -400,7 +403,7 @@ impl VoiceoverForm {
         let form = cx.entity();
         Button::new(name)
             .ghost()
-            .xsmall()
+            .small()
             .label(name)
             .trailing_icon(IconName::ChevronDown)
             .dropdown_menu(move |mut menu, _, _| {
@@ -415,7 +418,7 @@ impl VoiceoverForm {
     }
 
     fn slider_row(name: &'static str, slider: &Entity<SliderState>, cx: &App) -> impl IntoElement {
-        let percent = format!("{:.0}%", Self::slider_value(slider, cx) * 100.);
+        let percent = format!("{:.0} %", Self::slider_value(slider, cx) * 100.);
         form::row(name, form::slider(slider, percent))
     }
 }
@@ -460,10 +463,16 @@ impl Render for VoiceoverForm {
             .child(
                 v_flex()
                     .gap(px(4.))
-                    .child(Textarea::new(&self.script).counter(chars, SCRIPT_CHARS))
                     .child(
+                        Textarea::new(&self.script)
+                            .counter(chars, SCRIPT_CHARS)
+                            .token(form::tag_token),
+                    )
+                    .child(
+                        // Pulled left so the labels line up with the script.
                         h_flex()
                             .gap(px(2.))
+                            .ml(px(-8.))
                             .child(self.tag_menu("Emotion", &EMOTIONS, cx))
                             .child(self.tag_menu("Reaction", &REACTIONS, cx))
                             .child(self.tag_menu("Pause", &PAUSES, cx)),

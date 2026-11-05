@@ -359,10 +359,7 @@ impl LocalPeople {
         }
         let model = ModelTask::Matting.model();
         if !model.is_downloaded() {
-            return Err(format!(
-                "{} is not downloaded: Settings → Models.",
-                model.name
-            ));
+            return Err("Download it in Settings → Integrations.".into());
         }
         Ok(())
     }

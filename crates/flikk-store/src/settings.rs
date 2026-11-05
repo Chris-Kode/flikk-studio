@@ -141,7 +141,7 @@ impl Store {
         Ok(overrides.apply(&self.user_settings()?))
     }
 
-    /// Ids of the models the user picked in Settings → Models, per user.
+    /// Ids of the models the user picked in Settings → Integrations, per user.
     pub fn model_picks(&self) -> Result<Vec<String>> {
         Ok(self.meta(MODEL_PICKS)?.unwrap_or_default())
     }

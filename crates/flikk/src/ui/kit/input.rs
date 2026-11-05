@@ -54,7 +54,7 @@ fn field_icon(id: &'static str, icon: IconName, color: Rgba) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .size(px(16.))
-        .rounded(px(3.))
+        .rounded(t::RADIUS_XS)
         .text_color(color)
         .cursor_pointer()
         .hover(|s| s.text_color(t::T1))
@@ -349,7 +349,20 @@ impl RenderOnce for Textarea {
                     .text_size(px(10.))
                     .line_height(px(12.))
                     .text_color(if count > max { t::ERR } else { t::T3 })
-                    .child(format!("{count} / {max}"))
+                    .child(format!("{} / {}", grouped(count), grouped(max)))
             }))
     }
+}
+
+/// `n` with thousands grouped by commas: 5,000.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

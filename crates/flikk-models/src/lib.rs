@@ -123,15 +123,15 @@ impl Task {
 
     pub fn label(self) -> &'static str {
         match self {
-            Task::VoiceActivity => "Voice activity",
+            Task::VoiceActivity => "Silence detection",
             Task::Transcription => "Transcription",
             Task::WordTiming => "Word timing",
-            Task::Speakers => "Speakers",
-            Task::SoundTagging => "Sounds and music",
-            Task::Beats => "Beats",
+            Task::Speakers => "Speaker labels",
+            Task::SoundTagging => "Sound labels",
+            Task::Beats => "Beat detection",
             Task::SoundSearch => "Sound search",
             Task::Segmentation => "Subject masks",
-            Task::FrameInterpolation => "Optical flow",
+            Task::FrameInterpolation => "Motion smoothing",
             Task::Matting => "Person masks",
             Task::Depth => "Depth maps",
         }

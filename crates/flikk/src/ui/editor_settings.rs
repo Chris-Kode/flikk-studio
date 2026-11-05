@@ -3,7 +3,7 @@
 //! the right, and a footer to open the user-data folder or close.
 
 mod integrations;
-mod models;
+mod on_device;
 mod storage;
 
 use crate::state::{Check, EditorState};
@@ -14,14 +14,12 @@ use flikk_models::Status;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use integrations::IntegrationsTab;
-use models::ModelsTab;
 use storage::StorageTab;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agent,
     Integrations,
-    Models,
     Storage,
 }
 
@@ -33,10 +31,9 @@ impl SettingsTab {
             .find(|t| t.label().eq_ignore_ascii_case(label))
     }
 
-    const ALL: [SettingsTab; 4] = [
+    const ALL: [SettingsTab; 3] = [
         SettingsTab::Agent,
         SettingsTab::Integrations,
-        SettingsTab::Models,
         SettingsTab::Storage,
     ];
 
@@ -44,7 +41,6 @@ impl SettingsTab {
         match self {
             SettingsTab::Agent => "Agent",
             SettingsTab::Integrations => "Integrations",
-            SettingsTab::Models => "Models",
             SettingsTab::Storage => "Storage",
         }
     }
@@ -53,7 +49,6 @@ impl SettingsTab {
         match self {
             SettingsTab::Agent => IconName::MessageSquareText,
             SettingsTab::Integrations => IconName::Plug,
-            SettingsTab::Models => IconName::Box,
             SettingsTab::Storage => IconName::HardDrive,
         }
     }
@@ -64,26 +59,24 @@ pub struct EditorSettings {
     tab: SettingsTab,
     agent: Entity<SettingsPanel>,
     integrations: Entity<IntegrationsTab>,
-    models: Entity<ModelsTab>,
     storage: Entity<StorageTab>,
     _observe: Vec<Subscription>,
 }
 
 impl EditorSettings {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let models = cx.new(|cx| ModelsTab::new(state.clone(), window, cx));
+        let integrations = cx.new(|cx| IntegrationsTab::new(state.clone(), window, cx));
         let storage = cx.new(StorageTab::new);
         Self {
             // The sidebar follows the downloads and the sizes measured.
             _observe: vec![
                 cx.observe(&state, |_, _, cx| cx.notify()),
-                cx.observe(&models, |_, _, cx| cx.notify()),
+                cx.observe(&integrations, |_, _, cx| cx.notify()),
                 cx.observe(&storage, |_, _, cx| cx.notify()),
             ],
             tab: SettingsTab::Agent,
             agent: cx.new(|cx| SettingsPanel::new(state.clone(), window, cx)),
-            integrations: cx.new(|cx| IntegrationsTab::new(state.clone(), window, cx)),
-            models,
+            integrations,
             storage,
             state,
         }
@@ -108,7 +101,7 @@ impl EditorSettings {
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
                 .close_button(false)
-                .w(px(860.))
+                .w(px(900.))
                 .h(px(620.))
                 .p_0()
                 .gap_0()
@@ -126,22 +119,15 @@ impl EditorSettings {
         cx.notify();
     }
 
-    /// What a page's sidebar row shows after its label: a provider whose
-    /// key failed, the downloads' progress, the space used.
+    /// What a page's sidebar row shows after its label: the downloads'
+    /// progress and a provider whose key failed, the space used.
     fn trailing(&self, tab: SettingsTab, cx: &App) -> Option<AnyElement> {
         let s = self.state.read(cx);
         match tab {
-            SettingsTab::Integrations => flikk_cloud::PROVIDERS
-                .iter()
-                .any(|&p| matches!(s.provider_status(p).check, Check::Failed { .. }))
-                .then(|| {
-                    div()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(t::WARN)
-                        .into_any_element()
-                }),
-            SettingsTab::Models => {
+            SettingsTab::Integrations => {
+                let failed = flikk_cloud::PROVIDERS
+                    .iter()
+                    .any(|&p| matches!(s.provider_status(p).check, Check::Failed { .. }));
                 let fractions: Vec<f32> = s
                     .model_tasks
                     .iter()
@@ -150,10 +136,17 @@ impl EditorSettings {
                         _ => None,
                     })
                     .collect();
-                (!fractions.is_empty()).then(|| {
+                let progress = (!fractions.is_empty()).then(|| {
                     let fraction = fractions.iter().sum::<f32>() / fractions.len() as f32;
-                    meta(format!("{:.0} %", fraction * 100.))
-                        .text_color(t::AC)
+                    meta(format!("{:.0} %", fraction * 100.)).text_color(t::AC)
+                });
+                (failed || progress.is_some()).then(|| {
+                    h_flex()
+                        .gap(px(6.))
+                        .children(progress)
+                        .when(failed, |el| {
+                            el.child(div().size(px(6.)).rounded_full().bg(t::WARN))
+                        })
                         .into_any_element()
                 })
             }
@@ -206,7 +199,6 @@ impl Render for EditorSettings {
         let page: AnyView = match self.tab {
             SettingsTab::Agent => self.agent.clone().into(),
             SettingsTab::Integrations => self.integrations.clone().into(),
-            SettingsTab::Models => self.models.clone().into(),
             SettingsTab::Storage => self.storage.clone().into(),
         };
         let header = h_flex()
@@ -308,6 +300,17 @@ pub(crate) fn section_label(title: &'static str) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(t::T3)
         .child(title)
+}
+
+/// A heading over one of several sections of a page (Integrations' "Use
+/// for", "On this Mac"): a step up from [`section_label`], so the
+/// sections read apart.
+pub(crate) fn group_label(title: &'static str) -> Div {
+    section_label(title)
+        .h(px(26.))
+        .mb(px(4.))
+        .text_size(px(12.))
+        .text_color(t::T2)
 }
 
 /// One row of a page: its label in a column `label_w` wide on the left,

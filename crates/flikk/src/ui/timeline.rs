@@ -1756,7 +1756,7 @@ impl TimelinePanel {
                                 Some("ramp".into())
                             } else {
                                 ((clip.speed - 1.).abs() > 1e-6)
-                                    .then(|| format!("{}%", (clip.speed * 100.).round()).into())
+                                    .then(|| format!("{} %", (clip.speed * 100.).round()).into())
                             },
                             warp: (clip.media().is_some() && clip.is_retimed()).then(|| {
                                 let clip = clip.clone();

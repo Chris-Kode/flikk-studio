@@ -8,13 +8,13 @@ use crate::state::EditorState;
 use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
+    Badge, Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
     PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab, Tabs, Textarea,
     Tooltip, h_flex, v_flex,
 };
 use crate::ui::media_pool::form;
 use crate::ui::media_pool::import::is_audio;
-use crate::ui::media_pool::{listen_button, play_dot};
+use crate::ui::media_pool::{listen_button, play_button};
 use flikk_core::cloud::{
     self, Capability, CloudError, DESIGN_DESCRIPTION, Voice, VoiceClone, VoiceDesign, VoiceOrigin,
     VoicePreview, VoiceQuery,
@@ -543,9 +543,9 @@ impl VoicesDialog {
         }
         let heard = voice.sample.is_some();
         let voice = voice.clone();
-        play_dot(id, false, px(22.))
-            .when(!heard, |d| d.opacity(0.4))
-            .tooltip(Tooltip::text("Play"))
+        play_button(id, false)
+            .disabled(!heard)
+            .tooltip("Play")
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 if voice.sample.is_some() {
@@ -564,19 +564,12 @@ impl VoicesDialog {
         let rate = voice.rate.map(|r| format!("×{r:.1}"));
         let notice = voice.notice_days;
         let row_id = SharedString::from(format!("voice-{}", voice.id));
-        let tags = voice.traits.iter().take(2).map(|tag| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .h(px(18.))
-                .px(px(6.))
-                .rounded(t::RADIUS_SM)
-                .bg(t::alpha(t::T1, 0.04))
-                .text_size(px(10.))
-                .text_color(t::T2)
-                .child(cloud::voice_label(tag))
-        });
+        let tags = voice
+            .traits
+            .iter()
+            .take(2)
+            .map(|tag| Badge::new(cloud::voice_label(tag)));
+        // The footer's button is the primary one; each row's stays secondary.
         let action = Button::new(SharedString::from(format!("take-{}", voice.id)))
             .small()
             .label(if voice.shared() { "Add" } else { "Use" })
@@ -588,36 +581,36 @@ impl VoicesDialog {
                     this.take(taken.clone(), window, cx);
                 }
             }));
-        let action = if selected { action.primary() } else { action };
         h_flex()
             .id(row_id)
             .h(px(40.))
-            .px(px(10.))
+            .px(px(8.))
             .gap(px(10.))
             .rounded(t::RADIUS)
             .cursor_pointer()
-            .when(selected, |d| {
-                d.bg(t::alpha(t::AC, 0.08))
-                    .shadow(inset_ring(t::alpha(t::AC, 0.4)))
-            })
+            .when(selected, |d| d.bg(t::AC_WASH))
             .when(!selected, |d| d.hover(|s| s.bg(t::HV)))
             .child(self.sample_button(voice, cx))
             .child(
+                // Two 16 px lines, centred in the 40 px row.
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().child(voice.name.clone()))
+                    .justify_center()
+                    .line_height(px(16.))
+                    .child(div().h(px(16.)).truncate().child(voice.name.clone()))
                     .when(!voice.description.is_empty(), |d| {
                         d.child(
                             div()
+                                .h(px(16.))
                                 .truncate()
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .text_color(t::T3)
                                 .child(voice.description.clone()),
                         )
                     }),
             )
-            .child(h_flex().gap(px(3.)).flex_none().children(tags))
+            .child(h_flex().gap(px(4.)).flex_none().children(tags))
             .when_some(rate, |d, rate| {
                 let mut text = "Costs more credits per character".to_owned();
                 if let Some(days) = notice {
@@ -627,10 +620,7 @@ impl VoicesDialog {
                     div()
                         .id(SharedString::from(format!("rate-{}", voice.id)))
                         .flex_none()
-                        .font_family(t::mono())
-                        .text_size(px(10.))
-                        .text_color(t::WARN)
-                        .child(rate)
+                        .child(Badge::new(rate).warn().mono())
                         .tooltip(Tooltip::text(text)),
                 )
             })
@@ -667,19 +657,14 @@ impl VoicesDialog {
                     .map_or_else(|| v.clone(), |(_, name)| name)
             },
         );
+        // A set filter holds the hover surface, like an open menu.
         let chip = Button::new(SharedString::from(format!("filter-{}", filter.label())))
-            .xsmall()
+            .small()
             .label(format!("{} · {value}", filter.label()))
             .trailing_icon(IconName::ChevronDown)
-            .h(px(22.))
-            .px(px(8.))
-            .rounded_full()
-            .text_color(t::T2)
-            .when(current.is_some(), |b| {
-                b.border_color(t::alpha(t::AC, 0.53))
-                    .bg(t::alpha(t::AC, 0.08))
-                    .text_color(t::T1)
-            });
+            .selected(current.is_some())
+            .when(current.is_none(), |b| b.text_color(t::T2))
+            .when(current.is_some(), |b| b.border_color(t::LN_HV));
         chip.dropdown_menu(move |mut menu, _, _| {
             let d = dialog.clone();
             menu = menu.item(PopupMenuItem::new("Any").on_click(move |_, _, cx| {
@@ -742,18 +727,18 @@ impl VoicesDialog {
                         .h(px(22.))
                         .pl(px(8.))
                         .pr(px(2.))
-                        .rounded_full()
+                        .rounded(t::RADIUS)
                         .border_1()
-                        .border_color(t::LN)
+                        .border_color(t::LN_HV)
+                        .bg(t::HV)
                         .text_size(px(11.))
-                        .child(Icon::new(IconName::AudioLines).size(px(11.)).color(t::A))
+                        .child(Icon::new(IconName::AudioLines).size(px(12.)).color(t::A))
                         .child(format!("Like {label}"))
                         .child(
                             Button::new("clear-similar")
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::X)
-                                .rounded_full()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.similar = None;
                                     this.search_shared(0, cx);
@@ -784,39 +769,42 @@ impl VoicesDialog {
                     .child(scope),
             )
             .child(filters)
+            // The rows' hover reaches 8 px past the body padding. The margin
+            // sits on a wrapper: the scroll area clips its own content.
             .child(
-                div()
-                    .id("voice-list")
-                    .h(px(300.))
-                    .mx(px(-10.))
-                    .overflow_y_scrollbar()
-                    .when(loading && empty, |d| {
-                        d.flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Spinner::new().size(px(14.)))
-                    })
-                    .when_some(load_error.filter(|_| empty), |d, e| {
-                        d.p(px(10.)).child(form::problem(e))
-                    })
-                    .when(nothing, |d| {
-                        d.child(EmptyState::new(IconName::Search, "No voices found").compact())
-                    })
-                    .child(v_flex().gap(px(2.)).children(rows))
-                    .when(more, |d| {
-                        d.child(
-                            h_flex().justify_center().p(px(4.)).child(
-                                Button::new("more-voices")
-                                    .ghost()
-                                    .small()
-                                    .label("More")
-                                    .loading(loading)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.search_shared(next, cx)
-                                    })),
-                            ),
-                        )
-                    }),
+                div().mx(px(-8.)).child(
+                    div()
+                        .id("voice-list")
+                        .h(px(300.))
+                        .overflow_y_scrollbar()
+                        .when(loading && empty, |d| {
+                            d.flex()
+                                .items_center()
+                                .justify_center()
+                                .child(Spinner::new().size(px(14.)))
+                        })
+                        .when_some(load_error.filter(|_| empty), |d, e| {
+                            d.p(px(10.)).child(form::problem(e))
+                        })
+                        .when(nothing, |d| {
+                            d.child(EmptyState::new(IconName::Search, "No voices found").compact())
+                        })
+                        .child(v_flex().gap(px(2.)).children(rows))
+                        .when(more, |d| {
+                            d.child(
+                                h_flex().justify_center().p(px(4.)).child(
+                                    Button::new("more-voices")
+                                        .ghost()
+                                        .small()
+                                        .label("More")
+                                        .loading(loading)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.search_shared(next, cx)
+                                        })),
+                                ),
+                            )
+                        }),
+                ),
             )
             .into_any_element()
     }
@@ -939,7 +927,7 @@ impl VoicesDialog {
                                 .text_color(if picked { t::T1 } else { t::T2 })
                                 .child(format!("Take {}", i + 1)),
                         )
-                        .children(playing.map(|f| bar3(f).w(px(70.)).flex_none()))
+                        .children(playing.map(|f| take_bar(f).w(px(72.)).flex_none()))
                         .child(Radio::new(("pick-preview", i)).checked(picked).on_click(
                             cx.listener(move |this, _, _, cx| {
                                 this.picked = Some(i);
@@ -1080,7 +1068,7 @@ impl VoicesDialog {
                     .px(px(8.))
                     .gap(px(8.))
                     .rounded(t::RADIUS)
-                    .child(Icon::new(IconName::AudioLines).size(px(13.)).color(t::A))
+                    .child(Icon::new(IconName::AudioLines).color(t::A))
                     .child(div().flex_1().min_w_0().truncate().child(file_name(path)))
                     .child(
                         Button::new(("remove-file", i))
@@ -1102,7 +1090,7 @@ impl VoicesDialog {
                 el.child(
                     v_flex()
                         .p(px(4.))
-                        .rounded(px(6.))
+                        .rounded(t::RADIUS_LG)
                         .border_1()
                         .border_color(t::LN)
                         .bg(t::G)
@@ -1271,30 +1259,15 @@ fn spinner_box() -> impl IntoElement {
         .child(Spinner::new())
 }
 
-/// How far a take plays, as a 3 px bar.
-fn bar3(fraction: f32) -> Div {
-    div()
-        .h(px(3.))
-        .rounded_full()
-        .bg(t::alpha(t::T1, 0.08))
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .w(relative(fraction.clamp(0., 1.)))
-                .bg(t::T1),
-        )
-}
-
-/// A 1 px ring inside a selected row.
-fn inset_ring(color: Rgba) -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: color.into(),
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(0.),
-        spread_radius: px(1.),
-        inset: true,
-    }]
+/// How far a take plays, as a 4 px progress bar.
+fn take_bar(fraction: f32) -> Div {
+    div().h(px(4.)).rounded_full().bg(t::R1).child(
+        div()
+            .h_full()
+            .rounded_full()
+            .w(relative(fraction.clamp(0., 1.)))
+            .bg(t::T1),
+    )
 }
 
 /// Formats every provider takes as they are.

@@ -79,7 +79,8 @@ No `BOLD` or heavier anywhere. Letter spacing stays at the default.
 
 | Token | Value | Use |
 | --- | --- | --- |
-| `RADIUS_SM` | 4 | Clips, fields, keycaps |
+| `RADIUS_XS` | 3 | Keycaps, checkboxes, small handles inside a control |
+| `RADIUS_SM` | 4 | Clips, fields |
 | `RADIUS` | 5 | Buttons |
 | `RADIUS_SEG` | 7 | Segmented controls |
 | `RADIUS_LG` | 8 | Menus, popovers, dialogs |
@@ -94,7 +95,7 @@ Kit `Icon` with a lucide `IconName`, 14px, `T2` idle, `T1` on hover, `AC` when o
 
 - Depth is surface steps plus an `LN` hairline.
 - `floating_shadow()` for menus, popovers and dialogs only, with `SCRIM` behind a modal.
-- `focus_ring()` on controls, `field_ring()` on fields.
+- `focus_ring()` on controls (2px `AC` at 60 %, 1px off the edge), `field_ring()` on fields (3px `AC_WASH`).
 
 ## Motion
 

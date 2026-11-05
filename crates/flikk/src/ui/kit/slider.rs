@@ -129,7 +129,7 @@ impl RenderOnce for Slider {
                 .mb(px(-6.))
                 .w(px(24.))
                 .h(px(12.))
-                .rounded(px(3.))
+                .rounded(t::RADIUS_XS)
                 .bg(t::LN_HV)
                 .shadow(vec![
                     shadow(t::alpha(t::hex(0x000000), 0.67), 2., 5., 0., false),

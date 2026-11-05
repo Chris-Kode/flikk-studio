@@ -16,6 +16,7 @@ pub struct Segmented {
     disabled: Vec<usize>,
     selected: usize,
     compact: bool,
+    field: bool,
     fill: bool,
     on_click: Option<ClickHandler>,
     style: StyleRefinement,
@@ -29,6 +30,7 @@ impl Segmented {
             disabled: Vec::new(),
             selected: 0,
             compact: false,
+            field: false,
             fill: false,
             on_click: None,
             style: StyleRefinement::default(),
@@ -64,6 +66,12 @@ impl Segmented {
         self
     }
 
+    /// 26 px, as tall as the fields beside it in a settings row.
+    pub fn field(mut self) -> Self {
+        self.field = true;
+        self
+    }
+
     /// Take the full width, splitting it evenly between the options.
     pub fn fill(mut self) -> Self {
         self.fill = true;
@@ -86,8 +94,11 @@ impl Styled for Segmented {
 impl RenderOnce for Segmented {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let compact = self.compact;
+        let field = self.field && !compact;
         let (h, pad, radius, item_radius, text) = if compact {
             (px(18.), px(8.), px(5.), px(4.), px(11.))
+        } else if field {
+            (px(22.), px(10.), t::RADIUS_SEG, t::RADIUS, px(12.))
         } else {
             (px(24.), px(10.), t::RADIUS_SEG, t::RADIUS, px(12.))
         };
@@ -98,7 +109,7 @@ impl RenderOnce for Segmented {
             .flex_none()
             .items_center()
             .gap(px(2.))
-            .p(px(if compact { 1. } else { 2. }))
+            .p(px(if compact || field { 1. } else { 2. }))
             .rounded(radius)
             .border_1()
             .border_color(t::LN)
@@ -121,7 +132,7 @@ impl RenderOnce for Segmented {
                 .rounded(item_radius)
                 .whitespace_nowrap()
                 .text_color(t::T2);
-            if !compact {
+            if !compact && !field {
                 item = item.min_w(px(80.));
             }
             if self.fill {

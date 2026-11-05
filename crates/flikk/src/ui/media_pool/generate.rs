@@ -1,15 +1,15 @@
-//! Generate: music or a sound effect from a description, made by the
-//! provider set in Settings → Integrations, landing in the Music Generated
-//! or Sound Effects Generated bin. Music runs as long as In/Out when they
-//! are set. Each generation running (any kind) shows in the pool until it
-//! lands.
+//! Generate: music or a sound effect from a description, each in a dialog
+//! of its own, made by the provider set in Settings → Integrations and
+//! landing in the Music Generated or Sound Effects Generated bin. Music runs
+//! as long as In/Out when they are set. Each generation running (any kind)
+//! shows in the pool until it lands.
 
 use super::{MediaPoolPanel, form, thumb_badge};
 use crate::state::{EditorState, Generating};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, DialogExt as _, Icon, IconName, Progress, Segmented, Spinner, Switch, Textarea,
-    Tooltip, h_flex, v_flex,
+    Button, DialogExt as _, Icon, IconName, Progress, Spinner, Switch, Textarea, Tooltip, h_flex,
+    v_flex,
 };
 use flikk_core::cloud::{Capability, CloudError, GenerateRequest, Stage};
 use flikk_core::time::Time;
@@ -63,11 +63,9 @@ impl Kind {
 }
 
 /// The form: what it should sound like, how long, and instrumental (music)
-/// or looping (sound effects).
+/// or looping (sound effects). Each kind has a dialog of its own.
 pub struct GenerateForm {
     state: Entity<EditorState>,
-    /// What a provider can make, for the switch between them.
-    kinds: Vec<Kind>,
     kind: Kind,
     prompt: Entity<TextareaState>,
     length: Entity<SliderState>,
@@ -80,7 +78,6 @@ pub struct GenerateForm {
 impl GenerateForm {
     fn new(
         state: Entity<EditorState>,
-        kinds: Vec<Kind>,
         kind: Kind,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -95,7 +92,6 @@ impl GenerateForm {
             _prompt: cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
             _length: cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
             state,
-            kinds,
             kind,
             prompt,
             length,
@@ -121,20 +117,6 @@ impl GenerateForm {
                 .step(step)
                 .default_value(default.clamp(min, max))
         })
-    }
-
-    fn set_kind(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
-        if kind == self.kind {
-            return;
-        }
-        self.kind = kind;
-        self.option = kind == Kind::Music;
-        self.prompt.update(cx, |p, cx| {
-            p.set_placeholder(kind.placeholder(), window, cx)
-        });
-        self.length = Self::slider(&self.state, kind, cx);
-        self._length = cx.subscribe(&self.length, |_, _, _: &SliderEvent, cx| cx.notify());
-        cx.notify();
     }
 
     fn request(&self, cx: &App) -> Option<GenerateRequest> {
@@ -177,23 +159,8 @@ impl Render for GenerateForm {
             Kind::Music => "Instrumental",
             Kind::SoundEffect => "Loop",
         };
-        let kinds = self.kinds.clone();
-        let selected = kinds.iter().position(|k| *k == self.kind).unwrap_or(0);
         v_flex()
             .gap(px(10.))
-            .when(kinds.len() > 1, |el| {
-                el.child(
-                    Segmented::new("generate-kind")
-                        .items(kinds.iter().map(|k| k.label()))
-                        .selected(selected)
-                        .fill()
-                        .on_click(cx.listener(move |this, ix: &usize, window, cx| {
-                            if let Some(kind) = kinds.get(*ix) {
-                                this.set_kind(*kind, window, cx);
-                            }
-                        })),
-                )
-            })
             .child(Textarea::new(&self.prompt))
             .child(form::row(
                 "Length",
@@ -234,16 +201,12 @@ impl MediaPoolPanel {
         if window.has_active_dialog(cx) {
             return;
         }
-        let mut kinds = self.can_generate(cx);
-        if !kinds.contains(&kind) {
-            kinds = vec![kind];
-        }
-        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kinds, kind, window, cx));
+        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kind, window, cx));
         window.open_dialog(cx, move |dialog, _, cx| {
             let submit = form.clone();
             let ready = form.read(cx).request(cx).is_some();
             dialog
-                .title("Generate")
+                .title(kind.label())
                 .w(px(440.))
                 .child(form.clone())
                 .confirm("Generate", move |_, cx| {
@@ -414,7 +377,7 @@ fn stage_label(stage: Stage) -> String {
     match stage {
         Stage::Queued(Some(ahead)) if ahead > 0 => format!("Queued · {ahead} ahead"),
         Stage::Queued(_) => "Queued".into(),
-        Stage::Downloading(f) => format!("Downloading · {:.0}%", f * 100.),
+        Stage::Downloading(f) => format!("Downloading · {:.0} %", f * 100.),
         Stage::Starting | Stage::Running => "Generating".into(),
     }
 }

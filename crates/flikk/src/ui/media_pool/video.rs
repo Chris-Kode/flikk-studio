@@ -127,7 +127,10 @@ impl VideoForm {
             .collect();
         let resolution = picker(resolutions, 0, window, cx);
         let _subscriptions = vec![
-            cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe_in(&prompt, window, |_, prompt, _: &InputEvent, window, cx| {
+                form::mark_tags(prompt, form::Tags::References, window, cx);
+                cx.notify();
+            }),
             cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
             cx.subscribe(&start, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
             cx.subscribe(&end, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()),
@@ -398,7 +401,7 @@ impl Render for VideoForm {
         let pick = |name: &'static str, picker: &Picker| form::row(name, Select::new(picker));
         v_flex()
             .gap(px(10.))
-            .child(Textarea::new(&self.prompt))
+            .child(Textarea::new(&self.prompt).token(form::tag_token))
             .child(pick("Start frame", &self.start))
             .when(starts && self.model.last_frame, |el| {
                 el.child(pick("End frame", &self.end))

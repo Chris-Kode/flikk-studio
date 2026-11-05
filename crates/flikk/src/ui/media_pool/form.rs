@@ -1,9 +1,14 @@
 //! The rows of a form dialog (Video, Voiceover, Generate, Voices): a 96 px
-//! label column beside its control, a slider with its value, and the line
-//! that says why the form can't go ahead.
+//! label column beside its control, a slider with its value, the line that
+//! says why the form can't go ahead, and the tags a prompt paints in the
+//! accent.
+
+use std::ops::Range;
 
 use crate::ui::kit::{Icon, IconName, Slider, h_flex, theme as t};
+use gpui_kit::base::input::{InlineToken, InlineTokenContext, TextareaState};
 use gpui_kit::base::slider::SliderState;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// `label` beside `control`.
@@ -51,4 +56,111 @@ pub(crate) fn problem(text: impl Into<SharedString>) -> Div {
                 .child(Icon::new(IconName::CircleAlert).size(px(14.))),
         )
         .child(div().flex_1().min_w_0().child(text.into()))
+}
+
+/// What a prompt marks as a tag.
+#[derive(Clone, Copy)]
+pub(crate) enum Tags {
+    /// Audio tags in a script: `[whispers]`, `[short pause]`.
+    Bracketed,
+    /// References in a prompt: `@Image1`, `@Video2`.
+    References,
+}
+
+impl Tags {
+    /// Where the tags sit in `text`, in order.
+    fn find(self, text: &str) -> Vec<Range<usize>> {
+        match self {
+            Tags::Bracketed => bracketed(text),
+            Tags::References => references(text),
+        }
+    }
+}
+
+/// `[` words `]`, at most 40 bytes, with no space just inside the brackets.
+fn bracketed(text: &str) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find('[').map(|i| from + i) {
+        let rest = &text[open + 1..];
+        let Some(len) = rest.find(']') else { break };
+        let inner = &rest[..len];
+        let word = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'');
+        if len > 0
+            && len <= 40
+            && inner.chars().all(word)
+            && !inner.starts_with(' ')
+            && !inner.ends_with(' ')
+        {
+            found.push(open..open + len + 2);
+            from = open + len + 2;
+        } else {
+            from = open + 1;
+        }
+    }
+    found
+}
+
+/// `@` letters digits, at the start of the text or after a space.
+fn references(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices('@') {
+        if at > 0 && !bytes[at - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let letters = bytes[at + 1..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphabetic())
+            .count();
+        let digits = bytes[at + 1 + letters..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if letters > 0 && digits > 0 {
+            found.push(at..at + 1 + letters + digits);
+        }
+    }
+    found
+}
+
+/// Make each plain tag in `input` a token, so the field paints it in the
+/// accent. The text and the caret stay as they were.
+pub(crate) fn mark_tags(
+    input: &Entity<TextareaState>,
+    tags: Tags,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    input.update(cx, |input, cx| {
+        let text = input.value().to_string();
+        let taken: Vec<Range<usize>> = input.tokens().iter().map(|s| s.range()).collect();
+        let fresh: Vec<Range<usize>> = tags
+            .find(&text)
+            .into_iter()
+            .filter(|r| !taken.iter().any(|t| t.start < r.end && r.start < t.end))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let selection = input.selected_range();
+        for range in fresh.into_iter().rev() {
+            let tag = text[range.clone()].to_owned();
+            let token = InlineToken::new(tag.clone(), tag);
+            let _ = input.replace_range_with_token(range, token, window, cx);
+        }
+        input.set_selected_range(selection, cx);
+    });
+}
+
+/// A tag token: its text in the accent, washed while selected.
+pub(crate) fn tag_token(token: &InlineTokenContext, _: &mut Window, _: &mut App) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .h(token.line_height())
+        .text_color(t::AC)
+        .when(token.is_selected(), |d| d.bg(t::alpha(t::AC, 0.3)))
+        .when(token.is_disabled(), |d| d.opacity(0.5))
+        .child(token.token().label().clone())
 }

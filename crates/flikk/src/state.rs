@@ -1364,7 +1364,7 @@ impl EditorState {
     }
 
     /// Whether subject masks can be made; when not (their model is
-    /// missing), a notice that leads to Settings → Models.
+    /// missing), a notice that leads to Settings → Integrations.
     pub fn subjects_ready(&mut self, cx: &mut Context<Self>) -> bool {
         let ready = match &self.services.subjects {
             Some(s) => s.available(),
@@ -1392,7 +1392,7 @@ impl EditorState {
     }
 
     /// When optical flow is picked without its model: a notice that leads
-    /// to Settings → Models (slowed frames are blended meanwhile).
+    /// to Settings → Integrations (slowed frames are blended meanwhile).
     pub fn optical_flow_picked(&mut self, cx: &mut Context<Self>) {
         let Some(Err(e)) = self.services.interpolation.as_ref().map(|s| s.available()) else {
             return;
@@ -1401,7 +1401,7 @@ impl EditorState {
         self.notices.set(Notice {
             key: FLOW_NOTICE.into(),
             level: Level::Warning,
-            title: "Optical flow needs its model".into(),
+            title: "Motion smoothing needs its model".into(),
             items: Vec::new(),
             detail: Some(e),
             action: Some(NoticeAction::OpenModels),
@@ -1410,7 +1410,7 @@ impl EditorState {
     }
 
     /// Whether person masks can be made; when not (their model is
-    /// missing), a notice that leads to Settings → Models.
+    /// missing), a notice that leads to Settings → Integrations.
     pub fn people_ready(&mut self, cx: &mut Context<Self>) -> bool {
         let ready = match &self.services.subjects {
             Some(s) => s.people_available(),
@@ -1501,7 +1501,7 @@ impl EditorState {
                     changed |= self.notices.set(Notice {
                         key,
                         level: Level::Error,
-                        title: format!("Could not download {}", model.name),
+                        title: format!("Could not download {}", task.label().to_lowercase()),
                         items: Vec::new(),
                         detail: Some(message),
                         action: Some(NoticeAction::OpenModels),
@@ -1510,7 +1510,7 @@ impl EditorState {
                 flikk_models::Status::Missing | flikk_models::Status::Downloading(_) => {}
             }
             if required.contains(task) {
-                missing.push(format!("{} · {}", task.label(), model.name));
+                missing.push(task.label().to_owned());
             }
         }
         changed |= if missing.is_empty() {

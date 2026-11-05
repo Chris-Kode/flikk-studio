@@ -195,7 +195,7 @@ impl RenderOnce for Checkbox {
             .items_center()
             .justify_center()
             .size(px(14.))
-            .rounded(px(3.))
+            .rounded(t::RADIUS_XS)
             .border_1();
         mark = if self.checked {
             mark.bg(t::AC)

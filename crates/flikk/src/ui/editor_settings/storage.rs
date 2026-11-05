@@ -2,7 +2,7 @@
 //! with its folder to open: the cache as one (everything the editor makes
 //! again by itself), with Clear, then models, the library (effects,
 //! presets, sounds and voices), what providers and Codex generated, and
-//! backups. Models are deleted one by one on the Models page.
+//! backups. Models are deleted one by one on the Integrations page.
 //! Analysis results are left out: they are not cleared with the cache, as
 //! making them again can cost. Background rendering is turned on and off,
 //! and its size limit set, on a row of its own.

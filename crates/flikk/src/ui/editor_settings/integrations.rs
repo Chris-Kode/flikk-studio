@@ -1,23 +1,30 @@
 //! Settings → Integrations: each provider's API key and what it says of the
-//! account, and who does each capability (this computer, nobody, or a
-//! provider) on which of its models. Built from `flikk_cloud::PROVIDERS`,
+//! account, who does each capability (this computer, nobody, or a
+//! provider) on which of its models, and the models this computer runs
+//! ([`on_device`](super::on_device)). Built from `flikk_cloud::PROVIDERS`,
 //! so a new provider shows up here as it is added there.
 
-use super::{page, row, section_label};
+use super::on_device::{self, THIS_MACHINE, model_status, transcription_sizes};
+use super::{group_label, page, row};
 use crate::state::{Check, EditorState};
 use crate::ui::kit::{
-    Badge, Button, Icon, IconName, Input, ScrollableElement as _, Select, SelectEvent, SelectState,
-    Spinner, Switch, Tooltip, h_flex, theme as t, v_flex,
+    Badge, Button, Icon, IconName, Input, ScrollableElement as _, Segmented, Select, SelectEvent,
+    SelectState, Spinner, Switch, Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_cloud::{KeySource, PROVIDERS, Provider};
 use flikk_core::cloud::Capability;
+use flikk_models::Task as ModelTask;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// How often a running download's progress is redrawn.
+const PROGRESS_POLL: Duration = Duration::from_millis(200);
 
 /// The label column of the page's rows.
-const LABEL_W: f32 = 150.;
+const LABEL_W: f32 = 140.;
 /// The actions after a key: Replace and remove, or Save, end on one edge.
 const ACTIONS_W: f32 = 96.;
 
@@ -32,13 +39,16 @@ pub struct IntegrationsTab {
     doers: Vec<(Capability, Entity<SelectState<SharedString>>)>,
     /// Per capability, the models of the provider picked (by its id).
     models: HashMap<Capability, (&'static str, Entity<SelectState<SharedString>>)>,
+    /// A model download was running at the last poll.
+    busy: bool,
     _subscriptions: Vec<Subscription>,
+    _poll: Task<()>,
 }
 
 /// The first entry of a capability's list: what happens with no provider.
 fn no_provider(capability: Capability) -> &'static str {
     if capability.runs_locally() {
-        "This computer"
+        THIS_MACHINE
     } else {
         "Off"
     }
@@ -107,14 +117,66 @@ impl IntegrationsTab {
                 (capability, select)
             })
             .collect();
+        let _poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_POLL).await;
+                if this.update(cx, |this, cx| this.poll(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             state,
             replacing: vec![false; keys.len()],
             keys,
             doers,
             models: HashMap::new(),
+            busy: false,
             _subscriptions: subscriptions,
+            _poll,
         }
+    }
+
+    /// Redraw while a model downloads, and once more after it ends.
+    fn poll(&mut self, cx: &mut Context<Self>) {
+        let busy = self.state.read(cx).models.busy();
+        if busy || self.busy {
+            cx.notify();
+        }
+        self.busy = busy;
+    }
+
+    /// Transcription on this computer: its size, and where its model
+    /// stands.
+    fn render_transcription_size(&self, cx: &App) -> impl IntoElement {
+        let model = ModelTask::Transcription.model();
+        let selected = transcription_sizes()
+            .position(|(_, m)| m.id == model.id)
+            .unwrap_or(0);
+        let state = self.state.clone();
+        let status = self.state.read(cx).models.status(model);
+        h_flex()
+            .gap(px(10.))
+            .child(
+                Segmented::new("transcription-size")
+                    .field()
+                    .items(transcription_sizes().map(|(label, _)| label))
+                    .selected(selected)
+                    .on_click(move |ix, _, cx| {
+                        if let Some((_, model)) = transcription_sizes().nth(*ix) {
+                            state.update(cx, |s, cx| {
+                                s.pick_model(ModelTask::Transcription, model, cx)
+                            });
+                        }
+                    }),
+            )
+            .child(model_status(
+                &self.state,
+                ModelTask::Transcription,
+                model,
+                status,
+                cx,
+            ))
     }
 
     /// The page is shown again: drop a replacement left half typed and
@@ -452,63 +514,56 @@ impl Render for IntegrationsTab {
             .enumerate()
             .map(|(ix, &p)| self.render_provider(ix, p, cx).into_any_element())
             .collect();
-        let video_picked = self
-            .state
-            .read(cx)
-            .cloud
-            .settings()
-            .provider(Capability::Video)
-            .is_some();
+        let settings = self.state.read(cx).cloud.settings();
         let sound = self.state.read(cx).video_sound();
-        let use_row = |label: &'static str| row(label, LABEL_W).h(px(36.));
-        let mut rows: Vec<_> = self
+        let rows: Vec<_> = self
             .doers
             .iter()
             .map(|(capability, select)| {
-                let model = self.models.get(capability).map(|(_, m)| m.clone());
-                use_row(capability.label())
-                    .child(div().w(px(170.)).flex_none().child(Select::new(select)))
+                let capability = *capability;
+                let picked = settings.provider(capability).is_some();
+                let model = self.models.get(&capability).map(|(_, m)| m.clone());
+                row(capability.label(), LABEL_W)
+                    .h(px(36.))
+                    .child(div().w(px(160.)).flex_none().child(Select::new(select)))
                     .children(model.map(|m| {
                         let single = self
                             .models
-                            .get(capability)
+                            .get(&capability)
                             .and_then(|(id, _)| flikk_cloud::provider(id))
-                            .and_then(|p| p.offer(*capability))
+                            .and_then(|p| p.offer(capability))
                             .is_some_and(|o| o.models.len() < 2);
                         div()
-                            .w(px(190.))
+                            .w(px(180.))
                             .flex_none()
                             .child(Select::new(&m).disabled(single))
                     }))
+                    .when(capability.runs_locally() && !picked, |el| {
+                        el.child(self.render_transcription_size(cx))
+                    })
+                    .when(capability == Capability::Video && picked, |el| {
+                        let state = self.state.clone();
+                        el.child(
+                            Switch::new("video-sound")
+                                .checked(sound)
+                                .label("With sound")
+                                .on_click(move |on: &bool, _, cx| {
+                                    state.update(cx, |s, cx| s.set_video_sound(*on, cx))
+                                }),
+                        )
+                    })
                     .into_any_element()
             })
             .collect();
-        if video_picked {
-            let at = self
-                .doers
-                .iter()
-                .position(|(c, _)| *c == Capability::Video)
-                .map_or(rows.len(), |i| i + 1);
-            let state = self.state.clone();
-            rows.insert(
-                at,
-                use_row("Video sound")
-                    .child(Switch::new("video-sound").checked(sound).on_click(
-                        move |on: &bool, _, cx| {
-                            state.update(cx, |s, cx| s.set_video_sound(*on, cx))
-                        },
-                    ))
-                    .into_any_element(),
-            );
-        }
         page("Integrations", None)
             .children(providers)
             .child(
                 v_flex()
                     .mt(px(20.))
-                    .child(section_label("Use for"))
+                    .child(group_label("Use for"))
                     .children(rows),
             )
+            .child(on_device::section(&self.state, cx))
             .overflow_y_scrollbar()
     }
 }

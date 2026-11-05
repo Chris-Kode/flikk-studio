@@ -50,6 +50,11 @@ impl Badge {
         }
     }
 
+    pub fn warn(mut self) -> Self {
+        self.tone = Tone::Warn;
+        self
+    }
+
     pub fn err(mut self) -> Self {
         self.tone = Tone::Err;
         self

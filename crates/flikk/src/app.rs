@@ -406,7 +406,7 @@ impl Flikk {
             move |action, window, cx| {
                 let _ = this.update(cx, |this, cx| match action {
                     NoticeAction::OpenModels => {
-                        this.open_settings(Some(SettingsTab::Models), window, cx)
+                        this.open_settings(Some(SettingsTab::Integrations), window, cx)
                     }
                     NoticeAction::OpenIntegrations => {
                         this.open_settings(Some(SettingsTab::Integrations), window, cx)

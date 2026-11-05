@@ -1257,7 +1257,7 @@ impl ViewerPanel {
             .small()
             .label(match zoom {
                 None => "Fit".to_string(),
-                Some(z) => format!("{:.0}%", z * 100.0),
+                Some(z) => format!("{:.0} %", z * 100.0),
             })
             .trailing_icon(IconName::ChevronDown)
             .when(zoom.is_some(), |b| b.text_color(t::T1))
@@ -1270,7 +1270,7 @@ impl ViewerPanel {
                 for z in ZOOMS {
                     let v = viewer.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{:.0}%", z * 100.0))
+                        PopupMenuItem::new(format!("{:.0} %", z * 100.0))
                             .checked(zoom == Some(z))
                             .on_click(move |_, _, cx| {
                                 v.update(cx, |this, cx| this.set_zoom(Some(z), cx))
