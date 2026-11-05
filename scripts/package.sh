@@ -6,6 +6,8 @@
 #   scripts/package.sh 0.2.0
 #
 #   macOS    dist/flikk-0.2.0-macos-aarch64.tar.gz    Flikk.app
+#            dist/flikk-0.2.0-macos-aarch64.dmg, a disk image to drag
+#            Flikk.app to Applications from
 #   Linux    dist/flikk-0.2.0-linux-x86_64.tar.gz     flikk-0.2.0-linux-x86_64/
 #   Windows  dist/flikk-0.2.0-windows-x86_64.zip      flikk-0.2.0-windows-x86_64/
 #            dist/flikk-0.2.0-windows-x86_64-setup.exe, a per-user installer
@@ -103,6 +105,25 @@ EOF
     codesign --force --deep --sign - "$app"
     archive="$name.tar.gz"
     tar -C "$stage" -czf "$dist/$archive" Flikk.app
+
+    # The disk image: Flikk.app beside a link to /Applications. hdiutil
+    # can fail with "Resource busy" on CI runners; a retry clears it.
+    volume="$stage/dmg"
+    mkdir -p "$volume"
+    mv "$app" "$volume/"
+    ln -s /Applications "$volume/Applications"
+    installer="$name.dmg"
+    for attempt in 1 2 3; do
+      if hdiutil create -quiet -ov -fs HFS+ -format UDZO \
+        -volname Flikk -srcfolder "$volume" "$dist/$installer"; then
+        break
+      fi
+      if [ "$attempt" = 3 ]; then
+        echo "hdiutil could not create $installer" >&2
+        exit 1
+      fi
+      sleep 5
+    done
     ;;
   linux)
     dir="$stage/$name"

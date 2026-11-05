@@ -1,6 +1,7 @@
 # Deploy: build a published release on Windows, macOS and Linux and attach
-# each platform's archive and checksum to it. Installed copies of Flikk
-# find the new version through these (crates/flikk/src/update.rs).
+# each platform's archive, installer and checksums to it. Installed copies
+# of Flikk find the new version through the archives
+# (crates/flikk/src/update.rs).
 #
 # Starts when a release is published, and from Release, which can't start
 # it through the `release` event. Run it by hand to rebuild a release.
