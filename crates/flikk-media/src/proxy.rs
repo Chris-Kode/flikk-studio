@@ -7,9 +7,11 @@ use flikk_core::hdr::Mapping;
 use flikk_core::model::{Fingerprint, MediaItem};
 use flikk_core::paths;
 use flikk_core::services::{ServiceError, ServiceResult};
+use flikk_deliver::hw::{self, Codec};
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Where the proxy for a fingerprint lives, whether or not it exists yet.
 pub fn proxy_path(fingerprint: &Fingerprint) -> PathBuf {
@@ -66,24 +68,57 @@ pub(crate) fn ensure_proxy(
         scale.into(),
     );
 
-    let mut cmd = media.ffmpeg();
-    cmd.arg("-i")
-        .arg(&item.path)
-        .args(["-map", "0:v:0", "-map", "0:a?", "-vf", &filters])
-        .args(["-fps_mode", "cfr", "-r", &rate])
+    // The GPU first (VideoToolbox, NVENC, Quick Sync, AMF or VA-API, as
+    // the probe confirmed), all in software when that run fails.
+    let encoder = hw::probe().best(Codec::H264).cloned();
+    let (width, height) = {
+        let short = video.width.min(video.height).max(1) as f64;
+        let k = (720.0 / short).min(1.0);
+        (
+            (video.width as f64 * k) as u32,
+            (video.height as f64 * k) as u32,
+        )
+    };
+    let command = |gpu: bool| {
+        let encoder = encoder.as_ref().filter(|_| gpu);
+        let mut cmd = media.ffmpeg();
+        if let Some(encoder) = encoder {
+            cmd.args(encoder.global_args());
+        }
+        if gpu {
+            cmd.args(["-hwaccel", "auto"]);
+        }
+        let filters = match encoder.and_then(|e| e.upload_filter()) {
+            Some(upload) => format!("{filters},{upload}"),
+            None => filters.clone(),
+        };
+        cmd.arg("-i")
+            .arg(&item.path)
+            .args(["-map", "0:v:0", "-map", "0:a?", "-vf", &filters])
+            .args(["-fps_mode", "cfr", "-r", &rate]);
         // Only ever watched in the viewer, mostly smaller than 720p.
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "26"])
-        .args(["-tune", "fastdecode", "-pix_fmt", "yuv420p", "-bf", "0"])
-        .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
-        .args(["-colorspace", "bt709"])
-        .args(["-g", &gop, "-keyint_min", &gop, "-sc_threshold", "0"])
-        .args(["-c:a", "aac", "-b:a", "128k"])
-        .args(["-movflags", "+faststart", "-f", "mp4"])
-        .args(["-progress", "pipe:1", "-nostats", "-y"])
-        .arg(&tmp);
+        match encoder {
+            Some(encoder) => {
+                cmd.args(encoder.codec_args(26, width, height, video.rate.fps()));
+            }
+            None => {
+                cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "26"])
+                    .args(["-tune", "fastdecode", "-pix_fmt", "yuv420p"])
+                    .args(["-keyint_min", &gop, "-sc_threshold", "0"]);
+            }
+        }
+        cmd.args(["-bf", "0", "-g", &gop])
+            .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
+            .args(["-colorspace", "bt709"])
+            .args(["-c:a", "aac", "-b:a", "128k"])
+            .args(["-movflags", "+faststart", "-f", "mp4"])
+            .args(["-progress", "pipe:1", "-nostats", "-y"])
+            .arg(&tmp);
+        cmd
+    };
 
     let total_us = info.duration.as_secs_f64() * 1e6;
-    let result = (|| {
+    let run = |cmd: Command| -> ServiceResult<()> {
         let mut process = Process::spawn(cmd, BufReader::new)?;
         let mut line = String::new();
         loop {
@@ -110,7 +145,12 @@ pub(crate) fn ensure_proxy(
             )));
         }
         std::fs::rename(&tmp, &out).map_err(|e| err("proxy", e))
-    })();
+    };
+    let result = run(command(true)).or_else(|_| {
+        let _ = std::fs::remove_file(&tmp);
+        progress(0.0);
+        run(command(false))
+    });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

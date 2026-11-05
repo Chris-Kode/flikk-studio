@@ -130,7 +130,7 @@ impl HwEncoder {
     }
 
     /// Arguments before the inputs (hardware device for VA-API).
-    pub(crate) fn global_args(&self) -> Vec<OsString> {
+    pub fn global_args(&self) -> Vec<OsString> {
         match (&self.api, &self.device) {
             (Api::Vaapi, Some(device)) => [
                 "-init_hw_device".to_string(),
@@ -148,13 +148,13 @@ impl HwEncoder {
     /// takes frames in GPU memory. The conversion to 4:2:0 stays in
     /// swscale, as for the software encoders, so the matrix (and the
     /// absent colour tags) match.
-    pub(crate) fn upload_filter(&self) -> Option<&'static str> {
+    pub fn upload_filter(&self) -> Option<&'static str> {
         (self.api == Api::Vaapi).then_some("format=nv12,hwupload")
     }
 
     /// Video encoder arguments for `crf` (libx264's scale for H.264,
     /// libx265's for HEVC) at `width`×`height`, `fps`.
-    pub(crate) fn codec_args(&self, crf: u8, width: u32, height: u32, fps: f64) -> Vec<String> {
+    pub fn codec_args(&self, crf: u8, width: u32, height: u32, fps: f64) -> Vec<String> {
         // Hardware encoders spend fewer bits per quantizer step than x264's
         // CRF with psy tuning; one step lower keeps the look comparable.
         let q = crf.saturating_sub(1).clamp(1, 51).to_string();

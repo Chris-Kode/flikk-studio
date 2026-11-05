@@ -1929,6 +1929,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "flikk-core",
+ "flikk-deliver",
  "png 0.18.1",
  "serde_json",
 ]
