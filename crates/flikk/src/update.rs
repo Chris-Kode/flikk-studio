@@ -29,6 +29,11 @@ const NEW: &str = ".flikk-new";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,
+    /// Its page on GitHub, to download it from by hand.
+    pub page: String,
+    /// Whether this copy can lay it over itself: not when its folder needs
+    /// an administrator (Program Files, /opt).
+    pub installable: bool,
     archive: String,
     checksum: Option<String>,
 }
@@ -156,8 +161,14 @@ pub fn latest() -> Result<Option<Release>> {
     let Some(archive) = url_of(&name) else {
         return Ok(None);
     };
+    let page = json["html_url"].as_str().map_or_else(
+        || format!("https://github.com/{REPO}/releases/latest"),
+        str::to_owned,
+    );
     Ok(Some(Release {
         version,
+        page,
+        installable: installable(),
         archive,
         checksum: url_of(&format!("{name}.sha256")),
     }))
@@ -187,6 +198,13 @@ pub fn install(release: &Release, progress: &AtomicU32) -> Result<()> {
     lay_over(&payload, &root)?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// Whether an update can be laid over this copy.
+pub fn installable() -> bool {
+    exe()
+        .and_then(install_root)
+        .is_some_and(|root| writable(&root).is_ok())
 }
 
 /// Fail early, before any file is replaced, where the install can't be

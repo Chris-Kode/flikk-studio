@@ -1443,7 +1443,11 @@ available to them.
   on Windows) and its `.sha256`. On macOS the archive holds `Flikk.app`
   (ad hoc signed, not notarized, `mlx.metallib` beside the binary);
   elsewhere a folder with the binaries and the libraries cargo put beside
-  them (Dawn on Linux). It fails when the tag is not the crate version.
+  them (Dawn on Linux). Windows also gets `…-setup.exe`, built with Inno
+  Setup from `scripts/windows/flikk.iss`: it installs for the user alone
+  into `%LOCALAPPDATA%\Programs\Flikk`, without an administrator, so
+  updates can write there, adds a Start menu entry and opens `.flikk`
+  files. It fails when the tag is not the crate version.
 * **Updates** (`flikk/src/update.rs`, `flikk/src/state/update.rs`): only
   packaged builds (`FLIKK_UPDATES` at build time) ask GitHub for the
   latest release, at launch and every 6 hours; `FLIKK_NO_UPDATES` turns
@@ -1456,8 +1460,10 @@ available to them.
   target is renamed aside first (`*.flikk-old`, swept at the next launch),
   since a running executable can be renamed but not replaced. Restart
   settles unsaved changes like Quit, then starts the installed version.
-  An install folder that can't be written to fails before any file is
-  replaced, and the notice says so.
+  Whether the install folder can be written to is tried when the release
+  is found: where it can't (Program Files, `/opt`, `/Applications` for a
+  standard user), or where an update failed and it then can't, the notice
+  offers Download…, which opens the release's page, in place of Update.
 
 ## 10. Deliver
 

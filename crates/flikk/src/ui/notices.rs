@@ -167,6 +167,7 @@ fn row(ix: usize, notice: Notice, state: &Entity<EditorState>, on_action: &OnAct
                         NoticeAction::OpenIntegrations => ("Settings…", None),
                         NoticeAction::Relink => ("Relink…", Some(IconName::Link)),
                         NoticeAction::Update => ("Update", Some(IconName::Download)),
+                        NoticeAction::OpenRelease => ("Download…", Some(IconName::ExternalLink)),
                         NoticeAction::Restart => ("Restart", Some(IconName::RotateCcw)),
                     };
                     let mut button = Button::new(("notice-action", ix)).small().label(label);

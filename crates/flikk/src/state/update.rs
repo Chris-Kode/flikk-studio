@@ -64,10 +64,23 @@ impl EditorState {
         }
     }
 
+    /// The page of the release found, to download it by hand.
+    pub fn release_page(&self) -> Option<String> {
+        match &self.updater {
+            Updater::Idle => None,
+            Updater::Available(r)
+            | Updater::Installing(r, _)
+            | Updater::Ready(r)
+            | Updater::Failed(r, _) => Some(r.page.clone()),
+        }
+    }
+
     /// The notice's Update button: download and install, showing progress.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         let release = match std::mem::take(&mut self.updater) {
-            Updater::Available(release) | Updater::Failed(release, _) => release,
+            Updater::Available(release) | Updater::Failed(release, _) if release.installable => {
+                release
+            }
             other => {
                 self.updater = other;
                 return;
@@ -80,15 +93,22 @@ impl EditorState {
 
         let work = {
             let release = release.clone();
-            cx.background_executor()
-                .spawn(async move { update::install(&release, &progress) })
+            cx.background_executor().spawn(async move {
+                let result = update::install(&release, &progress);
+                // Whether to offer Update again or the download page.
+                (result, update::installable())
+            })
         };
         cx.spawn(async move |this, cx| {
-            let result = work.await;
+            let (result, installable) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.updater = match result {
                     Ok(()) => Updater::Ready(release),
-                    Err(e) => Updater::Failed(release, format!("{e:#}")),
+                    Err(e) => {
+                        let mut release = release;
+                        release.installable = installable;
+                        Updater::Failed(release, format!("{e:#}"))
+                    }
                 };
                 this.update_notice();
                 cx.notify();
@@ -120,7 +140,7 @@ impl EditorState {
             Updater::Available(r) => (
                 format!("Flikk {} is available", r.version),
                 None,
-                Some(NoticeAction::Update),
+                Some(get(r)),
             ),
             Updater::Installing(r, progress) => {
                 let percent = progress.load(Ordering::Relaxed) / 10;
@@ -138,7 +158,7 @@ impl EditorState {
             Updater::Failed(r, message) => (
                 format!("Could not update to Flikk {}", r.version),
                 Some(message.clone()),
-                Some(NoticeAction::Update),
+                Some(get(r)),
             ),
         };
         self.notices.set(Notice {
@@ -149,5 +169,14 @@ impl EditorState {
             detail,
             action,
         })
+    }
+}
+
+/// Update where this copy can lay the release over itself, else its page.
+fn get(release: &Release) -> NoticeAction {
+    if release.installable {
+        NoticeAction::Update
+    } else {
+        NoticeAction::OpenRelease
     }
 }

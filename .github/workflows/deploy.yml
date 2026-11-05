@@ -94,6 +94,16 @@ jobs:
           "C:\VulkanSDK\$env:VULKAN_VERSION\Bin" >> $env:GITHUB_PATH
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      # The per-user installer (scripts/windows/flikk.iss). Runner images
+      # usually have Inno Setup 6 already.
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
       # MLX compiles its Metal kernels with Xcode's Metal toolchain, a
       # separate download in newer Xcodes.
       - name: Check the Metal toolchain

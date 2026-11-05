@@ -413,6 +413,11 @@ impl Flikk {
                     }
                     NoticeAction::Relink => crate::relink::relink_folder(&this.state, cx),
                     NoticeAction::Update => this.state.update(cx, |s, cx| s.install_update(cx)),
+                    NoticeAction::OpenRelease => {
+                        if let Some(page) = this.state.read(cx).release_page() {
+                            cx.open_url(&page);
+                        }
+                    }
                     NoticeAction::Restart => crate::projects::restart(&this.state, window, cx),
                 });
             },

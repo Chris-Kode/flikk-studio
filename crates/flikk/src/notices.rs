@@ -23,6 +23,9 @@ pub enum NoticeAction {
     Relink,
     /// Download and install the new version.
     Update,
+    /// Open the new version's release page, where this copy can't update
+    /// itself.
+    OpenRelease,
     /// Quit and start the installed version.
     Restart,
 }

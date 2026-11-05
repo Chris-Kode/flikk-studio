@@ -8,6 +8,9 @@
 #   macOS    dist/flikk-0.2.0-macos-aarch64.tar.gz    Flikk.app
 #   Linux    dist/flikk-0.2.0-linux-x86_64.tar.gz     flikk-0.2.0-linux-x86_64/
 #   Windows  dist/flikk-0.2.0-windows-x86_64.zip      flikk-0.2.0-windows-x86_64/
+#            dist/flikk-0.2.0-windows-x86_64-setup.exe, a per-user installer
+#            (scripts/windows/flikk.iss) built with Inno Setup 6, when
+#            ISCC is installed; required on CI
 #
 # The updater (crates/flikk/src/update.rs, `asset_name`) looks for these
 # names, and lays the archive's one folder over the installed copy.
@@ -92,14 +95,36 @@ EOF
     find "$bin" -maxdepth 1 -name '*.dll' -exec cp {} "$dir/" \;
     archive="$name.zip"
     (cd "$stage" && 7z a -tzip "../$archive" "$name" >/dev/null)
+
+    iscc=$(command -v iscc || command -v ISCC.exe || true)
+    for candidate in "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+      [ -z "$iscc" ] && [ -x "$candidate" ] && iscc=$candidate
+    done
+    if [ -n "$iscc" ]; then
+      # Git Bash would rewrite the /D switches as paths.
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$iscc" /Q \
+        "/DVersion=$version" \
+        "/DSourceDir=$(cygpath -w "$dir")" \
+        "/DOutputDir=$(cygpath -w "$dist")" \
+        "/DOutputName=$name-setup" \
+        "$(cygpath -w scripts/windows/flikk.iss)"
+      installer="$name-setup.exe"
+    elif [ -n "${CI:-}" ]; then
+      echo "Inno Setup (ISCC) not found; the installer can't be built" >&2
+      exit 1
+    else
+      echo "Inno Setup (ISCC) not found; skipping the installer" >&2
+    fi
     ;;
 esac
 
 rm -rf "$stage"
 cd "$dist"
-if command -v sha256sum >/dev/null; then
-  sha256sum "$archive" >"$archive.sha256"
-else
-  shasum -a 256 "$archive" >"$archive.sha256"
-fi
-echo "$dist/$archive"
+for file in "$archive" ${installer:+"$installer"}; do
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$file" >"$file.sha256"
+  else
+    shasum -a 256 "$file" >"$file.sha256"
+  fi
+  echo "$dist/$file"
+done
