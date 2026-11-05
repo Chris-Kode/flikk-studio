@@ -108,13 +108,14 @@ EOF
       [ -z "$iscc" ] && [ -x "$candidate" ] && iscc=$candidate
     done
     if [ -n "$iscc" ]; then
-      # Git Bash would rewrite the /D switches as paths.
+      # Git Bash would rewrite the /D switches as paths. ISCC reads
+      # relative paths from the .iss file's folder, so pass absolute ones.
       MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$iscc" /Q \
         "/DVersion=$version" \
-        "/DSourceDir=$(cygpath -w "$dir")" \
-        "/DOutputDir=$(cygpath -w "$dist")" \
+        "/DSourceDir=$(cygpath -aw "$dir")" \
+        "/DOutputDir=$(cygpath -aw "$dist")" \
         "/DOutputName=$name-setup" \
-        "$(cygpath -w scripts/windows/flikk.iss)"
+        "$(cygpath -aw scripts/windows/flikk.iss)"
       installer="$name-setup.exe"
     elif [ -n "${CI:-}" ]; then
       echo "Inno Setup (ISCC) not found; the installer can't be built" >&2
