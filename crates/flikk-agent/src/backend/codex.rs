@@ -6,8 +6,9 @@
 //! the user's `config.toml` is not loaded (`--ignore-user-config`, which
 //! also drops their other MCP servers), the shell, exec and patch tools are
 //! disabled (web search and image generation too, unless the user allows
-//! them), the sandbox is read-only and approvals never prompt. Auth still
-//! comes from `CODEX_HOME`.
+//! them), the sandbox is read-only and approvals never prompt. Flikk's own
+//! tools are approved up front, as Flikk asks the user where it matters.
+//! Auth still comes from `CODEX_HOME`.
 
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use flikk_core::agent::Backend as BackendKind;
@@ -198,6 +199,9 @@ impl Adapter for Codex {
             ),
             format!("developer_instructions={}", toml_str(&turn.system_prompt)),
             "approval_policy=\"never\"".into(),
+            // Codex asks before an MCP tool that is not read-only, which
+            // "never" turns into a refusal. Flikk asks the user itself.
+            "mcp_servers.flikk.default_tools_approval_mode=\"approve\"".into(),
             if turn.web {
                 "web_search=\"live\"".into()
             } else {
