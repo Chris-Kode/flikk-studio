@@ -48,7 +48,7 @@ pub fn store() -> &'static Store {
 }
 
 /// Where cached frames live.
-pub fn dir() -> PathBuf {
+fn dir() -> PathBuf {
     paths::cache().join("frame-cache")
 }
 
@@ -69,10 +69,6 @@ impl Store {
 
     pub fn version(&self) -> u64 {
         self.files.version()
-    }
-
-    pub fn bytes(&self) -> u64 {
-        self.files.bytes()
     }
 
     pub fn contains(&self, key: &Key) -> bool {

@@ -13,8 +13,8 @@
 //! median move stands in.
 //!
 //! Paths are kept by fingerprint in memory and under
-//! `paths::cache()/analysis/<fingerprint>.motion`, so Settings → Storage
-//! clears them with the analysis results.
+//! `paths::cache()/analysis/<fingerprint>.motion`, beside the analysis
+//! results: the cache's Clear in Settings → Storage leaves them.
 
 use flikk_core::ids::JobId;
 use flikk_core::jobs::JobQueue;

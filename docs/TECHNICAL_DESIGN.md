@@ -551,8 +551,9 @@ bar).
 * **Render bar:** a 2 px strip along the top of the ruler: `theme.success`
   over cached frames, `theme.danger` over frames still to render; nothing
   where no compositor is needed or the span is cheap.
-* **Settings → Storage:** the "Render cache" row shows its size, opens and
-  clears its folder (old generations go when the store opens), sets the size limit (2–50 GB, 10 by default) and turns
+* **Settings → Storage:** the frames count in the Cache row and go with
+  its Clear (old generations go when the store opens); the "Background
+  rendering" row sets the size limit (2–50 GB, 10 by default) and turns
   background rendering off (`RenderCacheSettings` in the store's `meta`).
 
 ## 7. Analysis and models
@@ -634,7 +635,7 @@ Settings → Models, and slowed frames are blended meanwhile.
 newest asked first, keeps the last 48 in memory and those with a short
 side up to 720 (the viewer's and the render cache's) as QOI in a disk
 cache under `cache/interpolated/`, 4 GB at most, least recently used
-first out (Slow motion in Settings → Storage). A render's larger frames
+first out (counted and cleared with the Cache in Settings → Storage). A render's larger frames
 stay in memory: it asks for each only while it is on it.
 Depth ("Depth maps", the `depth` feature, default on) is not part of
 analysis either.
@@ -974,9 +975,9 @@ on the UI thread and run it off it:
   fitted: shake hardly zooms between frames, and a fitted zoom was mostly
   noise that the correction then added back. The path
   (`stabilize::CameraPath`: each frame's time and its step from the one
-  before) goes to `cache/analysis/<fp>.motion`, so Settings → Storage
-  clears it with the analysis results; paths already read stay in memory
-  for the session. It runs as a job on its own `JobQueue` (one at a
+  before) goes to `cache/analysis/<fp>.motion`, kept with the analysis
+  results (Clear in Settings → Storage leaves them); paths read stay in
+  memory for the session. It runs as a job on its own `JobQueue` (one at a
   time), listed by `Stabilizer::jobs`, with the inspector showing its
   progress; renders measure the paths they need first
   (`composed::measure_motion`, part of the progress), and the agent's
@@ -1037,8 +1038,8 @@ on the UI thread and run it off it:
   media engine (the proxy when there is one), matted in chunks of 32 and
   kept by fingerprint, model and chunk, as run-length coded bytes (about
   30 KB a frame for a 768 × 512 matte, so about 55 MB a minute at 30 fps)
-  in memory (96 chunks) and under `cache/mattes/` (cleared with Depth &
-  masks in Settings → Storage). Every person mask on the same media
+  in memory (96 chunks) and under `cache/mattes/` (cleared with the Cache
+  in Settings → Storage). Every person mask on the same media
   shares them. One worker serves the newest request first: drawing a frame
   asks for the 3 s from it on, so playback finds them made; a render asks
   for the frames of its range it shows and waits (`complete_person`). When
@@ -1098,7 +1099,7 @@ on the UI thread and run it off it:
   queues it, the next two seconds and the frames before it smoothing reads,
   ahead of what was queued, on one worker thread; meanwhile the nearest
   made frame within 12 stands in. A failed frame is not tried again in the
-  session. Settings → Storage clears the maps with Depth & masks.
+  session. Settings → Storage clears the maps with the Cache.
 
 ## 8. Agent
 
@@ -1496,11 +1497,12 @@ the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
-Storage (what the user-data folder holds, by kind: proxies, previews,
-slow motion, depth & masks, the assistant's images, analysis results,
-models, generated audio, library sounds, backups and the render cache,
-whose row also sets its size limit and turns background rendering off;
-Clear removes what a row counts). The FX code editor replaces
+Storage (the folders a user has a stake in: the Cache, everything the
+editor makes again by itself, with one Clear that removes what it counts;
+models, generated audio, library sounds and backups; and a row that turns
+background rendering off and sets its size limit. Analysis results are
+not shown and not cleared with the cache, as making them again can
+cost). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -1711,9 +1713,7 @@ there.
   steadied. Subject and person masks are drawn from mattes of the
   unstabilized frame, and depth effects and masks from its depth map, so
   on a stabilized clip they sit off by the correction; shape masks follow
-  the stabilized picture. Clearing analysis results in
-  Settings → Storage leaves paths already read in memory until the
-  editor restarts. Not run on a GPU here (lavapipe and the CPU
+  the stabilized picture. Not run on a GPU here (lavapipe and the CPU
   compositor only), nor on macOS or Windows.
 * Fitting music was checked on a synthetic 120 BPM song (intro, A, B, A,
   outro, a final chord ringing 5 s; built with NumPy) with its true

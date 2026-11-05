@@ -112,10 +112,6 @@ impl DiskCache {
         self.version.load(Ordering::Relaxed)
     }
 
-    pub fn bytes(&self) -> u64 {
-        self.lock().bytes
-    }
-
     pub fn contains(&self, key: &Key) -> bool {
         self.lock().files.contains_key(key)
     }

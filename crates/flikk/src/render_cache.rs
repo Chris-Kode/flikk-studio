@@ -22,7 +22,7 @@ mod store;
 mod worker;
 
 pub use key::{Globals, Plan};
-pub use store::{dir, store};
+pub use store::store;
 
 use crate::persistence;
 use crate::state::EditorState;

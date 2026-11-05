@@ -1,14 +1,16 @@
-//! Settings → Storage: what the user-data folder holds, by kind, each with
-//! its folder to open, and a way to clear what can be made again; each
-//! row clears what it counts. Models are deleted one by one on the Models
-//! page. The render cache's row also turns background rendering on and
-//! off and sets its size limit.
+//! Settings → Storage: the user-data folders a user has a stake in, each
+//! with its folder to open: the cache as one (everything the editor makes
+//! again by itself), with Clear, then models, generated audio, library
+//! sounds and backups. Models are deleted one by one on the Models page.
+//! Analysis results are left out: they are not cleared with the cache, as
+//! making them again can cost. Background rendering is turned on and off,
+//! and its size limit set, on a row of its own.
 
 use super::{meta, page, row, size_label};
 use crate::render_cache;
 use crate::ui::kit::{
-    Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, ScrollableElement as _,
-    Switch, h_flex, theme as t,
+    Button, DropdownMenu as _, IconName, PopupMenuItem, ScrollableElement as _, Switch, h_flex,
+    theme as t,
 };
 use flikk_core::paths;
 use gpui_kit::*;
@@ -16,157 +18,109 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
-    /// Playback copies of media.
-    Proxies,
-    /// Waveforms, collages, uploads, HTML pages and the like: what the
-    /// cache holds that no other row counts. Remade when needed.
-    Previews,
-    /// Optical flow frames.
-    SlowMotion,
-    /// Depth maps, subject and person mattes.
-    Depth,
-    /// Frames the agent looked at, kept for its activity log, and frames
-    /// handed to video generation.
-    Assistant,
-    /// Analysis results: remade only by analyzing again, which can cost.
-    Analysis,
+    /// Proxies, previews, optical flow frames, depth maps and mattes,
+    /// rendered frames, the agent's images, scratch: made again when
+    /// needed.
+    Cache,
     Models,
     Generated,
     /// Audio of the library's sounds, also of ones removed from it, which
     /// projects may still use.
     Sounds,
     Backups,
-    /// Frames the background render composed: remade while idle.
-    Render,
 }
 
-/// Folders under the cache the rows other than Previews own.
-const OWNED: [&str; 8] = [
-    "proxies",
-    "interpolated",
-    "depth",
-    "mattes",
-    "agent",
-    "frames",
-    "analysis",
-    "frame-cache",
-];
+/// Under the cache, what Clear leaves: analysis results, which can cost
+/// to make again, and renders' scratch folders, which one in progress
+/// uses (leftovers go at startup, `cache_sweep`).
+const KEPT: [&str; 2] = ["analysis", "render"];
+
+const LABEL_W: f32 = 150.;
 
 impl Place {
-    const ALL: [Place; 11] = [
-        Place::Proxies,
-        Place::Previews,
-        Place::SlowMotion,
-        Place::Depth,
-        Place::Assistant,
-        Place::Analysis,
+    const ALL: [Place; 5] = [
+        Place::Cache,
         Place::Models,
         Place::Generated,
         Place::Sounds,
         Place::Backups,
-        Place::Render,
     ];
 
     fn label(self) -> &'static str {
         match self {
-            Place::Proxies => "Proxies",
-            Place::Previews => "Previews",
-            Place::SlowMotion => "Slow motion",
-            Place::Depth => "Depth & masks",
-            Place::Assistant => "Assistant",
-            Place::Analysis => "Analysis",
+            Place::Cache => "Cache",
             Place::Models => "Models",
             Place::Generated => "Generated audio",
             Place::Sounds => "Library sounds",
             Place::Backups => "Backups",
-            Place::Render => "Render cache",
         }
     }
 
     /// Where it is, to show in the file manager.
     fn dir(self) -> PathBuf {
         match self {
-            Place::Proxies => paths::cache().join("proxies"),
-            Place::Previews => paths::cache(),
-            Place::SlowMotion => paths::cache().join("interpolated"),
-            Place::Depth => paths::cache().join("depth"),
-            Place::Assistant => paths::cache().join("agent"),
-            Place::Analysis => paths::cache().join("analysis"),
+            Place::Cache => paths::cache(),
             Place::Models => paths::models(),
             Place::Generated => paths::generated(),
             Place::Sounds => paths::assets(),
             Place::Backups => paths::backups(),
-            Place::Render => render_cache::dir(),
-        }
-    }
-
-    /// The folders it counts and clears.
-    fn dirs(self) -> Vec<PathBuf> {
-        let cache = paths::cache();
-        match self {
-            Place::Depth => vec![cache.join("depth"), cache.join("mattes")],
-            Place::Assistant => vec![cache.join("agent"), cache.join("frames")],
-            // Renders in progress keep their scratch folders; leftovers
-            // go at startup (`cache_sweep`).
-            Place::Previews => std::fs::read_dir(&cache)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| !OWNED.contains(&n) && n != "render")
-                })
-                .collect(),
-            _ => vec![self.dir()],
         }
     }
 
     fn size(self) -> u64 {
         match self {
-            Place::Render => render_cache::store().bytes(),
-            _ => self
-                .dirs()
-                .iter()
-                .map(|d| {
-                    if d.file_name().is_some_and(|n| n == "html") {
-                        html_size(d)
-                    } else if d.is_dir() {
-                        dir_size(d)
-                    } else {
-                        d.metadata().map_or(0, |m| m.len())
-                    }
-                })
-                .sum(),
+            Place::Cache => cleared().iter().map(|p| path_size(p)).sum(),
+            _ => dir_size(&self.dir()),
         }
     }
 
     fn clearable(self) -> bool {
-        !matches!(
-            self,
-            Place::Models | Place::Generated | Place::Sounds | Place::Backups
-        )
+        self == Place::Cache
     }
 
     /// Delete what it holds that nothing is using: the browser's profiles
     /// and renders in progress stay.
     fn clear(self) {
-        match self {
-            Place::Render => render_cache::store().clear(),
-            Place::SlowMotion => flikk_analysis::clear_interpolated(),
-            _ => {
-                for path in self.dirs() {
-                    if path.file_name().is_some_and(|n| n == "html") {
-                        clear_html(&path);
-                    } else if path.is_dir() {
-                        let _ = std::fs::remove_dir_all(path);
-                    } else {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
+        if self != Place::Cache {
+            return;
+        }
+        // Their indexes forget what they held.
+        render_cache::store().clear();
+        flikk_analysis::clear_interpolated();
+        for path in cleared() {
+            if path.file_name().is_some_and(|n| n == "html") {
+                clear_html(&path);
+            } else if path.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else {
+                let _ = std::fs::remove_file(path);
             }
         }
+    }
+}
+
+/// What the cache's Clear removes, and its size counts.
+fn cleared() -> Vec<PathBuf> {
+    std::fs::read_dir(paths::cache())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !KEPT.contains(&n))
+        })
+        .collect()
+}
+
+fn path_size(path: &Path) -> u64 {
+    if path.file_name().is_some_and(|n| n == "html") {
+        html_size(path)
+    } else if path.is_dir() {
+        dir_size(path)
+    } else {
+        path.metadata().map_or(0, |m| m.len())
     }
 }
 
@@ -205,7 +159,7 @@ fn dir_size(dir: &Path) -> u64 {
         .sum()
 }
 
-/// Size limits offered for the render cache, in GB.
+/// Size limits offered for rendered frames, in GB.
 const RENDER_LIMITS: [u32; 5] = [2, 5, 10, 20, 50];
 
 pub struct StorageTab {
@@ -294,32 +248,15 @@ impl StorageTab {
         self.sizes.iter().copied().sum()
     }
 
-    fn clear(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
-        if place != Place::Analysis {
-            place.clear();
-            self.measure(cx);
-            return;
-        }
-        let this = cx.entity().downgrade();
-        window.open_confirm(cx, move |dialog, _, _| {
-            let this = this.clone();
-            dialog
-                .title("Clear analysis results?")
-                .description("Analyzed media will need to be analyzed again.")
-                .destructive()
-                .confirm("Clear", move |_, cx| {
-                    place.clear();
-                    let _ = this.update(cx, |this, cx| this.measure(cx));
-                    true
-                })
-        });
+    fn clear(&mut self, place: Place, cx: &mut Context<Self>) {
+        place.clear();
+        self.measure(cx);
     }
 }
 
 impl Render for StorageTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut render = Some(self.render_controls(cx));
-        let rows: Vec<_> = Place::ALL
+        let mut rows: Vec<_> = Place::ALL
             .iter()
             .enumerate()
             .map(|(ix, &place)| {
@@ -328,10 +265,8 @@ impl Render for StorageTab {
                     Some(bytes) => size_label(bytes),
                     None => String::new(),
                 };
-                let render = (place == Place::Render).then(|| render.take()).flatten();
-                row(place.label(), 130.)
+                row(place.label(), LABEL_W)
                     .child(meta(size).flex_1().text_size(px(11.)))
-                    .children(render)
                     .child(
                         Button::new(("storage-open", ix))
                             .ghost()
@@ -347,14 +282,18 @@ impl Render for StorageTab {
                             Button::new(("storage-clear", ix))
                                 .small()
                                 .label("Clear")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.clear(place, window, cx)
-                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| this.clear(place, cx)))
                         }),
                     ))
                     .into_any_element()
             })
             .collect();
+        rows.push(
+            row("Background rendering", LABEL_W)
+                .child(div().flex_1())
+                .child(self.render_controls(cx))
+                .into_any_element(),
+        );
         page(
             "Storage",
             Some(meta(home_label()).text_size(px(11.)).into_any_element()),
