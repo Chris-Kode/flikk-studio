@@ -251,7 +251,10 @@ fn hide_window(command: &mut Command) {
 fn hide_window(_: &mut Command) {}
 
 /// Find a CLI: `$override_var`, else `name` on `PATH` (with `PATHEXT` on
-/// Windows). Batch shims (`claude.cmd`) run through `cmd /C`.
+/// Windows). An npm shim (`codex.cmd`) runs its script with Node directly:
+/// through `cmd /C`, the system prompt on the command line is cut at
+/// cmd's 8191 characters and its quotes, `<`, `>` and `&` are read as
+/// shell syntax. Other batch files still run through `cmd /C`.
 pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
     let path = std::env::var_os(override_var)
         .filter(|v| !v.is_empty())
@@ -266,12 +269,48 @@ pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
     let is_batch = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
-    Ok(if is_batch {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(path);
-        c
-    } else {
-        Command::new(path)
+    if !is_batch {
+        return Ok(Command::new(path));
+    }
+    if let Some(target) = shim_target(&path) {
+        let is_script = target.extension().is_some_and(|e| {
+            ["js", "mjs", "cjs"]
+                .iter()
+                .any(|js| e.eq_ignore_ascii_case(js))
+        });
+        if !is_script {
+            return Ok(Command::new(target));
+        }
+        let bundled = path.with_file_name("node.exe");
+        if let Some(node) = is_file(&bundled)
+            .then_some(bundled)
+            .or_else(|| search_path("node"))
+        {
+            let mut c = Command::new(node);
+            c.arg(target);
+            return Ok(c);
+        }
+    }
+    let mut c = Command::new("cmd");
+    c.arg("/C").arg(path);
+    Ok(c)
+}
+
+/// What an npm shim runs: the first quoted `%dp0%\…` (or `%~dp0\…`) path in
+/// it that exists, resolved against the shim's folder.
+fn shim_target(shim: &Path) -> Option<PathBuf> {
+    let text = String::from_utf8_lossy(&std::fs::read(shim).ok()?).into_owned();
+    let dir = shim.parent()?;
+    text.split('"').find_map(|quoted| {
+        let rest = quoted
+            .strip_prefix("%dp0%")
+            .or_else(|| quoted.strip_prefix("%~dp0"))?;
+        let rest = rest.trim_start_matches(['\\', '/']);
+        if rest.is_empty() || rest.eq_ignore_ascii_case("node.exe") || rest.contains('%') {
+            return None;
+        }
+        let target = dir.join(rest);
+        is_file(&target).then_some(target)
     })
 }
 
