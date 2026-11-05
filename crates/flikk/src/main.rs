@@ -1,5 +1,6 @@
 mod agent_link;
 mod app;
+mod bundled_ffmpeg;
 mod demo;
 mod notices;
 mod persistence;
@@ -29,6 +30,7 @@ fn main() {
     // Before any thread starts: the agent CLIs are found on PATH.
     #[cfg(unix)]
     shell_path::import();
+    bundled_ffmpeg::select();
     // `flikk Film.flikk` opens that project.
     if let Some(path) = std::env::args_os()
         .nth(1)

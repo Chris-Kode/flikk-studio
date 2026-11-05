@@ -73,6 +73,7 @@ Filename: "{app}\flikk.exe"; Description: "{cm:LaunchProgram,Flikk}"; Flags: now
 [UninstallDelete]
 Type: files; Name: "{app}\*.exe"
 Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\FFmpeg*.txt"
 Type: files; Name: "{app}\*.flikk-old"
 Type: files; Name: "{app}\*.flikk-new"
 Type: dirifempty; Name: "{app}"

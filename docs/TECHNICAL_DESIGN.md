@@ -75,7 +75,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Format | `SequenceSettings` sizes the frame by aspect (`Format::ALL`: 16:9, 9:16, 1:1, 4:5, 21:9, 4:3) and short side (720p–4K), changed by the undoable `SetFormat` | One project can be landscape, vertical or square; presets and lettering follow the short side |
 | Captions | Clips on `TrackKind::Caption` tracks, with per-word times | Ripple, move and undo retime captions for free (C3); highlights follow the speech |
 | Protected ranges | `Marker { kind: Protected }`; cut planners add `Warning::TouchesProtected` | F4 enforced in the bus for hand and agent edits alike |
-| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`FLIKK_FFMPEG` / `FLIKK_FFPROBE`, else `PATH`) | No libav linking on Windows/macOS |
+| FFmpeg | Spawn `ffmpeg`/`ffprobe` binaries (`FLIKK_FFMPEG` / `FLIKK_FFPROBE`, else the copy the release packages ship beside the editor, else `PATH`) | No libav linking on Windows/macOS |
 | Playback | A 720p proxy (`cache/proxies/<fp>.mp4`) is made on import and used once it exists; streams pipe RGBA from a long-lived ffmpeg (`-hwaccel auto`, software fallback); frames are composed on the GPU and painted as images | Smooth playback on a laptop without a GPU video surface |
 | Fingerprint | BLAKE3 over file size + head, tail and 8 evenly spaced 1 MiB chunks (whole file under 10 MiB) | Fast on multi-GB files; good enough to detect replacement (F2) |
 | Compositor | One `flikk_core::compose::program` draws the frame for the viewer, the agent's views and composited render ranges | The preview matches the export |

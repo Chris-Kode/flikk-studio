@@ -14,6 +14,9 @@
 #            (scripts/windows/flikk.iss) built with Inno Setup 6, when
 #            ISCC is installed; required on CI
 #
+# Every package includes FFmpeg, downloaded into dist/cache on the first
+# run.
+#
 # The updater (crates/flikk/src/update.rs, `asset_name`) looks for these
 # names, and lays the archive's one folder over the installed copy.
 set -euo pipefail
@@ -50,6 +53,52 @@ stage="$dist/stage"
 rm -rf "$stage"
 mkdir -p "$stage"
 
+sha256() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# Download $1 into dist/cache once, checked against SHA-256 $2; the path
+# is left in $fetched.
+fetch() {
+  fetched="$dist/cache/$2-$(basename "$1")"
+  if [ -f "$fetched" ]; then
+    return 0
+  fi
+  mkdir -p "$dist/cache"
+  curl -fsSL --retry 3 -o "$fetched.part" "$1"
+  got=$(sha256 "$fetched.part")
+  if [ "$got" != "$2" ]; then
+    echo "$1: SHA-256 $got, expected $2" >&2
+    rm -f "$fetched.part"
+    exit 1
+  fi
+  mv "$fetched.part" "$fetched"
+}
+
+# FFmpeg ships beside the editor, which uses it over one on PATH
+# (crates/flikk/src/bundled_ffmpeg.rs): static GPL builds of the same
+# release, with hardware encoders (VideoToolbox; NVENC, Quick Sync, AMF,
+# VA-API). $1 is the folder, $2 the builder's page, $3 the source if not
+# the release's tarball.
+ffmpeg_version=9.0.2
+ffmpeg_notice() {
+  fetch https://www.gnu.org/licenses/gpl-3.0.txt \
+    3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+  cp "$fetched" "$1/FFmpeg-GPL-3.0.txt"
+  cat >"$1/FFmpeg.txt" <<EOF
+Flikk runs FFmpeg $ffmpeg_version (https://ffmpeg.org), shipped with it
+unmodified as the ffmpeg and ffprobe programs. They are licensed under the
+GNU General Public License, version 3: FFmpeg-GPL-3.0.txt.
+
+Source: ${3:-https://ffmpeg.org/releases/ffmpeg-$ffmpeg_version.tar.xz}
+Built by: $2
+EOF
+}
+
 case $os in
   macos)
     app="$stage/Flikk.app"
@@ -81,6 +130,18 @@ case $os in
     fi
     echo "MLX kernels: $metallib"
     cp "$metallib" "$app/Contents/MacOS/"
+    if [ "$arch" != aarch64 ]; then
+      echo "no FFmpeg build is pinned for macOS $arch" >&2
+      exit 1
+    fi
+    riedl="https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_$ffmpeg_version"
+    fetch "$riedl/ffmpeg.zip" c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924
+    unzip -oq "$fetched" -d "$app/Contents/MacOS"
+    fetch "$riedl/ffprobe.zip" fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6
+    unzip -oq "$fetched" -d "$app/Contents/MacOS"
+    chmod +x "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+    ffmpeg_notice "$app/Contents/Resources" \
+      "Martin Riedl, https://ffmpeg.martin-riedl.de (scripts: https://git.martin-riedl.de/ffmpeg/build-script)"
     cat >"$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -131,6 +192,18 @@ EOF
     cp "$bin/flikk" "$bin/flikk-mcp" "$dir/"
     # ONNX Runtime's Dawn (WebGPU), found by rpath $ORIGIN.
     find "$bin" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' \) -exec cp -L {} "$dir/" \;
+    if [ "$arch" != x86_64 ]; then
+      echo "no FFmpeg build is pinned for Linux $arch" >&2
+      exit 1
+    fi
+    # A month's last build: BtbN keeps those, not the daily ones. The
+    # release branch, a few fixes past the tag.
+    btbn="ffmpeg-n$ffmpeg_version-39-g7adfbe40dc-linux64-gpl-9.0"
+    fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/$btbn.tar.xz" \
+      73e29a56974ae5a651133a04584c7483b21afe941e17dc91d79814a758b608d3
+    tar -xJf "$fetched" -C "$dir" --strip-components=2 "$btbn/bin/ffmpeg" "$btbn/bin/ffprobe"
+    ffmpeg_notice "$dir" "BtbN, https://github.com/BtbN/FFmpeg-Builds" \
+      "https://github.com/FFmpeg/FFmpeg/commit/7adfbe40dc"
     archive="$name.tar.gz"
     tar -C "$stage" -czf "$dist/$archive" "$name"
     ;;
@@ -139,6 +212,15 @@ EOF
     mkdir -p "$dir"
     cp "$bin/flikk.exe" "$bin/flikk-mcp.exe" "$dir/"
     find "$bin" -maxdepth 1 -name '*.dll' -exec cp {} "$dir/" \;
+    gyan="ffmpeg-$ffmpeg_version-essentials_build"
+    fetch "https://github.com/GyanD/codexffmpeg/releases/download/$ffmpeg_version/$gyan.7z" \
+      4705843ccaaf54257c16ad90f3e952ece33c17df964ecf7bfdbb0f49c7171077
+    7z e -y "-o$dir" "$fetched" "$gyan/bin/ffmpeg.exe" "$gyan/bin/ffprobe.exe" >/dev/null
+    if [ ! -f "$dir/ffmpeg.exe" ] || [ ! -f "$dir/ffprobe.exe" ]; then
+      echo "ffmpeg.exe or ffprobe.exe missing from $fetched" >&2
+      exit 1
+    fi
+    ffmpeg_notice "$dir" "Gyan Doshi, https://www.gyan.dev/ffmpeg/builds/"
     archive="$name.zip"
     (cd "$stage" && 7z a -tzip "../$archive" "$name" >/dev/null)
 
