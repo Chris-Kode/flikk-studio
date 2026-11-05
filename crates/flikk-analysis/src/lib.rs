@@ -267,14 +267,12 @@ impl LocalAnalysis {
     }
 
     /// The tasks whose models must be downloaded before an item can be
-    /// analyzed with `steps`. None when a provider transcribes (`online`):
-    /// a step whose model is missing is then left out.
+    /// analyzed with `steps`. When a provider transcribes (`online`), the
+    /// ones it does ([`Self::online_tasks`]) are not among them.
     pub fn required_tasks(steps: &AnalysisSteps, online: bool) -> Vec<ModelTask> {
-        if online {
-            return Vec::new();
-        }
         Self::model_tasks()
             .into_iter()
+            .filter(|task| !(online && Self::online_tasks().contains(task)))
             .filter(|task| match task {
                 // Voice activity runs with every item that has audio.
                 ModelTask::VoiceActivity => true,

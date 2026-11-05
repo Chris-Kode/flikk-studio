@@ -563,8 +563,10 @@ media pool (or its right-click menu): "Analyze", or "Analyze again" once it
 has results, which runs every step anew on the models picked now. The
 exception is the library's sounds, analyzed on their own without speech or
 shots, on local models only, so that it costs nothing. "Analyze" is
-disabled only while the transcription provider has no key, or while the
-item is queued or analyzing; images are not analyzed. Every step
+enabled only when every analysis task can run: each has its model
+downloaded, or the transcription provider (with its key) does it in place
+of the speech models. It is disabled otherwise, and while the item is
+queued or analyzing; images are not analyzed. Every step
 (`AnalysisSteps`: transcript, speakers, sounds and music, beats, sound
 search, shot changes) is always on and cannot be turned off: each runs
 whenever the model for its task is downloaded, and one whose model is

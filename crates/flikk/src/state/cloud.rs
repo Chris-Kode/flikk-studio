@@ -281,7 +281,7 @@ impl EditorState {
     }
 
     /// The tasks whose models must be on disk before media can be
-    /// analyzed: none while a provider transcribes.
+    /// analyzed: those a provider transcribing doesn't do.
     pub fn required_tasks(&self) -> Vec<flikk_models::Task> {
         flikk_analysis::LocalAnalysis::required_tasks(
             &AnalysisSteps::default(),

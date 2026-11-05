@@ -1334,11 +1334,17 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Media can be analyzed: always, each step running when its model is
-    /// downloaded, unless a provider set to transcribe has no key.
+    /// Media can be analyzed: every analysis task has a model downloaded
+    /// or the provider set to transcribe doing it, with its key.
     pub fn models_ready(&self) -> bool {
-        self.online_transcription()
-            .is_none_or(|p| self.provider_status(p).has_key())
+        let online = self
+            .online_transcription()
+            .is_none_or(|p| self.provider_status(p).has_key());
+        online
+            && self
+                .required_tasks()
+                .iter()
+                .all(|t| t.model().is_downloaded())
     }
 
     /// Analyze `media` (again, replacing its results, when `again`): the
