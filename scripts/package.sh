@@ -26,6 +26,9 @@ fi
 
 version=${1:?usage: scripts/package.sh <version> [binary dir]}
 bin=${2:-target/release}
+# This script's folder: Deploy runs a copy from another commit than the
+# source it packages.
+here=$(cd "$(dirname "$0")" && pwd)
 
 case "$(uname -s)" in
   Darwin) os=macos ;;
@@ -130,7 +133,7 @@ EOF
         "/DSourceDir=$(cygpath -aw "$dir")" \
         "/DOutputDir=$(cygpath -aw "$dist")" \
         "/DOutputName=$name-setup" \
-        "$(cygpath -aw scripts/windows/flikk.iss)"
+        "$(cygpath -aw "$here/windows/flikk.iss")"
       installer="$name-setup.exe"
     elif [ -n "${CI:-}" ]; then
       echo "Inno Setup (ISCC) not found; the installer can't be built" >&2

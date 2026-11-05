@@ -1452,7 +1452,9 @@ available to them.
   project nested so deep in cargo's build folder that under the checkout
   its paths pass 260 characters, which MSBuild's file tracker can't open
   (error FTK1011). A local Windows build in a deep folder needs a short
-  `CARGO_TARGET_DIR` too.
+  `CARGO_TARGET_DIR` too. Deploy builds the tag's source but packages
+  with `scripts/` from its own commit (checked out into `.deploy/`), so a
+  release rebuilt by hand from `main` gets packaging fixes made since.
 * **Updates** (`flikk/src/update.rs`, `flikk/src/state/update.rs`): only
   packaged builds (`FLIKK_UPDATES` at build time) ask GitHub for the
   latest release, at launch and every 6 hours; `FLIKK_NO_UPDATES` turns

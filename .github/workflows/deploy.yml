@@ -48,9 +48,18 @@ jobs:
       run:
         shell: bash
     steps:
+      # The release's source, to build.
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+
+      # The packaging scripts from this workflow's own commit: the same as
+      # the tag's for a release, but newer when a release is rebuilt by
+      # hand from main, so fixes to packaging apply to it.
+      - uses: actions/checkout@v4
+        with:
+          path: .deploy
+          sparse-checkout: scripts
 
       - name: Check the tag matches the version
         run: |
@@ -131,7 +140,7 @@ jobs:
         run: |
           target=${CARGO_TARGET_DIR:-target}
           if [ "$RUNNER_OS" = Windows ]; then target=$(cygpath -u "$target"); fi
-          scripts/package.sh "$VERSION" "$target/release"
+          .deploy/scripts/package.sh "$VERSION" "$target/release"
 
       - name: Attach to the release
         env:
