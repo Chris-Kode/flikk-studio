@@ -1,6 +1,5 @@
 //! Online providers in the editor: each one's key and account as Settings →
-//! Integrations shows them, the provider picked for each capability, the
-//! analysis steps, and music, sound effects, voiceovers and videos made from
+//! Integrations shows them, the provider picked for each capability, and music, sound effects, voiceovers and videos made from
 //! the media pool or approved for the agent. The requests themselves are
 //! `flikk-cloud`'s.
 
@@ -263,23 +262,12 @@ impl EditorState {
         cx.notify();
     }
 
-    pub fn set_analysis_steps(&mut self, steps: AnalysisSteps, cx: &mut Context<Self>) {
-        if steps == self.analysis_steps {
-            return;
-        }
-        persistence::with_store(|s| s.save_analysis_steps(&steps));
-        self.analysis_steps = steps;
-        self.configure_analysis();
-        self.refresh_model_notices();
-        cx.notify();
-    }
-
-    /// Hand analysis the steps and the transcriber for the items analyzed
+    /// Hand analysis every step and the transcriber for the items analyzed
     /// from now on.
     pub(super) fn configure_analysis(&self) {
         if let Some(analysis) = &self.services.analysis {
             analysis.configure(AnalysisConfig {
-                steps: self.analysis_steps,
+                steps: AnalysisSteps::default(),
                 speech: self.cloud.speech(),
             });
         }
@@ -296,7 +284,7 @@ impl EditorState {
     /// analyzed: none while a provider transcribes.
     pub fn required_tasks(&self) -> Vec<flikk_models::Task> {
         flikk_analysis::LocalAnalysis::required_tasks(
-            &self.analysis_steps,
+            &AnalysisSteps::default(),
             self.online_transcription().is_some(),
         )
     }
@@ -509,7 +497,7 @@ impl EditorState {
             self.generated_seen.insert(id);
             let analyze = match capability {
                 Capability::Video => self.models_ready(),
-                Capability::Voiceover => self.analysis_steps.transcript,
+                Capability::Voiceover => true,
                 _ => false,
             };
             if analyze {

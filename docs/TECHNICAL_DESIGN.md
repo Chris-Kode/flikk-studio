@@ -563,13 +563,14 @@ media pool (or its right-click menu): "Analyze", or "Analyze again" once it
 has results, which runs every step anew on the models picked now. The
 exception is the library's sounds, analyzed on their own without speech or
 shots, on local models only, so that it costs nothing. "Analyze" is
-disabled while a model it needs is missing (or the transcription provider
-has no key), or while the item is queued or analyzing; images are not
-analyzed. Settings → Analysis turns steps off (`AnalysisSteps`:
-transcript, speakers, sounds and music, beats, sound search, shot
-changes); a step off stays empty in the results, and its model is not
-needed. Speakers need the transcript; beats and sound search, the sound
-pass. Items are analyzed one at a
+disabled only while the transcription provider has no key, or while the
+item is queued or analyzing; images are not analyzed. Every step
+(`AnalysisSteps`: transcript, speakers, sounds and music, beats, sound
+search, shot changes) is always on and cannot be turned off: each runs
+whenever the model for its task is downloaded, and one whose model is
+missing stays empty in the results (voice activity falls back to an
+energy VAD). Speakers need the transcript; beats and sound search, the
+sound pass. Items are analyzed one at a
 time, in the order asked, on a `JobQueue`. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
 kept for the session and the job fails, naming the steps.

@@ -16,9 +16,11 @@
 //! speech steps are its: the item's audio goes to it as lossless FLAC and
 //! comes back as words with their times and voices, kept as it aligned
 //! them; speech is where the words are. No local speech model runs, and
-//! the other models are optional: a step whose model is missing is left
-//! out, and the provider's audio events stand in for the sound tagger. The
-//! steps the user turned off ([`AnalysisSteps`]) don't run either way.
+//! the provider's audio events stand in for the sound tagger when its
+//! model is missing.
+//!
+//! Every step runs whenever its model is downloaded; one whose model is
+//! missing is left out (voice activity falls back to an energy VAD).
 //!
 //! Library sounds are analyzed without being asked, so
 //! [`AnalyzeOptions::sound_only`] leaves speech and shots out: nothing goes
@@ -485,10 +487,6 @@ struct Plan {
     steps: AnalysisSteps,
     /// Transcribes in place of the local speech models.
     online: Option<Arc<dyn SpeechService>>,
-    /// A provider is set for transcription, or this is only a sound or a
-    /// voiceover, so local models are optional: a step whose model is
-    /// missing is left out.
-    lenient: bool,
     /// The sound pass runs, with sound search and beats when these say.
     sounds: bool,
     search: bool,
@@ -503,15 +501,19 @@ impl Plan {
             steps.speakers = false;
             steps.shots = false;
         }
-        let lenient = sound_only || script || config.speech.is_some();
-        let have = |task: ModelTask| !lenient || task.model().is_downloaded();
+        // A step runs only with its model on disk.
+        let have = |task: ModelTask| task.model().is_downloaded();
+        let online = config.speech.is_some() && !script;
+        if !online && !script {
+            steps.transcript &= have(ModelTask::Transcription);
+            steps.speakers &= have(ModelTask::Speakers);
+        }
         let sounds = cfg!(feature = "sounds") && steps.sounds && have(ModelTask::SoundTagging);
         Self {
             online: config
                 .speech
                 .clone()
                 .filter(|_| steps.transcript && !script),
-            lenient,
             sounds,
             search: sounds && steps.sound_search() && have(ModelTask::SoundSearch),
             beats: sounds && steps.beats() && have(ModelTask::Beats),
@@ -624,8 +626,8 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                     }
                 }
             } else {
-                let Voice { speech, stretches } = listen(shared, &plan, &audio, &progress)
-                    .unwrap_or_else(|e| {
+                let Voice { speech, stretches } =
+                    listen(shared, &audio, &progress).unwrap_or_else(|e| {
                         problems.push(format!("voice activity: {e:#}"));
                         Voice::energy(&audio)
                     });
@@ -765,16 +767,10 @@ impl Voice {
 }
 
 /// What the voice activity model hears in `audio`; the energy VAD stands
-/// in for it in a build without it, or when the model is missing and
-/// `plan` may do without.
+/// in for it in a build without it, or when the model is missing.
 #[cfg(feature = "whisper")]
-fn listen(
-    shared: &Shared,
-    plan: &Plan,
-    audio: &[f32],
-    progress: &Progress,
-) -> anyhow::Result<Voice> {
-    if plan.lenient && !ModelTask::VoiceActivity.model().is_downloaded() {
+fn listen(shared: &Shared, audio: &[f32], progress: &Progress) -> anyhow::Result<Voice> {
+    if !ModelTask::VoiceActivity.model().is_downloaded() {
         return Ok(Voice::energy(audio));
     }
     let heard = shared.voice.hear(audio, &progress.step(Step::Speech))?;
@@ -785,12 +781,7 @@ fn listen(
 }
 
 #[cfg(not(feature = "whisper"))]
-fn listen(
-    _shared: &Shared,
-    _plan: &Plan,
-    audio: &[f32],
-    _progress: &Progress,
-) -> anyhow::Result<Voice> {
+fn listen(_shared: &Shared, audio: &[f32], _progress: &Progress) -> anyhow::Result<Voice> {
     Ok(Voice::energy(audio))
 }
 
@@ -1034,7 +1025,10 @@ fn align_words(
     words: &mut [Word],
     progress: &dyn Fn(f32),
 ) -> anyhow::Result<bool> {
-    if words.is_empty() || !shared.aligner.supports(language) {
+    if words.is_empty()
+        || !ModelTask::WordTiming.model().is_downloaded()
+        || !shared.aligner.supports(language)
+    {
         return Ok(false);
     }
     shared.aligner.align(audio, words, progress)?;

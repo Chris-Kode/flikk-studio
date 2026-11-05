@@ -173,8 +173,8 @@ pub struct JobStatus {
     pub state: JobState,
 }
 
-/// How analysis runs from the next item on: the steps the user left on,
-/// and who transcribes.
+/// How analysis runs from the next item on: its steps, and who
+/// transcribes.
 #[derive(Clone, Default)]
 pub struct AnalysisConfig {
     pub steps: AnalysisSteps,

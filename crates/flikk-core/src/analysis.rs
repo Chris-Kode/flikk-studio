@@ -246,8 +246,9 @@ impl SoundVectors {
     }
 }
 
-/// The steps analysis runs, as set in Settings → Analysis. Voice activity
-/// and levels always run; a step left out stays empty in the results.
+/// The steps analysis runs: all of them, each when its model is on disk
+/// (a sound-only pass leaves speech and shots out). Voice activity and
+/// levels always run; a step left out stays empty in the results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnalysisSteps {

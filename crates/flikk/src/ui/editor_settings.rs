@@ -2,7 +2,6 @@
 //! from the chat panel's gear: its pages down the left, the open page on
 //! the right, and a footer to open the user-data folder or close.
 
-mod analysis;
 mod integrations;
 mod models;
 mod storage;
@@ -10,7 +9,6 @@ mod storage;
 use crate::state::{Check, EditorState};
 use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, h_flex, theme as t, v_flex};
 use crate::ui::settings::SettingsPanel;
-use analysis::AnalysisTab;
 use flikk_core::paths;
 use flikk_models::Status;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,7 +21,6 @@ use storage::StorageTab;
 pub enum SettingsTab {
     Agent,
     Integrations,
-    Analysis,
     Models,
     Storage,
 }
@@ -36,10 +33,9 @@ impl SettingsTab {
             .find(|t| t.label().eq_ignore_ascii_case(label))
     }
 
-    const ALL: [SettingsTab; 5] = [
+    const ALL: [SettingsTab; 4] = [
         SettingsTab::Agent,
         SettingsTab::Integrations,
-        SettingsTab::Analysis,
         SettingsTab::Models,
         SettingsTab::Storage,
     ];
@@ -48,7 +44,6 @@ impl SettingsTab {
         match self {
             SettingsTab::Agent => "Agent",
             SettingsTab::Integrations => "Integrations",
-            SettingsTab::Analysis => "Analysis",
             SettingsTab::Models => "Models",
             SettingsTab::Storage => "Storage",
         }
@@ -58,7 +53,6 @@ impl SettingsTab {
         match self {
             SettingsTab::Agent => IconName::MessageSquareText,
             SettingsTab::Integrations => IconName::Plug,
-            SettingsTab::Analysis => IconName::ScanSearch,
             SettingsTab::Models => IconName::Box,
             SettingsTab::Storage => IconName::HardDrive,
         }
@@ -70,7 +64,6 @@ pub struct EditorSettings {
     tab: SettingsTab,
     agent: Entity<SettingsPanel>,
     integrations: Entity<IntegrationsTab>,
-    analysis: Entity<AnalysisTab>,
     models: Entity<ModelsTab>,
     storage: Entity<StorageTab>,
     _observe: Vec<Subscription>,
@@ -90,7 +83,6 @@ impl EditorSettings {
             tab: SettingsTab::Agent,
             agent: cx.new(|cx| SettingsPanel::new(state.clone(), window, cx)),
             integrations: cx.new(|cx| IntegrationsTab::new(state.clone(), window, cx)),
-            analysis: cx.new(|cx| AnalysisTab::new(state.clone(), cx)),
             models,
             storage,
             state,
@@ -214,7 +206,6 @@ impl Render for EditorSettings {
         let page: AnyView = match self.tab {
             SettingsTab::Agent => self.agent.clone().into(),
             SettingsTab::Integrations => self.integrations.clone().into(),
-            SettingsTab::Analysis => self.analysis.clone().into(),
             SettingsTab::Models => self.models.clone().into(),
             SettingsTab::Storage => self.storage.clone().into(),
         };

@@ -5,7 +5,6 @@
 use crate::{Store, recipes};
 use anyhow::Result;
 use flikk_core::agent::{AgentSettings, VisionSettings};
-use flikk_core::analysis::AnalysisSteps;
 use flikk_core::bus::Permissions;
 use flikk_core::cloud::CloudSettings;
 use flikk_core::ids::{RecipeId, RuleId};
@@ -15,8 +14,6 @@ use serde::{Deserialize, Serialize};
 const USER_SETTINGS: &str = "agent_settings";
 /// The models the user picked over each task's default, by id.
 const MODEL_PICKS: &str = "model_picks";
-/// The analysis steps the user left on.
-const ANALYSIS_STEPS: &str = "analysis_steps";
 /// The provider picked for each capability (never its key).
 const CLOUD_SETTINGS: &str = "cloud_settings";
 
@@ -151,18 +148,6 @@ impl Store {
 
     pub fn save_model_picks(&self, ids: &[&str]) -> Result<()> {
         self.set_meta(MODEL_PICKS, ids)
-    }
-
-    /// The analysis steps set in Settings → Analysis, per user.
-    pub fn analysis_steps(&self) -> Result<AnalysisSteps> {
-        Ok(self
-            .meta::<serde_json::Value>(ANALYSIS_STEPS)?
-            .map(lenient)
-            .unwrap_or_default())
-    }
-
-    pub fn save_analysis_steps(&self, steps: &AnalysisSteps) -> Result<()> {
-        self.set_meta(ANALYSIS_STEPS, steps)
     }
 
     /// The providers set in Settings → Integrations, per user.

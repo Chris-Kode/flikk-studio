@@ -149,8 +149,6 @@ pub struct EditorState {
     pub cloud: Arc<flikk_cloud::Cloud>,
     /// Each provider's key and account, by provider id.
     providers: HashMap<&'static str, ProviderStatus>,
-    /// The analysis steps set in Settings → Analysis.
-    pub analysis_steps: flikk_core::analysis::AnalysisSteps,
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
@@ -210,7 +208,6 @@ impl EditorState {
         let cloud = Arc::new(flikk_cloud::Cloud::new(
             persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
         ));
-        let analysis_steps = persistence::with_store(|s| s.analysis_steps()).unwrap_or_default();
         let model_tasks = flikk_analysis::LocalAnalysis::model_tasks();
         let downloaded = model_tasks
             .iter()
@@ -267,7 +264,6 @@ impl EditorState {
             models_asked: HashSet::new(),
             cloud,
             providers: HashMap::new(),
-            analysis_steps,
             generating: Vec::new(),
             next_generation: 1,
             generated_seen: HashSet::new(),
@@ -1338,17 +1334,11 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Media can be analyzed: each task it needs a model for has the one
-    /// picked downloaded, and a provider transcribing has its key.
+    /// Media can be analyzed: always, each step running when its model is
+    /// downloaded, unless a provider set to transcribe has no key.
     pub fn models_ready(&self) -> bool {
-        let online = self
-            .online_transcription()
-            .is_none_or(|p| self.provider_status(p).has_key());
-        online
-            && self
-                .required_tasks()
-                .iter()
-                .all(|t| t.model().is_downloaded())
+        self.online_transcription()
+            .is_none_or(|p| self.provider_status(p).has_key())
     }
 
     /// Analyze `media` (again, replacing its results, when `again`): the
