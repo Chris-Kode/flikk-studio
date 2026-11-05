@@ -26,10 +26,13 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      # With branch protection on main, push as an admin: a fine-grained
+      # token with Contents read and write in the RELEASE_TOKEN secret.
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Raise the version
         id: version
