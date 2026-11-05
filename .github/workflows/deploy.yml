@@ -121,6 +121,8 @@ jobs:
         run: |
           xcrun -sdk macosx metal -v 2>/dev/null || xcodebuild -downloadComponent MetalToolchain
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >>"$GITHUB_ENV"
+          # Where mlx-sys writes mlx.metallib, for package.sh to bundle.
+          echo "MLX_RS_METAL_PATH=$RUNNER_TEMP/mlx-metal" >>"$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --locked -p flikk -p flikk-agent
