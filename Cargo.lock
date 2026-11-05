@@ -1857,6 +1857,8 @@ dependencies = [
  "anyhow",
  "flikk-core",
  "flikk-models",
+ "png 0.18.1",
+ "qoi",
  "serde",
  "serde_json",
 ]

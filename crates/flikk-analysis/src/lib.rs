@@ -69,7 +69,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub use depth::LocalDepth;
 pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
-pub use interpolation::LocalInterpolation;
+pub use interpolation::{LocalInterpolation, clear_disk as clear_interpolated};
 pub use motion::LocalStabilizer;
 pub use subjects::LocalSubjects;
 

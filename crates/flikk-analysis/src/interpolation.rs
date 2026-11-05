@@ -4,26 +4,35 @@
 //!
 //! A frame between two source frames is kept by the media's fingerprint
 //! (its path without one), the two frames' source times, the moment
-//! between them, its size and the model: in memory (the last
-//! [`KEPT`]) and under `paths::cache()/interpolated/<fp>/`, raw RGBA, so a
-//! frame is made once. The viewer asks without waiting: frames are made on
+//! between them, its size and the model: in memory (the last [`KEPT`])
+//! and, at preview sizes, under `paths::cache()/interpolated/` as QOI
+//! ([`DiskCache`], the least recently used going past [`DISK_LIMIT`]), so
+//! a frame is made once. Larger frames, a render's, stay in memory: a
+//! render asks for each only while it is on it. The viewer asks without
+//! waiting: frames are made on
 //! one thread of their own, the newest asked first (the playhead moved
 //! on), and blended until they are made. Renders wait for each. A frame
 //! that fails is not tried again until the model is downloaded anew.
 
+use flikk_core::disk_cache::{DiskCache, GB, Key};
 use flikk_core::paths;
 use flikk_core::services::{Between, Frame, InterpolationService};
 use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read as _, Write as _};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 /// Frames kept in memory.
 const KEPT: usize = 48;
+/// Frames kept on disk have at most this short side: the viewer's and the
+/// render cache's.
+const DISK_SIDE: u32 = 720;
+/// Disk the kept frames may use.
+const DISK_LIMIT: u64 = 4 * GB;
+const MAGIC: [u8; 4] = *b"FLKI";
 /// Frames waiting to be made; older requests go first.
 const WAITING: usize = 24;
 
@@ -43,21 +52,18 @@ struct Shared {
     waiting: Mutex<VecDeque<Job>>,
     wake: Condvar,
     /// Keys that failed, and whether the model was there then.
-    failed: Mutex<HashMap<u64, bool>>,
+    failed: Mutex<HashMap<Key, bool>>,
     version: AtomicU64,
 }
 
 #[derive(Default)]
 struct Made {
-    frames: HashMap<u64, Frame>,
-    order: VecDeque<u64>,
-    /// Keys looked for on disk and not found.
-    missing: HashSet<u64>,
+    frames: HashMap<Key, Frame>,
+    order: VecDeque<Key>,
 }
 
 struct Job {
-    key: u64,
-    folder: String,
+    key: Key,
     a: Frame,
     b: Frame,
     at: f32,
@@ -105,9 +111,8 @@ fn runner(model: &'static flikk_models::Model) -> Option<Arc<dyn Interpolator>> 
     }
 }
 
-/// What a request asks of the picked model, as a number, and the folder
-/// its frames are kept in.
-fn key(request: &Between<'_>) -> (u64, String) {
+/// What a request asks of the picked model, as a name.
+fn key(request: &Between<'_>) -> Key {
     let model = ModelTask::FrameInterpolation.model();
     let folder = match &request.item.fingerprint {
         Some(fp) => fp.0.clone(),
@@ -129,43 +134,57 @@ fn key(request: &Between<'_>) -> (u64, String) {
     if let Some(mapping) = flikk_core::hdr::Mapping::of(request.item) {
         h.write(mapping.key().as_bytes());
     }
-    (h.0, folder)
+    let mut source = Fnv::default();
+    source.write(folder.as_bytes());
+    let mut key = [0; 16];
+    key[..8].copy_from_slice(&h.0.to_le_bytes());
+    key[8..].copy_from_slice(&source.0.to_le_bytes());
+    key
 }
 
-fn file(folder: &str, key: u64) -> PathBuf {
-    paths::cache()
-        .join("interpolated")
-        .join(folder)
-        .join(format!("{key:016x}.rgba"))
+/// Optical flow frames on disk, read on first use.
+fn disk() -> &'static DiskCache {
+    static DISK: OnceLock<DiskCache> = OnceLock::new();
+    DISK.get_or_init(|| DiskCache::open(&dir(), "v2", MAGIC, "qoi", DISK_LIMIT))
 }
 
-/// A frame kept on disk: width and height (u32, little-endian), then RGBA.
-fn read(path: &PathBuf) -> Option<Frame> {
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut head = [0u8; 8];
-    f.read_exact(&mut head).ok()?;
-    let w = u32::from_le_bytes(head[..4].try_into().ok()?);
-    let h = u32::from_le_bytes(head[4..].try_into().ok()?);
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    f.read_to_end(&mut rgba).ok()?;
-    (rgba.len() == (w * h * 4) as usize).then(|| Frame {
-        width: w,
-        height: h,
-        rgba: Arc::from(rgba),
-    })
+fn dir() -> PathBuf {
+    paths::cache().join("interpolated")
 }
 
-fn write(path: &PathBuf, frame: &Frame) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// Remove the optical flow frames kept on disk.
+pub fn clear_disk() {
+    disk().clear();
+}
+
+fn on_disk(frame: &Frame) -> bool {
+    frame.width.min(frame.height) <= DISK_SIDE
+}
+
+fn read(key: &Key) -> Option<Frame> {
+    let bytes = disk().read(key)?;
+    let frame = qoi::decode_to_vec(&bytes)
+        .ok()
+        .filter(|(header, _)| header.channels == qoi::Channels::Rgba)
+        .map(|(header, rgba)| Frame {
+            width: header.width,
+            height: header.height,
+            rgba: Arc::from(rgba),
+        });
+    if frame.is_none() {
+        disk().forget(key);
     }
-    let part = path.with_extension("part");
-    let mut f = std::fs::File::create(&part)?;
-    f.write_all(&frame.width.to_le_bytes())?;
-    f.write_all(&frame.height.to_le_bytes())?;
-    f.write_all(&frame.rgba)?;
-    drop(f);
-    std::fs::rename(&part, path)
+    frame
+}
+
+fn write(key: &Key, frame: &Frame) {
+    if !on_disk(frame) {
+        return;
+    }
+    match qoi::encode_to_vec(&*frame.rgba, frame.width, frame.height) {
+        Ok(bytes) => disk().write(key, &bytes),
+        Err(e) => eprintln!("flikk-analysis: could not keep an optical flow frame: {e}"),
+    }
 }
 
 impl Shared {
@@ -183,28 +202,16 @@ impl Shared {
     }
 
     /// The frame under `key`, in memory or on disk.
-    fn find(&self, key: u64, folder: &str) -> Option<Frame> {
-        let mut made = lock(&self.made);
-        if let Some(f) = made.frames.get(&key) {
+    fn find(&self, key: Key) -> Option<Frame> {
+        if let Some(f) = lock(&self.made).frames.get(&key) {
             return Some(f.clone());
         }
-        if made.missing.contains(&key) {
-            return None;
-        }
-        match read(&file(folder, key)) {
-            Some(f) => {
-                Self::keep(&mut made, key, f.clone());
-                Some(f)
-            }
-            None => {
-                made.missing.insert(key);
-                None
-            }
-        }
+        let frame = read(&key)?;
+        Self::keep(&mut lock(&self.made), key, frame.clone());
+        Some(frame)
     }
 
-    fn keep(made: &mut Made, key: u64, frame: Frame) {
-        made.missing.remove(&key);
+    fn keep(made: &mut Made, key: Key, frame: Frame) {
         if made.frames.insert(key, frame).is_none() {
             made.order.push_back(key);
         }
@@ -216,7 +223,7 @@ impl Shared {
     }
 
     /// Whether `key` failed while the model it would run on was there.
-    fn failed(&self, key: u64) -> bool {
+    fn failed(&self, key: Key) -> bool {
         let downloaded = ModelTask::FrameInterpolation.model().is_downloaded();
         let mut failed = lock(&self.failed);
         match failed.get(&key) {
@@ -236,9 +243,7 @@ impl Shared {
             .and_then(|r| r.between(&job.a, &job.b, job.at).map_err(|e| e.to_string()));
         match made {
             Ok(frame) => {
-                if let Err(e) = write(&file(&job.folder, job.key), &frame) {
-                    eprintln!("flikk-analysis: could not keep an optical flow frame: {e}");
-                }
+                write(&job.key, &frame);
                 Self::keep(&mut lock(&self.made), job.key, frame.clone());
                 self.version.fetch_add(1, Ordering::SeqCst);
                 Some(frame)
@@ -256,6 +261,8 @@ impl Shared {
 
     /// Make waiting frames, newest first, for good.
     fn work(&self) {
+        // Read the disk's index here rather than on the first frame drawn.
+        disk();
         loop {
             let job = {
                 let mut waiting = lock(&self.waiting);
@@ -266,7 +273,7 @@ impl Shared {
                     waiting = self.wake.wait(waiting).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            if self.find(job.key, &job.folder).is_none() {
+            if self.find(job.key).is_none() {
                 self.make(&job);
             }
         }
@@ -289,8 +296,8 @@ impl InterpolationService for LocalInterpolation {
     }
 
     fn between(&self, request: &Between<'_>, wait: bool) -> Option<Frame> {
-        let (key, folder) = key(request);
-        if let Some(frame) = self.shared.find(key, &folder) {
+        let key = key(request);
+        if let Some(frame) = self.shared.find(key) {
             return Some(frame);
         }
         if self.available().is_err() || self.shared.failed(key) {
@@ -298,7 +305,6 @@ impl InterpolationService for LocalInterpolation {
         }
         let job = Job {
             key,
-            folder,
             a: request.a.1.clone(),
             b: request.b.1.clone(),
             at: request.at,

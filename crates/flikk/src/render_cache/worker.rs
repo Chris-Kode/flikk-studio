@@ -10,18 +10,51 @@
 //! Dropping the worker stops it after the frame in hand; frames are keyed
 //! by what they show, so one finished after an edit is simply never asked
 //! for.
+//!
+//! The first frames of each span are timed, one at a time: a span that
+//! composes well within a frame's time is [`cheap`], drawn live as fast as
+//! read from disk, so the rest of it is not kept.
 
 use super::key::{Key, Plan, Span};
 use super::store::store;
 use flikk_core::Time;
 use flikk_core::compose::{self, MaskView, Pending, Streams};
 use flikk_core::model::Project;
-use flikk_core::services::{PixelOrder, Services};
+use flikk_core::services::{Frame, PixelOrder, Services};
 use flikk_core::speed::Waiting;
+use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// Frames of a span timed before it is judged; the first ones open and
+/// seek the media, so the median is taken.
+const SAMPLE: usize = 9;
+/// A span whose frames compose in less than this share of a frame's
+/// time is cheap.
+const CHEAP_SHARE: f64 = 0.25;
+
+/// Spans found cheap this session, by what they draw.
+static CHEAP: Mutex<Option<HashSet<[u8; 32]>>> = Mutex::new(None);
+
+/// Whether `span` was found cheap to compose: it is drawn live.
+pub fn cheap(span: &Span) -> bool {
+    CHEAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|c| c.contains(&span.id()))
+}
+
+fn set_cheap(span: &Span) {
+    CHEAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_default()
+        .insert(span.id());
+}
 
 pub struct Worker {
     stop: Arc<AtomicBool>,
@@ -191,24 +224,54 @@ fn order(plan: &Plan, from: i64) -> Vec<(usize, Range<i64>)> {
     later
 }
 
+/// Frames composed, waiting to be encoded and written.
+const WRITING: usize = 2;
+
+/// Compose and keep the frames, encoding and writing them on a thread of
+/// their own, as that takes about as long as composing.
 fn run(project: &Project, services: &Services, plan: &Plan, from: i64, stop: &AtomicBool) {
+    let size = plan.size;
+    thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(Key, Frame)>(WRITING);
+        scope.spawn(move || {
+            for (key, frame) in rx {
+                store().write(&key, frame.width, frame.height, &frame.rgba);
+            }
+        });
+        let keep = move |key: Key, frame: Frame| {
+            if (frame.width, frame.height) == size {
+                let _ = tx.send((key, frame));
+            }
+        };
+        compose_all(project, services, plan, from, stop, &keep);
+    });
+}
+
+fn compose_all(
+    project: &Project,
+    services: &Services,
+    plan: &Plan,
+    from: i64,
+    stop: &AtomicBool,
+    keep: &dyn Fn(Key, Frame),
+) {
     let rate = plan.rate;
     let size = plan.size;
     let mut streams = Streams::new(services.media.clone(), size.0, rate);
     let mut flight: Option<(Key, Pending<'_>)> = None;
-    let land = |(key, pending): (Key, Pending<'_>)| {
-        let frame = pending.wait();
-        if (frame.width, frame.height) == size {
-            store().write(&key, frame.width, frame.height, &frame.rgba);
-        }
-    };
+    let land = |(key, pending): (Key, Pending<'_>)| keep(key, pending.wait());
+    let budget = Duration::from_secs_f64(rate.frame_duration().as_secs_f64() * CHEAP_SHARE);
     for (i, frames) in order(plan, from) {
         let span = &plan.spans[i];
+        if cheap(span) {
+            continue;
+        }
         complete_people(project, services, span, stop);
         complete_depth(project, services, span, stop);
         if !ready(project, services, span) {
             continue;
         }
+        let mut timed: Vec<Duration> = Vec::new();
         for frame in frames {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -217,16 +280,36 @@ fn run(project: &Project, services: &Services, plan: &Plan, from: i64, stop: &At
             if store().contains(&key) {
                 continue;
             }
-            let pending = compose::submit_program(
-                project,
-                Time::from_frame(frame, rate),
-                size,
-                services,
-                &mut streams,
-                PixelOrder::Bgra,
-                MaskView::Cut,
-            );
-            if let Some(previous) = flight.replace((key, pending)) {
+            let submit = |streams: &mut Streams| {
+                compose::submit_program(
+                    project,
+                    Time::from_frame(frame, rate),
+                    size,
+                    services,
+                    streams,
+                    PixelOrder::Bgra,
+                    MaskView::Cut,
+                )
+            };
+            if timed.len() < SAMPLE {
+                // By itself, so its time is its own.
+                if let Some(previous) = flight.take() {
+                    land(previous);
+                }
+                let start = Instant::now();
+                let made = submit(&mut streams).wait();
+                timed.push(start.elapsed());
+                keep(key, made);
+                if timed.len() == SAMPLE {
+                    timed.sort_unstable();
+                    if timed[SAMPLE / 2] < budget {
+                        set_cheap(span);
+                        break;
+                    }
+                }
+                continue;
+            }
+            if let Some(previous) = flight.replace((key, submit(&mut streams))) {
                 land(previous);
             }
         }

@@ -61,7 +61,10 @@ fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Ar
     }
     let file = peak_path(&fingerprint, stream);
     let peaks = match std::fs::read(&file).ok().and_then(|b| parse(&b)) {
-        Some(p) => p,
+        Some(p) => {
+            flikk_core::cache_sweep::mark_used(&file);
+            p
+        }
         None => {
             let p = decode(media, item, stream)?;
             if let Some(dir) = file.parent() {

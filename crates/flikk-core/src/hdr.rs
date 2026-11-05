@@ -273,6 +273,7 @@ impl Mapping {
         let dir = paths::cache().join("hdr");
         let path = dir.join(format!("{}.cube", self.key()));
         if path.is_file() {
+            crate::cache_sweep::mark_used(&path);
             return Ok(path);
         }
         std::fs::create_dir_all(&dir)?;

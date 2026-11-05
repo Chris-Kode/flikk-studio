@@ -394,7 +394,21 @@ pub fn spans_of(project: &Project, theirs: &[&TimelineWord]) -> Option<(PathBuf,
     (!spans.is_empty()).then_some((path, spans))
 }
 
-/// `spans` of `source` (all of it when none) as one WAV under the cache,
+/// Where [`recording`]s are cut: only needed until the provider has
+/// heard them. Their dialog removes them; leftovers go at startup
+/// (`flikk_core::cache_sweep`).
+fn recordings() -> PathBuf {
+    flikk_core::paths::cache().join("voice-sources")
+}
+
+/// Remove `path` if it is a [`recording`].
+pub fn discard_recording(path: &Path) {
+    if path.parent() == Some(recordings().as_path()) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// `spans` of `source` (all of it when none) as one FLAC under the cache,
 /// at most `limit` long, named after `name`. Slow: runs ffmpeg.
 pub fn recording(
     source: &Path,
@@ -402,7 +416,7 @@ pub fn recording(
     limit: Time,
     name: &str,
 ) -> Result<PathBuf, String> {
-    let dir = flikk_core::paths::cache().join("voice-sources");
+    let dir = recordings();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stem: String = name
         .chars()
@@ -412,7 +426,7 @@ pub fn recording(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let out = dir.join(format!("{stem}-{at}.wav"));
+    let out = dir.join(format!("{stem}-{at}.flac"));
     flikk_analysis::cut_speech(source, spans, limit, &out).map_err(|e| format!("{e:#}"))?;
     Ok(out)
 }
