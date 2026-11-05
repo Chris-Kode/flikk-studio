@@ -173,9 +173,30 @@ pub struct Rate {
 }
 
 impl Rate {
+    pub const FPS_23_976: Rate = Rate {
+        num: 24_000,
+        den: 1001,
+    };
     pub const FPS_24: Rate = Rate { num: 24, den: 1 };
+    pub const FPS_25: Rate = Rate { num: 25, den: 1 };
+    pub const FPS_29_97: Rate = Rate {
+        num: 30_000,
+        den: 1001,
+    };
     pub const FPS_30: Rate = Rate { num: 30, den: 1 };
+    pub const FPS_50: Rate = Rate { num: 50, den: 1 };
     pub const FPS_60: Rate = Rate { num: 60, den: 1 };
+
+    /// Rates offered for a sequence, with their names.
+    pub const SEQUENCE: [(Rate, &'static str); 7] = [
+        (Rate::FPS_23_976, "23.976"),
+        (Rate::FPS_24, "24"),
+        (Rate::FPS_25, "25"),
+        (Rate::FPS_29_97, "29.97"),
+        (Rate::FPS_30, "30"),
+        (Rate::FPS_50, "50"),
+        (Rate::FPS_60, "60"),
+    ];
 
     pub fn fps(self) -> f64 {
         self.num as f64 / self.den as f64

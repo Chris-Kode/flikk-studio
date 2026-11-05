@@ -927,10 +927,18 @@ impl EditorState {
         persistence::autosave(self.bus.project(), &self.overrides, self.file.as_deref());
     }
 
-    /// Replace the open project with a new "Untitled" one. Unsaved changes
-    /// must be settled first (see `crate::projects`).
-    pub fn new_project(&mut self, cx: &mut Context<Self>) {
-        self.switch_to(persistence::new_project(), cx);
+    /// Replace the open project with a new one saved at `path`, which names
+    /// it, with a sequence of `settings`. Unsaved changes must be settled
+    /// first (see `crate::projects`). Whether it saved.
+    pub fn create_project(
+        &mut self,
+        path: PathBuf,
+        settings: flikk_core::model::SequenceSettings,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let name = flikk_store::project_file::name_of(&path);
+        self.switch_to(persistence::new_project(&name, settings), cx);
+        self.save_project(path, cx)
     }
 
     /// Open a project file in place of the open project; unsaved changes

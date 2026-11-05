@@ -115,6 +115,7 @@ pub struct Dialog {
     destructive: bool,
     primary_disabled: bool,
     working: bool,
+    note: Option<AnyElement>,
     children: Vec<AnyElement>,
     style: StyleRefinement,
 }
@@ -132,6 +133,7 @@ impl Dialog {
             destructive: false,
             primary_disabled: false,
             working: false,
+            note: None,
             children: Vec::new(),
             style: StyleRefinement::default(),
         }
@@ -191,6 +193,13 @@ impl Dialog {
     /// Greys out the confirm button, such as until a form is filled.
     pub fn confirm_disabled(mut self, disabled: bool) -> Self {
         self.primary_disabled = disabled;
+        self
+    }
+
+    /// Quiet meta at the start of the footer, such as a shortcut that
+    /// opens the same settings later.
+    pub fn note(mut self, note: impl IntoElement) -> Self {
+        self.note = Some(note.into_any_element());
         self
     }
 
@@ -286,7 +295,7 @@ impl Render for DialogLayer {
 }
 
 fn render_dialog(
-    d: Dialog,
+    mut d: Dialog,
     active: &Active,
     layer: usize,
     top: bool,
@@ -379,6 +388,7 @@ fn render_dialog(
         None
     };
 
+    let note = d.note.take();
     let footer = d.primary.as_ref().map(|(label, _)| {
         // The Enter chip follows whichever button Enter would press.
         let focus_on_other =
@@ -413,6 +423,18 @@ fn render_dialog(
             .py(px(14.))
             .border_t_1()
             .border_color(t::LN)
+            .bg(t::INSET)
+            .children(note.map(|note| {
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.))
+                    .text_color(t::T3)
+                    .child(note)
+            }))
             .child(
                 Button::new("dialog-cancel")
                     .label("Cancel")

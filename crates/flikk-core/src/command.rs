@@ -8,7 +8,7 @@ use crate::fx::{FxAsset, FxInstance, ParamValue, Transition};
 use crate::ids::*;
 use crate::model::*;
 use crate::ops::Op;
-use crate::time::{Time, TimeRange};
+use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -224,6 +224,12 @@ pub enum Command {
     SetFormat {
         width: u32,
         height: u32,
+    },
+    /// Frame rate and audio sample rate of the sequence. Clips keep their
+    /// times; only the frame grid and the mix rate change.
+    SetRates {
+        rate: Rate,
+        sample_rate: u32,
     },
 
     // ---- transform (E5)
@@ -584,6 +590,7 @@ impl Command {
             | RenameClip { .. }
             | SetClipColor { .. }
             | SetFormat { .. }
+            | SetRates { .. }
             | ReplaceSpeech { .. }
             | SyncClips { .. }
             | PlaceSynced { .. } => ToolCategory::EditTimeline,

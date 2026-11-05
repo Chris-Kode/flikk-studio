@@ -1,5 +1,5 @@
 //! The Edit inspector: the selected transition, the selected clip's
-//! properties (see `clip.rs`), or the sequence when nothing is selected.
+//! properties (see `clip.rs`); hidden when nothing is selected.
 //! Picture clips get transform, compositing, crop and corner pin, each row
 //! with keyframe navigation at the playhead, and the clip's keyframes
 //! (PRD E5).
@@ -7,18 +7,15 @@
 use super::param::{Key, format_value};
 use super::{
     InspectorPanel, View, clip_time, group, label, panel_header, property_of, row, select_field,
-    wide,
 };
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DropdownMenu as _, EmptyState, IconName, Keyframe, KeyframeNav, PopupMenuItem,
-    Segmented, Tooltip, h_flex, v_flex,
+    Segmented, h_flex,
 };
 use flikk_core::Time;
 use flikk_core::command::Command;
-use flikk_core::model::{
-    BlendMode, Clip, Fit, Format, Keyframe as ClipKeyframe, Property, Transform,
-};
+use flikk_core::model::{BlendMode, Clip, Fit, Keyframe as ClipKeyframe, Property, Transform};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -49,7 +46,7 @@ impl At<'_> {
 
 impl InspectorPanel {
     /// The selected transition, the selected clip's properties for its
-    /// kind, or the sequence format when nothing is selected.
+    /// kind, or an empty state when nothing is selected.
     pub(super) fn edit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> View {
         // Shown until another clip is selected (the timeline may keep the
         // transition picked while clips are clicked).
@@ -452,199 +449,29 @@ impl InspectorPanel {
             .collect()
     }
 
-    /// Nothing selected: the sequence format, resolution and framing.
-    fn sequence_view(&self, cx: &mut Context<Self>) -> View {
-        let project = self.project(cx);
-        let s = project.timeline.settings.clone();
-        let fps = format!("{:.2}", s.rate.fps());
-        let fps = fps.trim_end_matches('0').trim_end_matches('.');
-        let line = format!(
-            "{}×{} · {} fps · {} kHz · {}",
-            s.width,
-            s.height,
-            fps,
-            s.sample_rate / 1000,
-            crate::ui::media_pool::clock(project.timeline.duration()),
-        );
-        let name = project.name.clone();
-        let current = s.format();
-        let short = s.short_side();
-
-        let tiles = Format::ALL.into_iter().enumerate().map(|(i, f)| {
-            let on = current == Some(f);
-            let (w, h) = format_glyph(f);
-            let size = f.size(short);
-            let color = if on { t::T1 } else { t::T3 };
-            v_flex()
-                .id(("format", i))
-                .items_center()
-                .gap(px(4.))
-                .py(px(8.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(on, |d| d.bg(t::HV))
-                .when(!on, |d| d.hover(|s| s.bg(t::alpha(t::HV, 0.6))))
-                .child(
-                    div()
-                        .size(px(GLYPH))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .w(px(w))
-                                .h(px(h))
-                                .rounded(px(2.))
-                                .border_1()
-                                .border_color(color),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(if on { t::T1 } else { t::T2 })
-                        .child(f.name()),
-                )
-                .tooltip(Tooltip::text(f.uses))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_format(size, cx)))
+    /// Whether a clip or transition is selected for the inspector to
+    /// show; the Edit workspace hides it otherwise.
+    pub fn has_subject(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let transition = state.selected_transition.is_some_and(|(clip, _)| {
+            state.selection.clips.is_empty() || state.selection.clips.contains(&clip)
         });
-        let tiles: Vec<_> = tiles.collect();
-        let resolutions = Format::RESOLUTIONS;
-        let picked = resolutions
-            .iter()
-            .position(|(p, _)| *p == short)
-            .unwrap_or(usize::MAX);
-        let resolution = Segmented::new("resolution")
-            .compact()
-            .fill()
-            .items(resolutions.map(|(_, name)| name))
-            .selected(picked)
-            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                if let Some((p, _)) = resolutions.get(*ix) {
-                    let size = this.project(cx).timeline.settings.scaled(*p);
-                    this.set_format(size, cx);
-                }
-            }));
-        let framing = self.framing_row(cx);
-        let rows = if self.is_open("sequence") {
-            vec![
-                wide(div().grid().grid_cols(3).gap(px(2.)).children(tiles)),
-                wide(resolution),
-            ]
-            .into_iter()
-            .chain(framing)
-            .chain([div()
-                .pl(px(22.))
-                .pr(px(10.))
-                .pt(px(4.))
-                .font_family(t::mono())
-                .text_size(px(10.))
-                .text_color(t::T3)
-                .child(line)])
-            .collect()
-        } else {
-            Vec::new()
-        };
+        transition || self.primary_on_track(cx).is_some()
+    }
+
+    /// Nothing selected; the Edit workspace hides the panel then.
+    fn sequence_view(&self, cx: &mut Context<Self>) -> View {
         View::new(
-            panel_header(name),
-            v_flex()
-                .child(div().border_b_1().border_color(t::LN).child(
-                    EmptyState::new(IconName::MousePointerClick, "No clip selected").compact(),
-                ))
-                .child(group(self.header("sequence", "Sequence", cx), rows)),
+            panel_header(self.project(cx).name.clone()),
+            EmptyState::new(IconName::MousePointerClick, "No clip selected").compact(),
         )
     }
-
-    /// Fit or fill every framed clip at once, or have the agent reframe
-    /// them around their subjects; `None` without footage.
-    fn framing_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let state = self.state.read(cx);
-        let busy = state.agent_busy();
-        let project = state.bus.project();
-        let clips: Vec<Clip> = project.framed_clips().cloned().collect();
-        if clips.is_empty() {
-            return None;
-        }
-        let commands: Vec<Vec<Command>> = Fit::ALL
-            .iter()
-            .map(|&fit| {
-                clips
-                    .iter()
-                    .filter(|c| c.transform.fit != fit)
-                    .map(|c| Command::SetTransform {
-                        clip: c.id,
-                        transform: Transform {
-                            fit,
-                            ..c.transform.clone()
-                        },
-                    })
-                    .collect()
-            })
-            .collect();
-        let picked = commands
-            .iter()
-            .position(Vec::is_empty)
-            .unwrap_or(usize::MAX);
-        let fits = Segmented::new("framing")
-            .compact()
-            .items(Fit::ALL.map(fit_label))
-            .selected(picked)
-            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                if let Some(commands) = commands.get(*ix) {
-                    this.run(commands.clone(), "set_fit", cx);
-                }
-            }));
-        let reframe = Button::new("reframe")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Crop)
-            .label("Reframe")
-            .disabled(busy)
-            .tooltip("Ask the agent to keep each subject in shot")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let text = REFRAME.to_owned();
-                this.state.update(cx, |s, cx| s.send_chat(text, cx));
-            }));
-        Some(row(
-            label("Framing"),
-            h_flex()
-                .gap(px(6.))
-                .child(fits)
-                .child(div().flex_1())
-                .child(reframe),
-            None,
-        ))
-    }
-
-    fn set_format(&self, (width, height): (u32, u32), cx: &mut Context<Self>) {
-        let s = &self.project(cx).timeline.settings;
-        if (s.width, s.height) != (width, height) {
-            self.run(vec![Command::SetFormat { width, height }], "set_format", cx);
-        }
-    }
 }
-
-/// What the Reframe button asks the agent.
-const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \
-(with keyframes where the subject moves) so its subject stays in shot.";
 
 fn fit_label(fit: Fit) -> &'static str {
     match fit {
         Fit::Contain => "Fit",
         Fit::Cover => "Fill",
-    }
-}
-
-/// Side of the box a format's outline is drawn in.
-const GLYPH: f32 = 18.;
-
-/// A format's outline size: its shape, fitted in [`GLYPH`].
-fn format_glyph(f: Format) -> (f32, f32) {
-    let (a, b) = (f.aspect.0 as f32, f.aspect.1 as f32);
-    if a >= b {
-        (GLYPH, (GLYPH * b / a).max(4.))
-    } else {
-        ((GLYPH * a / b).max(4.), GLYPH)
     }
 }
 

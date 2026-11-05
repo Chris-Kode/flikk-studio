@@ -8,7 +8,7 @@ mod models;
 mod storage;
 
 use crate::state::{Check, EditorState};
-use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, Kbd, h_flex, theme as t, v_flex};
+use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, h_flex, theme as t, v_flex};
 use crate::ui::settings::SettingsPanel;
 use analysis::AnalysisTab;
 use flikk_core::paths;
@@ -233,7 +233,6 @@ impl Render for EditorSettings {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Settings"),
             )
-            .child(div().text_color(t::T3).child(Kbd::new("Esc")))
             .child(
                 Button::new("settings-close")
                     .ghost()
@@ -262,6 +261,7 @@ impl Render for EditorSettings {
                 Button::new("settings-done")
                     .primary()
                     .label("Done")
+                    .kbd("Esc")
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             );
         v_flex()

@@ -4,7 +4,7 @@
 //! and the status bar.
 
 use crate::notices::NoticeAction;
-use crate::projects::{self, NewProject, OpenProject, SaveProject, SaveProjectAs};
+use crate::projects::{self, NewProject, OpenProject, ProjectSettings, SaveProject, SaveProjectAs};
 use crate::state::EditorState;
 use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
@@ -356,6 +356,15 @@ impl Flikk {
                 menu.separator()
                     .item(item("Save", Box::new(SaveProject), projects::save).icon(IconName::Save))
                     .item(item("Save as…", Box::new(SaveProjectAs), projects::save_as))
+                    .separator()
+                    .item(
+                        item(
+                            "Project settings…",
+                            Box::new(ProjectSettings),
+                            projects::settings,
+                        )
+                        .icon(IconName::Settings2),
+                    )
             })
     }
 
@@ -587,22 +596,26 @@ impl Flikk {
         let side = |width: f32| resizable_panel().size(px(width)).fixed();
         match self.state.read(cx).workspace {
             Workspace::Edit => {
-                // The code editor takes the inspector's place while open.
+                // The code editor takes the inspector's place while open;
+                // the inspector shows only with something selected.
                 let coding = self.state.read(cx).editing_fx.is_some();
-                let (id, right, width): (&'static str, AnyElement, f32) = if coding {
-                    (
+                let right: Option<(&'static str, AnyElement, f32)> = if coding {
+                    Some((
                         "edit-code",
                         self.code_editor.clone().into_any_element(),
                         460.,
-                    )
+                    ))
+                } else if self.inspector.read(cx).has_subject(cx) {
+                    Some(("edit", self.inspector.clone().into_any_element(), 300.))
                 } else {
-                    ("edit", self.inspector.clone().into_any_element(), 300.)
+                    None
                 };
-                let panels = vec![
+                let id = right.as_ref().map_or("edit-bare", |(id, _, _)| *id);
+                let mut panels = vec![
                     side(260.).child(self.edit_left(cx)),
                     resizable_panel().child(self.viewer.clone()),
-                    side(width).child(right),
                 ];
+                panels.extend(right.map(|(_, right, width)| side(width).child(right)));
                 self.over_timeline(id, panels, 340., cx)
             }
             Workspace::Captions => {
@@ -871,6 +884,11 @@ impl Render for Flikk {
             }))
             .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
                 projects::save_as(&this.state, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ProjectSettings, window, cx| {
+                if this.welcome.is_none() {
+                    projects::settings(&this.state, window, cx)
+                }
             }))
             .on_action(
                 cx.listener(|this, _: &Quit, window, cx| projects::quit(&this.state, window, cx)),

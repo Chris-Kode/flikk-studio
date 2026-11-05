@@ -4,11 +4,21 @@
 
 use crate::state::EditorState;
 use crate::ui::kit::DialogExt as _;
+use flikk_core::model::SequenceSettings;
 use flikk_store::project_file::{EXTENSION, sanitize};
 use gpui_kit::*;
 use std::path::PathBuf;
 
-actions!(flikk, [NewProject, OpenProject, SaveProject, SaveProjectAs]);
+actions!(
+    flikk,
+    [
+        NewProject,
+        OpenProject,
+        SaveProject,
+        SaveProjectAs,
+        ProjectSettings
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -20,19 +30,39 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-s", SaveProject, None),
         KeyBinding::new("cmd-shift-s", SaveProjectAs, None),
         KeyBinding::new("ctrl-shift-s", SaveProjectAs, None),
+        KeyBinding::new("cmd-j", ProjectSettings, None),
+        KeyBinding::new("ctrl-j", ProjectSettings, None),
     ]);
 }
 
 /// What replaces or closes the open project once its changes are settled.
 #[derive(Clone)]
 enum Then {
-    New,
+    Create(PathBuf, SequenceSettings),
     Open(PathBuf),
     Quit,
 }
 
+/// Ask for the new project's name, folder and sequence.
 pub fn new_project(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
-    settle(state, Then::New, window, cx);
+    crate::ui::project_settings::open_new(state, window, cx);
+}
+
+/// Change the open project's sequence.
+pub fn settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+    crate::ui::project_settings::open_settings(state, window, cx);
+}
+
+/// Make a project saved at `path` with a sequence of `settings`, once the
+/// open project's changes are settled.
+pub fn create(
+    state: &Entity<EditorState>,
+    path: PathBuf,
+    settings: SequenceSettings,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    settle(state, Then::Create(path, settings), window, cx);
 }
 
 /// Pick a project file and open it.
@@ -173,7 +203,9 @@ fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut
 
 fn run(state: &Entity<EditorState>, then: Then, _: &mut Window, cx: &mut App) {
     match then {
-        Then::New => state.update(cx, |s, cx| s.new_project(cx)),
+        Then::Create(path, settings) => {
+            state.update(cx, |s, cx| s.create_project(path, settings, cx));
+        }
         Then::Open(path) => {
             state.update(cx, |s, cx| s.open_project(&path, cx));
         }

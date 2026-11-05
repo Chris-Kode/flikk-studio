@@ -204,6 +204,7 @@ impl RenderOnce for Button {
         // An icon's children are marks over it, such as an `Indicator`.
         let square = self.label.is_none()
             && self.kbd.is_none()
+            && self.trailing.is_none()
             && (self.children.is_empty() || self.icon.is_some());
         let (pad, gap, text, icon) = match self.size {
             Size::Md => (px(10.), px(6.), px(12.), px(13.)),

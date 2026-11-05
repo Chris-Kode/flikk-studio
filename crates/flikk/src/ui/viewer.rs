@@ -44,12 +44,19 @@ use crate::ui::kit::{
     Tooltip, h_flex, theme as t, v_flex,
 };
 use crate::ui::media_pool::{item_name, seek_bar};
+
+/// What Reframe around subjects asks the agent.
+const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \
+(with keyframes where the subject moves) so its subject stays in shot.";
 use crate::ui::mixer::meter;
 use audio::AudioOut;
 use cache::{FrameCache, SharedCache};
 use flikk_core::agent::Workspace;
+use flikk_core::command::Command;
 use flikk_core::compose::{self, MaskView, Stills};
-use flikk_core::model::{ClipContent, MediaItem, MediaKind, Project, TrackKind};
+use flikk_core::model::{
+    Clip, ClipContent, Fit, MediaItem, MediaKind, Project, TrackKind, Transform,
+};
 use flikk_core::query::{audible_clips_at, topmost_video_clip};
 use flikk_core::services::{PixelOrder, Services};
 use flikk_core::subject::SubjectPrompt;
@@ -1327,10 +1334,76 @@ impl ViewerPanel {
             })
         });
         header
+            .when(!opened, |h| h.children(self.framing_menu(cx)))
             .child(zoom_menu)
             .child(div().flex_none().w(px(1.)).h(px(14.)).bg(t::LN))
             .child(safe)
             .when(!opened, |h| h.child(masks).child(pin))
+    }
+
+    /// Fit or fill every framed clip at once, or have the agent reframe
+    /// them around their subjects; `None` without footage.
+    fn framing_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let state = self.state.read(cx);
+        let busy = state.agent_busy();
+        let clips: Vec<Clip> = state.bus.project().framed_clips().cloned().collect();
+        if clips.is_empty() {
+            return None;
+        }
+        let all = |fit: Fit| clips.iter().all(|c| c.transform.fit == fit);
+        let (fit, fill) = (all(Fit::Contain), all(Fit::Cover));
+        let entity = self.state.clone();
+        Some(
+            Button::new("viewer-framing")
+                .ghost()
+                .small()
+                .icon(IconName::Crop)
+                .trailing_icon(IconName::ChevronDown)
+                .tooltip("Framing")
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let set = |fit: Fit| {
+                        let (state, clips) = (entity.clone(), clips.clone());
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let commands: Vec<Command> = clips
+                                .iter()
+                                .filter(|c| c.transform.fit != fit)
+                                .map(|c| Command::SetTransform {
+                                    clip: c.id,
+                                    transform: Transform {
+                                        fit,
+                                        ..c.transform.clone()
+                                    },
+                                })
+                                .collect();
+                            if !commands.is_empty() {
+                                state.update(cx, |s, cx| {
+                                    s.execute_batch(commands, "set_fit", cx);
+                                });
+                            }
+                        }
+                    };
+                    let state = entity.clone();
+                    menu.item(
+                        PopupMenuItem::new("Fit all clips")
+                            .checked(fit)
+                            .on_click(set(Fit::Contain)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Fill all clips")
+                            .checked(fill)
+                            .on_click(set(Fit::Cover)),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Reframe around subjects")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| {
+                                let text = REFRAME.to_owned();
+                                state.update(cx, |s, cx| s.send_chat(text, cx));
+                            }),
+                    )
+                }),
+        )
     }
 
     /// Mask mode's tools under the header: background removal, the

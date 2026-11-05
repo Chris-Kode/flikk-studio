@@ -14,7 +14,7 @@
 use flikk_agent::session::MAIN_CHAT;
 use flikk_core::agent::{AgentSettings, ChatMessage};
 use flikk_core::ids::ProjectId;
-use flikk_core::model::Project;
+use flikk_core::model::{Project, SequenceSettings};
 use flikk_store::project_file::{self, ProjectFile};
 use flikk_store::{Autosaver, SettingsOverrides, Snapshot, Store};
 use serde::{Deserialize, Serialize};
@@ -108,14 +108,17 @@ pub fn load_session() -> Loaded {
             return loaded;
         }
     }
-    new_project()
+    new_project("Untitled", SequenceSettings::default())
 }
 
-/// A new "Untitled" project, not saved anywhere yet.
-pub fn new_project() -> Loaded {
+/// A new project named `name` with a sequence of `settings`, not saved
+/// anywhere yet.
+pub fn new_project(name: &str, settings: SequenceSettings) -> Loaded {
+    let mut project = Project::new(name);
+    project.timeline.settings = settings;
     loaded(
         ProjectFile {
-            project: Project::new("Untitled"),
+            project,
             settings: SettingsOverrides::default(),
             autosave_of: None,
         },

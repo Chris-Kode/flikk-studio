@@ -213,6 +213,9 @@ impl Default for SequenceSettings {
 }
 
 impl SequenceSettings {
+    /// Audio sample rates offered for a sequence, with their names.
+    pub const SAMPLE_RATES: [(u32, &'static str); 2] = [(44_100, "44.1 kHz"), (48_000, "48 kHz")];
+
     /// The smaller of width and height: what "1080p" names in any shape.
     pub fn short_side(&self) -> u32 {
         self.width.min(self.height)
@@ -241,6 +244,8 @@ pub struct Format {
     pub aspect: (u32, u32),
     /// Platforms that play this shape.
     pub uses: &'static str,
+    /// The same, in a few words.
+    pub plays: &'static str,
 }
 
 impl Format {
@@ -248,26 +253,32 @@ impl Format {
         Format {
             aspect: (16, 9),
             uses: "YouTube, TV, desktop",
+            plays: "YouTube, TV",
         },
         Format {
             aspect: (9, 16),
             uses: "TikTok, Reels, Shorts, Stories",
+            plays: "Reels, Shorts",
         },
         Format {
             aspect: (1, 1),
             uses: "Instagram, Facebook, LinkedIn square posts",
+            plays: "Square posts",
         },
         Format {
             aspect: (4, 5),
             uses: "Instagram and Facebook feed",
+            plays: "Feed posts",
         },
         Format {
             aspect: (21, 9),
             uses: "Cinema widescreen",
+            plays: "Cinema",
         },
         Format {
             aspect: (4, 3),
             uses: "Classic TV, presentations",
+            plays: "Classic TV",
         },
     ];
 

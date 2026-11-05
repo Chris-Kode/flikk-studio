@@ -12,7 +12,7 @@ use crate::model::*;
 use crate::ops::apply_all;
 use crate::ops::{Op, TrackProps};
 use crate::speed::{MAX_SPEED, MIN_SPEED, SpeedKey};
-use crate::time::{FLICKS_PER_SECOND, Time, TimeRange};
+use crate::time::{FLICKS_PER_SECOND, Rate, Time, TimeRange};
 use std::collections::HashMap;
 
 pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
@@ -30,6 +30,7 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::RenameClip { .. }
             | Command::SetClipColor { .. }
             | Command::SetFormat { .. }
+            | Command::SetRates { .. }
             | Command::AddEffect { .. }
             | Command::SetEffect { .. }
             | Command::RemoveEffect { .. }
@@ -409,6 +410,26 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 after: SequenceSettings {
                     width: *width,
                     height: *height,
+                    ..tl.settings.clone()
+                },
+            }]))
+        }
+        Command::SetRates { rate, sample_rate } => {
+            let known = Rate::SEQUENCE.iter().any(|(r, _)| r == rate);
+            let mix = SequenceSettings::SAMPLE_RATES
+                .iter()
+                .any(|(s, _)| s == sample_rate);
+            if !known || !mix {
+                return Err(CoreError::Invalid(format!(
+                    "{}/{} fps at {sample_rate} Hz is not a sequence rate",
+                    rate.num, rate.den
+                )));
+            }
+            Ok(ops(vec![Op::SetSequence {
+                before: tl.settings.clone(),
+                after: SequenceSettings {
+                    rate: *rate,
+                    sample_rate: *sample_rate,
                     ..tl.settings.clone()
                 },
             }]))
