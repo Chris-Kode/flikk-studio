@@ -89,7 +89,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Agent ↔ editor | The backend CLI launches an MCP server over stdio; it connects to the editor over `127.0.0.1:<port>` with a token, and the editor serves calls in `AgentLink::pump` on the UI thread | One code path for Windows and macOS; the bus stays single-threaded |
 | Tool schema | Times in tool arguments are seconds, `"M:SS.mmm"`, `"H:MM:SS.s"`, timecode `"HH:MM:SS:FF"`, frames `"f:1234"` or `@time`/`@range`; results are seconds to the millisecond | What models read and write reliably |
 | Persistence | Projects are `.flikk` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
-| Library | FX programs (`.flikkfx`), presets (`.flikkpreset`: effects, audio effects or a grade with their values) sounds (`.flikksound`, their audio in `paths::assets()`, a folder per content) and voices (`.flikkvoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`flikk-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.flikk` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
+| Library | FX programs (`.flikkfx`), presets (`.flikkpreset`: effects, audio effects or a grade with their values) sounds (`.flikksound`, their audio in `paths::assets()`, `library/assets/`, a folder per content) and voices (`.flikkvoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`flikk-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.flikk` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$FLIKK_HOME` or `~/.flikk`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
 | Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "flikk"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.flikk` files or logs |
@@ -1418,8 +1418,9 @@ available to them.
   and intro/outro motion (fade, pop, slide), with twelve ready-made looks;
   sizes are at 1080p, scaled by the frame's short side.
 * **Other user files** under `paths::home()`: `projects/` (chats),
-  `library/`, `models/`, `cache/`, `agent/` (sessions, models, tool groups,
-  tool usage, work dirs), `assets/` (the library's audio and voice samples), `generated/` (music, sound effects and
+  `library/` (with `library/assets/`, the library's audio and voice
+  samples), `models/`, `cache/`, `agent/` (sessions, models, tool groups,
+  tool usage, work dirs), `generated/` (music, sound effects and
   voiceovers with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
   (owner-only, only where the system has no credential store).
 
@@ -1499,10 +1500,9 @@ the chat's gear for its Agent page) has five pages: Agent, Integrations
 model), Analysis (the steps), Models (download, pick and delete) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
-models, the library (effects, presets, sounds and voices: `library/` and
-`assets/`), what providers and Codex generated, and backups; and a row
-that turns
-background rendering off and sets its size limit. Analysis results are
+models, the library (effects, presets, sounds and voices, their audio in
+`library/assets/`), what providers and Codex generated, and backups; and
+a row that turns background rendering off and sets its size limit. Analysis results are
 not shown and not cleared with the cache, as making them again can
 cost). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector

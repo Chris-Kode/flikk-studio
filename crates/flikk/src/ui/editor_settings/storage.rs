@@ -25,8 +25,8 @@ enum Place {
     Cache,
     Models,
     /// Effects, presets, sounds and voices shared by every project: their
-    /// files, and the audio of sounds (also of ones removed, which
-    /// projects may still use) and voice samples.
+    /// files, and under `assets/` the audio of sounds (also of ones
+    /// removed, which projects may still use) and voice samples.
     Library,
     /// What providers made (music, sound effects, voiceovers, videos) and
     /// pictures Codex made: the project's copies of them.
@@ -74,7 +74,6 @@ impl Place {
     fn size(self) -> u64 {
         match self {
             Place::Cache => cleared().iter().map(|p| path_size(p)).sum(),
-            Place::Library => dir_size(&paths::library()) + dir_size(&paths::assets()),
             _ => dir_size(&self.dir()),
         }
     }
