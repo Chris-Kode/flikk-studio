@@ -1499,7 +1499,9 @@ the chat's gear for its Agent page) has five pages: Agent, Integrations
 model), Analysis (the steps), Models (download, pick and delete) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
-models, generated audio, library sounds and backups; and a row that turns
+models, the library (effects, presets, sounds and voices: `library/` and
+`assets/`), what providers and Codex generated, and backups; and a row
+that turns
 background rendering off and sets its size limit. Analysis results are
 not shown and not cleared with the cache, as making them again can
 cost). The FX code editor replaces

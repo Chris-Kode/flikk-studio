@@ -1,7 +1,8 @@
 //! Settings → Storage: the user-data folders a user has a stake in, each
 //! with its folder to open: the cache as one (everything the editor makes
-//! again by itself), with Clear, then models, generated audio, library
-//! sounds and backups. Models are deleted one by one on the Models page.
+//! again by itself), with Clear, then models, the library (effects,
+//! presets, sounds and voices), what providers and Codex generated, and
+//! backups. Models are deleted one by one on the Models page.
 //! Analysis results are left out: they are not cleared with the cache, as
 //! making them again can cost. Background rendering is turned on and off,
 //! and its size limit set, on a row of its own.
@@ -23,10 +24,13 @@ enum Place {
     /// needed.
     Cache,
     Models,
+    /// Effects, presets, sounds and voices shared by every project: their
+    /// files, and the audio of sounds (also of ones removed, which
+    /// projects may still use) and voice samples.
+    Library,
+    /// What providers made (music, sound effects, voiceovers, videos) and
+    /// pictures Codex made: the project's copies of them.
     Generated,
-    /// Audio of the library's sounds, also of ones removed from it, which
-    /// projects may still use.
-    Sounds,
     Backups,
 }
 
@@ -41,8 +45,8 @@ impl Place {
     const ALL: [Place; 5] = [
         Place::Cache,
         Place::Models,
+        Place::Library,
         Place::Generated,
-        Place::Sounds,
         Place::Backups,
     ];
 
@@ -50,8 +54,8 @@ impl Place {
         match self {
             Place::Cache => "Cache",
             Place::Models => "Models",
-            Place::Generated => "Generated audio",
-            Place::Sounds => "Library sounds",
+            Place::Library => "Library",
+            Place::Generated => "Generated",
             Place::Backups => "Backups",
         }
     }
@@ -61,8 +65,8 @@ impl Place {
         match self {
             Place::Cache => paths::cache(),
             Place::Models => paths::models(),
+            Place::Library => paths::library(),
             Place::Generated => paths::generated(),
-            Place::Sounds => paths::assets(),
             Place::Backups => paths::backups(),
         }
     }
@@ -70,6 +74,7 @@ impl Place {
     fn size(self) -> u64 {
         match self {
             Place::Cache => cleared().iter().map(|p| path_size(p)).sum(),
+            Place::Library => dir_size(&paths::library()) + dir_size(&paths::assets()),
             _ => dir_size(&self.dir()),
         }
     }
