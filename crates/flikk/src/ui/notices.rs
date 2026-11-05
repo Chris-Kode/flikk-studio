@@ -1,5 +1,6 @@
-//! The title bar's bell and the notifications it drops down: the warnings
-//! and errors in `EditorState::notices`, each with its own dismiss button.
+//! The title bar's bell and the notifications it drops down: the update,
+//! warnings and errors in `EditorState::notices`, each but the update with
+//! its own dismiss button.
 
 use crate::notices::{Level, Notice, NoticeAction};
 use crate::state::EditorState;
@@ -42,6 +43,7 @@ pub fn button(
 
 fn tone(level: Level) -> Tone {
     match level {
+        Level::Update => Tone::Accent,
         Level::Warning => Tone::Warn,
         Level::Error => Tone::Err,
     }
@@ -49,6 +51,7 @@ fn tone(level: Level) -> Tone {
 
 fn icon(level: Level) -> (IconName, Rgba) {
     match level {
+        Level::Update => (IconName::Download, t::AC),
         Level::Warning => (IconName::TriangleAlert, t::WARN),
         Level::Error => (IconName::CircleX, t::ERR),
     }
@@ -57,11 +60,17 @@ fn icon(level: Level) -> (IconName, Rgba) {
 fn list(state: &Entity<EditorState>, on_action: &OnAction, cx: &App) -> Div {
     let notices: Vec<Notice> = state.read(cx).notices.iter().cloned().collect();
     let count = notices.len();
+    let dismissable = notices.iter().filter(|n| n.dismissable()).count();
     let dismiss_all = {
         let state = state.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
             state.update(cx, |s, cx| {
-                let keys: Vec<String> = s.notices.iter().map(|n| n.key.clone()).collect();
+                let keys: Vec<String> = s
+                    .notices
+                    .iter()
+                    .filter(|n| n.dismissable())
+                    .map(|n| n.key.clone())
+                    .collect();
                 for key in keys {
                     s.dismiss_notice(&key, cx);
                 }
@@ -90,7 +99,7 @@ fn list(state: &Entity<EditorState>, on_action: &OnAction, cx: &App) -> Div {
                     )
                 })
                 .child(div().flex_1())
-                .when(count > 1, |el| {
+                .when(dismissable > 1, |el| {
                     el.child(
                         Button::new("notices-dismiss-all")
                             .ghost()
@@ -113,6 +122,7 @@ fn list(state: &Entity<EditorState>, on_action: &OnAction, cx: &App) -> Div {
 
 fn row(ix: usize, notice: Notice, state: &Entity<EditorState>, on_action: &OnAction) -> Div {
     let (icon, color) = icon(notice.level);
+    let dismissable = notice.dismissable();
     let dismiss = {
         let (state, key) = (state.clone(), notice.key.clone());
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -156,22 +166,29 @@ fn row(ix: usize, notice: Notice, state: &Entity<EditorState>, on_action: &OnAct
                         NoticeAction::OpenModels => ("Download…", Some(IconName::Download)),
                         NoticeAction::OpenIntegrations => ("Settings…", None),
                         NoticeAction::Relink => ("Relink…", Some(IconName::Link)),
+                        NoticeAction::Update => ("Update", Some(IconName::Download)),
+                        NoticeAction::Restart => ("Restart", Some(IconName::RotateCcw)),
                     };
                     let mut button = Button::new(("notice-action", ix)).small().label(label);
                     if let Some(icon) = icon {
                         button = button.icon(icon);
+                    }
+                    if !dismissable {
+                        button = button.primary();
                     }
                     h_flex()
                         .mt(px(8.))
                         .child(button.on_click(move |_, window, cx| on_action(action, window, cx)))
                 })),
         )
-        .child(
-            Button::new(("notice-dismiss", ix))
-                .ghost()
-                .xsmall()
-                .icon(IconName::X)
-                .tooltip("Dismiss")
-                .on_click(dismiss),
-        )
+        .when(dismissable, |el| {
+            el.child(
+                Button::new(("notice-dismiss", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::X)
+                    .tooltip("Dismiss")
+                    .on_click(dismiss),
+            )
+        })
 }

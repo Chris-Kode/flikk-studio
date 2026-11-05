@@ -7,6 +7,7 @@ mod music_fit;
 mod respeak;
 mod source;
 mod sync;
+mod update;
 pub mod voices;
 
 pub use cloud::{Check, Generating, ProviderStatus};
@@ -161,6 +162,10 @@ pub struct EditorState {
     pub heard_voices: HashMap<String, Option<flikk_core::model::MediaItem>>,
     /// Heavy ranges composed onto disk while the user is idle.
     pub render: crate::render_cache::Background,
+    // --- updates
+    /// A newer version of Flikk, from being found to being installed.
+    updater: update::Updater,
+    _update_watch: Task<()>,
 }
 
 impl EditorState {
@@ -270,6 +275,8 @@ impl EditorState {
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
             render: crate::render_cache::Background::new(cx),
+            updater: update::Updater::default(),
+            _update_watch: Self::watch_for_updates(cx),
         };
         this.mark_generated_seen();
         this.configure_analysis();

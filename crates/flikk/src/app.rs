@@ -412,6 +412,8 @@ impl Flikk {
                         this.open_settings(Some(SettingsTab::Integrations), window, cx)
                     }
                     NoticeAction::Relink => crate::relink::relink_folder(&this.state, cx),
+                    NoticeAction::Update => this.state.update(cx, |s, cx| s.install_update(cx)),
+                    NoticeAction::Restart => crate::projects::restart(&this.state, window, cx),
                 });
             },
             cx,

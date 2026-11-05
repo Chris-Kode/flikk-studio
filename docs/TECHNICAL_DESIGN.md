@@ -1424,8 +1424,40 @@ available to them.
   `library/` (with `library/assets/`, the library's audio and voice
   samples), `models/`, `cache/`, `agent/` (sessions, models, tool groups,
   tool usage, work dirs), `generated/` (music, sound effects and
-  voiceovers with their `.json`), `logs/`, `bridge.json`, and `credentials.json`
+  voiceovers with their `.json`), `logs/`, `updates/` (a new version
+  while it downloads and unpacks), `bridge.json`, and `credentials.json`
   (owner-only, only where the system has no credential store).
+
+### Releases and updates
+
+* **Release** (`.github/workflows/release.yml`, run by hand on `main`):
+  raises the workspace version (patch, minor or major) in `Cargo.toml` and
+  every member's entry in `Cargo.lock`, commits "Release vX.Y.Z" to `main`,
+  tags it and publishes a GitHub release with generated notes, then starts
+  Deploy (a release made with `GITHUB_TOKEN` starts no `release` workflow).
+* **Deploy** (`.github/workflows/deploy.yml`, on a published release or by
+  hand with a tag): builds `flikk` and `flikk-mcp` in release on Linux
+  x86-64 (Ubuntu 24.04), macOS Apple silicon (14.0 and later) and Windows
+  x86-64, with `FLIKK_UPDATES` and `FLIKK_UPDATE_REPO` set, and attaches
+  what `scripts/package.sh` makes: `flikk-<v>-<os>-<arch>.tar.gz` (`.zip`
+  on Windows) and its `.sha256`. On macOS the archive holds `Flikk.app`
+  (ad hoc signed, not notarized, `mlx.metallib` beside the binary);
+  elsewhere a folder with the binaries and the libraries cargo put beside
+  them (Dawn on Linux). It fails when the tag is not the crate version.
+* **Updates** (`flikk/src/update.rs`, `flikk/src/state/update.rs`): only
+  packaged builds (`FLIKK_UPDATES` at build time) ask GitHub for the
+  latest release, at launch and every 6 hours; `FLIKK_NO_UPDATES` turns
+  that off. A newer version with this platform's archive is a notice under
+  the bell that can't be dismissed and is listed first. Update downloads
+  it to `paths::updates()`, checks its SHA-256, unpacks it with the
+  system's `tar` (which reads zip on Windows) and lays its files over the
+  install: the bundle on macOS, the executable's folder elsewhere. Each
+  file is written beside its target and renamed over it; on Windows the
+  target is renamed aside first (`*.flikk-old`, swept at the next launch),
+  since a running executable can be renamed but not replaced. Restart
+  settles unsaved changes like Quit, then starts the installed version.
+  An install folder that can't be written to fails before any file is
+  replaced, and the notice says so.
 
 ## 10. Deliver
 

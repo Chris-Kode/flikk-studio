@@ -1,10 +1,13 @@
-//! Warnings and errors listed under the title bar's bell, kept until
-//! the user dismisses them or what they say stops being true.
+//! Updates, warnings and errors listed under the title bar's bell, kept
+//! until the user dismisses them or what they say stops being true. An
+//! update can't be dismissed and is listed first.
 
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
+    /// A new version of Flikk.
+    Update,
     Warning,
     Error,
 }
@@ -18,6 +21,10 @@ pub enum NoticeAction {
     OpenIntegrations,
     /// Pick a folder to relink offline media from.
     Relink,
+    /// Download and install the new version.
+    Update,
+    /// Quit and start the installed version.
+    Restart,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +38,12 @@ pub struct Notice {
     /// A line after them.
     pub detail: Option<String>,
     pub action: Option<NoticeAction>,
+}
+
+impl Notice {
+    pub fn dismissable(&self) -> bool {
+        self.level != Level::Update
+    }
 }
 
 #[derive(Default)]
@@ -62,6 +75,10 @@ impl Notices {
                 *n = notice;
                 true
             }
+            None if !notice.dismissable() => {
+                self.list.insert(0, notice);
+                true
+            }
             None => {
                 self.list.push(notice);
                 true
@@ -80,6 +97,9 @@ impl Notices {
 
     /// The user closed `key`'s notice; it stays hidden until cleared.
     pub fn dismiss(&mut self, key: &str) {
+        if self.list.iter().any(|n| n.key == key && !n.dismissable()) {
+            return;
+        }
         self.list.retain(|n| n.key != key);
         self.dismissed.insert(key.to_owned());
     }

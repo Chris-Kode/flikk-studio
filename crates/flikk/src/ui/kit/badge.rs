@@ -15,6 +15,8 @@ pub enum Tone {
     Warn,
     /// Removed, failed.
     Err,
+    /// Signal blue: an update.
+    Accent,
 }
 
 impl Tone {
@@ -23,6 +25,7 @@ impl Tone {
             Tone::Neutral => t::T2,
             Tone::Warn => t::WARN,
             Tone::Err => t::ERR,
+            Tone::Accent => t::AC,
         }
     }
 
