@@ -1447,7 +1447,12 @@ available to them.
   Setup from `scripts/windows/flikk.iss`: it installs for the user alone
   into `%LOCALAPPDATA%\Programs\Flikk`, without an administrator, so
   updates can write there, adds a Start menu entry and opens `.flikk`
-  files. It fails when the tag is not the crate version.
+  files. It fails when the tag is not the crate version. On Windows it
+  builds into `D:\t`: whisper.cpp's Vulkan shader generator is a CMake
+  project nested so deep in cargo's build folder that under the checkout
+  its paths pass 260 characters, which MSBuild's file tracker can't open
+  (error FTK1011). A local Windows build in a deep folder needs a short
+  `CARGO_TARGET_DIR` too.
 * **Updates** (`flikk/src/update.rs`, `flikk/src/state/update.rs`): only
   packaged builds (`FLIKK_UPDATES` at build time) ask GitHub for the
   latest release, at launch and every 6 hours; `FLIKK_NO_UPDATES` turns

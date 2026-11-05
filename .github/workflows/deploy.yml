@@ -94,6 +94,16 @@ jobs:
           "C:\VulkanSDK\$env:VULKAN_VERSION\Bin" >> $env:GITHUB_PATH
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      # whisper.cpp's Vulkan backend builds its shader generator as a CMake
+      # project nested deep in cargo's build folder; under the checkout its
+      # paths pass Windows' 260 characters, which MSBuild's file tracker
+      # can't open (FTK1011). A short target folder keeps them under.
+      - name: Use a short target folder
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=D:\t" >> $env:GITHUB_ENV
+
       # The per-user installer (scripts/windows/flikk.iss). Runner images
       # usually have Inno Setup 6 already.
       - name: Install Inno Setup
@@ -116,7 +126,10 @@ jobs:
         run: cargo build --release --locked -p flikk -p flikk-agent
 
       - name: Package
-        run: scripts/package.sh "$VERSION"
+        run: |
+          target=${CARGO_TARGET_DIR:-target}
+          if [ "$RUNNER_OS" = Windows ]; then target=$(cygpath -u "$target"); fi
+          scripts/package.sh "$VERSION" "$target/release"
 
       - name: Attach to the release
         env:
