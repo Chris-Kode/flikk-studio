@@ -5,7 +5,7 @@
 //! next voiceover starts on it.
 
 use crate::state::EditorState;
-use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, recording};
+use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
@@ -26,6 +26,7 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// Where the dialog opens.
 pub enum Start {
@@ -169,7 +170,18 @@ pub struct VoicesDialog {
     files: Vec<PathBuf>,
     denoise: bool,
     consent: bool,
+    /// Recordings cut for the provider to hear, removed with the dialog.
+    scratch: Arc<Mutex<Vec<PathBuf>>>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl Drop for VoicesDialog {
+    fn drop(&mut self) {
+        let scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        for path in scratch.iter() {
+            discard_recording(path);
+        }
+    }
 }
 
 impl VoicesDialog {
@@ -239,11 +251,13 @@ impl VoicesDialog {
             files: Vec::new(),
             denoise: false,
             consent: false,
+            scratch: Arc::default(),
             _subscriptions,
         };
         match start {
             Start::Find => {}
             Start::Similar { recording, label } => {
+                this.keep_scratch([recording.clone()]);
                 this.scope = Scope::Shared;
                 this.similar = Some((recording, label));
                 this.find_similar(cx);
@@ -265,6 +279,7 @@ impl VoicesDialog {
                 cx.defer_in(window, |this, window, cx| this.design(window, cx));
             }
             Start::Clone { files, name } => {
+                this.keep_scratch(files.iter().cloned());
                 this.page = Page::Clone;
                 this.files = files;
                 this.clone_name
@@ -272,6 +287,12 @@ impl VoicesDialog {
             }
         }
         this
+    }
+
+    /// Remove `paths` with the dialog, those that are recordings.
+    fn keep_scratch(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        scratch.extend(paths);
     }
 
     fn fail(&mut self, e: impl ToString, cx: &mut Context<Self>) {
@@ -394,7 +415,9 @@ impl VoicesDialog {
         self.more = false;
         let task = cx.background_executor().spawn(async move {
             let clip = recording_clip(&recording)?;
-            generation.similar_voices(&clip).map_err(|e| e.to_string())
+            let found = generation.similar_voices(&clip).map_err(|e| e.to_string());
+            discard_recording(&clip);
+            found
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -992,6 +1015,7 @@ impl VoicesDialog {
         };
         let sources: Vec<String> = files.iter().map(|p| file_name(p)).collect();
         let made = name.clone();
+        let scratch = self.scratch.clone();
         self.run(
             Busy::Cloning,
             move || {
@@ -1003,7 +1027,10 @@ impl VoicesDialog {
                         if is_audio(p) && is_upload_format(p) {
                             Ok(p.clone())
                         } else {
-                            recording(p, &[], SPEAKER_LIMIT, &made)
+                            let cut = recording(p, &[], SPEAKER_LIMIT, &made)?;
+                            let mut scratch = scratch.lock().unwrap_or_else(|e| e.into_inner());
+                            scratch.push(cut.clone());
+                            Ok(cut)
                         }
                     })
                     .collect::<Result<Vec<_>, String>>()?;

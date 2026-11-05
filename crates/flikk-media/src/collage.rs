@@ -39,6 +39,7 @@ pub(crate) fn collage(media: &FfmpegMedia, request: &CollageRequest) -> ServiceR
         rows,
     };
     if path.is_file() {
+        flikk_core::cache_sweep::mark_used(&path);
         return Ok(done(path));
     }
 

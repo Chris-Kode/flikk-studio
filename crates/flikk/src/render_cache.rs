@@ -67,7 +67,8 @@ impl Status {
     fn measure(plan: &Plan) -> Self {
         let store = store();
         let mut runs: Vec<(i64, i64, bool)> = Vec::new();
-        for span in &plan.spans {
+        // Cheap spans are drawn live: nothing to keep.
+        for span in plan.spans.iter().filter(|s| !worker::cheap(s)) {
             for frame in span.frames.clone() {
                 let cached = store.contains(&span.key(frame));
                 match runs.last_mut() {

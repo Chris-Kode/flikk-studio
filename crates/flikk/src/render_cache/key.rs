@@ -29,7 +29,7 @@ use std::ops::Range;
 pub type Key = [u8; 16];
 
 /// Bumped when the file layout or what the hash covers changes.
-const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 /// Short side of cached frames, at most the sequence's.
 const SHORT_SIDE: u32 = 720;
 
@@ -245,6 +245,11 @@ impl Plan {
 }
 
 impl Span {
+    /// What its frames draw, but for time.
+    pub fn id(&self) -> [u8; 32] {
+        self.hash
+    }
+
     pub fn key(&self, frame: i64) -> Key {
         let mut h = blake3::Hasher::new();
         h.update(&self.hash);

@@ -406,7 +406,7 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 * `flikk-media`: ffprobe (variable rates snapped to standard ones),
   fingerprints, single frames (96 MiB in-memory cache), playback streams
   (RGBA frames as PAM over a pipe) and f32 PCM streams, proxies (short side
-  ≤ 720, x264 veryfast, no B-frames, half-second GOP), 6 × 5 collages stamped
+  ≤ 720, x264 veryfast CRF 26, no B-frames, half-second GOP), 6 × 5 collages stamped
   with timeline and source timecodes, waveform peaks (200/s) and spectrogram
   pictures (`showspectrumpic`, one lane per track, words, sounds and beats
   marked). Derived files are written atomically.
@@ -414,15 +414,36 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
   `waveforms/<fp>-<stream>.peaks`, `collages/`, `analysis/<fp>.json` and
   `<fp>.vectors`, `analysis/<fp>.motion` (camera paths), `mattes/<fp>/` (subjects: `p-<key>.matte` per prompted
   frame, `t-<key>.mattes` per tracked subject; people:
-  `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<fp>/`
-  (optical flow frames, raw RGBA, `<key>.rgba`), `depth/<fp>/<model>/`
-  (`<frame>.depth` per source frame), `coreml/<model>-<sizes>/` (depth
+  `a-<model>-<chunk>.alpha` per 32 frames), `interpolated/<generation>/`
+  (optical flow frames at preview sizes, QOI, below), `depth/<fp>/<model>/`
+  (`<frame>.depth` per source frame, a grayscale PNG), `coreml/<model>-<sizes>/` (depth
   models compiled for the GPU, 420 MB a size), `html/` (pages and browser
   profiles), `render/<job>/` (scratch), `agent/frames/` (images for the
-  activity log), `frame-cache/<ab>/<key>.qoi` (the render cache, below),
+  activity log), `frames/` (stills handed to video generation),
+  `frame-cache/<generation>/<ab>/<key>.frame` (the render cache, below),
   `hdr/` (tone-mapping tables), `respeak/` (a provider's takes of a fixed
-  sentence, until the words are cut out of them). An HDR item's proxy is
+  sentence, until the words are cut out of them), `voice-sources/`
+  (speech cut as FLAC for a provider to clone or match, removed with the
+  voices dialog). An HDR item's proxy is
   `proxies/<fp>-<mapping>.mp4` (below).
+* **Disk caches** (`flikk-core/src/disk_cache.rs`): the render cache and
+  optical flow frames are files named by a 16-byte key under
+  `<root>/<generation>/<ab>/`, each starting with a magic and its key,
+  written to a temporary file and renamed. An in-memory index (read from
+  the folder on first use, ordered by modified time, which reads touch)
+  evicts the least recently used past a size limit. Opening one removes
+  the other generations under its root, so a new layout or app version
+  drops the old files at once.
+* **Sweep** (`flikk-core/src/cache_sweep.rs`): at startup, off the UI
+  thread, files unused for 30 days go from `proxies/`, `depth/`,
+  `collages/`, `waveforms/`, `frames/`, `agent/`, `voices/`,
+  `voice-previews/`, `hdr/` and the pages in `html/`; scratch
+  (`voice-sources/`, `upload/`, `respeak/`, `render/`) and partial writes
+  (`.part`, `.tmp`, `.tmp-…`) a day old; and proxies of a fingerprint a
+  day older than its newest, made for a tone map since changed. Readers
+  mark files used (`mark_used`: the modified time, at most once a day).
+  Mattes, analysis results and the disk caches are not swept. The pool
+  makes a video's proxy again when it is missing.
 * **HDR** (`flikk-core/src/hdr.rs`): probing marks a video stream whose
   transfer is PQ (`smpte2084`: HDR10, Dolby Vision) or HLG (`arib-std-b67`:
   iPhone and Android HLG, the base layer of Dolby Vision 8.4) with an `Hdr`
@@ -496,12 +517,16 @@ bar).
   in the key without being listed. An edit changes the keys of the frames
   it changes and no others; nothing is invalidated, frames no longer asked
   for age out.
-* **Store** (`render_cache/store.rs`): `cache/frame-cache/<ab>/<key>.qoi`, a
-  magic, the key and a lossless QOI picture (BGRA), written to a temporary
-  file and renamed. An in-memory index (read from the folder on first use,
-  ordered by modified time, which reads touch) evicts the least recently
-  used past the size limit. A file that is missing or does not decode, or
-  whose key does not match, is dropped and the frame composed live.
+* **Store** (`render_cache/store.rs`): a disk cache (above) under
+  `cache/frame-cache/v<FORMAT>-<app version>/`. Frames are only ever shown
+  in the viewer, so an opaque one (nearly all: the program is composed on
+  black) is kept as JPEG at quality 90, one with transparency as QOI
+  (BGRA). On 720p frames checked on the CPU, JPEG was about 9× smaller
+  than QOI on a clean photo (94 KB against 850 KB) and 5× on a grainy one
+  (520 KB against 2.6 MB), decoding in 5–12 ms; it encodes in 25–45 ms,
+  on a writer thread of the worker's own. A file that is missing or does
+  not decode, or whose key does not match, is dropped and the frame
+  composed live.
 * **Background render** (`render_cache.rs`, `render_cache/worker.rs`):
   `EditorState.render` polls 4 times a second. 200 ms after the shown
   project (`display_project`: a previewed draft or a drag included) last
@@ -514,6 +539,10 @@ bar).
   clips read are made first (`complete_depth`), so a frame is only kept
   as it will finally look. A stale or cancelled render can only write
   frames under the keys of what it drew, so it never shows a wrong frame.
+  The first 9 frames of a span are composed one at a time and timed; when
+  the median takes under a quarter of a frame's time the span is cheap
+  (for the session, by its hash): drawn live as fast as read, so the rest
+  of it is not kept.
 * **Reading:** playback (`viewer/player.rs`) takes a frame from the
   in-memory cache, else from disk when the cached frame is at least three
   quarters of the viewer's width, else composes it; paused frames and
@@ -521,9 +550,9 @@ bar).
   item in the viewer, a zoomed viewer and tinted masks always compose.
 * **Render bar:** a 2 px strip along the top of the ruler: `theme.success`
   over cached frames, `theme.danger` over frames still to render; nothing
-  where no compositor is needed.
+  where no compositor is needed or the span is cheap.
 * **Settings → Storage:** the "Render cache" row shows its size, opens and
-  clears its folder, sets the size limit (2–50 GB, 10 by default) and turns
+  clears its folder (old generations go when the store opens), sets the size limit (2–50 GB, 10 by default) and turns
   background rendering off (`RenderCacheSettings` in the store's `meta`).
 
 ## 7. Analysis and models
@@ -602,8 +631,11 @@ analysis: `required_tasks` never asks for them. Frame interpolation ("Optical fl
 picking optical flow for a clip without it raises a notice that leads to
 Settings → Models, and slowed frames are blended meanwhile.
 `LocalInterpolation` makes flow frames on one thread of its own, the
-newest asked first, keeps the last 48 in memory and every one under
-`cache/interpolated/` (cleared with Previews in Settings → Storage).
+newest asked first, keeps the last 48 in memory and those with a short
+side up to 720 (the viewer's and the render cache's) as QOI in a disk
+cache under `cache/interpolated/`, 4 GB at most, least recently used
+first out (Slow motion in Settings → Storage). A render's larger frames
+stay in memory: it asks for each only while it is on it.
 Depth ("Depth maps", the `depth` feature, default on) is not part of
 analysis either.
 
@@ -1005,8 +1037,8 @@ on the UI thread and run it off it:
   media engine (the proxy when there is one), matted in chunks of 32 and
   kept by fingerprint, model and chunk, as run-length coded bytes (about
   30 KB a frame for a 768 × 512 matte, so about 55 MB a minute at 30 fps)
-  in memory (96 chunks) and under `cache/mattes/` (cleared with the
-  previews in Settings → Storage). Every person mask on the same media
+  in memory (96 chunks) and under `cache/mattes/` (cleared with Depth &
+  masks in Settings → Storage). Every person mask on the same media
   shares them. One worker serves the newest request first: drawing a frame
   asks for the 3 s from it on, so playback finds them made; a render asks
   for the frames of its range it shows and waits (`complete_person`). When
@@ -1066,7 +1098,7 @@ on the UI thread and run it off it:
   queues it, the next two seconds and the frames before it smoothing reads,
   ahead of what was queued, on one worker thread; meanwhile the nearest
   made frame within 12 stands in. A failed frame is not tried again in the
-  session. Settings → Storage clears the maps with the previews.
+  session. Settings → Storage clears the maps with Depth & masks.
 
 ## 8. Agent
 
@@ -1464,9 +1496,11 @@ the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
 model), Analysis (the steps), Models (download, pick and delete) and
-Storage (what the user-data folder holds, with Clear for previews,
-subject mattes and depth maps among them, analysis results and the render cache, whose
-row also sets its size limit and turns background rendering off). The FX code editor replaces
+Storage (what the user-data folder holds, by kind: proxies, previews,
+slow motion, depth & masks, the assistant's images, analysis results,
+models, generated audio, library sounds, backups and the render cache,
+whose row also sets its size limit and turns background rendering off;
+Clear removes what a row counts). The FX code editor replaces
 the inspector while a program is open. With nothing selected the inspector
 shows the sequence: format, resolution, and Fit/Fill for all footage (whose
 Reframe asks the agent to fill the frame and keep each subject in shot).
@@ -1701,8 +1735,11 @@ there.
   the app version, so a development build that changes one keeps showing
   old frames until cleared. Frames are keyed by absolute time, so moving a
   clip (or a ripple) renders the moved range again. Playback's disk reads
-  and QOI decoding were not measured here at real time on a GPU machine
-  (no GPU in the cloud containers), nor on macOS or Windows.
+  were not measured here at real time on a GPU machine (no GPU in the
+  cloud containers), nor on macOS or Windows; JPEG coding was timed on
+  still frames on the CPU only. Cheap spans are judged by the worker's
+  timing at the render size, not the viewer's, and found again each
+  session.
 * HDR tone mapping was checked on FFmpeg-made PQ and HLG clips only
   (`zscale` from SDR test sources, x265 with HDR10 metadata): against the
   viewer's frames, exports match about as well as SDR exports do (41 dB),

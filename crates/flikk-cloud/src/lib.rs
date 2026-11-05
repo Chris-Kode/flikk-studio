@@ -399,6 +399,7 @@ impl GenerationService for Cloud {
         let dir = flikk_core::paths::cache().join("voices");
         let path = dir.join(format!("{name}.mp3"));
         if path.exists() {
+            flikk_core::cache_sweep::mark_used(&path);
             return Ok(path);
         }
         let url = voice

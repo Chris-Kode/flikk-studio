@@ -40,6 +40,7 @@ pub(crate) fn ensure_proxy(
     let mapping = Mapping::of(item);
     let out = proxy_path_mapped(&fingerprint, mapping.as_ref());
     if out.is_file() {
+        flikk_core::cache_sweep::mark_used(&out);
         progress(1.0);
         return Ok(out);
     }
@@ -70,7 +71,8 @@ pub(crate) fn ensure_proxy(
         .arg(&item.path)
         .args(["-map", "0:v:0", "-map", "0:a?", "-vf", &filters])
         .args(["-fps_mode", "cfr", "-r", &rate])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
+        // Only ever watched in the viewer, mostly smaller than 720p.
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "26"])
         .args(["-tune", "fastdecode", "-pix_fmt", "yuv420p", "-bf", "0"])
         .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
         .args(["-colorspace", "bt709"])

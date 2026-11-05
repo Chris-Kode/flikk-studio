@@ -1,7 +1,8 @@
 //! Settings → Storage: what the user-data folder holds, by kind, each with
-//! its folder to open, and a way to clear what can be made again. Models
-//! are deleted one by one on the Models page. The render cache's row also
-//! turns background rendering on and off and sets its size limit.
+//! its folder to open, and a way to clear what can be made again; each
+//! row clears what it counts. Models are deleted one by one on the Models
+//! page. The render cache's row also turns background rendering on and
+//! off and sets its size limit.
 
 use super::{meta, page, row, size_label};
 use crate::render_cache;
@@ -15,9 +16,18 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
-    /// Proxies, waveforms, collages, subject mattes and the like: remade
-    /// when needed.
+    /// Playback copies of media.
+    Proxies,
+    /// Waveforms, collages, uploads, HTML pages and the like: what the
+    /// cache holds that no other row counts. Remade when needed.
     Previews,
+    /// Optical flow frames.
+    SlowMotion,
+    /// Depth maps, subject and person mattes.
+    Depth,
+    /// Frames the agent looked at, kept for its activity log, and frames
+    /// handed to video generation.
+    Assistant,
     /// Analysis results: remade only by analyzing again, which can cost.
     Analysis,
     Models,
@@ -30,9 +40,25 @@ enum Place {
     Render,
 }
 
+/// Folders under the cache the rows other than Previews own.
+const OWNED: [&str; 8] = [
+    "proxies",
+    "interpolated",
+    "depth",
+    "mattes",
+    "agent",
+    "frames",
+    "analysis",
+    "frame-cache",
+];
+
 impl Place {
-    const ALL: [Place; 7] = [
+    const ALL: [Place; 11] = [
+        Place::Proxies,
         Place::Previews,
+        Place::SlowMotion,
+        Place::Depth,
+        Place::Assistant,
         Place::Analysis,
         Place::Models,
         Place::Generated,
@@ -43,7 +69,11 @@ impl Place {
 
     fn label(self) -> &'static str {
         match self {
+            Place::Proxies => "Proxies",
             Place::Previews => "Previews",
+            Place::SlowMotion => "Slow motion",
+            Place::Depth => "Depth & masks",
+            Place::Assistant => "Assistant",
             Place::Analysis => "Analysis",
             Place::Models => "Models",
             Place::Generated => "Generated audio",
@@ -53,9 +83,14 @@ impl Place {
         }
     }
 
+    /// Where it is, to show in the file manager.
     fn dir(self) -> PathBuf {
         match self {
+            Place::Proxies => paths::cache().join("proxies"),
             Place::Previews => paths::cache(),
+            Place::SlowMotion => paths::cache().join("interpolated"),
+            Place::Depth => paths::cache().join("depth"),
+            Place::Assistant => paths::cache().join("agent"),
             Place::Analysis => paths::cache().join("analysis"),
             Place::Models => paths::models(),
             Place::Generated => paths::generated(),
@@ -65,48 +100,93 @@ impl Place {
         }
     }
 
+    /// The folders it counts and clears.
+    fn dirs(self) -> Vec<PathBuf> {
+        let cache = paths::cache();
+        match self {
+            Place::Depth => vec![cache.join("depth"), cache.join("mattes")],
+            Place::Assistant => vec![cache.join("agent"), cache.join("frames")],
+            // Renders in progress keep their scratch folders; leftovers
+            // go at startup (`cache_sweep`).
+            Place::Previews => std::fs::read_dir(&cache)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !OWNED.contains(&n) && n != "render")
+                })
+                .collect(),
+            _ => vec![self.dir()],
+        }
+    }
+
     fn size(self) -> u64 {
         match self {
-            Place::Previews => dir_size(&self.dir())
-                .saturating_sub(dir_size(&Place::Analysis.dir()))
-                .saturating_sub(dir_size(&Place::Render.dir())),
             Place::Render => render_cache::store().bytes(),
-            _ => dir_size(&self.dir()),
+            _ => self
+                .dirs()
+                .iter()
+                .map(|d| {
+                    if d.file_name().is_some_and(|n| n == "html") {
+                        html_size(d)
+                    } else if d.is_dir() {
+                        dir_size(d)
+                    } else {
+                        d.metadata().map_or(0, |m| m.len())
+                    }
+                })
+                .sum(),
         }
     }
 
     fn clearable(self) -> bool {
-        matches!(self, Place::Previews | Place::Analysis | Place::Render)
+        !matches!(
+            self,
+            Place::Models | Place::Generated | Place::Sounds | Place::Backups
+        )
     }
 
     /// Delete what it holds that nothing is using: the browser's profiles
     /// and renders in progress stay.
     fn clear(self) {
-        if self == Place::Render {
-            render_cache::store().clear();
-            return;
+        match self {
+            Place::Render => render_cache::store().clear(),
+            Place::SlowMotion => flikk_analysis::clear_interpolated(),
+            _ => {
+                for path in self.dirs() {
+                    if path.file_name().is_some_and(|n| n == "html") {
+                        clear_html(&path);
+                    } else if path.is_dir() {
+                        let _ = std::fs::remove_dir_all(path);
+                    } else {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
         }
-        let dirs: Vec<PathBuf> = match self {
-            Place::Previews => [
-                "proxies",
-                "waveforms",
-                "collages",
-                "upload",
-                "mattes",
-                "hdr",
-                "interpolated",
-                "depth",
-                "coreml",
-                "respeak",
-            ]
-            .iter()
-            .map(|d| paths::cache().join(d))
-            .collect(),
-            Place::Analysis => vec![self.dir()],
-            _ => Vec::new(),
-        };
-        for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The HTML pages, without the browser's profiles, which Clear leaves.
+fn html_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok().filter(|m| m.is_file()))
+        .map(|m| m.len())
+        .sum()
+}
+
+/// HTML pages go; the browser's profiles stay, as one may be in use.
+fn clear_html(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -215,7 +295,7 @@ impl StorageTab {
     }
 
     fn clear(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(place, Place::Previews | Place::Render) {
+        if place != Place::Analysis {
             place.clear();
             self.measure(cx);
             return;

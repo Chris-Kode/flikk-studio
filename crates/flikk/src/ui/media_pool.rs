@@ -80,7 +80,7 @@ pub struct MediaPoolPanel {
     jobs: Vec<JobStatus>,
     /// Proxy creation progress, written from background threads.
     proxies: Arc<Mutex<HashMap<MediaId, f32>>>,
-    /// HDR proxies already looked for, by path (see `hdr.rs`).
+    /// Proxies already looked for, by path (see `hdr.rs`).
     hdr_proxies: std::collections::HashSet<std::path::PathBuf>,
     /// Files dragged in from outside, while they are over the items.
     dropping: Option<Vec<PathBuf>>,
@@ -189,7 +189,7 @@ impl MediaPoolPanel {
             .as_ref()
             .map(|a| a.jobs())
             .unwrap_or_default();
-        self.refresh_hdr_proxies(cx);
+        self.refresh_proxies(cx);
         let proxying = !self.proxies.lock().unwrap().is_empty();
         if jobs != self.jobs || proxying {
             self.jobs = jobs;

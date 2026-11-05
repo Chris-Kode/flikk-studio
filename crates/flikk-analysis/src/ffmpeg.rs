@@ -216,7 +216,8 @@ pub fn stream_audio(
 }
 
 /// The first audio stream of `path` over `spans` (source times, in order,
-/// not overlapping), joined into one mono 44.1 kHz WAV at `out`, at most
+/// not overlapping), joined into one mono 44.1 kHz file at `out` (FLAC
+/// for a `.flac` path, else WAV), at most
 /// `limit` long; the whole stream up to `limit` when `spans` is empty. For
 /// a provider to hear one voice.
 pub fn cut_speech(path: &Path, spans: &[TimeRange], limit: Time, out: &Path) -> Result<()> {
@@ -239,11 +240,15 @@ pub fn cut_speech(path: &Path, spans: &[TimeRange], limit: Time, out: &Path) -> 
             format!("aselect='{}',asetpts=N/SR/TB", keep.join("+")),
         ]));
     }
+    // Lossless either way; FLAC at about half the size.
+    let flac = out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("flac"));
     args.extend(strs([
         "-t".to_string(),
         format!("{:.3}", limit.as_secs_f64()),
         "-c:a".into(),
-        "pcm_s16le".into(),
+        if flac { "flac" } else { "pcm_s16le" }.into(),
     ]));
     args.push(out.as_os_str().to_owned());
     run(&args, None, &|_| {}, discard)?;

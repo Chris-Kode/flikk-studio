@@ -162,6 +162,7 @@ pub(crate) fn video_source(
         item.proxy.clone().or(expected)
     };
     if let Some(proxy) = proxy.filter(|p| p.is_file()) {
+        flikk_core::cache_sweep::mark_used(&proxy);
         return Ok((proxy, None));
     }
     Ok((

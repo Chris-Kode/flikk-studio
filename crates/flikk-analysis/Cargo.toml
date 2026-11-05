@@ -36,3 +36,5 @@ flikk-core.workspace = true
 flikk-models.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+png = "0.18"
+qoi = "0.4"

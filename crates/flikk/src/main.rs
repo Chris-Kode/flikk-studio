@@ -34,6 +34,10 @@ fn main() {
     {
         persistence::set_launch_file(path);
     }
+    // What nothing has used for long goes, off the UI thread.
+    let _ = std::thread::Builder::new()
+        .name("flikk-cache-sweep".into())
+        .spawn(flikk_core::cache_sweep::sweep);
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
