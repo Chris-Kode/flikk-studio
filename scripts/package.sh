@@ -15,6 +15,9 @@
 # The updater (crates/flikk/src/update.rs, `asset_name`) looks for these
 # names, and lays the archive's one folder over the installed copy.
 set -euo pipefail
+# Say which command failed: under pipefail a failing test would otherwise
+# end the script without a word.
+trap 'echo "package.sh:$LINENO: \`$BASH_COMMAND\` failed" >&2' ERR
 
 version=${1:?usage: scripts/package.sh <version> [binary dir]}
 bin=${2:-target/release}
@@ -43,16 +46,20 @@ case $os in
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$bin/flikk" "$bin/flikk-mcp" "$app/Contents/MacOS/"
     find "$bin" -maxdepth 1 -name '*.dylib' -exec cp -L {} "$app/Contents/MacOS/" \;
-    # MLX loads its Metal kernels from beside the binary first.
-    metallib=$(
-      for dir in "${MLX_RS_METAL_PATH:-}" "$bin/build" "$HOME/.mlx"; do
-        [ -n "$dir" ] && [ -e "$dir" ] && find "$dir" -name mlx.metallib 2>/dev/null
-      done | head -n 1
-    )
+    # MLX loads its Metal kernels from beside the binary first. mlx-sys
+    # writes them to $MLX_RS_METAL_PATH (Deploy sets it), else to
+    # ~/.mlx/lib/<mlx-c hash>/, the newest of which is the latest build.
+    metallib=""
+    if [ -n "${MLX_RS_METAL_PATH:-}" ] && [ -f "$MLX_RS_METAL_PATH/mlx.metallib" ]; then
+      metallib="$MLX_RS_METAL_PATH/mlx.metallib"
+    else
+      metallib=$(ls -t "$HOME"/.mlx/lib/*/mlx.metallib 2>/dev/null | head -n 1 || true)
+    fi
     if [ -z "$metallib" ]; then
-      echo "mlx.metallib not found; subject masks would not run" >&2
+      echo "mlx.metallib not found in \$MLX_RS_METAL_PATH or ~/.mlx/lib; subject masks would not run" >&2
       exit 1
     fi
+    echo "MLX kernels: $metallib"
     cp "$metallib" "$app/Contents/MacOS/"
     cat >"$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
