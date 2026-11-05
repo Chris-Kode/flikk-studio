@@ -15,9 +15,14 @@
 # The updater (crates/flikk/src/update.rs, `asset_name`) looks for these
 # names, and lays the archive's one folder over the installed copy.
 set -euo pipefail
-# Say which command failed: under pipefail a failing test would otherwise
-# end the script without a word.
+# Say which command failed. macOS runs this with bash 3.2, which can stop
+# a script under `set -e` without running this trap, so on CI every
+# command is traced as well.
 trap 'echo "package.sh:$LINENO: \`$BASH_COMMAND\` failed" >&2' ERR
+if [ -n "${CI:-}" ]; then
+  echo "package.sh: bash $BASH_VERSION"
+  set -x
+fi
 
 version=${1:?usage: scripts/package.sh <version> [binary dir]}
 bin=${2:-target/release}
@@ -48,15 +53,25 @@ case $os in
     find "$bin" -maxdepth 1 -name '*.dylib' -exec cp -L {} "$app/Contents/MacOS/" \;
     # MLX loads its Metal kernels from beside the binary first. mlx-sys
     # writes them to $MLX_RS_METAL_PATH (Deploy sets it), else to
-    # ~/.mlx/lib/<mlx-c hash>/, the newest of which is the latest build.
+    # ~/.mlx/lib/<mlx-c hash>/; MLX's own build leaves a copy under
+    # cargo's build folder. The newest wins. Plain tests only, no pipes:
+    # bash 3.2's `set -e` is unreliable around them.
     metallib=""
-    if [ -n "${MLX_RS_METAL_PATH:-}" ] && [ -f "$MLX_RS_METAL_PATH/mlx.metallib" ]; then
-      metallib="$MLX_RS_METAL_PATH/mlx.metallib"
-    else
-      metallib=$(ls -t "$HOME"/.mlx/lib/*/mlx.metallib 2>/dev/null | head -n 1 || true)
-    fi
+    for candidate in \
+      "${MLX_RS_METAL_PATH:-/nonexistent}/mlx.metallib" \
+      "$HOME"/.mlx/lib/*/mlx.metallib \
+      $(find "$bin/build" -path '*mlx-sys-*' -name mlx.metallib 2>/dev/null || true); do
+      if [ ! -f "$candidate" ]; then
+        continue
+      fi
+      if [ -z "$metallib" ] || [ "$candidate" -nt "$metallib" ]; then
+        metallib=$candidate
+      fi
+    done
     if [ -z "$metallib" ]; then
-      echo "mlx.metallib not found in \$MLX_RS_METAL_PATH or ~/.mlx/lib; subject masks would not run" >&2
+      echo "mlx.metallib not found; subject masks would not run. Looked in:" >&2
+      echo "  \$MLX_RS_METAL_PATH (${MLX_RS_METAL_PATH:-unset}), ~/.mlx/lib, $bin/build" >&2
+      ls -la "${MLX_RS_METAL_PATH:-/nonexistent}" >&2 || true
       exit 1
     fi
     echo "MLX kernels: $metallib"
