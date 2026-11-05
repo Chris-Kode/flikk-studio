@@ -6,6 +6,8 @@ mod persistence;
 mod projects;
 mod relink;
 mod render_cache;
+#[cfg(unix)]
+mod shell_path;
 mod state;
 mod ui;
 mod update;
@@ -24,6 +26,9 @@ fn main() {
         }
         return;
     }
+    // Before any thread starts: the agent CLIs are found on PATH.
+    #[cfg(unix)]
+    shell_path::import();
     // `flikk Film.flikk` opens that project.
     if let Some(path) = std::env::args_os()
         .nth(1)
