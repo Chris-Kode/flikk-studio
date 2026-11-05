@@ -58,9 +58,12 @@ pub fn models() -> PathBuf {
     sub("models")
 }
 
-/// Audio of the library's sounds, in a folder per content.
+/// Audio of the library's sounds, in a folder per content, and voice
+/// samples: inside the library, so its folder holds all of it.
 pub fn assets() -> PathBuf {
-    sub("assets")
+    let dir = library().join("assets");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 /// Music, sound effects, voiceovers and videos providers made, each with a `.json`
