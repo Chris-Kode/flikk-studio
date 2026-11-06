@@ -2264,19 +2264,6 @@ fn item_menu(
         .separator()
         .item(edits("Insert at playhead", InsertMode::Insert))
         .item(edits("Overwrite at playhead", InsertMode::Overwrite));
-    let clips: Vec<_> = group
-        .iter()
-        .flat_map(|m| state.read(cx).clips_using(*m))
-        .collect();
-    if !clips.is_empty() {
-        let s = state.clone();
-        menu = menu.item(
-            PopupMenuItem::new("Select in timeline").on_click(move |_, _, cx| {
-                let clips = clips.clone();
-                s.update(cx, |s, cx| s.select_clips(clips, cx))
-            }),
-        );
-    }
     let path = state
         .read(cx)
         .bus
@@ -2360,19 +2347,6 @@ fn selection_menu(
     let mut menu = menu
         .item(edits("Insert at playhead", InsertMode::Insert))
         .item(edits("Overwrite at playhead", InsertMode::Overwrite));
-    let clips: Vec<_> = media
-        .iter()
-        .flat_map(|m| state.read(cx).clips_using(*m))
-        .collect();
-    if !clips.is_empty() {
-        let s = state.clone();
-        menu = menu.item(
-            PopupMenuItem::new("Select in timeline").on_click(move |_, _, cx| {
-                let clips = clips.clone();
-                s.update(cx, |s, cx| s.select_clips(clips, cx))
-            }),
-        );
-    }
     if let Some((group, recorder)) = panel.read(cx).sync_group(lead, cx) {
         let item = |label: &'static str, mute: bool| {
             let (state, group) = (state.clone(), group.clone());
