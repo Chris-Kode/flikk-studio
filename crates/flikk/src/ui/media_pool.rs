@@ -2335,6 +2335,33 @@ fn selection_menu(
     if !folders.is_empty() {
         return common_menu(menu, panel, media, folders, window, cx);
     }
+    let mut menu = menu;
+    // Analyze when every clip can, and all are first runs or all reruns.
+    let ready: Vec<_> = media
+        .iter()
+        .map(|m| panel.read(cx).analyze_entry(*m, cx))
+        .collect();
+    let again = match ready.first() {
+        Some(Some(AnalyzeEntry::Ready { again })) => Some(*again),
+        _ => None,
+    };
+    if let Some(again) = again.filter(|again| {
+        ready
+            .iter()
+            .all(|e| matches!(e, Some(AnalyzeEntry::Ready { again: a }) if a == again))
+    }) {
+        let (p, ids) = (panel.clone(), media.clone());
+        let label = if again { "Analyze again" } else { "Analyze" };
+        menu = menu
+            .item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                p.update(cx, |this, cx| {
+                    for id in &ids {
+                        this.analyze(*id, again, cx);
+                    }
+                })
+            }))
+            .separator();
+    }
     let state = panel.read(cx).state.clone();
     let edits = |label: &'static str, mode: InsertMode| {
         let (p, media) = (panel.clone(), media.clone());
@@ -2344,7 +2371,7 @@ fn selection_menu(
             state.update(cx, |s, cx| s.edit_at_playhead(&ids, mode, cx));
         })
     };
-    let mut menu = menu
+    menu = menu
         .item(edits("Insert at playhead", InsertMode::Insert))
         .item(edits("Overwrite at playhead", InsertMode::Overwrite));
     if let Some((group, recorder)) = panel.read(cx).sync_group(lead, cx) {
