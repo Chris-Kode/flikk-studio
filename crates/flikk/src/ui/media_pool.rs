@@ -891,61 +891,19 @@ impl MediaPoolPanel {
 
     /// `button` opening what a provider can make; `None` when none can.
     fn generate_menu(&self, button: Button, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let generate = self.can_generate(cx);
-        let video = self.video_model(cx);
-        let can_voiceover = self.can_voiceover(cx);
-        if generate.is_empty() && video.is_none() && !can_voiceover {
+        if !self.can_make(cx) {
             return None;
         }
         let panel = cx.entity();
-        let menu = button.dropdown_menu(move |mut menu, _, _| {
-            for &kind in &generate {
-                let panel = panel.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(format!("{}…", kind.label()))
-                        .icon(kind.icon())
-                        .on_click(move |_, window, cx| {
-                            panel.update(cx, |this, cx| this.open_generate(kind, window, cx))
-                        }),
-                );
-            }
-            if let Some(model) = video.clone() {
-                let p = panel.clone();
-                menu = menu.item(PopupMenuItem::new("Video…").icon(IconName::Video).on_click(
-                    move |_, window, cx| {
-                        let model = model.clone();
-                        p.update(cx, |this, cx| this.open_video(model, window, cx))
-                    },
-                ));
-            }
-            if can_voiceover {
-                let p = panel.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Voiceover…")
-                        .icon(IconName::Mic)
-                        .on_click(move |_, window, cx| {
-                            p.update(cx, |this, cx| this.open_voiceover(None, window, cx))
-                        }),
-                );
-                let p = panel.clone();
-                menu = menu
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Voices…").on_click(move |_, window, cx| {
-                            let state = p.read(cx).state.clone();
-                            crate::ui::voices::open(
-                                state,
-                                crate::ui::voices::Start::Find,
-                                None,
-                                window,
-                                cx,
-                            );
-                        }),
-                    );
-            }
-            menu
-        });
+        let menu = button.dropdown_menu(move |menu, _, cx| generate_items(menu, &panel, cx));
         Some(menu.into_any_element())
+    }
+
+    /// Whether a provider can make anything.
+    fn can_make(&self, cx: &App) -> bool {
+        !self.can_generate(cx).is_empty()
+            || self.video_model(cx).is_some()
+            || self.can_voiceover(cx)
     }
 
     fn search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1082,6 +1040,7 @@ impl MediaPoolPanel {
                 this.import(paths.paths().to_vec(), Some(id), cx)
             }));
         let el = el.relative().child(self.place_marker(None));
+        let more = folder_more(id, &panel);
         let el = match self.layout {
             Layout::Grid => el
                 .flex()
@@ -1103,7 +1062,9 @@ impl MediaPoolPanel {
                         .drag_over::<ExternalPaths>(|s, _, _, _| {
                             s.bg(t::AC_WASH).border_color(t::AC)
                         })
-                        .child(Icon::new(IconName::Folder).size(px(22.)).color(t::T2)),
+                        .relative()
+                        .child(Icon::new(IconName::Folder).size(px(22.)).color(t::T2))
+                        .child(more.absolute().top(px(3.)).right(px(3.))),
                 )
                 .child(div().mt(px(4.)).flex().child(name))
                 .child(div().text_size(px(10.)).text_color(t::T3).child(holds)),
@@ -1133,7 +1094,7 @@ impl MediaPoolPanel {
                 .child(h_flex().flex_1().min_w_0().child(name))
                 .child(column(holds, 56.).text_color(t::T3))
                 .when(wide, |d| d.child(column("", 120.)).child(column("", 90.)))
-                .child(div().w(px(20.)).flex_none()),
+                .child(more),
         };
         el.context_menu(move |menu, _, _| bin_menu(menu, &panel, id))
             .into_any_element()
@@ -2000,7 +1961,9 @@ impl Render for MediaPoolPanel {
                                 cx.listener(|this, _, _, cx| this.band_end(cx)),
                             )
                             .child(content)
-                            .context_menu(move |menu, _, _| space_menu(menu, &panel)),
+                            .context_menu(move |menu, window, cx| {
+                                space_menu(menu, &panel, window, cx)
+                            }),
                     )
                     .children(self.band_overlay())
                     .vertical_scrollbar(&self.scroll)
@@ -2271,21 +2234,90 @@ impl Band {
     }
 }
 
+/// What a provider can make, each opening its form: the Generate
+/// button's menu and the Generate submenu.
+fn generate_items(mut menu: PopupMenu, panel: &Entity<MediaPoolPanel>, cx: &App) -> PopupMenu {
+    let pool = panel.read(cx);
+    let (generate, video, can_voiceover) = (
+        pool.can_generate(cx),
+        pool.video_model(cx),
+        pool.can_voiceover(cx),
+    );
+    for kind in generate {
+        let panel = panel.clone();
+        menu = menu.item(
+            PopupMenuItem::new(format!("{}…", kind.label()))
+                .icon(kind.icon())
+                .on_click(move |_, window, cx| {
+                    panel.update(cx, |this, cx| this.open_generate(kind, window, cx))
+                }),
+        );
+    }
+    if let Some(model) = video {
+        let p = panel.clone();
+        menu = menu.item(PopupMenuItem::new("Video…").icon(IconName::Video).on_click(
+            move |_, window, cx| {
+                let model = model.clone();
+                p.update(cx, |this, cx| this.open_video(model, window, cx))
+            },
+        ));
+    }
+    if can_voiceover {
+        let p = panel.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Voiceover…")
+                .icon(IconName::Mic)
+                .on_click(move |_, window, cx| {
+                    p.update(cx, |this, cx| this.open_voiceover(None, window, cx))
+                }),
+        );
+        let p = panel.clone();
+        menu =
+            menu.separator().item(
+                PopupMenuItem::new("Voices…").on_click(move |_, window, cx| {
+                    let state = p.read(cx).state.clone();
+                    crate::ui::voices::open(
+                        state,
+                        crate::ui::voices::Start::Find,
+                        None,
+                        window,
+                        cx,
+                    );
+                }),
+            );
+    }
+    menu
+}
+
 /// The menu on a right click between items.
-fn space_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>) -> PopupMenu {
+fn space_menu(
+    menu: PopupMenu,
+    panel: &Entity<MediaPoolPanel>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let (folder, import) = (panel.clone(), panel.clone());
-    menu.item(
-        PopupMenuItem::new("New folder")
-            .icon(IconName::FolderPlus)
-            .on_click(move |_, window, cx| {
-                folder.update(cx, |this, cx| this.new_bin(this.bin, window, cx))
-            }),
-    )
-    .item(
-        PopupMenuItem::new("Import…")
-            .icon(IconName::Download)
-            .on_click(move |_, _, cx| import.update(cx, |this, cx| this.prompt_import(cx))),
-    )
+    let can_make = panel.read(cx).can_make(cx);
+    let menu = menu
+        .item(
+            PopupMenuItem::new("New folder")
+                .icon(IconName::FolderPlus)
+                .on_click(move |_, window, cx| {
+                    folder.update(cx, |this, cx| this.new_bin(this.bin, window, cx))
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Import…")
+                .icon(IconName::Download)
+                .on_click(move |_, _, cx| import.update(cx, |this, cx| this.prompt_import(cx))),
+        );
+    if !can_make {
+        return menu;
+    }
+    let panel = panel.clone();
+    menu.submenu("Generate", window, cx, move |menu, _, cx| {
+        generate_items(menu, &panel, cx)
+    })
 }
 
 /// The bins by parent, for walking up from a bin.
@@ -2321,19 +2353,30 @@ impl BinTree {
     }
 }
 
-/// A bin's menu on a right click.
+/// A folder's "⋯", shown on hover, opening its menu. A press on it
+/// stays with it: the folder underneath would open.
+fn folder_more(id: BinId, panel: &Entity<MediaPoolPanel>) -> Div {
+    let panel = panel.clone();
+    div()
+        .flex_none()
+        .opacity(0.)
+        .group_hover(format!("folder-{id}"), |s| s.opacity(1.))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            Button::new(ElementId::Name(format!("folder-menu-{id}").into()))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Ellipsis)
+                .dropdown_menu(move |menu, _, _| bin_menu(menu, &panel, id)),
+        )
+}
+
+/// A folder's menu, from its "⋯" or a right click.
 fn bin_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: BinId) -> PopupMenu {
-    let (rename, inside, delete) = (panel.clone(), panel.clone(), panel.clone());
+    let (rename, delete) = (panel.clone(), panel.clone());
     menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
         rename.update(cx, |this, cx| this.start_rename(id, window, cx))
     }))
-    .item(
-        PopupMenuItem::new("New folder inside")
-            .icon(IconName::FolderPlus)
-            .on_click(move |_, window, cx| {
-                inside.update(cx, |this, cx| this.new_bin(Some(id), window, cx))
-            }),
-    )
     .separator()
     .item(
         PopupMenuItem::new("Delete folder")
