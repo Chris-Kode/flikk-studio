@@ -932,7 +932,7 @@ impl Render for DeliverPanel {
 }
 
 /// "Show in Finder" and its equivalents.
-const REVEAL: &str = if cfg!(target_os = "macos") {
+pub(crate) const REVEAL: &str = if cfg!(target_os = "macos") {
     "Show in Finder"
 } else {
     "Show in folder"

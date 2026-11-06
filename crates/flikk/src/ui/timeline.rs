@@ -1354,20 +1354,36 @@ impl TimelinePanel {
             MediaKind::Audio => TrackKind::Audio,
             _ => TrackKind::Video,
         };
-        let track = layout::row_at(&rows, y).map(|r| r.track).or_else(|| {
-            project
-                .timeline
-                .tracks
-                .iter()
-                .find(|t| t.kind == wanted)
-                .map(|t| t.id)
-        })?;
         let len = item
             .info
             .as_ref()
             .map(|i| i.duration)
             .filter(|d| d.0 > 0)
             .unwrap_or(Time::from_secs_f64(5.));
+        let rate = project.timeline.settings.rate;
+        let at = self
+            .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
+            .floor_to_frame(rate);
+        let range = TimeRange::new(at, at + len);
+        // Over a track that cannot take it, or below the tracks, the item
+        // goes to the first track of its kind that is free there, else the
+        // first of its kind.
+        let fits = |kind: TrackKind| match kind {
+            TrackKind::Audio => {
+                item.kind != MediaKind::Image
+                    && item.info.as_ref().is_none_or(|i| !i.audio.is_empty())
+            }
+            TrackKind::Video | TrackKind::Overlay => item.kind != MediaKind::Audio,
+            TrackKind::Title | TrackKind::Caption => false,
+        };
+        let hovered = layout::row_at(&rows, y)
+            .map(|r| r.track)
+            .filter(|id| project.timeline.track(*id).is_some_and(|t| fits(t.kind)));
+        let mut kin = project.timeline.tracks.iter().filter(|t| t.kind == wanted);
+        let free = kin
+            .clone()
+            .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&range)));
+        let track = hovered.or(free.or_else(|| kin.next()).map(|t| t.id))?;
         let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
         // Video with sound lands as a linked pair: the mixer and renderer
         // read audio from audio tracks only.
@@ -1377,11 +1393,7 @@ impl TimelinePanel {
             }
             _ => None,
         };
-        let rate = project.timeline.settings.rate;
-        let at = self
-            .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
-            .floor_to_frame(rate);
-        Some((track, TimeRange::new(at, at + len), linked))
+        Some((track, range, linked))
     }
 
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {

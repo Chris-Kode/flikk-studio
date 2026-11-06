@@ -40,8 +40,23 @@ const POLL: Duration = Duration::from_millis(500);
 const TILE: f32 = 100.;
 /// Items area wide enough for the list's format and bin columns.
 const WIDE_LIST: f32 = 420.;
+/// A row of the bins tree.
+const BIN_ROW: f32 = 24.;
 
-actions!(media_pool, [RemoveSelected, ListenToSelected, FocusSearch]);
+actions!(
+    media_pool,
+    [
+        RemoveSelected,
+        PlaySelected,
+        OpenSelected,
+        FocusSearch,
+        SelectAll,
+        SelectPrev,
+        SelectNext,
+        SelectUp,
+        SelectDown,
+    ]
+);
 
 fn bind_keys(cx: &mut App) {
     static BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -49,11 +64,19 @@ fn bind_keys(cx: &mut App) {
         return;
     }
     let c = Some("MediaPool");
+    let items = Some("MediaPool && !Input");
     cx.bind_keys([
         KeyBinding::new("delete", RemoveSelected, c),
         KeyBinding::new("backspace", RemoveSelected, c),
-        KeyBinding::new("space", ListenToSelected, c),
-        KeyBinding::new("/", FocusSearch, Some("MediaPool && !Input")),
+        KeyBinding::new("space", PlaySelected, c),
+        KeyBinding::new("enter", OpenSelected, items),
+        KeyBinding::new("/", FocusSearch, items),
+        KeyBinding::new("cmd-a", SelectAll, items),
+        KeyBinding::new("ctrl-a", SelectAll, items),
+        KeyBinding::new("left", SelectPrev, items),
+        KeyBinding::new("right", SelectNext, items),
+        KeyBinding::new("up", SelectUp, items),
+        KeyBinding::new("down", SelectDown, items),
     ]);
 }
 
@@ -84,8 +107,14 @@ pub struct MediaPoolPanel {
     hdr_proxies: std::collections::HashSet<std::path::PathBuf>,
     /// Files dragged in from outside, while they are over the items.
     dropping: Option<Vec<PathBuf>>,
-    /// The items area's width last frame, for the grid's columns.
-    width: Rc<Cell<Pixels>>,
+    /// The items area last frame, for the grid's columns and for keeping
+    /// the selection in view.
+    area: Rc<Cell<Bounds<Pixels>>>,
+    /// The grid's columns last frame, for moving up and down.
+    cols: Cell<u16>,
+    scroll: ScrollHandle,
+    /// Scroll the selected item into view when it next paints.
+    reveal: Rc<Cell<bool>>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -174,7 +203,10 @@ impl MediaPoolPanel {
             proxies: Arc::default(),
             hdr_proxies: Default::default(),
             dropping: None,
-            width: Rc::default(),
+            area: Rc::default(),
+            cols: Cell::new(1),
+            scroll: ScrollHandle::default(),
+            reveal: Rc::default(),
             _subscriptions,
             _poll,
         }
@@ -258,62 +290,179 @@ impl MediaPoolPanel {
         .detach();
     }
 
+    /// A click on `id`: cmd/ctrl adds or drops it, shift takes the run
+    /// from the selected item to it, and a double click opens it.
     fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let m = window.modifiers();
-        if !open && (m.secondary() || m.shift) && self.selected.is_some_and(|s| s != id) {
-            match self.also.iter().position(|a| *a == id) {
-                Some(i) => {
-                    self.also.remove(i);
+        let anchor = self.selected.filter(|s| *s != id);
+        if let Some(anchor) = anchor.filter(|_| !open) {
+            if m.shift {
+                let ids: Vec<MediaId> = self.visible_items(cx).iter().map(|m| m.id).collect();
+                let at = |x| ids.iter().position(|i| *i == x);
+                if let Some((a, b)) = at(anchor).zip(at(id)) {
+                    let run = if a < b { a + 1..=b } else { b..=a - 1 };
+                    self.also = ids[run].to_vec();
+                    cx.notify();
+                    return;
                 }
-                None => self.also.push(id),
             }
-            cx.notify();
-            return;
+            if m.secondary() {
+                match self.also.iter().position(|a| *a == id) {
+                    Some(i) => {
+                        self.also.remove(i);
+                    }
+                    None => self.also.push(id),
+                }
+                cx.notify();
+                return;
+            }
         }
         self.also.clear();
         self.selected = Some(id);
         if open {
-            match self.selected_item(cx) {
-                Some(item) if self.state.read(cx).can_listen(&item) => {
-                    self.state.update(cx, |s, cx| s.toggle_source(&item, cx));
-                }
-                _ => self.state.update(cx, |s, cx| s.open_source(id, cx)),
-            }
+            self.open(id, cx);
         }
         cx.notify();
     }
 
-    /// Ask, then remove `id` from the project together with its clips.
-    fn confirm_remove(&mut self, id: MediaId, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let Some(item) = state.bus.project().media(id) else {
+    /// Play a sound; show anything else in the viewer.
+    fn open(&mut self, id: MediaId, cx: &mut Context<Self>) {
+        let item = self.state.read(cx).bus.project().media(id).cloned();
+        match item {
+            Some(item) if self.state.read(cx).can_listen(&item) => {
+                self.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+            }
+            _ => self.state.update(cx, |s, cx| s.open_source(id, cx)),
+        }
+    }
+
+    /// Space: play or pause the selected sound or video from the pool.
+    fn play_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_item(cx) else {
             return;
         };
-        let name = item_name(item);
-        let clips = state.clips_using(id).len();
+        let state = self.state.read(cx);
+        let playable = match item.kind {
+            MediaKind::Audio => state.can_listen(&item),
+            MediaKind::Video => state.services.media.is_some() && !state.offline.contains(&item.id),
+            MediaKind::Image => false,
+        };
+        if playable {
+            self.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+        } else if item.kind == MediaKind::Image {
+            self.state.update(cx, |s, cx| s.open_source(item.id, cx));
+        }
+    }
+
+    /// The selected items, the one clicked first leading.
+    fn selection(&self) -> Vec<MediaId> {
+        self.selected
+            .into_iter()
+            .chain(self.also.iter().copied())
+            .collect()
+    }
+
+    /// What an action on `id` applies to: the selection when `id` is in
+    /// it, else `id` alone.
+    fn group_of(&self, id: MediaId) -> Vec<MediaId> {
+        let selection = self.selection();
+        if selection.contains(&id) {
+            selection
+        } else {
+            vec![id]
+        }
+    }
+
+    /// Arrow keys: move the selection `by` items through what shows,
+    /// keeping it in view.
+    fn step(&mut self, by: isize, cx: &mut Context<Self>) {
+        let ids: Vec<MediaId> = self.visible_items(cx).iter().map(|m| m.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let at = self.selected.and_then(|s| ids.iter().position(|i| *i == s));
+        let next = match at {
+            Some(at) => (at as isize + by).clamp(0, ids.len() as isize - 1) as usize,
+            None if by < 0 => ids.len() - 1,
+            None => 0,
+        };
+        self.also.clear();
+        self.selected = Some(ids[next]);
+        self.reveal.set(true);
+        cx.notify();
+    }
+
+    /// The rows the arrow keys move by: a grid row up or down, one item
+    /// in the list.
+    fn row_step(&self) -> isize {
+        match self.layout {
+            Layout::Grid => self.cols.get().max(1) as isize,
+            Layout::List => 1,
+        }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let mut ids = self.visible_items(cx).into_iter().map(|m| m.id);
+        let Some(first) = ids.next() else {
+            return;
+        };
+        let lead = self.selected.unwrap_or(first);
+        self.selected = Some(lead);
+        self.also = std::iter::once(first)
+            .chain(ids)
+            .filter(|i| *i != lead)
+            .collect();
+        cx.notify();
+    }
+
+    /// Ask, then remove `ids` from the project together with their clips.
+    fn confirm_remove(&mut self, ids: Vec<MediaId>, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let ids: Vec<MediaId> = ids
+            .into_iter()
+            .filter(|i| project.media(*i).is_some())
+            .collect();
+        let title = match ids.as_slice() {
+            [] => return,
+            [one] => {
+                let name = project.media(*one).map(item_name).unwrap_or_default();
+                format!("Remove “{name}” from the project?")
+            }
+            many => format!("Remove {} items from the project?", many.len()),
+        };
+        let clips: usize = ids.iter().map(|i| state.clips_using(*i).len()).sum();
         let (state, panel) = (self.state.clone(), cx.entity().downgrade());
         window.open_confirm(cx, move |dialog, _, _| {
-            let (state, panel) = (state.clone(), panel.clone());
-            let dialog = dialog
-                .title(format!("Remove “{name}” from the project?"))
-                .destructive()
-                .confirm("Remove", move |_, cx| {
-                    state.update(cx, |s, cx| s.remove_media(id, cx));
-                    let _ = panel.update(cx, |this, cx| {
-                        if this.selected == Some(id) {
-                            this.selected = None;
+            let (state, panel, many) = (state.clone(), panel.clone(), ids.len() > 1);
+            let ids = ids.clone();
+            let dialog =
+                dialog
+                    .title(title.clone())
+                    .destructive()
+                    .confirm("Remove", move |_, cx| {
+                        state.update(cx, |s, cx| s.remove_media(&ids, cx));
+                        let _ = panel.update(cx, |this, cx| {
+                            this.also.retain(|a| !ids.contains(a));
+                            if this.selected.is_some_and(|s| ids.contains(&s)) {
+                                this.selected = None;
+                                this.also.clear();
+                            }
                             cx.notify();
-                        }
+                        });
+                        true
                     });
-                    true
-                });
-            match clips {
-                0 => dialog,
-                1 => dialog.description("Its clip is removed from the timeline too."),
-                n => {
+            match (clips, many) {
+                (0, _) => dialog,
+                (1, false) => dialog.description("Its clip is removed from the timeline too."),
+                (n, false) => {
                     dialog.description(format!("Its {n} clips are removed from the timeline too."))
                 }
+                (1, true) => dialog.description("Their clip is removed from the timeline too."),
+                (n, true) => dialog.description(format!(
+                    "Their {n} clips are removed from the timeline too."
+                )),
             }
         });
     }
@@ -371,13 +520,23 @@ impl MediaPoolPanel {
         self.update_media(item, cx);
     }
 
-    fn move_to_bin(&mut self, media: MediaId, bin: Option<BinId>, cx: &mut Context<Self>) {
-        let Some(mut item) = self.state.read(cx).bus.project().media(media).cloned() else {
-            return;
-        };
-        if item.bin != bin {
-            item.bin = bin;
-            self.update_media(item, cx);
+    /// Put `media` in `bin`, as one undo step.
+    fn move_to_bin(&mut self, media: &[MediaId], bin: Option<BinId>, cx: &mut Context<Self>) {
+        let project = self.state.read(cx).bus.project();
+        let commands: Vec<Command> = media
+            .iter()
+            .filter_map(|id| project.media(*id))
+            .filter(|item| item.bin != bin)
+            .map(|item| Command::UpdateMedia {
+                media: MediaItem {
+                    bin,
+                    ..item.clone()
+                },
+            })
+            .collect();
+        if !commands.is_empty() {
+            self.state
+                .update(cx, |s, cx| s.execute_batch(commands, "move_to_bin", cx));
         }
     }
 
@@ -385,13 +544,13 @@ impl MediaPoolPanel {
         self.state.read(cx).bus.project().bins.clone()
     }
 
-    fn new_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_bin(&mut self, parent: Option<BinId>, window: &mut Window, cx: &mut Context<Self>) {
         let mut bins = self.bins(cx);
         let n = bins.len() + 1;
         let bin = Bin {
             id: BinId::new(),
             name: format!("Bin {n}"),
-            parent: None,
+            parent,
         };
         let id = bin.id;
         bins.push(bin);
@@ -415,6 +574,35 @@ impl MediaPoolPanel {
             i.set_placeholder(name, window, cx);
             i.focus(window, cx);
         });
+        cx.notify();
+    }
+
+    /// Remove bin `id`; what it held, items and bins, moves up to its
+    /// parent. One undo step.
+    fn delete_bin(&mut self, id: BinId, cx: &mut Context<Self>) {
+        let mut bins = self.bins(cx);
+        let Some(parent) = bins.iter().find(|b| b.id == id).map(|b| b.parent) else {
+            return;
+        };
+        bins.retain(|b| b.id != id);
+        for b in bins.iter_mut().filter(|b| b.parent == Some(id)) {
+            b.parent = parent;
+        }
+        let project = self.state.read(cx).bus.project();
+        let mut commands = vec![Command::SetBins { bins }];
+        commands.extend(project.media.iter().filter(|m| m.bin == Some(id)).map(|m| {
+            Command::UpdateMedia {
+                media: MediaItem {
+                    bin: parent,
+                    ..m.clone()
+                },
+            }
+        }));
+        self.state
+            .update(cx, |s, cx| s.execute_batch(commands, "delete_bin", cx));
+        if self.bin == Some(id) {
+            self.bin = parent;
+        }
         cx.notify();
     }
 
@@ -596,7 +784,7 @@ impl MediaPoolPanel {
                     cx.notify();
                 }))
                 .on_drop(cx.listener(|this, drag: &MediaDrag, _, cx| {
-                    this.move_to_bin(drag.media, None, cx)
+                    this.move_to_bin(&this.group_of(drag.media), None, cx)
                 }))
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                     this.import(paths.paths().to_vec(), None, cx)
@@ -619,6 +807,7 @@ impl MediaPoolPanel {
                 );
                 continue;
             }
+            let panel = cx.entity();
             rows.push(
                 row.child(div().flex_1().min_w_0().truncate().child(bin.name.clone()))
                     .child(count(counts.get(&id).copied().unwrap_or(0)))
@@ -631,11 +820,12 @@ impl MediaPoolPanel {
                         }
                     }))
                     .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
-                        this.move_to_bin(drag.media, Some(id), cx)
+                        this.move_to_bin(&this.group_of(drag.media), Some(id), cx)
                     }))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                         this.import(paths.paths().to_vec(), Some(id), cx)
                     }))
+                    .context_menu(move |menu, _, _| bin_menu(menu, &panel, id))
                     .into_any_element(),
             );
         }
@@ -644,13 +834,15 @@ impl MediaPoolPanel {
                 .text_color(t::T3)
                 .child(Icon::new(IconName::FolderPlus).size(px(12.)))
                 .child("New bin")
-                .on_click(cx.listener(|this, _, window, cx| this.new_bin(window, cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.new_bin(None, window, cx)))
                 .into_any_element(),
         );
+        // As tall as its rows, up to a few; past that they scroll.
+        let height = (rows.len() as f32 * BIN_ROW + 6.).min(200.);
         div()
             .id("bins")
             .flex_none()
-            .max_h(px(200.))
+            .h(px(height))
             .px(px(4.))
             .pb(px(6.))
             .overflow_y_scrollbar()
@@ -668,7 +860,10 @@ impl MediaPoolPanel {
             name: item_name(item).into(),
             meta: meta(item, used),
             listenable: state.can_listen(item),
-            listening: listening.map(|p| p.fraction()),
+            // A video's progress shows in the viewer.
+            listening: listening
+                .filter(|_| item.kind == MediaKind::Audio)
+                .map(|p| p.fraction()),
             progress: self.progress(item.id),
             selected: self.selected == Some(item.id) || self.also.contains(&item.id),
             offline: state.offline.contains(&item.id),
@@ -686,7 +881,7 @@ impl MediaPoolPanel {
                     .ghost()
                     .xsmall()
                     .icon(IconName::Ellipsis)
-                    .dropdown_menu(move |menu, _, cx| item_menu(menu, &panel, id, cx)),
+                    .dropdown_menu(move |menu, window, cx| item_menu(menu, &panel, id, window, cx)),
             )
     }
 
@@ -820,7 +1015,7 @@ impl MediaPoolPanel {
                             .text_color(name_color)
                             .child(look.name.clone()),
                     )
-                    .children(bar.map(|(f, color)| bar3(f, color).w(px(80.)).flex_none())),
+                    .children(bar.map(|(f, color)| bar3(f, color).w(px(40.)).flex_none())),
             )
             .child(column(duration, 56.).font_family(t::mono()))
             .when(wide, |d| {
@@ -851,17 +1046,47 @@ impl MediaPoolPanel {
         div()
             .id(ElementId::Name(group.clone()))
             .group(group.clone())
+            .relative()
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.select(id, ev.click_count() >= 2, window, cx)
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+            .when(self.selected == Some(id), |d| d.child(self.reveal_marker()))
+    }
+
+    /// Inside the selected item: after an arrow key, scrolls the items so
+    /// it shows.
+    fn reveal_marker(&self) -> impl IntoElement {
+        let (reveal, area, scroll) = (self.reveal.clone(), self.area.clone(), self.scroll.clone());
+        canvas(
+            move |item, window, _| {
+                if !reveal.replace(false) {
+                    return;
+                }
+                let view = area.get();
+                let margin = px(8.);
+                let mut offset = scroll.offset();
+                if item.top() - margin < view.top() {
+                    offset.y += view.top() - item.top() + margin;
+                } else if item.bottom() + margin > view.bottom() {
+                    offset.y -= item.bottom() + margin - view.bottom();
+                } else {
+                    return;
+                }
+                scroll.set_offset(offset);
+                window.request_animation_frame();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
     }
 
     /// The item's menu on a right click.
     fn with_menu(&self, el: Stateful<Div>, id: MediaId, cx: &mut Context<Self>) -> AnyElement {
         let panel = cx.entity();
-        el.context_menu(move |menu, _, cx| item_menu(menu, &panel, id, cx))
+        el.context_menu(move |menu, window, cx| item_menu(menu, &panel, id, window, cx))
             .into_any_element()
     }
 
@@ -982,9 +1207,6 @@ impl MediaPoolPanel {
                 lines.push(parts.join(" · ").into());
             }
         }
-        if let Some(fp) = &item.fingerprint {
-            lines.push(fp.0.chars().take(16).collect::<String>().into());
-        }
         let tags = item.tags.clone();
         let id = item.id;
         v_flex()
@@ -1012,7 +1234,7 @@ impl MediaPoolPanel {
                             .icon(IconName::Trash)
                             .tooltip("Remove from project")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_remove(id, window, cx)
+                                this.confirm_remove(vec![id], window, cx)
                             })),
                     ),
             )
@@ -1146,17 +1368,19 @@ impl Render for MediaPoolPanel {
             .track_focus(&self.focus)
             .key_context("MediaPool")
             .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
+                this.confirm_remove(this.selection(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PlaySelected, _, cx| this.play_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
                 if let Some(id) = this.selected {
-                    this.confirm_remove(id, window, cx);
+                    this.open(id, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ListenToSelected, _, cx| {
-                if let Some(item) = this.selected_item(cx)
-                    && this.state.read(cx).can_listen(&item)
-                {
-                    this.state.update(cx, |s, cx| s.toggle_source(&item, cx));
-                }
-            }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step(-this.row_step(), cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step(this.row_step(), cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
@@ -1171,7 +1395,7 @@ impl Render for MediaPoolPanel {
         }
 
         let items = self.visible_items(cx);
-        let width = self.width.get().as_f32();
+        let width = self.area.get().size.width.as_f32();
         let wide = width >= WIDE_LIST;
         let content: AnyElement = if items.is_empty() && generating.is_empty() {
             let searching = !self.search.read(cx).value().trim().is_empty();
@@ -1188,6 +1412,7 @@ impl Render for MediaPoolPanel {
                     } else {
                         2
                     };
+                    self.cols.set(cols);
                     let mut tiles: Vec<AnyElement> = generating
                         .iter()
                         .map(|g| self.generation_tile(g, cx))
@@ -1217,7 +1442,7 @@ impl Render for MediaPoolPanel {
                 }
             }
         };
-        let measured = self.width.clone();
+        let measured = self.area.clone();
         let dropping = self.dropping.clone();
         let selected = self.selected_item(cx);
         root.child(self.search_row(cx))
@@ -1230,17 +1455,28 @@ impl Render for MediaPoolPanel {
                     .min_h_0()
                     .on_drag_move(cx.listener(Self::drag_files))
                     .child(
-                        canvas(move |b, _, _| measured.set(b.size.width), |_, _, _, _| {})
-                            .absolute()
-                            .size_full(),
+                        canvas(
+                            move |b, window, _| {
+                                // Columns and the list's layout follow the
+                                // width at once, not on the next repaint.
+                                if measured.replace(b).size.width != b.size.width {
+                                    window.request_animation_frame();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
                     .child(
                         div()
                             .id("media-items")
                             .size_full()
-                            .overflow_y_scrollbar()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
                             .child(content),
                     )
+                    .vertical_scrollbar(&self.scroll)
                     .children(dropping.map(|paths| self.drop_overlay(&paths, cx))),
             )
             .children(selected.map(|item| self.details(&item, cx)))
@@ -1270,8 +1506,15 @@ struct AnalyzeEntry {
 
 /// The menu of item `id`, from its "⋯" button or a right click; built as
 /// it opens, so what it offers is current.
-fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &App) -> PopupMenu {
+fn item_menu(
+    menu: PopupMenu,
+    panel: &Entity<MediaPoolPanel>,
+    id: MediaId,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let mut menu = menu;
+    let group = panel.read(cx).group_of(id);
     let state = panel.read(cx).state.clone();
     if state.read(cx).offline.contains(&id) {
         menu = menu
@@ -1304,11 +1547,37 @@ fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &
         true => "Play",
         false => "Open in viewer",
     };
-    let menu = menu.item(
+    let mut menu = menu.item(
         PopupMenuItem::new(open_label).on_click(move |_, window, cx| {
             open.update(cx, |this, cx| this.select(id, true, window, cx))
         }),
     );
+    let clips: Vec<_> = group
+        .iter()
+        .flat_map(|m| state.read(cx).clips_using(*m))
+        .collect();
+    if !clips.is_empty() {
+        let s = state.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Select in timeline").on_click(move |_, _, cx| {
+                let clips = clips.clone();
+                s.update(cx, |s, cx| s.select_clips(clips, cx))
+            }),
+        );
+    }
+    let path = state
+        .read(cx)
+        .bus
+        .project()
+        .media(id)
+        .map(|m| m.path.clone());
+    if let Some(path) = path.filter(|p| p.exists()) {
+        menu = menu.item(
+            PopupMenuItem::new(crate::ui::deliver::REVEAL)
+                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+        );
+    }
+    let menu = move_menu(menu, panel, &group, window, cx);
     let menu = if shared::can_save_sound(state.read(cx), id) {
         menu.item(
             PopupMenuItem::new("Add to Library")
@@ -1359,13 +1628,83 @@ fn item_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: MediaId, cx: &
         }
         None => menu,
     };
+    let remove_label = match group.len() {
+        1 => "Remove from project".to_owned(),
+        n => format!("Remove {n} items from project"),
+    };
     menu.separator().item(
-        PopupMenuItem::new("Remove from project")
+        PopupMenuItem::new(remove_label)
             .icon(IconName::Trash)
             .destructive()
             .on_click(move |_, window, cx| {
-                remove.update(cx, |this, cx| this.confirm_remove(id, window, cx))
+                let group = group.clone();
+                remove.update(cx, |this, cx| this.confirm_remove(group, window, cx))
             }),
+    )
+}
+
+/// "Move to", opening the bins `group` can go to; ticks the bin they
+/// all share.
+fn move_menu(
+    menu: PopupMenu,
+    panel: &Entity<MediaPoolPanel>,
+    group: &[MediaId],
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let project = panel.read(cx).state.read(cx).bus.project();
+    let bins: Vec<(Option<BinId>, String, usize)> = std::iter::once((None, "All media".into(), 0))
+        .chain(
+            bin_tree(&project.bins)
+                .into_iter()
+                .map(|(b, depth)| (Some(b.id), b.name.clone(), depth + 1)),
+        )
+        .collect();
+    if bins.len() < 2 {
+        return menu;
+    }
+    let mut homes = group
+        .iter()
+        .filter_map(|m| project.media(*m))
+        .map(|m| m.bin);
+    let first = homes.next().flatten();
+    let shared = homes.all(|b| b == first).then_some(first);
+    let (panel, group) = (panel.clone(), group.to_vec());
+    menu.submenu("Move to", window, cx, move |mut menu, _, _| {
+        for (bin, name, depth) in &bins {
+            let (panel, group, bin) = (panel.clone(), group.clone(), *bin);
+            let indent = "    ".repeat(depth.saturating_sub(1));
+            menu = menu.item(
+                PopupMenuItem::new(format!("{indent}{name}"))
+                    .checked(shared == Some(bin))
+                    .on_click(move |_, _, cx| {
+                        panel.update(cx, |this, cx| this.move_to_bin(&group, bin, cx))
+                    }),
+            );
+        }
+        menu
+    })
+}
+
+/// A bin's menu on a right click.
+fn bin_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: BinId) -> PopupMenu {
+    let (rename, inside, delete) = (panel.clone(), panel.clone(), panel.clone());
+    menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+        rename.update(cx, |this, cx| this.start_rename(id, window, cx))
+    }))
+    .item(
+        PopupMenuItem::new("New bin inside")
+            .icon(IconName::FolderPlus)
+            .on_click(move |_, window, cx| {
+                inside.update(cx, |this, cx| this.new_bin(Some(id), window, cx))
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Delete bin")
+            .icon(IconName::Trash)
+            .destructive()
+            .on_click(move |_, _, cx| delete.update(cx, |this, cx| this.delete_bin(id, cx))),
     )
 }
 
@@ -1463,7 +1802,8 @@ fn bin_tree(bins: &[Bin]) -> Vec<(&Bin, usize)> {
 fn bin_row(id: impl Into<ElementId>, selected: bool, depth: usize) -> Stateful<Div> {
     h_flex()
         .id(id)
-        .h(px(24.))
+        .flex_none()
+        .h(px(BIN_ROW))
         .gap(px(6.))
         .pl(px(6. + 16. * depth as f32))
         .pr(px(6.))
