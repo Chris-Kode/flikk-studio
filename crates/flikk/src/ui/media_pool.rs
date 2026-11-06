@@ -2336,27 +2336,26 @@ fn selection_menu(
         return common_menu(menu, panel, media, folders, window, cx);
     }
     let mut menu = menu;
-    // Analyze when every clip can, and all are first runs or all reruns.
-    let ready: Vec<_> = media
+    // Analyze when every clip can: each runs fresh or again as it would
+    // alone, and "again" only when every one has results.
+    let ready: Option<Vec<(MediaId, bool)>> = media
         .iter()
-        .map(|m| panel.read(cx).analyze_entry(*m, cx))
+        .map(|m| match panel.read(cx).analyze_entry(*m, cx) {
+            Some(AnalyzeEntry::Ready { again }) => Some((*m, again)),
+            _ => None,
+        })
         .collect();
-    let again = match ready.first() {
-        Some(Some(AnalyzeEntry::Ready { again })) => Some(*again),
-        _ => None,
-    };
-    if let Some(again) = again.filter(|again| {
-        ready
-            .iter()
-            .all(|e| matches!(e, Some(AnalyzeEntry::Ready { again: a }) if a == again))
-    }) {
-        let (p, ids) = (panel.clone(), media.clone());
-        let label = if again { "Analyze again" } else { "Analyze" };
+    if let Some(ready) = ready {
+        let label = match ready.iter().all(|(_, again)| *again) {
+            true => "Analyze again",
+            false => "Analyze",
+        };
+        let p = panel.clone();
         menu = menu
             .item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                 p.update(cx, |this, cx| {
-                    for id in &ids {
-                        this.analyze(*id, again, cx);
+                    for (id, again) in &ready {
+                        this.analyze(*id, *again, cx);
                     }
                 })
             }))
