@@ -26,7 +26,7 @@ use flikk_core::{BinId, MediaId, Time};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -35,16 +35,6 @@ use std::time::Duration;
 use thumbs::Thumbs;
 
 const POLL: Duration = Duration::from_millis(500);
-
-/// Which items the pool shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Show {
-    All,
-    Video,
-    Audio,
-    Image,
-    Unused,
-}
 
 /// Narrowest a grid tile gets before the grid drops a column.
 const TILE: f32 = 100.;
@@ -119,7 +109,6 @@ pub struct MediaPoolPanel {
     renaming_item: Option<MediaId>,
     item_input: Entity<InputState>,
     layout: Layout,
-    show: Show,
     /// The bin open in the pool; `None` is the top level.
     bin: Option<BinId>,
     renaming: Option<BinId>,
@@ -147,6 +136,11 @@ pub struct MediaPoolPanel {
     dragged: Vec<MediaId>,
     /// The video tile the pointer skims, and where across it, 0..1.
     skim: Option<(MediaId, f32)>,
+    /// Where each item (`Some`) and folder (`None`) painted last frame,
+    /// for the rubber band.
+    placed: Rc<RefCell<Vec<Placed>>>,
+    /// A rubber band being dragged across empty space.
+    band: Option<Band>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -235,7 +229,6 @@ impl MediaPoolPanel {
             renaming_item: None,
             item_input,
             layout: Layout::Grid,
-            show: Show::All,
             bin: None,
             renaming: None,
             selected,
@@ -251,6 +244,8 @@ impl MediaPoolPanel {
             reveal: Rc::default(),
             dragged: Vec::new(),
             skim: None,
+            placed: Rc::default(),
+            band: None,
             _subscriptions,
             _poll,
         }
@@ -634,14 +629,16 @@ impl MediaPoolPanel {
         self.state.read(cx).bus.project().bins.clone()
     }
 
-    /// A bin in `parent`, which opens, named as it is typed.
+    /// A folder in `parent`, which opens, named as it is typed.
     fn new_bin(&mut self, parent: Option<BinId>, window: &mut Window, cx: &mut Context<Self>) {
         self.open_bin(parent, cx);
+        // Searching hides folders; the new one has to show to be named.
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
         let mut bins = self.bins(cx);
         let n = bins.len() + 1;
         let bin = Bin {
             id: BinId::new(),
-            name: format!("Bin {n}"),
+            name: format!("Folder {n}"),
             parent,
         };
         let id = bin.id;
@@ -806,14 +803,14 @@ impl MediaPoolPanel {
 
     // ------------------------------------------------------------- render
 
-    /// Whether the items shown come from the open bin and every bin in it,
-    /// without folders: while searching or filtering.
+    /// Whether the items shown come from the open folder and every folder
+    /// in it, without folders: while searching.
     fn flattened(&self, cx: &App) -> bool {
-        self.show != Show::All || !self.search.read(cx).value().trim().is_empty()
+        !self.search.read(cx).value().trim().is_empty()
     }
 
-    /// The open bin's items, in import order; while searching or
-    /// filtering, the matches from it and every bin in it.
+    /// The open folder's items, in import order; while searching, the
+    /// matches from it and every folder in it.
     fn visible_items(&self, cx: &App) -> Vec<MediaItem> {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let state = self.state.read(cx);
@@ -828,13 +825,6 @@ impl MediaPoolPanel {
                 (true, Some(open)) => tree.within(m.bin, open),
                 (false, open) => tree.home(m.bin) == open,
             })
-            .filter(|m| match self.show {
-                Show::All => true,
-                Show::Video => m.kind == MediaKind::Video,
-                Show::Audio => m.kind == MediaKind::Audio,
-                Show::Image => m.kind == MediaKind::Image,
-                Show::Unused => state.clips_using(m.id).is_empty(),
-            })
             .filter(|m| {
                 query.is_empty()
                     || item_name(m).to_lowercase().contains(&query)
@@ -844,8 +834,8 @@ impl MediaPoolPanel {
             .collect()
     }
 
-    /// The bins in the open bin, each with how many items it holds,
-    /// counting its own bins'; none while searching or filtering.
+    /// The folders in the open folder, each with how many items it holds,
+    /// counting its own folders'; none while searching.
     fn folders(&self, cx: &App) -> Vec<(Bin, usize)> {
         if self.flattened(cx) {
             return Vec::new();
@@ -875,39 +865,6 @@ impl MediaPoolPanel {
             self.scroll.set_offset(point(px(0.), px(0.)));
         }
         cx.notify();
-    }
-
-    /// Which kinds of item show.
-    fn show_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let show = self.show;
-        let panel = cx.entity();
-        Button::new("show")
-            .ghost()
-            .icon(IconName::ListFilter)
-            .tooltip("Show")
-            // On while a filter hides items.
-            .selected(show != Show::All)
-            .dropdown_menu(move |mut menu, _, _| {
-                for (label, value) in [
-                    ("All media", Show::All),
-                    ("Video", Show::Video),
-                    ("Audio", Show::Audio),
-                    ("Images", Show::Image),
-                    ("Not in the timeline", Show::Unused),
-                ] {
-                    let p = panel.clone();
-                    menu = menu.item(PopupMenuItem::new(label).checked(show == value).on_click(
-                        move |_, _, cx| {
-                            p.update(cx, |this, cx| {
-                                this.show = value;
-                                cx.notify();
-                            })
-                        },
-                    ));
-                }
-                menu
-            })
-            .into_any_element()
     }
 
     /// The Edit panel header's actions while the pool shows: generate and
@@ -992,7 +949,6 @@ impl MediaPoolPanel {
     }
 
     fn search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = self.show_menu(cx);
         let toggle = |id: &'static str, icon: IconName, tip: &'static str, layout: Layout| {
             Button::new(id)
                 .ghost()
@@ -1014,14 +970,13 @@ impl MediaPoolPanel {
                     .min_w_0()
                     .child(Input::new(&self.search).search().kbd("/")),
             )
-            .child(view)
             .child(toggle("grid", IconName::LayoutGrid, "Grid", Layout::Grid))
             .child(toggle("list", IconName::List, "List", Layout::List))
     }
 
-    /// Where the pool is: Media, then each bin down to the open one, the
-    /// middle ones folded on a deep path; and New bin. Each place takes
-    /// dropped media.
+    /// Where the pool is: Media, then each folder down to the open one,
+    /// the middle ones folded on a deep path. Each place takes dropped
+    /// media.
     fn path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let project = self.state.read(cx).bus.project();
         let tree = BinTree::of(&project.bins);
@@ -1081,14 +1036,7 @@ impl MediaPoolPanel {
                     })),
             );
         }
-        bar.child(div().flex_1()).child(
-            Button::new("new-bin")
-                .ghost()
-                .xsmall()
-                .icon(IconName::FolderPlus)
-                .tooltip("New bin")
-                .on_click(cx.listener(|this, _, window, cx| this.new_bin(this.bin, window, cx))),
-        )
+        bar
     }
 
     /// A bin among the items: a click opens it, dropped media goes in,
@@ -1133,6 +1081,7 @@ impl MediaPoolPanel {
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.import(paths.paths().to_vec(), Some(id), cx)
             }));
+        let el = el.relative().child(self.place_marker(None));
         let el = match self.layout {
             Layout::Grid => el
                 .flex()
@@ -1296,7 +1245,8 @@ impl MediaPoolPanel {
                         .bg(t::OK)
                 }))
             })
-            .children(look.listenable.then(|| {
+            // The selection's count takes the corner from the play button.
+            .children((look.listenable && multi.is_none()).then(|| {
                 div().absolute().top(px(4.)).left(px(4.)).child(listen_dot(
                     format!("listen-{id}"),
                     &self.state,
@@ -1455,7 +1405,116 @@ impl MediaPoolPanel {
                 this.select(id, ev.click_count() >= 2, window, cx)
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+            .child(self.place_marker(Some(id)))
             .when(self.selected == Some(id), |d| d.child(self.reveal_marker()))
+    }
+
+    /// Inside an item (`Some`) or folder: notes where it paints, for the
+    /// rubber band.
+    fn place_marker(&self, item: Option<MediaId>) -> impl IntoElement {
+        let placed = self.placed.clone();
+        canvas(
+            move |b, _, _| placed.borrow_mut().push((item, b)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// `p` in the items' own space, which scrolls with them.
+    fn in_items(&self, p: Point<Pixels>) -> Point<Pixels> {
+        p - self.scroll.offset()
+    }
+
+    /// A press on empty space starts a rubber band; with shift or cmd/ctrl
+    /// it adds to the selection, else it starts over.
+    fn band_start(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .placed
+            .borrow()
+            .iter()
+            .any(|(_, b)| b.contains(&ev.position))
+        {
+            return;
+        }
+        window.focus(&self.focus, cx);
+        let additive = ev.modifiers.shift || ev.modifiers.secondary();
+        if !additive {
+            self.deselect(cx);
+        }
+        let at = self.in_items(ev.position);
+        self.band = Some(Band {
+            from: at,
+            to: at,
+            base: self.selection(),
+            moved: false,
+        });
+    }
+
+    /// The band follows the pointer, selecting what it covers.
+    fn band_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.band.is_none() {
+            return;
+        }
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.band_end(cx);
+            return;
+        }
+        let at = self.in_items(ev.position);
+        let offset = self.scroll.offset();
+        let Some(band) = self.band.as_mut() else {
+            return;
+        };
+        band.to = at;
+        let d = band.to - band.from;
+        band.moved |= d.x.abs() > px(3.) || d.y.abs() > px(3.);
+        if !band.moved {
+            return;
+        }
+        let rect = band.rect();
+        let hits: Vec<MediaId> = self
+            .placed
+            .borrow()
+            .iter()
+            .filter_map(|(item, b)| {
+                let b = Bounds::new(b.origin - offset, b.size);
+                item.filter(|_| b.intersects(&rect))
+            })
+            .collect();
+        let mut chosen = band.base.clone();
+        chosen.extend(hits.into_iter().filter(|h| !band.base.contains(h)));
+        let chosen = self.in_pool_order(&chosen, cx);
+        let lead = self
+            .selected
+            .filter(|s| chosen.contains(s))
+            .or(chosen.first().copied());
+        self.selected = lead;
+        self.also = chosen.into_iter().filter(|c| Some(*c) != lead).collect();
+        cx.notify();
+    }
+
+    fn band_end(&mut self, cx: &mut Context<Self>) {
+        if self.band.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The band over the items area, in its coordinates.
+    fn band_overlay(&self) -> Option<Div> {
+        let band = self.band.as_ref().filter(|b| b.moved)?;
+        let rect = band.rect();
+        let origin = rect.origin + self.scroll.offset() - self.area.get().origin;
+        Some(
+            div()
+                .absolute()
+                .left(origin.x)
+                .top(origin.y)
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .border_1()
+                .border_color(t::alpha(t::MK, 0.8))
+                .bg(t::alpha(t::MK, 0.12)),
+        )
     }
 
     /// Inside the selected item: after an arrow key, scrolls the items so
@@ -1546,7 +1605,7 @@ impl MediaPoolPanel {
             .child(div().flex_1().child("Name"))
             .child(column("Duration", 56.))
             .child(column("Format", 120.))
-            .child(column("Bin", 90.))
+            .child(column("Folder", 90.))
             .child(div().w(px(20.)).flex_none())
     }
 
@@ -1826,6 +1885,7 @@ impl Render for MediaPoolPanel {
         {
             self.bin = None;
         }
+        self.placed.borrow_mut().clear();
         let items = self.visible_items(cx);
         let folders = self.folders(cx);
         self.dragged = if self.also.is_empty() {
@@ -1843,23 +1903,9 @@ impl Render for MediaPoolPanel {
         let content: AnyElement = if items.is_empty() && folders.is_empty() && generating.is_empty()
         {
             let searching = !self.search.read(cx).value().trim().is_empty();
-            match (searching, self.show) {
-                (true, _) => EmptyState::new(IconName::Search, "No matches").compact(),
-                (false, Show::All) => {
-                    EmptyState::new(IconName::Inbox, "Nothing in this bin").compact()
-                }
-                (false, _) => EmptyState::new(IconName::ListFilter, "Nothing to show")
-                    .compact()
-                    .child(
-                        Button::new("show-all")
-                            .ghost()
-                            .small()
-                            .label("Show all media")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show = Show::All;
-                                cx.notify();
-                            })),
-                    ),
+            match searching {
+                true => EmptyState::new(IconName::Search, "No matches").compact(),
+                false => EmptyState::new(IconName::Inbox, "Nothing in this folder").compact(),
             }
             .into_any_element()
         } else {
@@ -1904,6 +1950,7 @@ impl Render for MediaPoolPanel {
         };
         let measured = self.area.clone();
         let dropping = self.dropping.clone();
+        let panel = cx.entity();
         // Details for an item that shows here, not one left in another bin.
         let selected = self
             .selected_item(cx)
@@ -1937,13 +1984,25 @@ impl Render for MediaPoolPanel {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
-                            // A click between items clears the selection.
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                window.focus(&this.focus, cx);
-                                this.deselect(cx)
-                            }))
-                            .child(content),
+                            // A press between items clears the selection;
+                            // a drag there draws a rubber band.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev, window, cx| this.band_start(ev, window, cx)),
+                            )
+                            .on_mouse_move(cx.listener(|this, ev, _, cx| this.band_move(ev, cx)))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.band_end(cx)),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.band_end(cx)),
+                            )
+                            .child(content)
+                            .context_menu(move |menu, _, _| space_menu(menu, &panel)),
                     )
+                    .children(self.band_overlay())
                     .vertical_scrollbar(&self.scroll)
                     .children(dropping.map(|paths| self.drop_overlay(&paths, cx))),
             )
@@ -2189,6 +2248,46 @@ fn move_menu(
     })
 }
 
+/// Where an item (`Some`) or folder (`None`) painted.
+type Placed = (Option<MediaId>, Bounds<Pixels>);
+
+/// A rubber band across the items, in their scrolling space.
+struct Band {
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    /// The selection it adds to.
+    base: Vec<MediaId>,
+    /// Past a few pixels: a press that stays put only deselects.
+    moved: bool,
+}
+
+impl Band {
+    fn rect(&self) -> Bounds<Pixels> {
+        let (a, b) = (self.from, self.to);
+        Bounds::from_corners(
+            point(a.x.min(b.x), a.y.min(b.y)),
+            point(a.x.max(b.x), a.y.max(b.y)),
+        )
+    }
+}
+
+/// The menu on a right click between items.
+fn space_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>) -> PopupMenu {
+    let (folder, import) = (panel.clone(), panel.clone());
+    menu.item(
+        PopupMenuItem::new("New folder")
+            .icon(IconName::FolderPlus)
+            .on_click(move |_, window, cx| {
+                folder.update(cx, |this, cx| this.new_bin(this.bin, window, cx))
+            }),
+    )
+    .item(
+        PopupMenuItem::new("Import…")
+            .icon(IconName::Download)
+            .on_click(move |_, _, cx| import.update(cx, |this, cx| this.prompt_import(cx))),
+    )
+}
+
 /// The bins by parent, for walking up from a bin.
 struct BinTree(HashMap<BinId, Option<BinId>>);
 
@@ -2229,7 +2328,7 @@ fn bin_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: BinId) -> Popup
         rename.update(cx, |this, cx| this.start_rename(id, window, cx))
     }))
     .item(
-        PopupMenuItem::new("New bin inside")
+        PopupMenuItem::new("New folder inside")
             .icon(IconName::FolderPlus)
             .on_click(move |_, window, cx| {
                 inside.update(cx, |this, cx| this.new_bin(Some(id), window, cx))
@@ -2237,7 +2336,7 @@ fn bin_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: BinId) -> Popup
     )
     .separator()
     .item(
-        PopupMenuItem::new("Delete bin")
+        PopupMenuItem::new("Delete folder")
             .icon(IconName::Trash)
             .destructive()
             .on_click(move |_, _, cx| delete.update(cx, |this, cx| this.delete_bin(id, cx))),
@@ -2432,8 +2531,20 @@ fn waveform(peaks: &[f32]) -> Div {
 /// The ground of a thumbnail before (or without) its frame.
 fn thumb_bg(item: &MediaItem) -> Rgba {
     match item.kind {
-        MediaKind::Audio => t::alpha(t::A, 0.1),
+        // Opaque: the selection ring is a shadow, which shows through.
+        MediaKind::Audio => over(t::A, 0.1, t::P),
         _ => t::R1,
+    }
+}
+
+/// `c` at `alpha` laid over `ground`, as one opaque colour.
+fn over(c: Rgba, alpha: f32, ground: Rgba) -> Rgba {
+    let mix = |a: f32, b: f32| b + (a - b) * alpha;
+    Rgba {
+        r: mix(c.r, ground.r),
+        g: mix(c.g, ground.g),
+        b: mix(c.b, ground.b),
+        a: 1.,
     }
 }
 

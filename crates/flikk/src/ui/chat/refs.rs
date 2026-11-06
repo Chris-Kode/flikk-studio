@@ -66,7 +66,7 @@ impl RefKind {
             Self::Media => "Media",
             Self::Marker => "Markers",
             Self::Track => "Tracks",
-            Self::Bin => "Bins",
+            Self::Bin => "Folders",
             Self::Effect => "Clip effects",
             Self::Transition => "Transitions",
             Self::Fx => "FX library",
