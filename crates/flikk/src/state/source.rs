@@ -7,8 +7,9 @@
 
 use super::{EditorState, PLAY_TICK};
 use crate::ui::viewer::audio::AudioOut;
+use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Clip, ClipContent, MediaItem, MediaKind, Project, Track, TrackKind};
-use flikk_core::{MediaId, Time};
+use flikk_core::{MediaId, Time, TimeRange};
 use gpui_kit::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ use std::time::{Duration, Instant};
 const SOUND_TICK: Duration = Duration::from_millis(100);
 /// Length of the clip a still is shown from.
 const STILL: f64 = 1.0;
+/// How long a still runs once edited in.
+const STILL_CLIP: f64 = 5.0;
 
 pub struct Source {
     item: MediaItem,
@@ -277,5 +280,127 @@ impl EditorState {
             cx.notify();
         }
         false
+    }
+
+    /// The part of `item` an edit takes: its marks, else all of it.
+    pub fn source_range(&self, item: &MediaItem) -> TimeRange {
+        let all = length(item).unwrap_or(Time::from_secs_f64(STILL_CLIP));
+        self.source_marks
+            .get(&item.id)
+            .copied()
+            .filter(|r| !r.is_empty())
+            .unwrap_or(TimeRange::new(Time::ZERO, all))
+    }
+
+    /// Mark in, or out, on the source in the viewer where it is; the
+    /// out mark takes the frame showing. Whether there was a source to
+    /// mark.
+    pub(crate) fn mark_source(&mut self, out: bool, cx: &mut Context<Self>) -> bool {
+        let Some(source) = self.source_picture() else {
+            return false;
+        };
+        let Some(all) = length(&source.item) else {
+            // A still has nothing to mark.
+            return true;
+        };
+        let rate = source.project.timeline.settings.rate;
+        let t = source.position().floor_to_frame(rate);
+        let id = source.item.id;
+        let marked = self.source_marks.get(&id).copied();
+        let range = if out {
+            let start = marked
+                .filter(|r| r.start <= t)
+                .map_or(Time::ZERO, |r| r.start);
+            TimeRange::new(start, (t + rate.frame_duration()).min(all))
+        } else {
+            let end = marked.filter(|r| r.end > t).map_or(all, |r| r.end);
+            TimeRange::new(t, end)
+        };
+        self.source_marks.insert(id, range);
+        cx.notify();
+        true
+    }
+
+    /// A frame back or on in the source in the viewer, paused. Whether
+    /// there was one.
+    pub fn step_source(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(source) = self
+            .source
+            .as_mut()
+            .filter(|s| s.item.kind != MediaKind::Audio && s.can_play())
+        else {
+            return false;
+        };
+        let rate = source.project.timeline.settings.rate;
+        let t = source.position().floor_to_frame(rate);
+        let t = if forward {
+            t + rate.frame_duration()
+        } else {
+            t - rate.frame_duration()
+        };
+        source.from = t.max(Time::ZERO).min(source.last());
+        source.playing = None;
+        cx.notify();
+        true
+    }
+
+    /// Edit `media` into the timeline at the playhead, one after another,
+    /// each its marked part: pictures on V1 with their sound on its audio
+    /// track, sounds on A1. The
+    /// playhead moves past them, ready for the next edit.
+    pub fn edit_at_playhead(
+        &mut self,
+        media: &[MediaId],
+        mode: InsertMode,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self.bus.project();
+        let tl = &project.timeline;
+        let open = |t: &&Track, kind| t.kind == kind && !t.locked;
+        // Tracks list top down: V1 is the last video track, A1 the first
+        // audio track.
+        let video = tl.tracks.iter().rfind(|t| open(t, TrackKind::Video));
+        let audio = tl.tracks.iter().find(|t| open(t, TrackKind::Audio));
+        let (video, audio) = (video.map(|t| t.id), audio.map(|t| t.id));
+        let rate = tl.settings.rate;
+        let mut at = self.playhead.floor_to_frame(rate);
+        let mut commands = Vec::new();
+        for id in media {
+            let Some(item) = project.media(*id) else {
+                continue;
+            };
+            let source = self.source_range(item);
+            let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
+            let tracks: Vec<_> = match item.kind {
+                MediaKind::Audio => audio.into_iter().collect(),
+                _ => video
+                    .into_iter()
+                    .chain(
+                        video
+                            .filter(|_| has_audio)
+                            .and_then(|v| crate::ui::timeline::matching_audio_track(tl, v)),
+                    )
+                    .collect(),
+            };
+            if tracks.is_empty() {
+                continue;
+            }
+            commands.extend(tracks.into_iter().map(|track| Command::InsertClip {
+                media: *id,
+                source,
+                track,
+                at,
+                mode,
+            }));
+            at = at + source.duration();
+        }
+        if commands.is_empty() {
+            self.status = Some("No track to edit into".into());
+            cx.notify();
+            return;
+        }
+        if self.edit_batch(commands, "insert_clip", cx).is_some() {
+            self.seek(at, cx);
+        }
     }
 }

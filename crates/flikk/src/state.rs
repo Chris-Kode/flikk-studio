@@ -82,6 +82,9 @@ pub struct EditorState {
     /// Pool item loaded in the viewer as source (double-click in the pool).
     /// The item playing on its own, or showing in the viewer.
     pub source: Option<Source>,
+    /// In and out marked on pool items in the viewer, for the next edit
+    /// with them; for the session.
+    pub source_marks: std::collections::HashMap<flikk_core::MediaId, TimeRange>,
     /// Caption styles, loudness and ducking defaults of the selected style
     /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: flikk_core::memory::Presets,
@@ -239,6 +242,7 @@ impl EditorState {
             live_version: 0,
             status: persistence::take_notice(),
             source: None,
+            source_marks: Default::default(),
             presets: flikk_core::memory::Presets::default(),
             caption_style: 0,
             caption_live: None,
@@ -1606,8 +1610,23 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Clear the marks of the source in the viewer, else the program's.
+    pub fn clear_marks(&mut self, cx: &mut Context<Self>) {
+        match self.source_picture().map(|s| s.item().id) {
+            Some(id) => {
+                self.source_marks.remove(&id);
+                cx.notify();
+            }
+            None => self.set_in_out(None, cx),
+        }
+    }
+
     /// Mark in at the playhead, keeping the out point when it is still after it.
+    /// With a source in the viewer, marks the source.
     pub fn mark_in(&mut self, cx: &mut Context<Self>) {
+        if self.mark_source(false, cx) {
+            return;
+        }
         let t = self.playhead;
         let end = match self.in_out {
             Some(r) if r.end > t => r.end,
@@ -1617,7 +1636,11 @@ impl EditorState {
     }
 
     /// Mark out at the playhead, keeping the in point when it is still before it.
+    /// With a source in the viewer, marks the source.
     pub fn mark_out(&mut self, cx: &mut Context<Self>) {
+        if self.mark_source(true, cx) {
+            return;
+        }
         let t = self.playhead;
         let start = match self.in_out {
             Some(r) if r.start < t => r.start,

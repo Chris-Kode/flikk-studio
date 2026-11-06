@@ -1315,17 +1315,21 @@ impl TimelinePanel {
         &mut self,
         p: Point<Pixels>,
         bounds: Bounds<Pixels>,
-        media: Option<flikk_core::MediaId>,
+        media: Option<&[flikk_core::MediaId]>,
         cx: &mut Context<Self>,
     ) {
         let hint = if !bounds.contains(&p) {
             None
         } else if let Some(media) = media {
-            self.media_landing(media, p, cx)
-                .map(|(track, range, linked)| DropHint::Insert {
-                    track,
-                    range,
-                    linked,
+            // Several items show as one span on the first one's track.
+            let landings = self.media_landings(media, p, cx);
+            landings
+                .first()
+                .zip(landings.last())
+                .map(|(first, last)| DropHint::Insert {
+                    track: first.track,
+                    range: TimeRange::new(first.range.start, last.range.end),
+                    linked: first.linked,
                 })
         } else {
             let (_, y) = self.local(p);
@@ -1338,87 +1342,73 @@ impl TimelinePanel {
         self.set_drop(hint, cx);
     }
 
-    /// Where `media` dropped at `p` lands: its track, its span there, and
-    /// the audio track its sound goes to.
-    fn media_landing(
+    /// Where `media` dropped at `p` land, one after another, each its
+    /// marked part (all of it without marks).
+    fn media_landings(
         &mut self,
-        media: flikk_core::MediaId,
+        media: &[flikk_core::MediaId],
         p: Point<Pixels>,
         cx: &App,
-    ) -> Option<(TrackId, TimeRange, Option<TrackId>)> {
+    ) -> Vec<Landing> {
         let (x, y) = self.local(p);
-        let project = self.state.read(cx).bus.project();
-        let item = project.media(media)?;
+        let state = self.state.read(cx);
+        let project = state.bus.project();
         let rows = self.rows(&project.timeline);
-        let wanted = match item.kind {
-            MediaKind::Audio => TrackKind::Audio,
-            _ => TrackKind::Video,
-        };
-        let len = item
-            .info
-            .as_ref()
-            .map(|i| i.duration)
-            .filter(|d| d.0 > 0)
-            .unwrap_or(Time::from_secs_f64(5.));
+        let row = layout::row_at(&rows, y).map(|r| r.track);
         let rate = project.timeline.settings.rate;
-        let at = self
+        let mut at = self
             .snap_time(self.viewport.time(x).max(Time::ZERO), &[], cx)
             .floor_to_frame(rate);
-        let range = TimeRange::new(at, at + len);
-        // Over a track that cannot take it, or below the tracks, the item
-        // goes to the first track of its kind that is free there, else the
-        // first of its kind.
-        let fits = |kind: TrackKind| match kind {
-            TrackKind::Audio => {
-                item.kind != MediaKind::Image
-                    && item.info.as_ref().is_none_or(|i| !i.audio.is_empty())
-            }
-            TrackKind::Video | TrackKind::Overlay => item.kind != MediaKind::Audio,
-            TrackKind::Title | TrackKind::Caption => false,
-        };
-        let hovered = layout::row_at(&rows, y)
-            .map(|r| r.track)
-            .filter(|id| project.timeline.track(*id).is_some_and(|t| fits(t.kind)));
-        let mut kin = project.timeline.tracks.iter().filter(|t| t.kind == wanted);
-        let free = kin
-            .clone()
-            .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&range)));
-        let track = hovered.or(free.or_else(|| kin.next()).map(|t| t.id))?;
-        let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
-        // Video with sound lands as a linked pair: the mixer and renderer
-        // read audio from audio tracks only.
-        let linked = match project.timeline.track(track).map(|t| t.kind) {
-            Some(TrackKind::Video | TrackKind::Overlay) if has_audio => {
-                matching_audio_track(&project.timeline, track)
-            }
-            _ => None,
-        };
-        Some((track, range, linked))
+        let mut out = Vec::new();
+        for &id in media {
+            let Some(item) = project.media(id) else {
+                continue;
+            };
+            let source = state.source_range(item);
+            let range = TimeRange::new(at, at + source.duration());
+            let Some((track, linked)) = place(&project.timeline, item, row, range) else {
+                continue;
+            };
+            out.push(Landing {
+                media: id,
+                from: source.start,
+                track,
+                range,
+                linked,
+            });
+            at = range.end;
+        }
+        out
     }
 
     fn drop_media(&mut self, drag: &super::MediaDrag, window: &Window, cx: &mut Context<Self>) {
         self.drop = None;
-        let landing = self.media_landing(drag.media, window.mouse_position(), cx);
+        let landings = self.media_landings(&drag.all(), window.mouse_position(), cx);
         self.snap = None;
-        let Some((track, range, linked)) = landing else {
-            cx.notify();
-            return;
-        };
-        let insert = |track| Command::InsertClip {
-            media: drag.media,
-            source: TimeRange::new(Time::ZERO, range.duration()),
-            track,
-            at: range.start,
-            mode: InsertMode::Overwrite,
-        };
-        self.state.update(cx, |s, cx| match linked {
-            Some(audio) => {
-                s.edit_batch(vec![insert(track), insert(audio)], "insert_clip", cx);
+        let commands: Vec<Command> = landings
+            .iter()
+            .flat_map(|l| {
+                let insert = move |track| Command::InsertClip {
+                    media: l.media,
+                    source: TimeRange::new(l.from, l.from + l.range.duration()),
+                    track,
+                    at: l.range.start,
+                    mode: InsertMode::Overwrite,
+                };
+                std::iter::once(insert(l.track)).chain(l.linked.map(insert))
+            })
+            .collect();
+        match commands.len() {
+            0 => cx.notify(),
+            1 => {
+                let command = commands.into_iter().next().unwrap();
+                self.state.update(cx, |s, cx| s.edit(command, cx));
             }
-            None => {
-                s.edit(insert(track), cx);
+            _ => {
+                self.state
+                    .update(cx, |s, cx| s.edit_batch(commands, "insert_clip", cx));
             }
-        });
+        }
     }
 
     /// Add the sound to the pool, then drop it like pool media.
@@ -1430,10 +1420,7 @@ impl TimelinePanel {
             self.drop = None;
             return;
         };
-        let drag = super::MediaDrag {
-            media,
-            name: drag.name.clone(),
-        };
+        let drag = super::MediaDrag::one(media, drag.name.clone());
         self.drop_media(&drag, window, cx);
     }
 
@@ -2515,7 +2502,56 @@ fn transition_span(vp: &Viewport, range: TimeRange) -> (f32, f32) {
 /// The audio track paired with a video track: V1 ↔ A1, V2 ↔ A2, counting
 /// video tracks up from the one nearest the audio. Falls back to the first
 /// unlocked audio track.
-fn matching_audio_track(timeline: &flikk_core::model::Timeline, video: TrackId) -> Option<TrackId> {
+/// Where one item of a media drop goes.
+struct Landing {
+    media: flikk_core::MediaId,
+    /// Where in the item the clip starts.
+    from: Time,
+    track: TrackId,
+    range: TimeRange,
+    /// The audio track a picture's sound goes to.
+    linked: Option<TrackId>,
+}
+
+/// The track `item` lands on over `row` for `range`, and the audio track
+/// its sound goes to. Over a track that cannot take it, or below the
+/// tracks, it goes to the first track of its kind that is free there,
+/// else the first of its kind.
+fn place(
+    tl: &flikk_core::model::Timeline,
+    item: &flikk_core::model::MediaItem,
+    row: Option<TrackId>,
+    range: TimeRange,
+) -> Option<(TrackId, Option<TrackId>)> {
+    let wanted = match item.kind {
+        MediaKind::Audio => TrackKind::Audio,
+        _ => TrackKind::Video,
+    };
+    let has_audio = item.info.as_ref().is_some_and(|i| !i.audio.is_empty());
+    let fits = |kind: TrackKind| match kind {
+        TrackKind::Audio => item.kind != MediaKind::Image && (item.info.is_none() || has_audio),
+        TrackKind::Video | TrackKind::Overlay => item.kind != MediaKind::Audio,
+        TrackKind::Title | TrackKind::Caption => false,
+    };
+    let hovered = row.filter(|id| tl.track(*id).is_some_and(|t| fits(t.kind)));
+    let mut kin = tl.tracks.iter().filter(|t| t.kind == wanted);
+    let free = kin
+        .clone()
+        .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&range)));
+    let track = hovered.or(free.or_else(|| kin.next()).map(|t| t.id))?;
+    // Video with sound lands as a linked pair: the mixer and renderer
+    // read audio from audio tracks only.
+    let linked = match tl.track(track).map(|t| t.kind) {
+        Some(TrackKind::Video | TrackKind::Overlay) if has_audio => matching_audio_track(tl, track),
+        _ => None,
+    };
+    Some((track, linked))
+}
+
+pub(crate) fn matching_audio_track(
+    timeline: &flikk_core::model::Timeline,
+    video: TrackId,
+) -> Option<TrackId> {
     let videos: Vec<_> = timeline
         .tracks
         .iter()
@@ -2798,7 +2834,7 @@ impl Render for TimelinePanel {
                 }),
             )
             .on_action(cx.listener(|this, _: &ClearInOut, _, cx| {
-                this.state.update(cx, |s, cx| s.set_in_out(None, cx))
+                this.state.update(cx, |s, cx| s.clear_marks(cx))
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.25, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(0.8, cx)))
@@ -2855,11 +2891,11 @@ impl Render for TimelinePanel {
                             )
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::MediaDrag>, _, cx| {
-                                    let media = ev.drag(cx).media;
+                                    let media = ev.drag(cx).all();
                                     this.media_drag_moved(
                                         ev.event.position,
                                         ev.bounds,
-                                        Some(media),
+                                        Some(&media),
                                         cx,
                                     )
                                 },

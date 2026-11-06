@@ -19,7 +19,7 @@ use crate::ui::kit::{
     Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Spinner, Tooltip, h_flex, v_flex,
 };
 use crate::ui::library::shared;
-use flikk_core::command::Command;
+use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Bin, MediaItem, MediaKind};
 use flikk_core::services::{JobState, JobStatus};
 use flikk_core::{BinId, MediaId, Time};
@@ -36,8 +36,43 @@ use thumbs::Thumbs;
 
 const POLL: Duration = Duration::from_millis(500);
 
-/// Narrowest a grid tile gets before the grid drops a column.
-const TILE: f32 = 100.;
+/// What the pool lists first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Imported,
+    Name,
+    Duration,
+    Kind,
+}
+
+/// Which items the pool shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Show {
+    All,
+    Video,
+    Audio,
+    Image,
+    Unused,
+}
+
+/// The grid's tiles: the narrowest one gets before the grid drops a
+/// column.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TileSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl TileSize {
+    fn width(self) -> f32 {
+        match self {
+            TileSize::Small => 76.,
+            TileSize::Medium => 100.,
+            TileSize::Large => 150.,
+        }
+    }
+}
 /// Items area wide enough for the list's format and bin columns.
 const WIDE_LIST: f32 = 420.;
 /// A row of the bins tree.
@@ -55,6 +90,12 @@ actions!(
         SelectNext,
         SelectUp,
         SelectDown,
+        Deselect,
+        InsertSelected,
+        OverwriteSelected,
+        MarkSourceIn,
+        MarkSourceOut,
+        RenameSelected,
     ]
 );
 
@@ -63,12 +104,12 @@ fn bind_keys(cx: &mut App) {
     if BOUND.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let c = Some("MediaPool");
+    // Not while typing in the search, tag or name fields.
     let items = Some("MediaPool && !Input");
     cx.bind_keys([
-        KeyBinding::new("delete", RemoveSelected, c),
-        KeyBinding::new("backspace", RemoveSelected, c),
-        KeyBinding::new("space", PlaySelected, c),
+        KeyBinding::new("delete", RemoveSelected, items),
+        KeyBinding::new("backspace", RemoveSelected, items),
+        KeyBinding::new("space", PlaySelected, items),
         KeyBinding::new("enter", OpenSelected, items),
         KeyBinding::new("/", FocusSearch, items),
         KeyBinding::new("cmd-a", SelectAll, items),
@@ -77,6 +118,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", SelectNext, items),
         KeyBinding::new("up", SelectUp, items),
         KeyBinding::new("down", SelectDown, items),
+        KeyBinding::new("escape", Deselect, items),
+        KeyBinding::new(",", InsertSelected, items),
+        KeyBinding::new("f2", RenameSelected, items),
+        KeyBinding::new("i", MarkSourceIn, items),
+        KeyBinding::new("o", MarkSourceOut, items),
+        KeyBinding::new(".", OverwriteSelected, items),
     ]);
 }
 
@@ -92,7 +139,13 @@ pub struct MediaPoolPanel {
     search: Entity<InputState>,
     tag_input: Entity<InputState>,
     bin_input: Entity<InputState>,
+    /// The item being renamed and its name field.
+    renaming_item: Option<MediaId>,
+    item_input: Entity<InputState>,
     layout: Layout,
+    sort: Sort,
+    show: Show,
+    tile: TileSize,
     /// `None` shows every item.
     bin: Option<BinId>,
     renaming: Option<BinId>,
@@ -115,6 +168,11 @@ pub struct MediaPoolPanel {
     scroll: ScrollHandle,
     /// Scroll the selected item into view when it next paints.
     reveal: Rc<Cell<bool>>,
+    /// The selection in pool order, when it is more than one item: what
+    /// grabbing one of them drags.
+    dragged: Vec<MediaId>,
+    /// The video tile the pointer skims, and where across it, 0..1.
+    skim: Option<(MediaId, f32)>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -125,6 +183,7 @@ impl MediaPoolPanel {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search media"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag"));
         let bin_input = cx.new(|cx| InputState::new(window, cx));
+        let item_input = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
@@ -133,6 +192,12 @@ impl MediaPoolPanel {
                     let tag = input.read(cx).value().trim().to_owned();
                     input.update(cx, |i, cx| i.set_value("", window, cx));
                     this.add_tag(tag, cx);
+                }
+            }),
+            cx.subscribe_in(&item_input, window, |this, input, ev, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let name = input.read(cx).value().trim().to_owned();
+                    this.finish_item_rename(name, window, cx);
                 }
             }),
             cx.subscribe_in(&bin_input, window, |this, input, ev, _, cx| {
@@ -193,7 +258,12 @@ impl MediaPoolPanel {
             search,
             tag_input,
             bin_input,
+            renaming_item: None,
+            item_input,
             layout: Layout::Grid,
+            sort: Sort::Imported,
+            show: Show::All,
+            tile: TileSize::Medium,
             bin: None,
             renaming: None,
             selected,
@@ -207,6 +277,8 @@ impl MediaPoolPanel {
             cols: Cell::new(1),
             scroll: ScrollHandle::default(),
             reveal: Rc::default(),
+            dragged: Vec::new(),
+            skim: None,
             _subscriptions,
             _poll,
         }
@@ -244,8 +316,7 @@ impl MediaPoolPanel {
     }
 
     /// The item's "Analyze" entry; `None` for images, which are not
-    /// analyzed. Disabled while a task's picked model is missing, unless a
-    /// voiceover can do without, or the item is queued or analyzing.
+    /// analyzed.
     fn analyze_entry(&self, id: MediaId, cx: &App) -> Option<AnalyzeEntry> {
         let state = self.state.read(cx);
         let item = state.bus.project().media(id)?;
@@ -253,17 +324,18 @@ impl MediaPoolPanel {
         if item.kind == MediaKind::Image {
             return None;
         }
-        let busy = self
-            .jobs
-            .iter()
-            .rev()
-            .find(|j| j.media == Some(id))
-            .is_some_and(|j| matches!(j.state, JobState::Queued | JobState::Running { .. }));
+        let job = self.jobs.iter().rev().find(|j| j.media == Some(id));
         let fp = item.fingerprint.as_ref();
         let script = item.generated.as_deref().and_then(|g| g.script());
-        Some(AnalyzeEntry {
-            again: fp.and_then(|fp| analysis.analysis(fp)).is_some(),
-            enabled: fp.is_some() && (script.is_some() || state.models_ready()) && !busy,
+        let again = fp.and_then(|fp| analysis.analysis(fp)).is_some();
+        Some(match job.map(|j| &j.state) {
+            Some(JobState::Queued) => AnalyzeEntry::Queued,
+            Some(JobState::Running { .. }) => AnalyzeEntry::Running,
+            // A file that could not be read has nothing to analyze.
+            _ if fp.is_none() => AnalyzeEntry::Unreadable,
+            // A voiceover's script stands in for transcription.
+            _ if script.is_none() && !state.models_ready() => AnalyzeEntry::SetUp,
+            _ => AnalyzeEntry::Ready { again },
         })
     }
 
@@ -293,8 +365,18 @@ impl MediaPoolPanel {
     /// A click on `id`: cmd/ctrl adds or drops it, shift takes the run
     /// from the selected item to it, and a double click opens it.
     fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming_item == Some(id) {
+            // A click in its name field.
+            return;
+        }
         window.focus(&self.focus, cx);
         let m = window.modifiers();
+        if !open && m.secondary() && self.selected == Some(id) {
+            // The next in the selection leads, or nothing is selected.
+            self.selected = (!self.also.is_empty()).then(|| self.also.remove(0));
+            cx.notify();
+            return;
+        }
         let anchor = self.selected.filter(|s| *s != id);
         if let Some(anchor) = anchor.filter(|_| !open) {
             if m.shift {
@@ -326,14 +408,50 @@ impl MediaPoolPanel {
         cx.notify();
     }
 
-    /// Play a sound; show anything else in the viewer.
+    /// `,` and `.`: edit the selection into the timeline at the
+    /// playhead, in pool order.
+    fn edit_selected(&mut self, mode: InsertMode, cx: &mut Context<Self>) {
+        let Some(first) = self.selected else {
+            return;
+        };
+        let ids = self.in_pool_order(&self.group_of(first), cx);
+        self.state
+            .update(cx, |s, cx| s.edit_at_playhead(&ids, mode, cx));
+    }
+
+    /// `ids` in the order the pool shows them.
+    fn in_pool_order(&self, ids: &[MediaId], cx: &App) -> Vec<MediaId> {
+        self.visible_items(cx)
+            .iter()
+            .map(|m| m.id)
+            .filter(|id| ids.contains(id))
+            .collect()
+    }
+
+    /// Clear the selection, which closes the details.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        if self.selected.take().is_some() || !self.also.is_empty() {
+            self.also.clear();
+            cx.notify();
+        }
+    }
+
+    /// Play a sound; show anything else in the viewer, at the frame the
+    /// pointer skims.
     fn open(&mut self, id: MediaId, cx: &mut Context<Self>) {
         let item = self.state.read(cx).bus.project().media(id).cloned();
+        let skimmed = self.skim.filter(|(m, _)| *m == id).map(|(_, f)| f);
         match item {
             Some(item) if self.state.read(cx).can_listen(&item) => {
                 self.state.update(cx, |s, cx| s.toggle_source(&item, cx));
             }
-            _ => self.state.update(cx, |s, cx| s.open_source(id, cx)),
+            Some(item) => self.state.update(cx, |s, cx| {
+                s.open_source(id, cx);
+                if let Some(f) = skimmed {
+                    s.seek_source(&item, f, cx);
+                }
+            }),
+            None => {}
         }
     }
 
@@ -606,6 +724,79 @@ impl MediaPoolPanel {
         cx.notify();
     }
 
+    /// Name item `id` in the pool; typing replaces the name, an empty
+    /// entry keeps it.
+    fn start_item_rename(&mut self, id: MediaId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.state.read(cx).bus.project().media(id) else {
+            return;
+        };
+        let name = item_name(item);
+        self.renaming_item = Some(id);
+        self.item_input.update(cx, |i, cx| {
+            i.set_value("", window, cx);
+            i.set_placeholder(name, window, cx);
+            i.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The pool's name for the item; its file's name drops the rename.
+    fn finish_item_rename(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_item.take() else {
+            return;
+        };
+        window.focus(&self.focus, cx);
+        let item = self.state.read(cx).bus.project().media(id).cloned();
+        if let Some(mut item) = item.filter(|_| !name.is_empty()) {
+            let name = (name != file_name(&item.path)).then_some(name);
+            if item.name != name {
+                item.name = name;
+                self.update_media(item, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Parts of item `id` the timeline uses, as fractions of it.
+    fn used_parts(&self, item: &MediaItem, cx: &App) -> Vec<(f32, f32)> {
+        let Some(length) = item
+            .info
+            .as_ref()
+            .map(|i| i.duration.0 as f32)
+            .filter(|l| *l > 0.)
+        else {
+            return Vec::new();
+        };
+        let tl = &self.state.read(cx).bus.project().timeline;
+        tl.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter(|c| c.media() == Some(item.id))
+            .filter_map(|c| {
+                let (a, b) = (c.to_source(c.start)?, c.to_source(c.end())?);
+                Some((a.0.min(b.0) as f32 / length, a.0.max(b.0) as f32 / length))
+            })
+            .collect()
+    }
+
+    /// The item's name, or its name field while it is renamed.
+    fn name_cell(&self, id: MediaId, look: &Look) -> AnyElement {
+        if self.renaming_item == Some(id) {
+            return div()
+                .min_w_0()
+                .flex_1()
+                .child(Input::new(&self.item_input).small())
+                .into_any_element();
+        }
+        let color = if look.offline { t::WARN } else { t::T1 };
+        div()
+            .min_w_0()
+            .truncate()
+            .text_color(color)
+            .child(look.name.clone())
+            .into_any_element()
+    }
+
     fn finish_rename(&mut self, name: String, cx: &mut Context<Self>) {
         let Some(id) = self.renaming.take() else {
             return;
@@ -643,18 +834,114 @@ impl MediaPoolPanel {
 
     fn visible_items(&self, cx: &App) -> Vec<MediaItem> {
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let project = self.state.read(cx).bus.project();
-        project
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let mut items: Vec<MediaItem> = project
             .media
             .iter()
             .filter(|m| self.bin.is_none() || m.bin == self.bin)
+            .filter(|m| match self.show {
+                Show::All => true,
+                Show::Video => m.kind == MediaKind::Video,
+                Show::Audio => m.kind == MediaKind::Audio,
+                Show::Image => m.kind == MediaKind::Image,
+                Show::Unused => state.clips_using(m.id).is_empty(),
+            })
             .filter(|m| {
                 query.is_empty()
                     || item_name(m).to_lowercase().contains(&query)
                     || m.tags.iter().any(|t| t.to_lowercase().contains(&query))
             })
             .cloned()
-            .collect()
+            .collect();
+        let name = |m: &MediaItem| item_name(m).to_lowercase();
+        match self.sort {
+            Sort::Imported => {}
+            Sort::Name => items.sort_by_key(name),
+            // Longest first.
+            Sort::Duration => items.sort_by_key(|m| {
+                std::cmp::Reverse(m.info.as_ref().map_or(Time::ZERO, |i| i.duration))
+            }),
+            Sort::Kind => items.sort_by_key(|m| {
+                let rank = match m.kind {
+                    MediaKind::Video => 0,
+                    MediaKind::Audio => 1,
+                    MediaKind::Image => 2,
+                };
+                (rank, name(m))
+            }),
+        }
+        items
+    }
+
+    /// Sort, which kinds show, and the grid's tile size.
+    fn view_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (sort, show, tile, layout) = (self.sort, self.show, self.tile, self.layout);
+        let panel = cx.entity();
+        Button::new("view-options")
+            .ghost()
+            .icon(IconName::SlidersHorizontal)
+            .tooltip("View options")
+            // On while a filter hides items.
+            .selected(show != Show::All)
+            .dropdown_menu(move |mut menu, _, _| {
+                menu = menu.item(PopupMenuItem::label("Sort by"));
+                for (label, value) in [
+                    ("Import order", Sort::Imported),
+                    ("Name", Sort::Name),
+                    ("Duration", Sort::Duration),
+                    ("Kind", Sort::Kind),
+                ] {
+                    let p = panel.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(sort == value).on_click(
+                        move |_, _, cx| {
+                            p.update(cx, |this, cx| {
+                                this.sort = value;
+                                cx.notify();
+                            })
+                        },
+                    ));
+                }
+                menu = menu.separator().item(PopupMenuItem::label("Show"));
+                for (label, value) in [
+                    ("All media", Show::All),
+                    ("Video", Show::Video),
+                    ("Audio", Show::Audio),
+                    ("Images", Show::Image),
+                    ("Not in the timeline", Show::Unused),
+                ] {
+                    let p = panel.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(show == value).on_click(
+                        move |_, _, cx| {
+                            p.update(cx, |this, cx| {
+                                this.show = value;
+                                cx.notify();
+                            })
+                        },
+                    ));
+                }
+                if layout == Layout::Grid {
+                    menu = menu.separator().item(PopupMenuItem::label("Thumbnails"));
+                    for (label, value) in [
+                        ("Small", TileSize::Small),
+                        ("Medium", TileSize::Medium),
+                        ("Large", TileSize::Large),
+                    ] {
+                        let p = panel.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new(label).checked(tile == value).on_click(
+                                move |_, _, cx| {
+                                    p.update(cx, |this, cx| {
+                                        this.tile = value;
+                                        cx.notify();
+                                    })
+                                },
+                            ));
+                    }
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     /// The Edit panel header's actions while the pool shows: generate and
@@ -739,6 +1026,7 @@ impl MediaPoolPanel {
     }
 
     fn search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = self.view_menu(cx);
         let toggle = |id: &'static str, icon: IconName, tip: &'static str, layout: Layout| {
             Button::new(id)
                 .ghost()
@@ -760,6 +1048,7 @@ impl MediaPoolPanel {
                     .min_w_0()
                     .child(Input::new(&self.search).search().kbd("/")),
             )
+            .child(view)
             .child(toggle("grid", IconName::LayoutGrid, "Grid", Layout::Grid))
             .child(toggle("list", IconName::List, "List", Layout::List))
     }
@@ -784,7 +1073,7 @@ impl MediaPoolPanel {
                     cx.notify();
                 }))
                 .on_drop(cx.listener(|this, drag: &MediaDrag, _, cx| {
-                    this.move_to_bin(&this.group_of(drag.media), None, cx)
+                    this.move_to_bin(&drag.all(), None, cx)
                 }))
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                     this.import(paths.paths().to_vec(), None, cx)
@@ -820,7 +1109,7 @@ impl MediaPoolPanel {
                         }
                     }))
                     .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
-                        this.move_to_bin(&this.group_of(drag.media), Some(id), cx)
+                        this.move_to_bin(&drag.all(), Some(id), cx)
                     }))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                         this.import(paths.paths().to_vec(), Some(id), cx)
@@ -886,13 +1175,75 @@ impl MediaPoolPanel {
     }
 
     fn tile(&mut self, item: &MediaItem, cx: &mut Context<Self>) -> AnyElement {
-        let look = self.look(item, cx);
+        let mut look = self.look(item, cx);
         let id = item.id;
         let group = SharedString::from(format!("media-{id}"));
         let multi =
             (self.selected == Some(id) && !self.also.is_empty()).then(|| self.also.len() + 1);
-        let mut thumb = thumb_box(&look, item)
+        // Skimming: the pointer's place across a video's picture picks
+        // the frame.
+        let duration = item.info.as_ref().map(|i| i.duration);
+        let skimmable = item.kind == MediaKind::Video && !look.offline && duration.is_some();
+        let skim = self
+            .skim
+            .filter(|(m, _)| *m == id && skimmable)
+            .map(|(_, f)| f);
+        if let Some(f) = skim {
+            let slot = (f * thumbs::SKIM_SLOTS as f32) as u32;
+            if let Some(image) = self.thumbs.skim(item, slot, &self.state, cx) {
+                look.thumb = Some(image);
+            }
+        }
+        let peaks = (item.kind == MediaKind::Audio)
+            .then(|| self.thumbs.peaks(item, &self.state, cx))
+            .flatten();
+        let used = self.used_parts(item, cx);
+        let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+        let seen = bounds.clone();
+        let mut thumb = thumb_box(&look, item, peaks.as_deref().map(Vec::as_slice))
+            .id(ElementId::Name(format!("thumb-{id}").into()))
             .when(look.selected, |d| d.shadow(ring()))
+            .child(
+                canvas(move |b, _, _| seen.set(b), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .when(skimmable, |d| {
+                d.on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                    let b = bounds.get();
+                    let f = ((ev.position.x - b.left()) / b.size.width).clamp(0., 1.);
+                    this.skim = Some((id, f));
+                    cx.notify();
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if !hovered && this.skim.is_some_and(|(m, _)| m == id) {
+                        this.skim = None;
+                        cx.notify();
+                    }
+                }))
+            })
+            .children(skim.map(|f| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(f))
+                    .w(px(1.))
+                    .bg(t::T1)
+            }))
+            // What the timeline uses, along the bottom, unless a bar
+            // shows progress there.
+            .when(look.progress.is_none() && look.listening.is_none(), |d| {
+                d.children(used.into_iter().map(|(a, b)| {
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .h(px(2.))
+                        .left(relative(a.clamp(0., 1.)))
+                        .w(relative((b - a).clamp(0.01, 1.)))
+                        .bg(t::OK)
+                }))
+            })
             .children(look.listenable.then(|| {
                 div().absolute().top(px(4.)).left(px(4.)).child(listen_dot(
                     format!("listen-{id}"),
@@ -909,7 +1260,11 @@ impl MediaPoolPanel {
                     .child(Icon::new(IconName::Check).size(px(9.)))
                     .child(n.to_string())
             }))
-            .children(item.info.as_ref().map(|i| duration_chip(i.duration)))
+            .children(duration.map(|d| {
+                // While skimming, where in the item.
+                let at = skim.map_or(d, |f| Time((d.0 as f64 * f as f64) as i64));
+                duration_chip(at)
+            }))
             .child(
                 self.more_button(id, group.clone(), cx)
                     .absolute()
@@ -919,7 +1274,6 @@ impl MediaPoolPanel {
         if multi.is_none() && !look.listenable {
             thumb = thumb.children(corner_badge(item, look.progress));
         }
-        let name_color = if look.offline { t::WARN } else { t::T1 };
         let meta = self.meta_line(&look, id);
         let tile = self
             .item_frame(item, &group, cx)
@@ -928,13 +1282,7 @@ impl MediaPoolPanel {
             .min_w_0()
             .text_size(px(11.))
             .child(thumb)
-            .child(
-                div()
-                    .mt(px(4.))
-                    .truncate()
-                    .text_color(name_color)
-                    .child(look.name.clone()),
-            )
+            .child(div().mt(px(4.)).flex().child(self.name_cell(id, &look)))
             .child(meta);
         self.with_menu(tile, id, cx)
     }
@@ -980,7 +1328,6 @@ impl MediaPoolPanel {
             .listening
             .map(|f| (f, t::T1))
             .or(look.progress.and_then(Progress::bar));
-        let name_color = if look.offline { t::WARN } else { t::T1 };
         let duration = item
             .info
             .as_ref()
@@ -1008,13 +1355,7 @@ impl MediaPoolPanel {
                     .flex_1()
                     .min_w_0()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(name_color)
-                            .child(look.name.clone()),
-                    )
+                    .child(self.name_cell(id, &look))
                     .children(bar.map(|(f, color)| bar3(f, color).w(px(40.)).flex_none())),
             )
             .child(column(duration, 56.).font_family(t::mono()))
@@ -1039,9 +1380,18 @@ impl MediaPoolPanel {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = item.id;
-        let drag = MediaDrag {
-            media: id,
-            name: item_name(item).into(),
+        // Grabbing a selected item drags the selection, in pool order.
+        let drag = match self.dragged.split_first() {
+            Some((&first, more)) if self.dragged.contains(&id) => {
+                let project = self.state.read(cx).bus.project();
+                let name = project.media(first).map(item_name).unwrap_or_default();
+                MediaDrag {
+                    media: first,
+                    name: name.into(),
+                    more: more.to_vec(),
+                }
+            }
+            _ => MediaDrag::one(id, item_name(item).into()),
         };
         div()
             .id(ElementId::Name(group.clone()))
@@ -1049,6 +1399,7 @@ impl MediaPoolPanel {
             .relative()
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                cx.stop_propagation();
                 this.select(id, ev.click_count() >= 2, window, cx)
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
@@ -1159,6 +1510,7 @@ impl MediaPoolPanel {
         let (seeker, sound) = (self.state.clone(), item.clone());
         let bar = seek_bar(
             fraction,
+            None,
             move |f, cx| seeker.update(cx, |s, cx| s.seek_source(&sound, f, cx)),
             cx,
         );
@@ -1194,9 +1546,7 @@ impl MediaPoolPanel {
                 head.push(v.codec.clone());
                 head.extend(v.hdr.as_ref().map(|h| h.describe()));
             }
-            if !info.container.is_empty() {
-                head.push(info.container.clone());
-            }
+            head.extend(file_type(item));
             lines.push(head.join(" · ").into());
             for a in &info.audio {
                 let mut parts = vec![format!("A{}", a.index)];
@@ -1377,6 +1727,24 @@ impl Render for MediaPoolPanel {
                 }
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &Deselect, _, cx| this.deselect(cx)))
+            .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
+                if let Some(id) = this.selected {
+                    this.start_item_rename(id, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MarkSourceIn, _, cx| {
+                this.state.update(cx, |s, cx| s.mark_source(false, cx));
+            }))
+            .on_action(cx.listener(|this, _: &MarkSourceOut, _, cx| {
+                this.state.update(cx, |s, cx| s.mark_source(true, cx));
+            }))
+            .on_action(cx.listener(|this, _: &InsertSelected, _, cx| {
+                this.edit_selected(InsertMode::Insert, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OverwriteSelected, _, cx| {
+                this.edit_selected(InsertMode::Overwrite, cx)
+            }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step(-this.row_step(), cx)))
@@ -1395,20 +1763,46 @@ impl Render for MediaPoolPanel {
         }
 
         let items = self.visible_items(cx);
+        self.dragged = if self.also.is_empty() {
+            Vec::new()
+        } else {
+            let selection = self.selection();
+            items
+                .iter()
+                .map(|m| m.id)
+                .filter(|id| selection.contains(id))
+                .collect()
+        };
         let width = self.area.get().size.width.as_f32();
         let wide = width >= WIDE_LIST;
         let content: AnyElement = if items.is_empty() && generating.is_empty() {
             let searching = !self.search.read(cx).value().trim().is_empty();
-            match searching {
-                true => EmptyState::new(IconName::Search, "No matches").compact(),
-                false => EmptyState::new(IconName::Inbox, "Nothing in this bin").compact(),
+            match (searching, self.show) {
+                (true, _) => EmptyState::new(IconName::Search, "No matches").compact(),
+                (false, Show::All) => {
+                    EmptyState::new(IconName::Inbox, "Nothing in this bin").compact()
+                }
+                (false, _) => EmptyState::new(IconName::ListFilter, "Nothing to show")
+                    .compact()
+                    .child(
+                        Button::new("show-all")
+                            .ghost()
+                            .small()
+                            .label("Show all media")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show = Show::All;
+                                cx.notify();
+                            })),
+                    ),
             }
             .into_any_element()
         } else {
             match self.layout {
                 Layout::Grid => {
                     let cols = if width > 0. {
-                        ((width - 16. + 8.) / (TILE + 8.)).floor().max(1.) as u16
+                        ((width - 16. + 8.) / (self.tile.width() + 8.))
+                            .floor()
+                            .max(1.) as u16
                     } else {
                         2
                     };
@@ -1474,6 +1868,11 @@ impl Render for MediaPoolPanel {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
+                            // A click between items clears the selection.
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.focus(&this.focus, cx);
+                                this.deselect(cx)
+                            }))
                             .child(content),
                     )
                     .vertical_scrollbar(&self.scroll)
@@ -1496,12 +1895,19 @@ struct Look {
     offline: bool,
 }
 
-/// The "Analyze" entry of an item's menu.
+/// The "Analyze" entry of an item's menu: what it says about why it
+/// cannot run, or where to go so it can.
 #[derive(Clone, Copy)]
-struct AnalyzeEntry {
-    /// The item has results, which analyzing replaces.
-    again: bool,
-    enabled: bool,
+enum AnalyzeEntry {
+    Queued,
+    Running,
+    Unreadable,
+    /// A model it needs is missing: opens where to get it.
+    SetUp,
+    /// `again` when it has results, which analyzing replaces.
+    Ready {
+        again: bool,
+    },
 }
 
 /// The menu of item `id`, from its "⋯" button or a right click; built as
@@ -1527,14 +1933,25 @@ fn item_menu(
     }
     if let Some(entry) = panel.read(cx).analyze_entry(id, cx) {
         let panel = panel.clone();
-        let label = if entry.again {
-            "Analyze again"
-        } else {
-            "Analyze"
-        };
-        menu = menu.item(PopupMenuItem::new(label).disabled(!entry.enabled).on_click(
-            move |_, _, cx| panel.update(cx, |this, cx| this.analyze(id, entry.again, cx)),
-        ));
+        menu = menu.item(match entry {
+            AnalyzeEntry::Queued => PopupMenuItem::new("Queued for analysis").disabled(true),
+            AnalyzeEntry::Running => PopupMenuItem::new("Analyzing…").disabled(true),
+            AnalyzeEntry::Unreadable => {
+                PopupMenuItem::new("Can’t analyze this file").disabled(true)
+            }
+            AnalyzeEntry::SetUp => {
+                PopupMenuItem::new("Set up analysis…").on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::app::OpenIntegrationsSettings), cx)
+                })
+            }
+            AnalyzeEntry::Ready { again } => {
+                let label = if again { "Analyze again" } else { "Analyze" };
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    panel.update(cx, |this, cx| this.analyze(id, again, cx))
+                })
+            }
+        });
+        menu = menu.separator();
     }
     let (open, remove) = (panel.clone(), panel.clone());
     let state = panel.read(cx).state.clone();
@@ -1547,11 +1964,28 @@ fn item_menu(
         true => "Play",
         false => "Open in viewer",
     };
-    let mut menu = menu.item(
-        PopupMenuItem::new(open_label).on_click(move |_, window, cx| {
-            open.update(cx, |this, cx| this.select(id, true, window, cx))
-        }),
-    );
+    let rename = panel.clone();
+    let mut menu = menu
+        .item(
+            PopupMenuItem::new(open_label).on_click(move |_, window, cx| {
+                open.update(cx, |this, cx| this.select(id, true, window, cx))
+            }),
+        )
+        .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+            rename.update(cx, |this, cx| this.start_item_rename(id, window, cx))
+        }));
+    let edits = |label: &'static str, mode: InsertMode| {
+        let (p, group) = (panel.clone(), group.clone());
+        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+            let ids = p.read(cx).in_pool_order(&group, cx);
+            let state = p.read(cx).state.clone();
+            state.update(cx, |s, cx| s.edit_at_playhead(&ids, mode, cx));
+        })
+    };
+    menu = menu
+        .separator()
+        .item(edits("Insert at playhead", InsertMode::Insert))
+        .item(edits("Overwrite at playhead", InsertMode::Overwrite));
     let clips: Vec<_> = group
         .iter()
         .flat_map(|m| state.read(cx).clips_using(*m))
@@ -1577,7 +2011,7 @@ fn item_menu(
                 .on_click(move |_, _, cx| cx.reveal_path(&path)),
         );
     }
-    let menu = move_menu(menu, panel, &group, window, cx);
+    let menu = move_menu(menu.separator(), panel, &group, window, cx);
     let menu = if shared::can_save_sound(state.read(cx), id) {
         menu.item(
             PopupMenuItem::new("Add to Library")
@@ -1839,7 +2273,7 @@ fn column(text: impl Into<SharedString>, width: f32) -> Div {
 
 /// The 16:9 picture of a tile: the frame, or the kind's mark, the offline
 /// veil and the progress along the bottom.
-fn thumb_box(look: &Look, item: &MediaItem) -> Div {
+fn thumb_box(look: &Look, item: &MediaItem, peaks: Option<&[f32]>) -> Div {
     let bar = look
         .listening
         .map(|f| (f, t::T1))
@@ -1855,15 +2289,18 @@ fn thumb_box(look: &Look, item: &MediaItem) -> Div {
             (Some(image), _) => {
                 d.child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
             }
-            (None, MediaKind::Audio) => d.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::AudioLines).size(px(22.)).color(t::A)),
-            ),
+            (None, MediaKind::Audio) => match peaks {
+                Some(peaks) => d.child(waveform(peaks)),
+                None => d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::AudioLines).size(px(22.)).color(t::A)),
+                ),
+            },
             (None, MediaKind::Image) => d.child(
                 div()
                     .absolute()
@@ -1895,6 +2332,26 @@ fn thumb_box(look: &Look, item: &MediaItem) -> Div {
                 .h(px(2.))
                 .w(relative(f.clamp(0., 1.)))
                 .bg(color)
+        }))
+}
+
+/// A sound's peaks across a tile, mirrored about the middle.
+fn waveform(peaks: &[f32]) -> Div {
+    h_flex()
+        .absolute()
+        .left(px(6.))
+        .right(px(6.))
+        .top(px(16.))
+        .bottom(px(16.))
+        .items_center()
+        .gap(px(1.))
+        .children(peaks.iter().map(|p| {
+            div()
+                .flex_1()
+                .min_w(px(1.))
+                .h(relative(p.clamp(0.04, 1.)))
+                .rounded(px(1.))
+                .bg(t::alpha(t::A, 0.8))
         }))
 }
 
@@ -2092,6 +2549,20 @@ fn trim_rate(fps: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// "MP4", "WAV": the file's extension, else the first name the
+/// container goes by ("mov,mp4,m4a,…" is one demuxer).
+fn file_type(item: &MediaItem) -> Option<String> {
+    let ext = item
+        .path
+        .extension()
+        .map(|e| e.to_string_lossy().to_uppercase());
+    let container = item.info.as_ref().and_then(|i| {
+        let first = i.container.split(',').next()?.trim();
+        (!first.is_empty()).then(|| first.to_uppercase())
+    });
+    ext.or(container)
+}
+
 fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2101,6 +2572,7 @@ fn file_name(path: &std::path::Path) -> String {
 /// A bar at `fraction`; a click on it calls `seek` with where, 0..1.
 pub(crate) fn seek_bar(
     fraction: f32,
+    marked: Option<(f32, f32)>,
     seek: impl Fn(f32, &mut App) + 'static,
     _: &App,
 ) -> impl IntoElement {
@@ -2123,6 +2595,17 @@ pub(crate) fn seek_bar(
                 .absolute()
                 .size_full(),
         )
+        .children(marked.map(|(a, b)| {
+            // The marked part, under the position.
+            let (a, b) = (a.clamp(0., 1.), b.clamp(0., 1.));
+            div()
+                .absolute()
+                .left(relative(a))
+                .w(relative((b - a).max(0.)))
+                .h(px(9.))
+                .rounded(px(2.))
+                .bg(t::alpha(t::AC, 0.3))
+        }))
         .child(bar3(fraction, t::T1).w_full())
 }
 
@@ -2223,6 +2706,9 @@ impl Progress {
 }
 
 pub(crate) fn item_name(item: &MediaItem) -> String {
+    if let Some(name) = &item.name {
+        return name.clone();
+    }
     item.path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

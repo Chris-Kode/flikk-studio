@@ -1114,6 +1114,7 @@ pub fn media_item(
         tags: Vec::new(),
         proxy: None,
         generated: Some(Box::new(generated.info.clone())),
+        name: None,
         tone_map: Default::default(),
     }
 }
@@ -1131,6 +1132,7 @@ pub fn image_item(path: PathBuf, media: Option<&dyn crate::services::MediaServic
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     }
 }
@@ -1147,6 +1149,7 @@ pub fn sample_item(path: PathBuf, media: Option<&dyn crate::services::MediaServi
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     }
 }

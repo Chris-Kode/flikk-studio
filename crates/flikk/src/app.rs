@@ -46,6 +46,7 @@ actions!(
         TogglePlay,
         OpenSettings,
         OpenAgentSettings,
+        OpenIntegrationsSettings,
         ToggleAgent,
         Quit
     ]
@@ -880,6 +881,11 @@ impl Render for Flikk {
             .on_action(cx.listener(|this, _: &OpenAgentSettings, window, cx| {
                 this.open_settings(Some(SettingsTab::Agent), window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &OpenIntegrationsSettings, window, cx| {
+                    this.open_settings(Some(SettingsTab::Integrations), window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewProject, window, cx| {
                 projects::new_project(&this.state, window, cx)
             }))
