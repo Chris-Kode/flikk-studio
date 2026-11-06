@@ -2194,9 +2194,11 @@ fn item_menu(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let (group, folders) = panel.read(cx).split_of(Entry::Media(id));
+    if group.len() + folders.len() > 1 {
+        return selection_menu(menu, panel, id, group, folders, window, cx);
+    }
     let mut menu = menu;
-    let group = panel.read(cx).group_of(id);
-    let (_, folders) = panel.read(cx).split_of(Entry::Media(id));
     let state = panel.read(cx).state.clone();
     if state.read(cx).offline.contains(&id) {
         menu = menu
@@ -2319,37 +2321,94 @@ fn item_menu(
         }
         None => menu,
     };
-    let menu = match panel.read(cx).sync_group(id, cx) {
-        Some((group, recorder)) => {
-            let item = |label: &'static str, mute: bool| {
-                let state = panel.read(cx).state.clone();
-                let group = group.clone();
-                PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    let group = group.clone();
-                    state.update(cx, |s, cx| s.sync_media(group, mute, cx))
-                })
-            };
-            let menu = menu.item(item("Sync", false));
-            if recorder {
-                menu.item(item("Sync, Recorder Sound", true))
-            } else {
-                menu
-            }
-        }
-        None => menu,
-    };
-    let remove_label = match group.len() + folders.len() {
-        1 => "Remove from project".to_owned(),
-        n => format!("Remove {n} items from project"),
-    };
     menu.separator().item(
-        PopupMenuItem::new(remove_label)
+        PopupMenuItem::new("Remove from project")
             .icon(IconName::Trash)
             .destructive()
             .on_click(move |_, window, cx| {
                 let (group, folders) = (group.clone(), folders.clone());
                 remove.update(cx, |this, cx| {
                     this.confirm_delete(group, folders, window, cx)
+                })
+            }),
+    )
+}
+
+/// The menu on several entries: only what applies to every one of them.
+/// Clips can go on the timeline and sync; folders only move or go.
+fn selection_menu(
+    menu: PopupMenu,
+    panel: &Entity<MediaPoolPanel>,
+    lead: MediaId,
+    media: Vec<MediaId>,
+    folders: Vec<BinId>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    if !folders.is_empty() {
+        return common_menu(menu, panel, media, folders, window, cx);
+    }
+    let state = panel.read(cx).state.clone();
+    let edits = |label: &'static str, mode: InsertMode| {
+        let (p, media) = (panel.clone(), media.clone());
+        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+            let ids = p.read(cx).in_pool_order(&media, cx);
+            let state = p.read(cx).state.clone();
+            state.update(cx, |s, cx| s.edit_at_playhead(&ids, mode, cx));
+        })
+    };
+    let mut menu = menu
+        .item(edits("Insert at playhead", InsertMode::Insert))
+        .item(edits("Overwrite at playhead", InsertMode::Overwrite));
+    let clips: Vec<_> = media
+        .iter()
+        .flat_map(|m| state.read(cx).clips_using(*m))
+        .collect();
+    if !clips.is_empty() {
+        let s = state.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Select in timeline").on_click(move |_, _, cx| {
+                let clips = clips.clone();
+                s.update(cx, |s, cx| s.select_clips(clips, cx))
+            }),
+        );
+    }
+    if let Some((group, recorder)) = panel.read(cx).sync_group(lead, cx) {
+        let item = |label: &'static str, mute: bool| {
+            let (state, group) = (state.clone(), group.clone());
+            PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                let group = group.clone();
+                state.update(cx, |s, cx| s.sync_media(group, mute, cx))
+            })
+        };
+        menu = menu.separator().item(item("Sync", false));
+        if recorder {
+            menu = menu.item(item("Sync, Recorder Sound", true));
+        }
+    }
+    common_menu(menu.separator(), panel, media, folders, window, cx)
+}
+
+/// What any selection can do: move, and leave the project.
+fn common_menu(
+    menu: PopupMenu,
+    panel: &Entity<MediaPoolPanel>,
+    media: Vec<MediaId>,
+    folders: Vec<BinId>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let menu = move_menu(menu, panel, &media, &folders, window, cx);
+    let label = format!("Remove {} items from project", media.len() + folders.len());
+    let remove = panel.clone();
+    menu.separator().item(
+        PopupMenuItem::new(label)
+            .icon(IconName::Trash)
+            .destructive()
+            .on_click(move |_, window, cx| {
+                let (media, folders) = (media.clone(), folders.clone());
+                remove.update(cx, |this, cx| {
+                    this.confirm_delete(media, folders, window, cx)
                 })
             }),
     )
@@ -2586,22 +2645,21 @@ fn bin_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let (media, folders) = panel.read(cx).split_of(Entry::Folder(id));
-    let many = media.len() + folders.len();
-    let mut menu = menu;
-    if many == 1 {
-        let rename = panel.clone();
-        menu = menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
-            rename.update(cx, |this, cx| this.start_rename(id, window, cx))
-        }));
+    if media.len() + folders.len() > 1 {
+        let lead = media.first().copied();
+        return match lead {
+            Some(lead) => selection_menu(menu, panel, lead, media, folders, window, cx),
+            None => common_menu(menu, panel, media, folders, window, cx),
+        };
     }
+    let rename = panel.clone();
+    let menu = menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+        rename.update(cx, |this, cx| this.start_rename(id, window, cx))
+    }));
     let menu = move_menu(menu, panel, &media, &folders, window, cx);
-    let label = match many {
-        1 => "Delete folder".to_owned(),
-        n => format!("Remove {n} items from project"),
-    };
     let delete = panel.clone();
     menu.separator().item(
-        PopupMenuItem::new(label)
+        PopupMenuItem::new("Delete folder")
             .icon(IconName::Trash)
             .destructive()
             .on_click(move |_, window, cx| {
