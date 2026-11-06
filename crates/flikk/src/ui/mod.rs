@@ -33,6 +33,9 @@ pub struct MediaDrag {
     pub media: flikk_core::MediaId,
     pub name: SharedString,
     pub more: Vec<flikk_core::MediaId>,
+    /// Folders selected with it, which a folder takes; the timeline
+    /// doesn't.
+    pub folders: Vec<flikk_core::BinId>,
 }
 
 impl MediaDrag {
@@ -41,6 +44,7 @@ impl MediaDrag {
             media,
             name,
             more: Vec::new(),
+            folders: Vec::new(),
         }
     }
 
@@ -54,7 +58,25 @@ impl MediaDrag {
 
 impl Render for MediaDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        match self.more.len() {
+        match self.more.len() + self.folders.len() {
+            0 => drag_chip(self.name.clone()),
+            n => drag_chip(format!("{} +{n}", self.name).into()),
+        }
+    }
+}
+
+/// Drag payload for pool folders, with the items selected with them,
+/// dropped on another folder.
+#[derive(Clone, Debug)]
+pub struct FolderDrag {
+    pub folders: Vec<flikk_core::BinId>,
+    pub media: Vec<flikk_core::MediaId>,
+    pub name: SharedString,
+}
+
+impl Render for FolderDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        match self.folders.len() + self.media.len() - 1 {
             0 => drag_chip(self.name.clone()),
             n => drag_chip(format!("{} +{n}", self.name).into()),
         }
