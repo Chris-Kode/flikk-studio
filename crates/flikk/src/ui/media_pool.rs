@@ -36,15 +36,6 @@ use thumbs::Thumbs;
 
 const POLL: Duration = Duration::from_millis(500);
 
-/// What the pool lists first.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sort {
-    Imported,
-    Name,
-    Duration,
-    Kind,
-}
-
 /// Which items the pool shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Show {
@@ -55,28 +46,10 @@ enum Show {
     Unused,
 }
 
-/// The grid's tiles: the narrowest one gets before the grid drops a
-/// column.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TileSize {
-    Small,
-    Medium,
-    Large,
-}
-
-impl TileSize {
-    fn width(self) -> f32 {
-        match self {
-            TileSize::Small => 76.,
-            TileSize::Medium => 100.,
-            TileSize::Large => 150.,
-        }
-    }
-}
+/// Narrowest a grid tile gets before the grid drops a column.
+const TILE: f32 = 100.;
 /// Items area wide enough for the list's format and bin columns.
 const WIDE_LIST: f32 = 420.;
-/// A row of the bins tree.
-const BIN_ROW: f32 = 24.;
 
 actions!(
     media_pool,
@@ -96,6 +69,7 @@ actions!(
         MarkSourceIn,
         MarkSourceOut,
         RenameSelected,
+        OpenParentBin,
     ]
 );
 
@@ -121,6 +95,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Deselect, items),
         KeyBinding::new(",", InsertSelected, items),
         KeyBinding::new("f2", RenameSelected, items),
+        KeyBinding::new("cmd-up", OpenParentBin, items),
+        KeyBinding::new("ctrl-up", OpenParentBin, items),
         KeyBinding::new("i", MarkSourceIn, items),
         KeyBinding::new("o", MarkSourceOut, items),
         KeyBinding::new(".", OverwriteSelected, items),
@@ -143,10 +119,8 @@ pub struct MediaPoolPanel {
     renaming_item: Option<MediaId>,
     item_input: Entity<InputState>,
     layout: Layout,
-    sort: Sort,
     show: Show,
-    tile: TileSize,
-    /// `None` shows every item.
+    /// The bin open in the pool; `None` is the top level.
     bin: Option<BinId>,
     renaming: Option<BinId>,
     selected: Option<MediaId>,
@@ -261,9 +235,7 @@ impl MediaPoolPanel {
             renaming_item: None,
             item_input,
             layout: Layout::Grid,
-            sort: Sort::Imported,
             show: Show::All,
-            tile: TileSize::Medium,
             bin: None,
             renaming: None,
             selected,
@@ -662,7 +634,9 @@ impl MediaPoolPanel {
         self.state.read(cx).bus.project().bins.clone()
     }
 
+    /// A bin in `parent`, which opens, named as it is typed.
     fn new_bin(&mut self, parent: Option<BinId>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_bin(parent, cx);
         let mut bins = self.bins(cx);
         let n = bins.len() + 1;
         let bin = Bin {
@@ -832,14 +806,28 @@ impl MediaPoolPanel {
 
     // ------------------------------------------------------------- render
 
+    /// Whether the items shown come from the open bin and every bin in it,
+    /// without folders: while searching or filtering.
+    fn flattened(&self, cx: &App) -> bool {
+        self.show != Show::All || !self.search.read(cx).value().trim().is_empty()
+    }
+
+    /// The open bin's items, in import order; while searching or
+    /// filtering, the matches from it and every bin in it.
     fn visible_items(&self, cx: &App) -> Vec<MediaItem> {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let state = self.state.read(cx);
         let project = state.bus.project();
-        let mut items: Vec<MediaItem> = project
+        let tree = BinTree::of(&project.bins);
+        let flat = self.flattened(cx);
+        project
             .media
             .iter()
-            .filter(|m| self.bin.is_none() || m.bin == self.bin)
+            .filter(|m| match (flat, self.bin) {
+                (true, None) => true,
+                (true, Some(open)) => tree.within(m.bin, open),
+                (false, open) => tree.home(m.bin) == open,
+            })
             .filter(|m| match self.show {
                 Show::All => true,
                 Show::Video => m.kind == MediaKind::Video,
@@ -853,56 +841,53 @@ impl MediaPoolPanel {
                     || m.tags.iter().any(|t| t.to_lowercase().contains(&query))
             })
             .cloned()
-            .collect();
-        let name = |m: &MediaItem| item_name(m).to_lowercase();
-        match self.sort {
-            Sort::Imported => {}
-            Sort::Name => items.sort_by_key(name),
-            // Longest first.
-            Sort::Duration => items.sort_by_key(|m| {
-                std::cmp::Reverse(m.info.as_ref().map_or(Time::ZERO, |i| i.duration))
-            }),
-            Sort::Kind => items.sort_by_key(|m| {
-                let rank = match m.kind {
-                    MediaKind::Video => 0,
-                    MediaKind::Audio => 1,
-                    MediaKind::Image => 2,
-                };
-                (rank, name(m))
-            }),
-        }
-        items
+            .collect()
     }
 
-    /// Sort, which kinds show, and the grid's tile size.
-    fn view_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (sort, show, tile, layout) = (self.sort, self.show, self.tile, self.layout);
+    /// The bins in the open bin, each with how many items it holds,
+    /// counting its own bins'; none while searching or filtering.
+    fn folders(&self, cx: &App) -> Vec<(Bin, usize)> {
+        if self.flattened(cx) {
+            return Vec::new();
+        }
+        let project = self.state.read(cx).bus.project();
+        let tree = BinTree::of(&project.bins);
+        let mut counts: HashMap<BinId, usize> = HashMap::new();
+        for item in &project.media {
+            for bin in tree.ancestry(item.bin) {
+                *counts.entry(bin).or_default() += 1;
+            }
+        }
+        project
+            .bins
+            .iter()
+            .filter(|b| tree.home(b.parent) == self.bin)
+            .map(|b| (b.clone(), counts.get(&b.id).copied().unwrap_or(0)))
+            .collect()
+    }
+
+    /// Open `bin` in the pool; the selection stays behind.
+    fn open_bin(&mut self, bin: Option<BinId>, cx: &mut Context<Self>) {
+        if self.bin != bin {
+            self.bin = bin;
+            self.selected = None;
+            self.also.clear();
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
+        cx.notify();
+    }
+
+    /// Which kinds of item show.
+    fn show_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let show = self.show;
         let panel = cx.entity();
-        Button::new("view-options")
+        Button::new("show")
             .ghost()
-            .icon(IconName::SlidersHorizontal)
-            .tooltip("View options")
+            .icon(IconName::ListFilter)
+            .tooltip("Show")
             // On while a filter hides items.
             .selected(show != Show::All)
             .dropdown_menu(move |mut menu, _, _| {
-                menu = menu.item(PopupMenuItem::label("Sort by"));
-                for (label, value) in [
-                    ("Import order", Sort::Imported),
-                    ("Name", Sort::Name),
-                    ("Duration", Sort::Duration),
-                    ("Kind", Sort::Kind),
-                ] {
-                    let p = panel.clone();
-                    menu = menu.item(PopupMenuItem::new(label).checked(sort == value).on_click(
-                        move |_, _, cx| {
-                            p.update(cx, |this, cx| {
-                                this.sort = value;
-                                cx.notify();
-                            })
-                        },
-                    ));
-                }
-                menu = menu.separator().item(PopupMenuItem::label("Show"));
                 for (label, value) in [
                     ("All media", Show::All),
                     ("Video", Show::Video),
@@ -919,25 +904,6 @@ impl MediaPoolPanel {
                             })
                         },
                     ));
-                }
-                if layout == Layout::Grid {
-                    menu = menu.separator().item(PopupMenuItem::label("Thumbnails"));
-                    for (label, value) in [
-                        ("Small", TileSize::Small),
-                        ("Medium", TileSize::Medium),
-                        ("Large", TileSize::Large),
-                    ] {
-                        let p = panel.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new(label).checked(tile == value).on_click(
-                                move |_, _, cx| {
-                                    p.update(cx, |this, cx| {
-                                        this.tile = value;
-                                        cx.notify();
-                                    })
-                                },
-                            ));
-                    }
                 }
                 menu
             })
@@ -1026,7 +992,7 @@ impl MediaPoolPanel {
     }
 
     fn search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = self.view_menu(cx);
+        let view = self.show_menu(cx);
         let toggle = |id: &'static str, icon: IconName, tip: &'static str, layout: Layout| {
             Button::new(id)
                 .ghost()
@@ -1053,89 +1019,175 @@ impl MediaPoolPanel {
             .child(toggle("list", IconName::List, "List", Layout::List))
     }
 
-    /// All media, then each bin under its parent, then "New bin".
-    fn bins_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Where the pool is: Media, then each bin down to the open one, the
+    /// middle ones folded on a deep path; and New bin. Each place takes
+    /// dropped media.
+    fn path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let project = self.state.read(cx).bus.project();
-        let total = project.media.len();
-        let mut counts: HashMap<BinId, usize> = HashMap::new();
-        for bin in project.media.iter().filter_map(|m| m.bin) {
-            *counts.entry(bin).or_default() += 1;
+        let tree = BinTree::of(&project.bins);
+        let mut path: Vec<Bin> = tree
+            .ancestry(self.bin)
+            .filter_map(|id| project.bins.iter().find(|b| b.id == id).cloned())
+            .collect();
+        path.reverse();
+        let mut crumbs: Vec<(Option<BinId>, SharedString)> = vec![(None, "Media".into())];
+        let folded = path.len() > 2;
+        let shown = if folded {
+            &path[path.len() - 2..]
+        } else {
+            &path[..]
+        };
+        if folded {
+            // "…" goes to the bin above the ones shown.
+            crumbs.push((Some(path[path.len() - 3].id), "…".into()));
         }
-        let bins = project.bins.clone();
-        let tree = bin_tree(&bins);
-        let mut rows = vec![
-            bin_row("bin-all", self.bin.is_none(), 0)
-                .child(Icon::new(IconName::FolderOpen).size(px(12.)).color(t::T2))
-                .child(div().flex_1().min_w_0().truncate().child("All media"))
-                .child(count(total))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.bin = None;
-                    cx.notify();
-                }))
-                .on_drop(cx.listener(|this, drag: &MediaDrag, _, cx| {
-                    this.move_to_bin(&drag.all(), None, cx)
-                }))
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                    this.import(paths.paths().to_vec(), None, cx)
-                }))
-                .into_any_element(),
-        ];
-        for (bin, depth) in tree {
-            let id = bin.id;
-            let selected = self.bin == Some(id);
-            let row = bin_row(
-                ElementId::Name(format!("bin-{id}").into()),
-                selected,
-                depth + 1,
-            )
-            .child(Icon::new(IconName::Folder).size(px(12.)));
-            if self.renaming == Some(id) {
-                rows.push(
-                    row.child(div().flex_1().child(Input::new(&self.bin_input).small()))
-                        .into_any_element(),
-                );
-                continue;
+        crumbs.extend(shown.iter().map(|b| (Some(b.id), b.name.clone().into())));
+        let last = crumbs.len() - 1;
+        let mut bar = h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(8.))
+            .gap(px(2.))
+            .text_size(px(12.));
+        for (i, (bin, label)) in crumbs.into_iter().enumerate() {
+            if i > 0 {
+                bar = bar.child(Icon::new(IconName::ChevronRight).size(px(10.)).color(t::T3));
             }
-            let panel = cx.entity();
-            rows.push(
-                row.child(div().flex_1().min_w_0().truncate().child(bin.name.clone()))
-                    .child(count(counts.get(&id).copied().unwrap_or(0)))
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        if ev.click_count() >= 2 {
-                            this.start_rename(id, window, cx);
-                        } else {
-                            this.bin = Some(id);
-                            cx.notify();
-                        }
-                    }))
+            let current = i == last;
+            bar = bar.child(
+                div()
+                    .id(("crumb", i))
+                    .flex_shrink(1.)
+                    .min_w(px(16.))
+                    .max_w(px(140.))
+                    .h(px(22.))
+                    .px(px(5.))
+                    .flex()
+                    .items_center()
+                    .rounded(t::RADIUS_SM)
+                    .text_color(if current { t::T1 } else { t::T3 })
+                    .when(!current, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(t::HV).text_color(t::T1))
+                    })
+                    .drag_over::<MediaDrag>(|s, _, _, _| s.bg(t::AC_WASH))
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(t::AC_WASH))
+                    .child(div().truncate().child(label))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_bin(bin, cx)))
                     .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
-                        this.move_to_bin(&drag.all(), Some(id), cx)
+                        this.move_to_bin(&drag.all(), bin, cx)
                     }))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
-                        this.import(paths.paths().to_vec(), Some(id), cx)
-                    }))
-                    .context_menu(move |menu, _, _| bin_menu(menu, &panel, id))
-                    .into_any_element(),
+                        this.import(paths.paths().to_vec(), bin, cx)
+                    })),
             );
         }
-        rows.push(
-            bin_row("new-bin", false, 1)
-                .text_color(t::T3)
-                .child(Icon::new(IconName::FolderPlus).size(px(12.)))
-                .child("New bin")
-                .on_click(cx.listener(|this, _, window, cx| this.new_bin(None, window, cx)))
-                .into_any_element(),
-        );
-        // As tall as its rows, up to a few; past that they scroll.
-        let height = (rows.len() as f32 * BIN_ROW + 6.).min(200.);
-        div()
-            .id("bins")
-            .flex_none()
-            .h(px(height))
-            .px(px(4.))
-            .pb(px(6.))
-            .overflow_y_scrollbar()
-            .child(v_flex().children(rows))
+        bar.child(div().flex_1()).child(
+            Button::new("new-bin")
+                .ghost()
+                .xsmall()
+                .icon(IconName::FolderPlus)
+                .tooltip("New bin")
+                .on_click(cx.listener(|this, _, window, cx| this.new_bin(this.bin, window, cx))),
+        )
+    }
+
+    /// A bin among the items: a click opens it, dropped media goes in,
+    /// and its menu renames or deletes it. A tile in the grid, a row in
+    /// the list.
+    fn folder(&self, bin: &Bin, count: usize, wide: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = bin.id;
+        let renaming = self.renaming == Some(id);
+        let name = if renaming {
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(&self.bin_input).small())
+                .into_any_element()
+        } else {
+            div()
+                .min_w_0()
+                .truncate()
+                .child(bin.name.clone())
+                .into_any_element()
+        };
+        let holds = match count {
+            0 => "Empty".to_owned(),
+            1 => "1 item".to_owned(),
+            n => format!("{n} items"),
+        };
+        let panel = cx.entity();
+        let el = div()
+            .id(ElementId::Name(format!("folder-{id}").into()))
+            .group(SharedString::from(format!("folder-{id}")))
+            .min_w_0()
+            .cursor_pointer()
+            .when(!renaming, |d| {
+                d.on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_bin(Some(id), cx)
+                }))
+            })
+            .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
+                this.move_to_bin(&drag.all(), Some(id), cx)
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                this.import(paths.paths().to_vec(), Some(id), cx)
+            }));
+        let el = match self.layout {
+            Layout::Grid => el
+                .flex()
+                .flex_col()
+                .text_size(px(11.))
+                .child(
+                    div()
+                        .w_full()
+                        .aspect_ratio(16. / 9.)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(t::RADIUS_SM)
+                        .border_1()
+                        .border_color(t::LN)
+                        .bg(t::R1)
+                        .group_hover(format!("folder-{id}"), |s| s.border_color(t::LN_HV))
+                        .drag_over::<MediaDrag>(|s, _, _, _| s.bg(t::AC_WASH).border_color(t::AC))
+                        .drag_over::<ExternalPaths>(|s, _, _, _| {
+                            s.bg(t::AC_WASH).border_color(t::AC)
+                        })
+                        .child(Icon::new(IconName::Folder).size(px(22.)).color(t::T2)),
+                )
+                .child(div().mt(px(4.)).flex().child(name))
+                .child(div().text_size(px(10.)).text_color(t::T3).child(holds)),
+            Layout::List => el
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(8.))
+                .rounded(t::RADIUS)
+                .text_size(px(12.))
+                .hover(|s| s.bg(t::HV))
+                .drag_over::<MediaDrag>(|s, _, _, _| s.bg(t::AC_WASH))
+                .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(t::AC_WASH))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .w(px(36.))
+                        .h(px(20.))
+                        .rounded(px(3.))
+                        .bg(t::R1)
+                        .child(Icon::new(IconName::Folder).size(px(12.)).color(t::T2)),
+                )
+                .child(h_flex().flex_1().min_w_0().child(name))
+                .child(column(holds, 56.).text_color(t::T3))
+                .when(wide, |d| d.child(column("", 120.)).child(column("", 90.)))
+                .child(div().w(px(20.)).flex_none()),
+        };
+        el.context_menu(move |menu, _, _| bin_menu(menu, &panel, id))
+            .into_any_element()
     }
 
     /// What a tile or row shows of `item`.
@@ -1728,6 +1780,11 @@ impl Render for MediaPoolPanel {
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.deselect(cx)))
+            .on_action(cx.listener(|this, _: &OpenParentBin, _, cx| {
+                let bins = &this.state.read(cx).bus.project().bins;
+                let parent = BinTree::of(bins).ancestry(this.bin).nth(1);
+                this.open_bin(parent, cx)
+            }))
             .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
                 if let Some(id) = this.selected {
                     this.start_item_rename(id, window, cx);
@@ -1762,7 +1819,15 @@ impl Render for MediaPoolPanel {
             return root.child(self.empty(cx));
         }
 
+        // The open bin can go, by undo or by another's hand.
+        if self
+            .bin
+            .is_some_and(|id| !project.bins.iter().any(|b| b.id == id))
+        {
+            self.bin = None;
+        }
         let items = self.visible_items(cx);
+        let folders = self.folders(cx);
         self.dragged = if self.also.is_empty() {
             Vec::new()
         } else {
@@ -1775,7 +1840,8 @@ impl Render for MediaPoolPanel {
         };
         let width = self.area.get().size.width.as_f32();
         let wide = width >= WIDE_LIST;
-        let content: AnyElement = if items.is_empty() && generating.is_empty() {
+        let content: AnyElement = if items.is_empty() && folders.is_empty() && generating.is_empty()
+        {
             let searching = !self.search.read(cx).value().trim().is_empty();
             match (searching, self.show) {
                 (true, _) => EmptyState::new(IconName::Search, "No matches").compact(),
@@ -1800,17 +1866,16 @@ impl Render for MediaPoolPanel {
             match self.layout {
                 Layout::Grid => {
                     let cols = if width > 0. {
-                        ((width - 16. + 8.) / (self.tile.width() + 8.))
-                            .floor()
-                            .max(1.) as u16
+                        ((width - 16. + 8.) / (TILE + 8.)).floor().max(1.) as u16
                     } else {
                         2
                     };
                     self.cols.set(cols);
-                    let mut tiles: Vec<AnyElement> = generating
+                    let mut tiles: Vec<AnyElement> = folders
                         .iter()
-                        .map(|g| self.generation_tile(g, cx))
+                        .map(|(b, n)| self.folder(b, *n, false, cx))
                         .collect();
+                    tiles.extend(generating.iter().map(|g| self.generation_tile(g, cx)));
                     tiles.extend(items.iter().map(|m| self.tile(m, cx)));
                     div()
                         .grid()
@@ -1823,10 +1888,11 @@ impl Render for MediaPoolPanel {
                         .into_any_element()
                 }
                 Layout::List => {
-                    let mut rows: Vec<AnyElement> = generating
+                    let mut rows: Vec<AnyElement> = folders
                         .iter()
-                        .map(|g| self.generation_row(g, cx))
+                        .map(|(b, n)| self.folder(b, *n, wide, cx))
                         .collect();
+                    rows.extend(generating.iter().map(|g| self.generation_row(g, cx)));
                     rows.extend(items.iter().map(|m| self.row(m, wide, cx)));
                     v_flex()
                         .p(px(4.))
@@ -1838,9 +1904,12 @@ impl Render for MediaPoolPanel {
         };
         let measured = self.area.clone();
         let dropping = self.dropping.clone();
-        let selected = self.selected_item(cx);
+        // Details for an item that shows here, not one left in another bin.
+        let selected = self
+            .selected_item(cx)
+            .filter(|item| items.iter().any(|m| m.id == item.id));
         root.child(self.search_row(cx))
-            .child(self.bins_tree(cx))
+            .child(self.path_bar(cx))
             .child(div().flex_none().h(px(1.)).bg(t::LN))
             .child(
                 div()
@@ -2087,7 +2156,7 @@ fn move_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let project = panel.read(cx).state.read(cx).bus.project();
-    let bins: Vec<(Option<BinId>, String, usize)> = std::iter::once((None, "All media".into(), 0))
+    let bins: Vec<(Option<BinId>, String, usize)> = std::iter::once((None, "Media".into(), 0))
         .chain(
             bin_tree(&project.bins)
                 .into_iter()
@@ -2118,6 +2187,39 @@ fn move_menu(
         }
         menu
     })
+}
+
+/// The bins by parent, for walking up from a bin.
+struct BinTree(HashMap<BinId, Option<BinId>>);
+
+impl BinTree {
+    fn of(bins: &[Bin]) -> Self {
+        Self(bins.iter().map(|b| (b.id, b.parent)).collect())
+    }
+
+    /// Where something in `bin` shows: that bin, or the top level when
+    /// the bin is gone.
+    fn home(&self, bin: Option<BinId>) -> Option<BinId> {
+        bin.filter(|b| self.0.contains_key(b))
+    }
+
+    /// `bin`, then each bin it sits in, up to the top level.
+    fn ancestry(&self, bin: Option<BinId>) -> impl Iterator<Item = BinId> + '_ {
+        let mut at = self.home(bin);
+        // A bad parent loop stops after this many.
+        let mut left = self.0.len();
+        std::iter::from_fn(move || {
+            let here = at.filter(|_| left > 0)?;
+            left -= 1;
+            at = self.home(self.0.get(&here).copied().flatten());
+            Some(here)
+        })
+    }
+
+    /// Whether something in `bin` is in `open` or a bin inside it.
+    fn within(&self, bin: Option<BinId>, open: BinId) -> bool {
+        self.ancestry(bin).any(|b| b == open)
+    }
 }
 
 /// A bin's menu on a right click.
@@ -2230,34 +2332,6 @@ fn bin_tree(bins: &[Bin]) -> Vec<(&Bin, usize)> {
         }
     }
     out
-}
-
-/// A row of the bins tree, indented `depth` levels.
-fn bin_row(id: impl Into<ElementId>, selected: bool, depth: usize) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .flex_none()
-        .h(px(BIN_ROW))
-        .gap(px(6.))
-        .pl(px(6. + 16. * depth as f32))
-        .pr(px(6.))
-        .rounded(t::RADIUS_SM)
-        .cursor_pointer()
-        .text_color(if selected { t::T1 } else { t::T2 })
-        .when(selected, |d| d.bg(t::HV))
-        .when(!selected, |d| d.hover(|s| s.bg(t::alpha(t::HV, 0.6))))
-        .drag_over::<MediaDrag>(|s, _, _, _| s.bg(t::AC_WASH))
-        .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(t::AC_WASH))
-}
-
-/// A mono item count at the end of a bins row.
-fn count(n: usize) -> impl IntoElement {
-    div()
-        .flex_none()
-        .font_family(t::mono())
-        .text_size(px(10.))
-        .text_color(t::T3)
-        .child(n.to_string())
 }
 
 /// A fixed-width list column.
