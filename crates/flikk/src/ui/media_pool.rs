@@ -666,32 +666,93 @@ impl MediaPoolPanel {
         cx.notify();
     }
 
-    /// Remove bin `id`; what it held, items and bins, moves up to its
-    /// parent. One undo step.
-    fn delete_bin(&mut self, id: BinId, cx: &mut Context<Self>) {
-        let mut bins = self.bins(cx);
+    /// Delete folder `id` and everything in it, items and folders; one
+    /// undo step. An empty folder goes at once; otherwise this asks
+    /// first, counting what goes with it.
+    fn confirm_delete_bin(&mut self, id: BinId, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let project = state.bus.project();
+        let Some(name) = project
+            .bins
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| b.name.clone())
+        else {
+            return;
+        };
+        let tree = BinTree::of(&project.bins);
+        let folders = project
+            .bins
+            .iter()
+            .filter(|b| b.id != id && tree.within(Some(b.id), id))
+            .count();
+        let media: Vec<MediaId> = project
+            .media
+            .iter()
+            .filter(|m| tree.within(m.bin, id))
+            .map(|m| m.id)
+            .collect();
+        if folders == 0 && media.is_empty() {
+            self.delete_bin(id, Vec::new(), cx);
+            return;
+        }
+        let clips: usize = media.iter().map(|m| state.clips_using(*m).len()).sum();
+        let plural = |n: usize, one: &str, many: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {many}"),
+        };
+        let held: Vec<String> = [
+            (media.len(), "item", "items"),
+            (folders, "folder", "folders"),
+        ]
+        .into_iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, one, many)| plural(n, one, many))
+        .collect();
+        let mut description = format!("It holds {}.", held.join(" and "));
+        if clips > 0 {
+            description.push_str(&format!(
+                " {} on the timeline go too.",
+                plural(clips, "clip", "clips")
+            ));
+        }
+        let panel = cx.entity().downgrade();
+        window.open_confirm(cx, move |dialog, _, _| {
+            let (panel, media) = (panel.clone(), media.clone());
+            dialog
+                .title(format!("Delete “{name}” and everything in it?"))
+                .description(description.clone())
+                .destructive()
+                .confirm("Delete", move |_, cx| {
+                    let _ = panel.update(cx, |this, cx| this.delete_bin(id, media.clone(), cx));
+                    true
+                })
+        });
+    }
+
+    /// Remove folder `id`, the folders in it and `media`, what they hold.
+    fn delete_bin(&mut self, id: BinId, media: Vec<MediaId>, cx: &mut Context<Self>) {
+        let bins = self.bins(cx);
+        let tree = BinTree::of(&bins);
         let Some(parent) = bins.iter().find(|b| b.id == id).map(|b| b.parent) else {
             return;
         };
-        bins.retain(|b| b.id != id);
-        for b in bins.iter_mut().filter(|b| b.parent == Some(id)) {
-            b.parent = parent;
+        let keep: Vec<Bin> = bins
+            .iter()
+            .filter(|b| !tree.within(Some(b.id), id))
+            .cloned()
+            .collect();
+        // Out of the folder before it goes.
+        if tree.within(self.bin, id) {
+            self.open_bin(tree.home(parent), cx);
         }
-        let project = self.state.read(cx).bus.project();
-        let mut commands = vec![Command::SetBins { bins }];
-        commands.extend(project.media.iter().filter(|m| m.bin == Some(id)).map(|m| {
-            Command::UpdateMedia {
-                media: MediaItem {
-                    bin: parent,
-                    ..m.clone()
-                },
-            }
-        }));
+        self.also.retain(|a| !media.contains(a));
+        if self.selected.is_some_and(|s| media.contains(&s)) {
+            self.selected = None;
+            self.also.clear();
+        }
         self.state
-            .update(cx, |s, cx| s.execute_batch(commands, "delete_bin", cx));
-        if self.bin == Some(id) {
-            self.bin = parent;
-        }
+            .update(cx, |s, cx| s.remove_from_pool(&media, Some(keep), cx));
         cx.notify();
     }
 
@@ -2382,7 +2443,9 @@ fn bin_menu(menu: PopupMenu, panel: &Entity<MediaPoolPanel>, id: BinId) -> Popup
         PopupMenuItem::new("Delete folder")
             .icon(IconName::Trash)
             .destructive()
-            .on_click(move |_, _, cx| delete.update(cx, |this, cx| this.delete_bin(id, cx))),
+            .on_click(move |_, window, cx| {
+                delete.update(cx, |this, cx| this.confirm_delete_bin(id, window, cx))
+            }),
     )
 }
 

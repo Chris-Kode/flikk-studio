@@ -534,6 +534,17 @@ impl EditorState {
 
     /// Remove pool items and their clips, as one undo step.
     pub fn remove_media(&mut self, media: &[flikk_core::MediaId], cx: &mut Context<Self>) {
+        self.remove_from_pool(media, None, cx);
+    }
+
+    /// Remove pool items and their clips and, with `bins`, set the pool's
+    /// bins to those: one undo step.
+    pub fn remove_from_pool(
+        &mut self,
+        media: &[flikk_core::MediaId],
+        bins: Option<Vec<flikk_core::model::Bin>>,
+        cx: &mut Context<Self>,
+    ) {
         let clips: Vec<_> = media.iter().flat_map(|m| self.clips_using(*m)).collect();
         let mut commands = Vec::new();
         if !clips.is_empty() {
@@ -543,7 +554,13 @@ impl EditorState {
             });
         }
         commands.extend(media.iter().map(|&media| Command::RemoveMedia { media }));
-        if self.execute_batch(commands, "remove_media", cx).is_some() {
+        let label = if bins.is_some() {
+            "delete_bin"
+        } else {
+            "remove_media"
+        };
+        commands.extend(bins.map(|bins| Command::SetBins { bins }));
+        if self.execute_batch(commands, label, cx).is_some() {
             self.selection.clips.retain(|c| !clips.contains(c));
             if self
                 .source
