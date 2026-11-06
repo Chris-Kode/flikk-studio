@@ -26,16 +26,60 @@ pub mod welcome;
 use gpui_kit::*;
 use kit::theme as t;
 
-/// Drag payload for pool media dropped on the timeline or viewer.
+/// Drag payload for pool media dropped on the timeline or viewer: the
+/// item grabbed and, when it was part of a selection, the rest of it.
 #[derive(Clone, Debug)]
 pub struct MediaDrag {
     pub media: flikk_core::MediaId,
     pub name: SharedString,
+    pub more: Vec<flikk_core::MediaId>,
+    /// Folders selected with it, which a folder takes; the timeline
+    /// doesn't.
+    pub folders: Vec<flikk_core::BinId>,
+}
+
+impl MediaDrag {
+    pub fn one(media: flikk_core::MediaId, name: SharedString) -> Self {
+        Self {
+            media,
+            name,
+            more: Vec::new(),
+            folders: Vec::new(),
+        }
+    }
+
+    /// Every item dragged, the grabbed one first.
+    pub fn all(&self) -> Vec<flikk_core::MediaId> {
+        std::iter::once(self.media)
+            .chain(self.more.iter().copied())
+            .collect()
+    }
 }
 
 impl Render for MediaDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        drag_chip(self.name.clone())
+        match self.more.len() + self.folders.len() {
+            0 => drag_chip(self.name.clone()),
+            n => drag_chip(format!("{} +{n}", self.name).into()),
+        }
+    }
+}
+
+/// Drag payload for pool folders, with the items selected with them,
+/// dropped on another folder.
+#[derive(Clone, Debug)]
+pub struct FolderDrag {
+    pub folders: Vec<flikk_core::BinId>,
+    pub media: Vec<flikk_core::MediaId>,
+    pub name: SharedString,
+}
+
+impl Render for FolderDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        match self.folders.len() + self.media.len() - 1 {
+            0 => drag_chip(self.name.clone()),
+            n => drag_chip(format!("{} +{n}", self.name).into()),
+        }
     }
 }
 

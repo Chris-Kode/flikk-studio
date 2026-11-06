@@ -86,6 +86,10 @@ pub struct Fingerprint(pub String);
 pub struct MediaItem {
     pub id: MediaId,
     pub path: PathBuf,
+    /// What the pool calls it, when renamed there; the file keeps its
+    /// name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub kind: MediaKind,
     pub fingerprint: Option<Fingerprint>,
     pub info: Option<MediaInfo>,

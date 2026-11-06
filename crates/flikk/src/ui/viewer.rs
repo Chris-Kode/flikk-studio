@@ -34,7 +34,8 @@ mod masks;
 mod player;
 
 use super::timeline::{
-    NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward, ShuttleReverse, ShuttleStop,
+    ClearInOut, MarkIn, MarkOut, NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward,
+    ShuttleReverse, ShuttleStop,
 };
 use crate::app::TogglePlay;
 use crate::render_cache::{self, Globals};
@@ -52,7 +53,7 @@ use crate::ui::mixer::meter;
 use audio::AudioOut;
 use cache::{FrameCache, SharedCache};
 use flikk_core::agent::Workspace;
-use flikk_core::command::Command;
+use flikk_core::command::{Command, InsertMode};
 use flikk_core::compose::{self, MaskView, Stills};
 use flikk_core::model::{
     Clip, ClipContent, Fit, MediaItem, MediaKind, Project, TrackKind, Transform,
@@ -93,6 +94,8 @@ actions!(
         NudgeItemDownMore,
         Deselect,
         RemoveMask,
+        InsertSource,
+        OverwriteSource,
     ]
 );
 
@@ -116,6 +119,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Deselect, g),
         KeyBinding::new("delete", RemoveMask, g),
         KeyBinding::new("backspace", RemoveMask, g),
+        // Three-point editing from the source in the viewer.
+        KeyBinding::new("i", MarkIn, Some("Viewer")),
+        KeyBinding::new("o", MarkOut, Some("Viewer")),
+        KeyBinding::new("alt-x", ClearInOut, Some("Viewer")),
+        KeyBinding::new(",", InsertSource, Some("Viewer")),
+        KeyBinding::new(".", OverwriteSource, Some("Viewer")),
     ]);
 }
 const TRANSPORT_HEIGHT: f32 = 44.;
@@ -1563,7 +1572,10 @@ impl ViewerPanel {
                 .color(t::G),
             );
 
-        let marked = state.in_out.filter(|_| source.is_none());
+        let marked = match source {
+            Some(s) => state.source_marks.get(&s.item().id).copied(),
+            None => state.in_out,
+        };
         let step = |id: &'static str, icon, tip: &'static str, kbd: &'static str| {
             Button::new(id)
                 .ghost()
@@ -1578,9 +1590,75 @@ impl ViewerPanel {
             }
         };
         let (mark_in, mark_out) = (self.state.clone(), self.state.clone());
+        let source_frames = source.is_some_and(|s| s.can_play());
         let buttons = h_flex().flex_none().gap(px(2.)).map(|d| {
-            if source.is_some() {
+            if source.is_some() && !source_frames {
                 return d.child(play);
+            }
+            if source.is_some() {
+                let (mark_in, mark_out) = (self.state.clone(), self.state.clone());
+                let (insert, overwrite) = (self.state.clone(), self.state.clone());
+                let (back, on) = (self.state.clone(), self.state.clone());
+                return d
+                    .child(
+                        step("source-mark-in", IconName::ArrowRightToLine, "Mark in", "I")
+                            .when(marked.is_some(), |b| b.text_color(t::T1))
+                            .on_click(move |_, _, cx| mark_in.update(cx, |s, cx| s.mark_in(cx))),
+                    )
+                    .child(
+                        step(
+                            "source-prev-frame",
+                            IconName::StepBack,
+                            "Previous frame",
+                            "Left",
+                        )
+                        .on_click(move |_, _, cx| {
+                            back.update(cx, |s, cx| s.step_source(false, cx));
+                        }),
+                    )
+                    .child(play)
+                    .child(
+                        step(
+                            "source-next-frame",
+                            IconName::StepForward,
+                            "Next frame",
+                            "Right",
+                        )
+                        .on_click(move |_, _, cx| {
+                            on.update(cx, |s, cx| s.step_source(true, cx));
+                        }),
+                    )
+                    .child(
+                        step(
+                            "source-mark-out",
+                            IconName::ArrowLeftToLine,
+                            "Mark out",
+                            "O",
+                        )
+                        .when(marked.is_some(), |b| b.text_color(t::T1))
+                        .on_click(move |_, _, cx| mark_out.update(cx, |s, cx| s.mark_out(cx))),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(t::LN))
+                    .child(
+                        step(
+                            "source-insert",
+                            IconName::BetweenHorizontalStart,
+                            "Insert at playhead",
+                            ",",
+                        )
+                        .on_click(move |_, _, cx| edit_source(&insert, InsertMode::Insert, cx)),
+                    )
+                    .child(
+                        step(
+                            "source-overwrite",
+                            IconName::Replace,
+                            "Overwrite at playhead",
+                            ".",
+                        )
+                        .on_click(move |_, _, cx| {
+                            edit_source(&overwrite, InsertMode::Overwrite, cx)
+                        }),
+                    );
             }
             d.child(
                 step("viewer-mark-in", IconName::ArrowRightToLine, "Mark in", "I")
@@ -1637,8 +1715,11 @@ impl ViewerPanel {
         let seek = source.filter(|s| s.can_play()).map(|s| {
             let item = s.item().clone();
             let state = self.state.clone();
+            let length = s.project().timeline.duration().0.max(1) as f32;
+            let range = marked.map(|r| (r.start.0 as f32 / length, r.end.0 as f32 / length));
             seek_bar(
                 s.fraction(),
+                range,
                 move |f, cx| state.update(cx, |s, cx| s.seek_source(&item, f, cx)),
                 cx,
             )
@@ -1667,7 +1748,8 @@ impl ViewerPanel {
                         )),
                 )
             })
-            .children(marked.map(|r| {
+            // A source's marks show on its seek bar.
+            .children(marked.filter(|_| source.is_none()).map(|r| {
                 h_flex()
                     .gap(px(10.))
                     .child(mark("In", r.start))
@@ -1938,10 +2020,31 @@ impl Render for ViewerPanel {
                 super::timeline::transport(&this.state, a, cx)
             }))
             .on_action(cx.listener(|this, a: &PrevFrame, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
+                if !this.state.update(cx, |s, cx| s.step_source(false, cx)) {
+                    super::timeline::transport(&this.state, a, cx)
+                }
             }))
             .on_action(cx.listener(|this, a: &NextFrame, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
+                if !this.state.update(cx, |s, cx| s.step_source(true, cx)) {
+                    super::timeline::transport(&this.state, a, cx)
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &MarkIn, _, cx| this.state.update(cx, |s, cx| s.mark_in(cx))),
+            )
+            .on_action(
+                cx.listener(|this, _: &MarkOut, _, cx| {
+                    this.state.update(cx, |s, cx| s.mark_out(cx))
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ClearInOut, _, cx| {
+                this.state.update(cx, |s, cx| s.clear_marks(cx))
+            }))
+            .on_action(cx.listener(|this, _: &InsertSource, _, cx| {
+                edit_source(&this.state, InsertMode::Insert, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OverwriteSource, _, cx| {
+                edit_source(&this.state, InsertMode::Overwrite, cx)
             }))
             .on_action(cx.listener(|this, a: &PrevCut, _, cx| {
                 super::timeline::transport(&this.state, a, cx)
@@ -2128,4 +2231,13 @@ fn fit(bounds: Bounds<Pixels>, aspect: f32, pad: Pixels) -> Bounds<Pixels> {
         ),
         size(fw, fh),
     )
+}
+
+/// Edit the source in the viewer into the timeline at the playhead.
+fn edit_source(state: &Entity<EditorState>, mode: InsertMode, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        if let Some(id) = s.source_picture().map(|p| p.item().id) {
+            s.edit_at_playhead(&[id], mode, cx);
+        }
+    });
 }

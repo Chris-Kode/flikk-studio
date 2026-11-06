@@ -82,6 +82,9 @@ pub struct EditorState {
     /// Pool item loaded in the viewer as source (double-click in the pool).
     /// The item playing on its own, or showing in the viewer.
     pub source: Option<Source>,
+    /// In and out marked on pool items in the viewer, for the next edit
+    /// with them; for the session.
+    pub source_marks: std::collections::HashMap<flikk_core::MediaId, TimeRange>,
     /// Caption styles, loudness and ducking defaults of the selected style
     /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: flikk_core::memory::Presets,
@@ -239,6 +242,7 @@ impl EditorState {
             live_version: 0,
             status: persistence::take_notice(),
             source: None,
+            source_marks: Default::default(),
             presets: flikk_core::memory::Presets::default(),
             caption_style: 0,
             caption_live: None,
@@ -528,9 +532,20 @@ impl EditorState {
             .collect()
     }
 
-    /// Remove a pool item and its clips, as one undo step.
-    pub fn remove_media(&mut self, media: flikk_core::MediaId, cx: &mut Context<Self>) {
-        let clips = self.clips_using(media);
+    /// Remove pool items and their clips, as one undo step.
+    pub fn remove_media(&mut self, media: &[flikk_core::MediaId], cx: &mut Context<Self>) {
+        self.remove_from_pool(media, None, cx);
+    }
+
+    /// Remove pool items and their clips and, with `bins`, set the pool's
+    /// bins to those: one undo step.
+    pub fn remove_from_pool(
+        &mut self,
+        media: &[flikk_core::MediaId],
+        bins: Option<Vec<flikk_core::model::Bin>>,
+        cx: &mut Context<Self>,
+    ) {
+        let clips: Vec<_> = media.iter().flat_map(|m| self.clips_using(*m)).collect();
         let mut commands = Vec::new();
         if !clips.is_empty() {
             commands.push(Command::DeleteClips {
@@ -538,10 +553,20 @@ impl EditorState {
                 ripple: false,
             });
         }
-        commands.push(Command::RemoveMedia { media });
-        if self.execute_batch(commands, "remove_media", cx).is_some() {
+        commands.extend(media.iter().map(|&media| Command::RemoveMedia { media }));
+        let label = if bins.is_some() {
+            "delete_bin"
+        } else {
+            "remove_media"
+        };
+        commands.extend(bins.map(|bins| Command::SetBins { bins }));
+        if self.execute_batch(commands, label, cx).is_some() {
             self.selection.clips.retain(|c| !clips.contains(c));
-            if self.source.as_ref().is_some_and(|s| s.item().id == media) {
+            if self
+                .source
+                .as_ref()
+                .is_some_and(|s| media.contains(&s.item().id))
+            {
                 self.source = None;
             }
         }
@@ -1602,8 +1627,23 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Clear the marks of the source in the viewer, else the program's.
+    pub fn clear_marks(&mut self, cx: &mut Context<Self>) {
+        match self.source_picture().map(|s| s.item().id) {
+            Some(id) => {
+                self.source_marks.remove(&id);
+                cx.notify();
+            }
+            None => self.set_in_out(None, cx),
+        }
+    }
+
     /// Mark in at the playhead, keeping the out point when it is still after it.
+    /// With a source in the viewer, marks the source.
     pub fn mark_in(&mut self, cx: &mut Context<Self>) {
+        if self.mark_source(false, cx) {
+            return;
+        }
         let t = self.playhead;
         let end = match self.in_out {
             Some(r) if r.end > t => r.end,
@@ -1613,7 +1653,11 @@ impl EditorState {
     }
 
     /// Mark out at the playhead, keeping the in point when it is still before it.
+    /// With a source in the viewer, marks the source.
     pub fn mark_out(&mut self, cx: &mut Context<Self>) {
+        if self.mark_source(true, cx) {
+            return;
+        }
         let t = self.playhead;
         let start = match self.in_out {
             Some(r) if r.start < t => r.start,

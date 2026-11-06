@@ -57,6 +57,7 @@ fn project(media: &dyn MediaService, path: PathBuf) -> Result<(Project, ClipId)>
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     };
     let length = if still {

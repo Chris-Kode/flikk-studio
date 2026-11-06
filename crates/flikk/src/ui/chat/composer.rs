@@ -566,8 +566,18 @@ impl Composer {
                 this.insert_refs(drag.refs.clone(), window, cx)
             }))
             .on_drop(cx.listener(|this, drag: &MediaDrag, window, cx| {
-                let token = format!("@media {}", drag.media);
-                this.insert_refs(vec![(token, drag.name.clone())], window, cx)
+                let project = this.state.read(cx).bus.project();
+                let refs = drag
+                    .all()
+                    .into_iter()
+                    .map(|id| {
+                        let name = project.media(id).map_or(drag.name.clone(), |m| {
+                            crate::ui::media_pool::item_name(m).into()
+                        });
+                        (format!("@media {id}"), name)
+                    })
+                    .collect();
+                this.insert_refs(refs, window, cx)
             }))
             .on_drop(cx.listener(|this, drag: &SoundDrag, window, cx| {
                 let media = this.state.update(cx, |s, cx| {

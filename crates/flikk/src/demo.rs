@@ -355,6 +355,7 @@ fn project() -> Demo {
         tags: vec!["brand".into()],
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     };
 
@@ -807,6 +808,7 @@ fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -
         tags: tags.iter().map(|t| t.to_string()).collect(),
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     }
 }

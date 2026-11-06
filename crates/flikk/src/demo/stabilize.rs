@@ -87,6 +87,7 @@ fn project(media: &dyn MediaService) -> Result<(Project, flikk_core::ClipId)> {
         tags: Vec::new(),
         proxy: None,
         generated: None,
+        name: None,
         tone_map: Default::default(),
     };
     let mut clip = Clip::new(
