@@ -180,12 +180,14 @@ pub fn list(
     role: AgentRole,
     groups: Option<&BTreeSet<ToolCategory>>,
     settings: &AgentSettings,
+    services: &Services,
 ) -> Vec<Value> {
+    let images = image::offered(settings, services);
     catalog()
         .iter()
         .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
         .filter(|t| settings.web || t.name != web::TOOL)
-        .filter(|t| t.name != image::TOOL || image::offered(settings))
+        .filter(|t| t.name != image::TOOL || images)
         .filter(|t| match groups {
             Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
             None => t.name != groups::LOAD_TOOLS && t.name != groups::RUN_TOOL,

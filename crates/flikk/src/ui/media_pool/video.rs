@@ -26,17 +26,17 @@ const NONE: &str = "";
 /// The program's frame at the playhead, grabbed when it is made.
 const PLAYHEAD: &str = "playhead";
 /// The model picks the shape.
-const AUTO: &str = "auto";
+pub(super) const AUTO: &str = "auto";
 
 /// One choice in a picker: what it shows, and its key.
 #[derive(Clone)]
-struct Choice {
-    key: String,
+pub(super) struct Choice {
+    pub(super) key: String,
     title: SharedString,
 }
 
 impl Choice {
-    fn new(key: impl Into<String>, title: impl Into<SharedString>) -> Self {
+    pub(super) fn new(key: impl Into<String>, title: impl Into<SharedString>) -> Self {
         Self {
             key: key.into(),
             title: title.into(),
@@ -56,7 +56,7 @@ impl SelectItem for Choice {
     }
 }
 
-type Picker = Entity<SelectState<Choice>>;
+pub(super) type Picker = Entity<SelectState<Choice>>;
 
 pub struct VideoForm {
     state: Entity<EditorState>,
@@ -271,7 +271,7 @@ impl VideoForm {
             return false;
         };
         self.state
-            .update(cx, |s, cx| s.generate_video(request, grabs, cx));
+            .update(cx, |s, cx| s.generate_with_frames(request, grabs, cx));
         true
     }
 
@@ -436,13 +436,18 @@ impl Render for VideoForm {
     }
 }
 
-fn picker(rows: Vec<Choice>, selected: usize, window: &mut Window, cx: &mut App) -> Picker {
+pub(super) fn picker(
+    rows: Vec<Choice>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> Picker {
     let many = rows.len() > 8;
     cx.new(|cx| SelectState::new(rows, Some(selected), window, cx).searchable(many))
 }
 /// The aspect ratio a `width` × `height` sequence has, when it is a common
 /// one.
-fn shape_of(width: u32, height: u32) -> Option<&'static str> {
+pub(super) fn shape_of(width: u32, height: u32) -> Option<&'static str> {
     let ratio = width as f64 / height.max(1) as f64;
     [
         ("16:9", 16. / 9.),

@@ -264,7 +264,7 @@ impl AgentHost {
         if self.turn.is_none()
             && let Some(q) = self.queued.take()
         {
-            self.start(q, bus);
+            self.start(q, bus, services);
         }
         self.serve_calls(bus, services);
         self.drain_jobs(bus, services);
@@ -276,7 +276,7 @@ impl AgentHost {
 
     // ------------------------------------------------------------- turns
 
-    fn start(&mut self, q: Queued, bus: &mut CommandBus) {
+    fn start(&mut self, q: Queued, bus: &mut CommandBus, services: &Services) {
         let author = Author::Agent { role: self.role };
         // A set left open by an earlier turn that never finished.
         close_open_sets(bus, &author, None, &mut self.events);
@@ -310,7 +310,8 @@ impl AgentHost {
             let outcomes = std::mem::take(&mut self.outcomes).join("\n");
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
-        let system_prompt = prompt::system_prompt(self.role, &q.settings);
+        let images = tools::image::offered(&q.settings, services);
+        let system_prompt = prompt::system_prompt(self.role, &q.settings, images);
         let backend = q.settings.backend;
         let resume = session::load(project.id, &self.chat, backend, self.role);
         let picked = groups::pick(&text, project, &q.context, self.role);
@@ -561,16 +562,29 @@ impl AgentHost {
                             role_of(&turn.author),
                             Some(&turn.groups),
                             &turn.settings,
+                            services,
                         );
                         turn.usage.listed = list.len();
                         turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
                         reply.tools(list);
                     }
-                    None => reply.tools(tools::list(bus, self.role, None, &self.external.settings)),
+                    None => reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        &self.external.settings,
+                        services,
+                    )),
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, self.role, None, &self.external.settings));
+                    reply.tools(tools::list(
+                        bus,
+                        self.role,
+                        None,
+                        &self.external.settings,
+                        services,
+                    ));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
@@ -586,7 +600,7 @@ impl AgentHost {
                             role_of(&turn.author),
                             &turn.groups,
                             &mut turn.usage.loaded,
-                            tools::image::offered(&turn.settings),
+                            tools::image::offered(&turn.settings, services),
                             &args,
                         );
                         self.finish_call(origin, reply, tool, args, done, None);

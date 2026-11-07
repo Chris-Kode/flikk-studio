@@ -1,10 +1,10 @@
-//! The video models fal hosts that the editor offers, and how each one
-//! takes a request: its endpoints, and the names and forms of its fields,
-//! which differ from model to model. What each can make is its
-//! [`VideoModel`]; the provider's catalog lists the same ids, in the same
-//! order, the default first.
+//! The video and image models fal hosts that the editor offers, and how
+//! each one takes a request: its endpoints, and the names and forms of its
+//! fields, which differ from model to model. What each can make is its
+//! [`VideoModel`] or [`ImageModel`]; the provider's catalog lists the same
+//! ids, in the same order, the default first.
 
-use flikk_core::cloud::{ReferenceLimits, VideoModel, VideoSound};
+use flikk_core::cloud::{ImageModel, ReferenceLimits, VideoModel, VideoSound};
 
 /// One model: what it can make, and how to ask for it.
 pub struct FalVideo {
@@ -533,4 +533,248 @@ pub const VIDEO: &[FalVideo] = &[
 
 pub fn find(id: &str) -> Option<&'static FalVideo> {
     VIDEO.iter().find(|m| m.id == id)
+}
+
+// ------------------------------------------------------------------ images
+
+/// One image model: what it can make, and how to ask for it.
+pub struct FalImage {
+    /// The catalog id, kept in the user's settings.
+    pub id: &'static str,
+    pub spec: ImageModel,
+    /// The endpoint making a picture from a description.
+    pub text: &'static str,
+    /// The endpoint making one from pictures, when the spec takes them.
+    pub edit: Option<&'static str>,
+    pub shape: Shape,
+    /// Resolutions are sent in lower case ("2k").
+    pub lower_resolution: bool,
+    pub pictures: Pictures,
+    /// `background` takes "transparent" or "opaque".
+    pub background: bool,
+}
+
+/// How the shape is asked for.
+pub enum Shape {
+    /// `aspect_ratio`, one of the spec's ratios; this word lets the model
+    /// pick, else the field is left out.
+    AspectRatio(Option<&'static str>),
+    /// `image_size`, the name fal gives the ratio ([`size_name`]); this
+    /// name lets the model pick, else the field is left out.
+    ImageSize(Option<&'static str>),
+}
+
+/// Where the pictures it edits or follows go.
+pub enum Pictures {
+    /// All in `image_urls`.
+    List,
+    /// The one to edit in `image_url`, the ones it follows in
+    /// `reference_image_urls`.
+    FirstAndReferences,
+}
+
+/// The ratios fal's named sizes come in.
+const SIZES: &[&str] = &["1:1", "16:9", "9:16", "4:3", "3:4"];
+
+/// fal's name for the size of `aspect`, one of [`SIZES`].
+pub fn size_name(aspect: &str) -> Option<&'static str> {
+    Some(match aspect {
+        "1:1" => "square_hd",
+        "16:9" => "landscape_16_9",
+        "9:16" => "portrait_16_9",
+        "4:3" => "landscape_4_3",
+        "3:4" => "portrait_4_3",
+        _ => return None,
+    })
+}
+
+const NANO_BANANA_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9",
+];
+
+const FLUX_3_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9", "2:1", "1:2",
+];
+
+const GROK_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9", "2:1", "1:2",
+];
+
+/// A model sized by fal's named sizes, with no choice of resolution.
+const fn sized(
+    name: &'static str,
+    auto_aspect: bool,
+    references: usize,
+    transparent: bool,
+) -> ImageModel {
+    ImageModel {
+        name,
+        aspects: SIZES,
+        auto_aspect,
+        resolutions: &[],
+        references,
+        transparent,
+    }
+}
+
+const fn nano_banana(name: &'static str) -> ImageModel {
+    ImageModel {
+        name,
+        aspects: NANO_BANANA_ASPECTS,
+        auto_aspect: true,
+        resolutions: &["1K", "2K", "4K"],
+        references: 14,
+        transparent: false,
+    }
+}
+
+pub const IMAGE: &[FalImage] = &[
+    FalImage {
+        id: "google/nano-banana-2.1",
+        spec: nano_banana("Nano Banana 2.1"),
+        text: "google/nano-banana-2.1",
+        edit: Some("google/nano-banana-2.1/edit"),
+        shape: Shape::AspectRatio(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "fal-ai/nano-banana-pro",
+        spec: nano_banana("Nano Banana Pro"),
+        text: "fal-ai/nano-banana-pro",
+        edit: Some("fal-ai/nano-banana-pro/edit"),
+        shape: Shape::AspectRatio(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "openai/gpt-image-2",
+        spec: sized("GPT Image 2", true, 16, true),
+        text: "openai/gpt-image-2",
+        edit: Some("openai/gpt-image-2/edit"),
+        shape: Shape::ImageSize(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: true,
+    },
+    FalImage {
+        id: "openai/gpt-image-2.6/flare",
+        spec: sized("GPT Image 2.6 Flare", true, 16, true),
+        text: "openai/gpt-image-2.6/flare/text-to-image",
+        edit: Some("openai/gpt-image-2.6/flare/edit"),
+        shape: Shape::ImageSize(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: true,
+    },
+    FalImage {
+        id: "openai/gpt-image-2.6/sunburst",
+        spec: sized("GPT Image 2.6 Sunburst", true, 16, true),
+        text: "openai/gpt-image-2.6/sunburst/text-to-image",
+        edit: Some("openai/gpt-image-2.6/sunburst/edit"),
+        shape: Shape::ImageSize(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: true,
+    },
+    FalImage {
+        id: "blackforestlabs/flux-3",
+        spec: ImageModel {
+            name: "FLUX 3",
+            aspects: FLUX_3_ASPECTS,
+            auto_aspect: true,
+            resolutions: &["1K", "1.5K", "2K", "4K"],
+            references: 10,
+            transparent: false,
+        },
+        text: "blackforestlabs/flux-3/text-to-image",
+        edit: Some("blackforestlabs/flux-3/edit-image"),
+        shape: Shape::AspectRatio(Some("auto")),
+        lower_resolution: true,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "blackforestlabs/flux-3/klein",
+        spec: sized("FLUX 3 Klein", false, 10, false),
+        text: "blackforestlabs/flux-3/klein/text-to-image",
+        edit: Some("blackforestlabs/flux-3/klein/edit-image"),
+        shape: Shape::ImageSize(None),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "bytedance/seedream/v5/pro",
+        spec: sized("Seedream 5.0 Pro", true, 10, false),
+        text: "bytedance/seedream/v5/pro/text-to-image",
+        edit: Some("bytedance/seedream/v5/pro/edit"),
+        shape: Shape::ImageSize(Some("auto_2K")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "ideogram/v4.5",
+        spec: sized("Ideogram 4.5", false, 5, false),
+        text: "ideogram/v4.5",
+        edit: Some("ideogram/v4.5/edit"),
+        shape: Shape::ImageSize(None),
+        lower_resolution: false,
+        pictures: Pictures::FirstAndReferences,
+        background: false,
+    },
+    FalImage {
+        id: "xai/grok-imagine-image/v2.0",
+        spec: ImageModel {
+            name: "Grok Imagine Image 2.0",
+            aspects: GROK_ASPECTS,
+            auto_aspect: true,
+            resolutions: &["1K", "1.5K", "2K"],
+            references: 5,
+            transparent: false,
+        },
+        text: "xai/grok-imagine-image/v2.0/text-to-image",
+        edit: Some("xai/grok-imagine-image/v2.0/edit"),
+        shape: Shape::AspectRatio(Some("auto")),
+        lower_resolution: true,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "alibaba/qwen-image-3",
+        spec: sized("Qwen Image 3", false, 3, false),
+        text: "alibaba/qwen-image-3/text-to-image",
+        edit: Some("alibaba/qwen-image-3/edit"),
+        shape: Shape::ImageSize(None),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "krea/v3",
+        spec: sized("Krea 3", true, 8, false),
+        text: "krea/v3/text-to-image",
+        edit: Some("krea/v3/edit"),
+        shape: Shape::ImageSize(Some("auto")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+    FalImage {
+        id: "fal-ai/recraft/v4.1/pro",
+        spec: sized("Recraft V4.1 Pro", false, 0, false),
+        text: "fal-ai/recraft/v4.1/pro/text-to-image",
+        edit: None,
+        shape: Shape::ImageSize(None),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: false,
+    },
+];
+
+pub fn find_image(id: &str) -> Option<&'static FalImage> {
+    IMAGE.iter().find(|m| m.id == id)
 }

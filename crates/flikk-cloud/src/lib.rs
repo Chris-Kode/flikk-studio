@@ -17,14 +17,15 @@ mod elevenlabs;
 mod fal;
 mod http;
 mod keys;
+mod picture;
 mod pika;
 
 pub use keys::{KeySource, Keys};
 
 use flikk_core::cloud::{
     Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest, Generated,
-    GenerationInfo, GenerationService, GenerationTask, Heard, SpeechRequest, SpeechService,
-    VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
+    GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
+    SpeechService, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -135,6 +136,12 @@ pub trait Api: Sync {
     /// What video model `model` can make; only for providers offering
     /// video.
     fn video_model(&self, _model: &str) -> Option<&'static VideoModel> {
+        None
+    }
+
+    /// What image model `model` can make; only for providers offering
+    /// pictures.
+    fn image_model(&self, _model: &str) -> Option<&'static ImageModel> {
         None
     }
 
@@ -305,6 +312,11 @@ impl GenerationService for Cloud {
         provider.api.video_model(model.id).cloned()
     }
 
+    fn image_model(&self) -> Option<ImageModel> {
+        let (provider, model) = self.picked(Capability::Image)?;
+        provider.api.image_model(model.id).cloned()
+    }
+
     fn generate(
         &self,
         request: &GenerateRequest,
@@ -314,8 +326,18 @@ impl GenerationService for Cloud {
         let capability = request.capability();
         let (provider, model) = self.require(capability)?;
         let key = self.key(provider)?;
-        if let Some(video) = provider.api.video_model(model.id) {
-            video.check(request)?;
+        match capability {
+            Capability::Video => {
+                if let Some(video) = provider.api.video_model(model.id) {
+                    video.check(request)?;
+                }
+            }
+            Capability::Image => {
+                if let Some(image) = provider.api.image_model(model.id) {
+                    image.check(request)?;
+                }
+            }
+            _ => {}
         }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;
@@ -428,6 +450,7 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> PathBuf {
         GenerateRequest::SoundEffect { .. } => "sfx",
         GenerateRequest::Voiceover { .. } => "voiceover",
         GenerateRequest::Video { .. } => "video",
+        GenerateRequest::Image { .. } => "image",
     };
     let words: Vec<String> = request
         .prompt()

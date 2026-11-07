@@ -1,12 +1,15 @@
-//! Pika (dev.pika.art): video, from the models in [`models`]: Pika's own
-//! (Pika H3 Flex, Pika 2.5 with Pikaframes) and the other vendors' Pika
-//! hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni
-//! Flash, FLUX, Grok Imagine). Every call sends the key as
-//! `X-API-Key`. A video is made as a media job ([`jobs`]); what goes in is
-//! [`video`]'s, and the files it follows are uploaded to Pika first
-//! ([`files`]). See `docs/pika.md`.
+//! Pika (dev.pika.art): video and pictures, from the models in
+//! [`models`]. Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes)
+//! and the other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo,
+//! Wan, Happy Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from
+//! a description or from pictures: Nano Banana, GPT Image, Seedream,
+//! Ideogram, Grok Imagine, Muse, Recraft. Every call sends the key as
+//! `X-API-Key`. Both are made as media jobs ([`jobs`]); what goes in is
+//! [`video`]'s or [`image`]'s, and the files they follow are uploaded to
+//! Pika first ([`files`]). See `docs/pika.md`.
 
 mod files;
+mod image;
 mod jobs;
 mod models;
 mod video;
@@ -14,7 +17,7 @@ mod video;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, VideoModel,
+    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -28,84 +31,136 @@ pub static PROVIDER: Provider = Provider {
     name: NAME,
     keys_url: "https://dev.pika.art/keys",
     key_env: "PIKA_API_KEY",
-    offers: &[Offer {
-        capability: Capability::Video,
-        // The ids and order of `models::VIDEO`, the default first.
-        models: &[
-            CloudModel {
-                id: "pika/pika-h3-flex",
-                name: "Pika H3 Flex",
-            },
-            CloudModel {
-                id: "pika/pika-2.5",
-                name: "Pika 2.5",
-            },
-            CloudModel {
-                id: "bytedance/seedance-2.0",
-                name: "Seedance 2.0",
-            },
-            CloudModel {
-                id: "bytedance/seedance-2.0-fast",
-                name: "Seedance 2.0 Fast",
-            },
-            CloudModel {
-                id: "bytedance/seedance-2.0-mini",
-                name: "Seedance 2.0 Mini",
-            },
-            CloudModel {
-                id: "bytedance/seedance-2.5",
-                name: "Seedance 2.5",
-            },
-            CloudModel {
-                id: "kling/kling-4.0",
-                name: "Kling 4.0",
-            },
-            CloudModel {
-                id: "kling/kling-3.0",
-                name: "Kling 3.0",
-            },
-            CloudModel {
-                id: "kling/kling-3.0-turbo",
-                name: "Kling 3.0 Turbo",
-            },
-            CloudModel {
-                id: "minimax/h3",
-                name: "MiniMax H3",
-            },
-            CloudModel {
-                id: "minimax/hailuo-2.3",
-                name: "Hailuo 2.3",
-            },
-            CloudModel {
-                id: "alibaba/wan3.0-video",
-                name: "Wan 3.0",
-            },
-            CloudModel {
-                id: "alibaba/wan3.0-video-prime",
-                name: "Wan 3.0 Prime",
-            },
-            CloudModel {
-                id: "alibaba/happyhorse-1.1",
-                name: "Happy Horse 1.1",
-            },
-            CloudModel {
-                id: "alibaba/happyhorse-1.0",
-                name: "Happy Horse 1.0",
-            },
-            CloudModel {
-                id: "google/gemini-omni-flash",
-                name: "Gemini Omni Flash",
-            },
-            CloudModel {
-                id: "black-forest-labs/flux-3-video",
-                name: "FLUX 3",
-            },
-            CloudModel {
-                id: "x-ai/grok-imagine-video",
-                name: "Grok Imagine Video",
-            },
-        ],
-    }],
+    offers: &[
+        Offer {
+            capability: Capability::Video,
+            // The ids and order of `models::VIDEO`, the default first.
+            models: &[
+                CloudModel {
+                    id: "pika/pika-h3-flex",
+                    name: "Pika H3 Flex",
+                },
+                CloudModel {
+                    id: "pika/pika-2.5",
+                    name: "Pika 2.5",
+                },
+                CloudModel {
+                    id: "bytedance/seedance-2.0",
+                    name: "Seedance 2.0",
+                },
+                CloudModel {
+                    id: "bytedance/seedance-2.0-fast",
+                    name: "Seedance 2.0 Fast",
+                },
+                CloudModel {
+                    id: "bytedance/seedance-2.0-mini",
+                    name: "Seedance 2.0 Mini",
+                },
+                CloudModel {
+                    id: "bytedance/seedance-2.5",
+                    name: "Seedance 2.5",
+                },
+                CloudModel {
+                    id: "kling/kling-4.0",
+                    name: "Kling 4.0",
+                },
+                CloudModel {
+                    id: "kling/kling-3.0",
+                    name: "Kling 3.0",
+                },
+                CloudModel {
+                    id: "kling/kling-3.0-turbo",
+                    name: "Kling 3.0 Turbo",
+                },
+                CloudModel {
+                    id: "minimax/h3",
+                    name: "MiniMax H3",
+                },
+                CloudModel {
+                    id: "minimax/hailuo-2.3",
+                    name: "Hailuo 2.3",
+                },
+                CloudModel {
+                    id: "alibaba/wan3.0-video",
+                    name: "Wan 3.0",
+                },
+                CloudModel {
+                    id: "alibaba/wan3.0-video-prime",
+                    name: "Wan 3.0 Prime",
+                },
+                CloudModel {
+                    id: "alibaba/happyhorse-1.1",
+                    name: "Happy Horse 1.1",
+                },
+                CloudModel {
+                    id: "alibaba/happyhorse-1.0",
+                    name: "Happy Horse 1.0",
+                },
+                CloudModel {
+                    id: "google/gemini-omni-flash",
+                    name: "Gemini Omni Flash",
+                },
+                CloudModel {
+                    id: "black-forest-labs/flux-3-video",
+                    name: "FLUX 3",
+                },
+                CloudModel {
+                    id: "x-ai/grok-imagine-video",
+                    name: "Grok Imagine Video",
+                },
+            ],
+        },
+        Offer {
+            capability: Capability::Image,
+            // The ids and order of `models::IMAGE`, the default first.
+            models: &[
+                CloudModel {
+                    id: "google/gemini-nano-banana-2.1",
+                    name: "Nano Banana 2.1",
+                },
+                CloudModel {
+                    id: "google/gemini-3-pro-image",
+                    name: "Nano Banana Pro",
+                },
+                CloudModel {
+                    id: "openai/gpt-image-2",
+                    name: "GPT Image 2",
+                },
+                CloudModel {
+                    id: "openai/gpt-image-2.6-flare",
+                    name: "GPT Image 2.6 Flare",
+                },
+                CloudModel {
+                    id: "openai/gpt-image-2.6-sunburst",
+                    name: "GPT Image 2.6 Sunburst",
+                },
+                CloudModel {
+                    id: "bytedance/seedream-5.0-pro",
+                    name: "Seedream 5.0 Pro",
+                },
+                CloudModel {
+                    id: "bytedance/seedream-5.0-lite",
+                    name: "Seedream 5.0 Lite",
+                },
+                CloudModel {
+                    id: "ideogram/ideogram-4.5",
+                    name: "Ideogram 4.5",
+                },
+                CloudModel {
+                    id: "x-ai/grok-imagine-image-2.0",
+                    name: "Grok Imagine Image 2.0",
+                },
+                CloudModel {
+                    id: "meta/muse-image-1.0",
+                    name: "Muse Image",
+                },
+                CloudModel {
+                    id: "recraft/recraft-4.1",
+                    name: "Recraft 4.1",
+                },
+            ],
+        },
+    ],
     api: &Pika,
 };
 
@@ -145,13 +200,25 @@ impl Api for Pika {
         stem: &Path,
         task: &GenerationTask,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
-        let model = models::find(model)
-            .ok_or_else(|| CloudError::Unavailable(format!("{NAME} has no model {model}")))?;
-        video::run(key, model, request, stem, task)
+        let missing = || CloudError::Unavailable(format!("{NAME} has no model {model}"));
+        match request.capability() {
+            Capability::Image => {
+                let model = models::find_image(model).ok_or_else(missing)?;
+                image::run(key, model, request, stem, task)
+            }
+            _ => {
+                let model = models::find(model).ok_or_else(missing)?;
+                video::run(key, model, request, stem, task)
+            }
+        }
     }
 
     fn video_model(&self, model: &str) -> Option<&'static VideoModel> {
         models::find(model).map(|m| &m.spec)
+    }
+
+    fn image_model(&self, model: &str) -> Option<&'static ImageModel> {
+        models::find_image(model).map(|m| &m.spec)
     }
 }
 

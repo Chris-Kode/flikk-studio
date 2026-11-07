@@ -276,7 +276,9 @@ impl IntegrationsTab {
                 continue;
             }
             let names: Vec<SharedString> = offer.models.iter().map(|m| m.name.into()).collect();
-            let select = cx.new(|cx| SelectState::new(names, Some(current), window, cx));
+            let many = names.len() > 8;
+            let select =
+                cx.new(|cx| SelectState::new(names, Some(current), window, cx).searchable(many));
             self._subscriptions.push(cx.subscribe(
                 &select,
                 move |this, _, SelectEvent::Confirm(name): &SelectEvent<SharedString>, cx| {

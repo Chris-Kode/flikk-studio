@@ -1,23 +1,28 @@
-//! `generate_image`: a picture made with the user's ChatGPT plan, through
-//! the image service Codex itself uses (`gpt-image-2`), signed in with
-//! Codex's own ChatGPT login. Offered only when the user turns image
-//! generation on, with either backend. Each picture counts against their
-//! plan, so it waits for their approval unless they allowed generating. It
-//! goes to the pool's Images Generated bin.
+//! `generate_image`: a picture, from a description alone or from pictures
+//! it edits or follows (pictures in the pool, or the program at a time).
+//! It is made by the image provider set in Settings → Integrations when
+//! there is one, whatever the agent's own setting says; else with the
+//! user's ChatGPT plan, when they turned image generation on (Settings →
+//! Agent). Each picture costs the user money or counts against their plan,
+//! so it waits for their approval unless they allowed generating. It goes
+//! to the pool's Images Generated bin.
 //!
-//! The request is the one Codex sends (`codex-rs/ext/image-generation`):
-//! the prompt, a fixed model, automatic size and quality, and an opaque or
-//! transparent background. The service is ChatGPT's own, not the public
-//! Images API, and free plans are refused.
+//! The ChatGPT plan's pictures come from the image service Codex itself
+//! uses (`gpt-image-2`), signed in with Codex's own ChatGPT login, as Codex
+//! asks for them (`codex-rs/ext/image-generation`): the prompt, a fixed
+//! model, automatic size and quality, and an opaque or transparent
+//! background. The service is ChatGPT's own, not the public Images API, and
+//! free plans are refused. It makes pictures from a description only.
 
+use super::video::{self, FrameGrab};
 use super::{Done, Job, JobDone, Step, ToolCtx};
-use crate::args::{Args, ToolError, ToolResultOf, fail};
+use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, parse_time};
 use base64::Engine;
 use flikk_core::agent::AgentSettings;
-use flikk_core::cloud;
-use flikk_core::model::MediaItem;
+use flikk_core::cloud::{self, Capability, CloudError, GenerateRequest, GenerationTask};
+use flikk_core::model::{MediaItem, MediaKind, Project};
 use flikk_core::paths;
-use flikk_core::services::MediaService;
+use flikk_core::services::{MediaService, Services};
 use image::ImageFormat;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,14 +38,70 @@ const MAX_BYTES: u64 = 64 << 20;
 /// Longest prompt sent.
 const MAX_PROMPT: usize = 32_000;
 
-/// What to make.
+/// Who makes the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The image provider set in Settings → Integrations.
+    Provider,
+    /// The user's ChatGPT plan, through Codex's sign-in.
+    ChatGpt,
+}
+
+/// Who makes pictures for `settings`: the provider set for them, which
+/// wins over the agent's own setting, else the ChatGPT plan when the user
+/// turned it on and Codex is signed in with a paid one.
+pub fn route(settings: &AgentSettings, services: &Services) -> Option<Route> {
+    let provider = services
+        .generation
+        .as_ref()
+        .is_some_and(|g| g.provider_for(Capability::Image).is_some());
+    if provider {
+        Some(Route::Provider)
+    } else if settings.image_generation && subscription().is_some() {
+        Some(Route::ChatGpt)
+    } else {
+        None
+    }
+}
+
+/// Whether turns are offered `generate_image`.
+pub fn offered(settings: &AgentSettings, services: &Services) -> bool {
+    route(settings, services).is_some()
+}
+
+/// What to make with the ChatGPT plan.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Request {
+pub struct Prompt {
     pub prompt: String,
     pub transparent: bool,
 }
 
-pub fn parse(args: &Args) -> ToolResultOf<Request> {
+/// What to make, and who makes it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// By the provider, after grabbing the program's frames it follows.
+    Provider {
+        request: GenerateRequest,
+        grabs: Vec<FrameGrab>,
+    },
+    ChatGpt(Prompt),
+}
+
+impl Request {
+    /// Whether the program's frames are grabbed first.
+    pub fn grabs_frames(&self) -> bool {
+        matches!(self, Self::Provider { grabs, .. } if !grabs.is_empty())
+    }
+}
+
+/// The request from the tool's arguments, for whoever makes pictures now;
+/// a provider's is checked against the model the user picked.
+pub fn parse(
+    project: &Project,
+    settings: &AgentSettings,
+    services: &Services,
+    args: &Args,
+) -> ToolResultOf<Request> {
     let prompt = args.str("prompt")?.trim().to_owned();
     if prompt.is_empty() {
         return fail("`prompt` describes the picture");
@@ -48,69 +109,145 @@ pub fn parse(args: &Args) -> ToolResultOf<Request> {
     if prompt.chars().count() > MAX_PROMPT {
         return fail(format!("`prompt` runs at most {MAX_PROMPT} characters"));
     }
-    Ok(Request {
-        prompt,
-        transparent: args.opt_bool("transparent")?.unwrap_or(false),
-    })
+    let transparent = args.opt_bool("transparent")?.unwrap_or(false);
+    let Some(route) = route(settings, services) else {
+        return fail(
+            "No image provider is set in Settings → Integrations, and image generation with the ChatGPT plan is off (Settings → Agent). Tell the user; don't retry.",
+        );
+    };
+    let mut references = Vec::new();
+    for id in args.strings("references")? {
+        let item = project
+            .media(media_id(project, &id)?)
+            .filter(|m| m.kind == MediaKind::Image);
+        match item {
+            Some(item) => references.push(item.path.clone()),
+            None => return fail(format!("`references`: {id} is not a picture in the pool")),
+        }
+    }
+    let mut grabs = Vec::new();
+    if let Some(times) = args.value("frames_at") {
+        let Some(times) = times.as_array() else {
+            return fail("`frames_at` is a list of times");
+        };
+        for t in times {
+            let grab = FrameGrab::new(parse_time(t, args.1)?);
+            references.push(grab.path.clone());
+            grabs.push(grab);
+        }
+    }
+    match route {
+        Route::ChatGpt => {
+            if !references.is_empty() {
+                return fail(
+                    "Editing or following pictures needs an image provider set in Settings → Integrations; the ChatGPT plan makes pictures from a description only. Describe the picture instead, or tell the user.",
+                );
+            }
+            Login::read()?;
+            Ok(Request::ChatGpt(Prompt {
+                prompt,
+                transparent,
+            }))
+        }
+        Route::Provider => {
+            let request = GenerateRequest::Image {
+                prompt,
+                aspect: args.opt_str("aspect")?.map(str::to_owned),
+                resolution: args.opt_str("resolution")?.map(str::to_owned),
+                references,
+                transparent,
+            };
+            if let Some(model) = services.generation.as_ref().and_then(|g| g.image_model()) {
+                model
+                    .check(&request)
+                    .map_err(|e| ToolError(error_text(&e)))?;
+            }
+            Ok(Request::Provider { request, grabs })
+        }
+    }
+}
+
+/// A provider's refusal as the model should read it.
+pub fn error_text(e: &CloudError) -> String {
+    match e {
+        CloudError::BadPrompt { message, .. } => format!(
+            "Refused: {message}. Change the request to fit the model the user picked, or tell the user."
+        ),
+        e => super::generate::error_text(e),
+    }
 }
 
 /// One line for the approval card and the activity log.
 pub fn summary(request: &Request) -> String {
     const SHOWN: usize = 80;
-    let mut text: String = request.prompt.chars().take(SHOWN).collect();
-    if request.prompt.chars().count() > SHOWN {
+    let prompt = match request {
+        Request::Provider { request, .. } => request.prompt(),
+        Request::ChatGpt(p) => &p.prompt,
+    };
+    let references = match request {
+        Request::Provider {
+            request: GenerateRequest::Image { references, .. },
+            ..
+        } => references.len(),
+        _ => 0,
+    };
+    let mut text: String = prompt.chars().take(SHOWN).collect();
+    if prompt.chars().count() > SHOWN {
         text.push('…');
     }
-    format!("Picture: {text}")
+    match references {
+        0 => format!("Picture: {text}"),
+        1 => format!("Picture: {text} (from 1 picture)"),
+        n => format!("Picture: {text} (from {n} pictures)"),
+    }
 }
 
 /// The request as an approval carries it.
 pub fn request_json(request: &Request) -> Value {
-    json!({ "prompt": request.prompt, "transparent": request.transparent })
+    match request {
+        Request::Provider { request, grabs } => json!({
+            "via": "provider",
+            "request": request,
+            "frames": grabs.iter().map(FrameGrab::to_json).collect::<Vec<_>>(),
+        }),
+        Request::ChatGpt(p) => json!({ "prompt": p.prompt, "transparent": p.transparent }),
+    }
 }
 
 /// What [`request_json`] made.
 pub fn from_json(value: &Value) -> Option<Request> {
-    Some(Request {
+    if value.get("via").and_then(Value::as_str) == Some("provider") {
+        let request = serde_json::from_value(value.get("request")?.clone()).ok()?;
+        let grabs = value
+            .get("frames")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(FrameGrab::from_json).collect())
+            .unwrap_or_default();
+        return Some(Request::Provider { request, grabs });
+    }
+    Some(Request::ChatGpt(Prompt {
         prompt: value.get("prompt")?.as_str()?.to_owned(),
         transparent: value
             .get("transparent")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-    })
+    }))
 }
 
 /// The paid ChatGPT plan Codex is signed in with ("plus", "pro",
-/// "team"…), if any: the account link `generate_image` needs. Free plans
+/// "team"…), if any: the account link the ChatGPT route needs. Free plans
 /// have no image generation.
 pub fn subscription() -> Option<String> {
     Login::load()?.paid().map(str::to_owned)
 }
 
-/// Whether turns are offered `generate_image`: the user turned it on and
-/// Codex is signed in with a paid ChatGPT plan.
-pub fn offered(settings: &AgentSettings) -> bool {
-    settings.image_generation && subscription().is_some()
-}
-
-/// Why the call stops before anything is sent: image generation is off, or
-/// there is no ChatGPT plan to make the picture with.
-pub fn check(ctx: &ToolCtx) -> ToolResultOf<()> {
-    if !ctx.settings.image_generation {
-        return fail(
-            "The user has not turned on image generation (Settings → Agent). Tell the user; don't retry.",
-        );
-    }
-    Login::read().map(|_| ())
-}
-
 /// With the user's leave: a job that makes the picture and comes back to
 /// the UI thread to add it to the pool.
 pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    check(ctx)?;
-    let request = parse(args)?;
-    let media = ctx.services.media.clone();
-    let job: Job = Box::new(move || match make(&request, media.as_deref()) {
+    let request = parse(ctx.project(), ctx.settings, ctx.services, args)?;
+    let services = ctx.services.clone();
+    let project = request.grabs_frames().then(|| ctx.project().clone());
+    let job: Job = Box::new(move || match make(&request, project.as_ref(), &services) {
         Ok(item) => JobDone::Generated {
             item: Box::new(item),
             placement: None,
@@ -122,10 +259,37 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
 }
 
 /// Make the picture and keep it with the user's data, as a pool item not
-/// in a bin yet. Blocks for as long as the service takes.
-pub fn make(request: &Request, media: Option<&dyn MediaService>) -> ToolResultOf<MediaItem> {
+/// in a bin yet: grabbing the frames it follows from `project` first. Blocks
+/// for as long as the provider or service takes.
+pub fn make(
+    request: &Request,
+    project: Option<&Project>,
+    services: &Services,
+) -> ToolResultOf<MediaItem> {
+    let (request, grabs) = match request {
+        Request::Provider { request, grabs } => (request, grabs),
+        Request::ChatGpt(prompt) => return chatgpt(prompt, services.media.as_deref()),
+    };
+    let Some(generation) = services.generation.as_ref() else {
+        return fail("Generation is not available in this build.");
+    };
+    if !grabs.is_empty() {
+        let Some(project) = project else {
+            return fail("The frames to follow could not be grabbed.");
+        };
+        video::grab_all(project, services, grabs).map_err(ToolError)?;
+    }
+    let task = GenerationTask::default();
+    let made = generation
+        .generate(request, &paths::generated(), &task)
+        .map_err(|e| ToolError(error_text(&e)))?;
+    Ok(cloud::media_item(&made, services.media.as_deref()))
+}
+
+/// Make the picture with the ChatGPT plan.
+fn chatgpt(prompt: &Prompt, media: Option<&dyn MediaService>) -> ToolResultOf<MediaItem> {
     let login = Login::read()?;
-    let bytes = generate(&login, request)?;
+    let bytes = generate(&login, prompt)?;
     let ext = match image::guess_format(&bytes) {
         Ok(ImageFormat::Png) => "png",
         Ok(ImageFormat::Jpeg) => "jpg",
@@ -227,7 +391,7 @@ fn jwt_claims(token: &str) -> Option<Value> {
 }
 
 /// The picture's bytes.
-fn generate(login: &Login, request: &Request) -> ToolResultOf<Vec<u8>> {
+fn generate(login: &Login, request: &Prompt) -> ToolResultOf<Vec<u8>> {
     use ureq::tls::{RootCerts, TlsConfig};
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(

@@ -66,8 +66,8 @@ pub fn assets() -> PathBuf {
     dir
 }
 
-/// Music, sound effects, voiceovers and videos providers made, each with a `.json`
-/// of how, and pictures Codex made.
+/// Music, sound effects, voiceovers, videos and pictures providers made,
+/// each with a `.json` of how, and pictures made with the ChatGPT plan.
 pub fn generated() -> PathBuf {
     sub("generated")
 }

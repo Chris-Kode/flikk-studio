@@ -1401,11 +1401,19 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             super::image::TOOL,
             Some(Generate),
-            "Make a picture with the user's ChatGPT plan (GPT Image, through their Codex sign-in): a still, a background, a title card, a texture, a cutout. It lands in the pool's Images Generated bin, to use like any other picture. Each one counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes.",
+            "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
-                    "prompt": string("What to make: subject, composition, shape (wide 16:9, portrait 9:16, square), style and light, and any words that appear in it, exactly as written"),
-                    "transparent": boolean("A transparent background, for a cutout or an overlay (default: opaque)")
+                    "prompt": string("What to make: subject, composition, style and light, and any words that appear in it, exactly as written. With pictures to follow, name them by order: @Image1, @Image2 (`references` first, then `frames_at`), and say what to keep and what to change. With the ChatGPT plan, also say its shape (wide 16:9, portrait 9:16, square)"),
+                    "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9", "2:1", "1:2"], "Shape (default: the model picks, from the first picture when there is one); match the sequence for a full-frame still. Not with the ChatGPT plan"),
+                    "resolution": one_of(&["1K", "1.5K", "2K", "3K", "4K"], "Default: the model's. Not with the ChatGPT plan"),
+                    "references": strings("Media ids of pictures in the pool to edit or follow; not with the ChatGPT plan"),
+                    "frames_at": {
+                        "type": "array",
+                        "items": { "type": ["number", "string"] },
+                        "description": "Times of the program to grab as pictures to edit or follow (after `references`); not with the ChatGPT plan"
+                    },
+                    "transparent": boolean("A transparent background, for a cutout or an overlay (default: opaque), where the model makes one")
                 }),
                 &["prompt"],
             ),

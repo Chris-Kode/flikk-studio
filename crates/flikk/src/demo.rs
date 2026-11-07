@@ -58,7 +58,7 @@ pub fn settings_page() -> Option<String> {
         .map(|v| v.to_lowercase())
 }
 
-/// `FLIKK_DEMO_GENERATE=music|sfx|video|voiceover|voices[-describe|-audio]`: open the media pool's Generate
+/// `FLIKK_DEMO_GENERATE=music|sfx|video|image|voiceover|voices[-describe|-audio]`: open the media pool's Generate
 /// form (a provider must be set for it).
 pub fn generate_form() -> Option<String> {
     enabled()

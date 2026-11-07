@@ -244,7 +244,7 @@ impl MediaPoolPanel {
             .child(
                 thumb_badge()
                     .text_color(t::T2)
-                    .child(Icon::new(IconName::AudioLines).size(px(9.)))
+                    .child(Icon::new(badge_icon(g.request.capability())).size(px(9.)))
                     .child(g.request.capability().label()),
             )
             .child(
@@ -402,5 +402,14 @@ fn failure(e: &CloudError) -> String {
             suggestion: Some(s),
         } => format!("{message}\n\n{s}"),
         e => e.to_string(),
+    }
+}
+
+/// The icon a running generation's tile wears for what it makes.
+fn badge_icon(capability: Capability) -> IconName {
+    match capability {
+        Capability::Image => IconName::Image,
+        Capability::Video => IconName::Video,
+        _ => IconName::AudioLines,
     }
 }
