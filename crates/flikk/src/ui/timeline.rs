@@ -1570,10 +1570,20 @@ impl TimelinePanel {
                     .background_executor()
                     .spawn(async move { silence::detect(analysis.as_ref(), &item, min) })
                     .await;
+                let failed = found.is_none();
                 let _ = this.update(cx, |this, cx| {
                     this.silences.insert(min, id, found);
                     cx.notify();
                 });
+                if failed {
+                    // Render again once it may be asked for again.
+                    cx.background_executor().timer(silence::RETRY).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.silence_open {
+                            cx.notify();
+                        }
+                    });
+                }
             })
             .detach();
         }
@@ -1962,6 +1972,9 @@ impl TimelinePanel {
                 let entity = entity.clone();
                 move |open, _, cx| {
                     entity.update(cx, |this, cx| {
+                        if *open && !this.silence_open {
+                            this.silences.retry_failed();
+                        }
                         this.silence_open = *open;
                         cx.notify();
                     })
@@ -2623,6 +2636,7 @@ fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
     let found = this.silences.timeline_silences(project, min, pad);
     let total: f64 = found.iter().map(|r| r.duration().as_secs_f64()).sum();
     let loading = this.silences.is_loading();
+    let failed = this.silences.has_failed();
     let row = |label: &'static str, slider: &Entity<SliderState>, value: String| {
         h_flex()
             .gap(px(8.))
@@ -2644,6 +2658,8 @@ fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
             .text_color(t::T2)
             .child(Spinner::new().size(px(11.)))
             .child("Analyzing…")
+    } else if found.is_empty() && failed {
+        h_flex().text_color(t::T3).child("Analysis failed")
     } else if found.is_empty() {
         h_flex().text_color(t::T3).child("Nothing found")
     } else {

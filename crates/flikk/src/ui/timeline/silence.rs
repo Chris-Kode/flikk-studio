@@ -8,18 +8,29 @@ use flikk_core::model::{Project, TrackKind};
 use flikk_core::services::AnalysisService;
 use flikk_core::{MediaId, Time, TimeRange};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// How long a failed analysis waits before it is asked again.
+pub const RETRY: Duration = Duration::from_secs(30);
+
+/// One media item's silences.
+enum Silences {
+    InFlight,
+    /// The analysis failed then; asked again after [`RETRY`].
+    Failed(Instant),
+    Ready(Vec<TimeRange>),
+}
 
 /// Source silences per media item, for one minimum length.
 #[derive(Default)]
 pub struct SilenceCache {
     min: Time,
-    /// `None` while in flight or after a failure.
-    by_media: HashMap<MediaId, Option<Vec<TimeRange>>>,
+    by_media: HashMap<MediaId, Silences>,
 }
 
 impl SilenceCache {
-    /// Media whose silences for `min` are not known or requested yet. Marks
-    /// them as requested.
+    /// Media whose silences for `min` are not known or requested yet, or
+    /// failed over [`RETRY`] ago. Marks them as requested.
     pub fn missing(&mut self, project: &Project, min: Time) -> Vec<flikk_core::model::MediaItem> {
         if self.min != min {
             self.min = min;
@@ -28,10 +39,12 @@ impl SilenceCache {
         let mut out = Vec::new();
         for clip in sound_clips(project) {
             let Some(id) = clip.1 else { continue };
-            if self.by_media.contains_key(&id) {
-                continue;
+            match self.by_media.get(&id) {
+                Some(Silences::Failed(at)) if at.elapsed() >= RETRY => {}
+                Some(_) => continue,
+                None => {}
             }
-            self.by_media.insert(id, None);
+            self.by_media.insert(id, Silences::InFlight);
             if let Some(item) = project.media(id) {
                 out.push(item.clone());
             }
@@ -39,14 +52,33 @@ impl SilenceCache {
         out
     }
 
+    /// The result for `media`; `None` when the analysis failed.
     pub fn insert(&mut self, min: Time, media: MediaId, ranges: Option<Vec<TimeRange>>) {
         if min == self.min {
-            self.by_media.insert(media, ranges);
+            let silences = match ranges {
+                Some(r) => Silences::Ready(r),
+                None => Silences::Failed(Instant::now()),
+            };
+            self.by_media.insert(media, silences);
         }
     }
 
+    /// Forget failures, so the next [`Self::missing`] asks for them again.
+    pub fn retry_failed(&mut self) {
+        self.by_media
+            .retain(|_, s| !matches!(s, Silences::Failed(_)));
+    }
+
     pub fn is_loading(&self) -> bool {
-        self.by_media.values().any(Option::is_none)
+        self.by_media
+            .values()
+            .any(|s| matches!(s, Silences::InFlight))
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.by_media
+            .values()
+            .any(|s| matches!(s, Silences::Failed(_)))
     }
 
     /// Timeline ranges to remove: inside clip coverage, silent on every
@@ -56,11 +88,12 @@ impl SilenceCache {
         let mut sound = Vec::new();
         for (clip, media) in sound_clips(project) {
             covered.push(clip.range());
-            let silences = media
-                .and_then(|m| self.by_media.get(&m))
-                .and_then(|s| s.as_ref());
+            let silences = media.and_then(|m| match self.by_media.get(&m) {
+                Some(Silences::Ready(s)) => Some(s),
+                _ => None,
+            });
             let Some(silences) = silences else {
-                // Unknown: treat the whole clip as sound.
+                // Unknown or failed: treat the whole clip as sound.
                 sound.push(clip.range());
                 continue;
             };
