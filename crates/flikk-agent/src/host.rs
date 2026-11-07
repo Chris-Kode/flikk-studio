@@ -69,6 +69,18 @@ pub struct PendingApproval {
     pub request: ApprovalRequest,
     /// Unix seconds.
     pub at: i64,
+    /// The project it was asked on.
+    pub project: ProjectId,
+    /// The chat whose turn asked; none for an external client.
+    pub chat: Option<String>,
+}
+
+/// What became of an approval whose call no longer waits, for the next
+/// turn of the chat that asked.
+struct Outcome {
+    project: ProjectId,
+    chat: String,
+    text: String,
 }
 
 struct Queued {
@@ -138,9 +150,12 @@ pub struct AgentHost {
     /// stays open until the user decides, so the turn carries on with what
     /// came of it.
     held: HashMap<u64, (Origin, Reply)>,
+    /// Where each approval still to be reported was asked: its project, and
+    /// its chat (none for an external client).
+    asked: HashMap<u64, (ProjectId, Option<String>)>,
     /// What became of approval requests whose call was no longer waiting
-    /// (the turn ended), told to the agent on its next turn.
-    outcomes: Vec<String>,
+    /// (the turn ended), told to the agent on that chat's next turn.
+    outcomes: Vec<Outcome>,
     external: External,
     /// Id of the next call shown while it runs.
     next_call: u64,
@@ -172,6 +187,7 @@ impl AgentHost {
             approvals: Vec::new(),
             next_approval: 1,
             held: HashMap::new(),
+            asked: HashMap::new(),
             outcomes: Vec::new(),
             external: External::default(),
             next_call: 1,
@@ -264,8 +280,34 @@ impl AgentHost {
         std::mem::take(&mut self.orphans)
     }
 
-    pub fn pending_approvals(&self) -> &[PendingApproval] {
-        &self.approvals
+    /// The requests waiting for the user in the open chat, and those of
+    /// external clients.
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
+        self.approvals
+            .iter()
+            .filter(|a| a.chat.as_deref().is_none_or(|c| c == self.chat))
+            .cloned()
+            .collect()
+    }
+
+    /// The user opened another project: withdraw the requests `project`'s
+    /// turns left waiting. Its chats' agents are told on their next turn.
+    pub fn close_project(&mut self, project: ProjectId) {
+        let (gone, kept) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|a| a.project == project);
+        self.approvals = kept;
+        for approval in gone {
+            let PendingApproval { id, request, .. } = approval;
+            self.report_outcome(
+                id,
+                format!(
+                    "withdrawn: {} (the user opened another project before deciding)",
+                    request.summary
+                ),
+                true,
+            );
+        }
     }
 
     /// Remove a request once the user approved or denied it.
@@ -278,10 +320,21 @@ impl AgentHost {
     /// Style rule: …"`): as the result of the call that asked, which is
     /// still waiting, else at the start of its next turn.
     pub fn report_outcome(&mut self, id: u64, outcome: String, failed: bool) {
+        let asked = self.asked.remove(&id);
         match self.held.remove(&id) {
             Some((_, reply)) if failed => reply.result(bridge::ToolResult::error(outcome)),
             Some((_, reply)) => reply.result(bridge::ToolResult::text(outcome)),
-            None => self.outcomes.push(outcome),
+            // An external client's call that gave up waiting has nobody to
+            // tell; the editor's own agent never asked.
+            None => {
+                if let Some((project, Some(chat))) = asked {
+                    self.outcomes.push(Outcome {
+                        project,
+                        chat,
+                        text: outcome,
+                    });
+                }
+            }
         }
     }
 
@@ -337,8 +390,14 @@ impl AgentHost {
             &self.memory.rules,
             recipe.as_deref(),
         );
-        if !self.outcomes.is_empty() {
-            let outcomes = std::mem::take(&mut self.outcomes).join("\n");
+        // What came of this chat's own requests, and no other's.
+        let (ours, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.outcomes)
+            .into_iter()
+            .partition(|o| o.project == project_id && o.chat == self.chat);
+        self.outcomes = others;
+        if !ours.is_empty() {
+            let outcomes: Vec<_> = ours.into_iter().map(|o| o.text).collect();
+            let outcomes = outcomes.join("\n");
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let images = tools::image::offered(&q.settings, services);
@@ -638,7 +697,8 @@ impl AgentHost {
                             tools::image::offered(&turn.settings, services),
                             &args,
                         );
-                        self.finish_call(origin, reply, tool, args, done, None);
+                        let project = bus.project().id;
+                        self.finish_call(origin, project, reply, tool, args, done, None);
                         continue;
                     }
                     let mut ctx = ToolCtx {
@@ -654,7 +714,8 @@ impl AgentHost {
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
-                            self.finish_call(origin, reply, tool, args, *done, None)
+                            let project = bus.project().id;
+                            self.finish_call(origin, project, reply, tool, args, *done, None)
                         }
                         Step::Job(job) => {
                             turn.jobs += 1;
@@ -680,7 +741,8 @@ impl AgentHost {
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
-                            self.finish_call(origin, reply, tool, args, *done, None)
+                            let project = bus.project().id;
+                            self.finish_call(origin, project, reply, tool, args, *done, None)
                         }
                         Step::Job(job) => {
                             self.external.jobs += 1;
@@ -760,7 +822,7 @@ impl AgentHost {
             // for that project, and nothing touches the open one.
             if bus.project().id != project {
                 let done = self.orphan(project, out);
-                self.finish_call(origin, reply, tool, args, done, Some(call));
+                self.finish_call(origin, project, reply, tool, args, done, Some(call));
                 continue;
             }
             let turn_author = || {
@@ -847,7 +909,7 @@ impl AgentHost {
                     }
                 }
             };
-            self.finish_call(origin, reply, tool, args, done, Some(call));
+            self.finish_call(origin, project, reply, tool, args, done, Some(call));
         }
     }
 
@@ -885,11 +947,13 @@ impl AgentHost {
         close_open_sets(bus, &external_author(), None, &mut self.events);
     }
 
-    /// Answer a call and show it; `call` is the id its start was shown
-    /// under, if it was.
+    /// Answer a call made on `project` and show it; `call` is the id its
+    /// start was shown under, if it was.
+    #[allow(clippy::too_many_arguments)]
     fn finish_call(
         &mut self,
         origin: Origin,
+        project: ProjectId,
         reply: Reply,
         tool: String,
         args: Value,
@@ -907,10 +971,21 @@ impl AgentHost {
             Some(request) => {
                 let id = self.next_approval;
                 self.next_approval += 1;
+                let chat = match origin {
+                    Origin::Turn => Some(
+                        self.turn
+                            .as_ref()
+                            .map_or_else(|| self.chat.clone(), |t| t.chat.clone()),
+                    ),
+                    Origin::External(_) => None,
+                };
+                self.asked.insert(id, (project, chat.clone()));
                 self.approvals.push(PendingApproval {
                     id,
                     request,
                     at: now(),
+                    project,
+                    chat,
                 });
                 self.held.insert(id, (origin, reply));
             }

@@ -71,9 +71,15 @@ impl AgentLink {
         self.host.set_memory(rules, facts);
     }
 
-    /// Memory and deliver requests waiting for the user's approval.
-    pub fn pending_approvals(&self) -> &[PendingApproval] {
+    /// Requests waiting for the user's approval in the open chat.
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
         self.host.pending_approvals()
+    }
+
+    /// The user opened another project: withdraw the requests `project`
+    /// left waiting.
+    pub fn close_project(&mut self, project: flikk_core::ProjectId) {
+        self.host.close_project(project);
     }
 
     /// Take a request off the list once the user approved (and the caller

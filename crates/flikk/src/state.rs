@@ -1018,6 +1018,7 @@ impl EditorState {
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
         self.set_playing(false, cx);
         self.agent.cancel();
+        self.agent.close_project(self.bus.project().id);
         self.save_chat();
         self.chats = persistence::load_chats(loaded.project.id);
         self.chat = active_messages(&self.chats);
@@ -1767,7 +1768,7 @@ fn now() -> i64 {
 impl EditorState {
     /// Memory and deliver requests waiting for the user (PRD "Agent
     /// configuration": these categories need approval per call).
-    pub fn pending_approvals(&self) -> &[flikk_agent::PendingApproval] {
+    pub fn pending_approvals(&self) -> Vec<flikk_agent::PendingApproval> {
         self.agent.pending_approvals()
     }
 
