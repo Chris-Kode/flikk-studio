@@ -958,6 +958,11 @@ impl EditorState {
         }
         self.autosaved = Some(version);
         persistence::autosave(self.bus.project(), self.file.as_deref());
+        if let Some(e) = persistence::autosave_failure() {
+            self.status = Some(format!(
+                "Unsaved changes could not be kept for recovery: {e}"
+            ));
+        }
     }
 
     /// Replace the open project with a new one saved at `path`, which names

@@ -262,6 +262,12 @@ pub fn autosave(project: &Project, file: Option<&Path>) {
     }
 }
 
+/// Why autosave last failed, once per run of failures: the changes stay
+/// queued and are tried again meanwhile.
+pub fn autosave_failure() -> Option<String> {
+    session().as_ref()?.autosaver.take_failure()
+}
+
 /// The project's unsaved changes were saved or thrown away: drop its
 /// autosave.
 pub fn discard(project: ProjectId) {
