@@ -17,6 +17,9 @@ use std::collections::HashMap;
 
 pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
     let mut plan = plan_command(command, project)?;
+    if let Some(track) = locked_track(project, &plan.ops) {
+        return Err(locked(track));
+    }
     if !matches!(
         command,
         Command::AddMarker { .. }
@@ -1636,12 +1639,29 @@ fn update_clips(tl: &Timeline, ids: &[ClipId], f: impl Fn(&mut Clip)) -> Result<
 fn editable_track(tl: &Timeline, id: TrackId) -> Result<&Track> {
     let track = tl.track(id).ok_or(CoreError::TrackNotFound(id))?;
     if track.locked {
-        return Err(CoreError::Invalid(format!(
-            "track {} is locked",
-            track.name
-        )));
+        return Err(locked(track));
     }
     Ok(track)
+}
+
+fn locked(track: &Track) -> CoreError {
+    CoreError::Invalid(format!("track {} is locked", track.name))
+}
+
+/// The first locked track `ops` would change. A lock keeps a track's clips
+/// and the track itself; its mix, caption style and lock stay editable, as
+/// in the track header.
+pub(crate) fn locked_track<'a>(project: &'a Project, ops: &[Op]) -> Option<&'a Track> {
+    ops.iter().find_map(|op| {
+        let id = match op {
+            Op::InsertClip { track, .. }
+            | Op::RemoveClip { track, .. }
+            | Op::UpdateClip { track, .. } => *track,
+            Op::RemoveTrack { track, .. } => track.id,
+            _ => return None,
+        };
+        project.timeline.track(id).filter(|t| t.locked)
+    })
 }
 
 fn clip_index(track: &Track, id: ClipId) -> usize {

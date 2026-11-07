@@ -433,7 +433,8 @@ impl CommandBus {
                 user_touched
                     .iter()
                     .any(|(v, t)| *v > item.base_version && *t == c)
-            }) {
+            }) || crate::edit::locked_track(&scratch, &item.ops).is_some()
+            {
                 item.state = ItemState::Conflicted;
                 report.conflicted.push(item.id);
                 continue;
