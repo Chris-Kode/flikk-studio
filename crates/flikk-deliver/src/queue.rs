@@ -13,10 +13,12 @@ use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::paths;
 use flikk_core::services::Services;
+use std::any::Any;
 use std::ffi::OsString;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Everything a render needs, owned so it can cross threads.
 #[derive(Clone, Debug)]
@@ -70,6 +72,36 @@ struct Inner {
     worker: AtomicBool,
 }
 
+impl Inner {
+    /// The entries, even after a panic poisoned the lock: every write to
+    /// them is a single field store, so they are never left half-changed.
+    fn entries(&self) -> MutexGuard<'_, Vec<Entry>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Clears `worker` if the worker thread ends some way other than finding
+/// the queue empty, so the next `enqueue` starts a new one.
+struct WorkerGuard<'a>(&'a Inner);
+
+impl Drop for WorkerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.worker.store(false, Ordering::Release);
+    }
+}
+
+/// A panic's message, when it carries one.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match detail {
+        Some(detail) => format!("the render stopped unexpectedly: {detail}"),
+        None => "the render stopped unexpectedly".into(),
+    }
+}
+
 /// Cheap to clone; all clones share one queue.
 #[derive(Clone, Default)]
 pub struct RenderQueue {
@@ -85,7 +117,7 @@ impl RenderQueue {
     /// target of a queued job.
     pub fn enqueue(&self, request: RenderRequest) -> Result<JobId> {
         ensure_free(&request.output)?;
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         if entries
             .iter()
             .any(|e| !e.job.state.is_finished() && e.job.output == request.output)
@@ -112,7 +144,7 @@ impl RenderQueue {
     }
 
     pub fn cancel(&self, id: JobId) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         if let Some(e) = entries.iter_mut().find(|e| e.job.id == id) {
             e.cancel.store(true, Ordering::Relaxed);
             if e.job.state == RenderState::Queued {
@@ -124,7 +156,7 @@ impl RenderQueue {
 
     /// Snapshot of every job, oldest first.
     pub fn jobs(&self) -> Vec<RenderJob> {
-        let entries = self.inner.entries.lock().expect("queue lock");
+        let entries = self.inner.entries();
         entries.iter().map(|e| e.job.clone()).collect()
     }
 
@@ -134,20 +166,31 @@ impl RenderQueue {
 
     /// Forget one finished job.
     pub fn remove(&self, id: JobId) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         entries.retain(|e| e.job.id != id || !e.job.state.is_finished());
     }
 
     /// Forget finished jobs.
     pub fn clear_finished(&self) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         entries.retain(|e| !e.job.state.is_finished());
     }
 
     fn set_state(&self, id: JobId, state: RenderState) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         if let Some(e) = entries.iter_mut().find(|e| e.job.id == id) {
             e.job.state = state;
+        }
+    }
+
+    /// Progress only moves forward and stays within 0..1, whatever the
+    /// render's phases report.
+    fn set_progress(&self, id: JobId, fraction: f32) {
+        let mut entries = self.inner.entries();
+        if let Some(e) = entries.iter_mut().find(|e| e.job.id == id)
+            && let RenderState::Running { fraction: shown } = &mut e.job.state
+        {
+            *shown = shown.max(fraction.clamp(0.0, 1.0));
         }
     }
 
@@ -156,43 +199,65 @@ impl RenderQueue {
             return;
         }
         let queue = self.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("flikk-render".into())
-            .spawn(move || queue.work())
-            .expect("spawn render worker");
+            .spawn(move || queue.work());
+        if let Err(err) = spawned {
+            // Nothing will pick the waiting jobs up: fail them rather than
+            // leave them queued forever.
+            let mut entries = self.inner.entries();
+            for e in entries.iter_mut() {
+                if e.job.state == RenderState::Queued && e.request.take().is_some() {
+                    e.job.state = RenderState::Failed {
+                        message: format!("could not start rendering: {err}"),
+                    };
+                }
+            }
+            self.inner.worker.store(false, Ordering::Release);
+        }
     }
 
+    /// Run queued jobs until there are none. A job that panics fails, and
+    /// the next one runs.
     fn work(&self) {
+        let guard = WorkerGuard(&self.inner);
         loop {
             let next = {
-                let mut entries = self.inner.entries.lock().expect("queue lock");
+                let mut entries = self.inner.entries();
                 let next = entries
                     .iter_mut()
                     .find(|e| e.job.state == RenderState::Queued && e.request.is_some());
                 match next {
                     Some(e) => {
                         e.job.state = RenderState::Running { fraction: 0.0 };
-                        Some((
+                        (
                             e.job.id,
                             e.request.take().expect("queued"),
                             e.cancel.clone(),
-                        ))
+                        )
                     }
                     None => {
+                        // Cleared under the lock, so a job queued from now
+                        // on starts a new worker.
                         self.inner.worker.store(false, Ordering::Release);
-                        None
+                        std::mem::forget(guard);
+                        return;
                     }
                 }
             };
-            let Some((id, request, cancel)) = next else {
-                return;
-            };
-            let progress = |fraction: f32| self.set_state(id, RenderState::Running { fraction });
-            let state = match render_blocking(&request, &progress, &cancel) {
-                Ok(()) => RenderState::Done,
-                Err(_) if cancel.load(Ordering::Relaxed) => RenderState::Canceled,
-                Err(e) => RenderState::Failed {
+            let (id, request, cancel) = next;
+            let progress = |fraction: f32| self.set_progress(id, fraction);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                render_blocking(&request, &progress, &cancel)
+            }));
+            let state = match result {
+                Ok(Ok(())) => RenderState::Done,
+                Ok(Err(_)) if cancel.load(Ordering::Relaxed) => RenderState::Canceled,
+                Ok(Err(e)) => RenderState::Failed {
                     message: format!("{e:#}"),
+                },
+                Err(payload) => RenderState::Failed {
+                    message: panic_message(payload.as_ref()),
                 },
             };
             self.set_state(id, state);
@@ -234,6 +299,9 @@ const MOTION_SHARE: f32 = 0.2;
 /// The part of what is left spent making depth maps, when it has any to
 /// make.
 const DEPTH_SHARE: f32 = 0.5;
+/// The part of what is left spent measuring loudness, when it is
+/// normalized.
+const LOUDNESS_SHARE: f32 = 0.2;
 
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
@@ -298,7 +366,7 @@ pub fn render_blocking(
         args.extend(filter_script_args(&script));
         args.extend(["-map", "[aout]", "-f", "null", "-"].map(OsString::from));
         let from = share;
-        share += 0.2;
+        share += (1.0 - share) * LOUDNESS_SHARE;
         let stderr = ffmpeg::run(
             &args,
             g.seconds,
