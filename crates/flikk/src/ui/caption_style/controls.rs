@@ -128,12 +128,14 @@ pub fn number(
         &state,
         move |this, _, ev: &NumberFieldEvent, cx| match *ev {
             NumberFieldEvent::Change(v) => {
-                let i = this.numbers_for();
-                this.show_at(i, |s| field.set(s, v as f32), cx)
+                if let Some(i) = this.numbers_for(cx) {
+                    this.show_at(i, |s| field.set(s, v as f32), cx)
+                }
             }
             NumberFieldEvent::Commit(v) => {
-                let i = this.numbers_for();
-                this.edit_at(i, |s| field.set(s, v as f32), cx)
+                if let Some(i) = this.numbers_for(cx) {
+                    this.edit_at(i, |s| field.set(s, v as f32), cx)
+                }
             }
         },
     );

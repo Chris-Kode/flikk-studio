@@ -62,17 +62,17 @@ pub struct CaptionStylePanel {
     target: Target,
     page: Page,
     numbers: HashMap<Field, Entity<NumberFieldState>>,
-    /// The style the number fields showed when their edit began: what a
-    /// value typed or scrubbed applies to.
-    numbers_for: usize,
+    /// The style the number fields showed when their edit began, with the
+    /// presets version: what a value typed or scrubbed applies to.
+    numbers_for: (usize, u64),
     /// Color pickers, with the color each last showed.
     colors: HashMap<Paint, (Entity<ColorPickerState>, flikk_core::memory::Color)>,
     color_pending: Option<PendingColor>,
     fonts: Entity<FontSelect>,
     /// Font the select was last set to.
     font_shown: String,
-    /// Style being renamed in `name`.
-    renaming: Option<usize>,
+    /// Style being renamed in `name`, with the presets version.
+    renaming: Option<(usize, u64)>,
     name: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -113,6 +113,7 @@ impl CaptionStylePanel {
             }),
         ];
         let style = state.read(cx).active_caption_style();
+        let version = state.read(cx).presets_version;
         let mut colors = HashMap::new();
         for paint in Paint::ALL {
             let color = paint.get(&style);
@@ -139,7 +140,7 @@ impl CaptionStylePanel {
             target,
             page: Page::Text,
             numbers,
-            numbers_for: 0,
+            numbers_for: (0, version),
             colors,
             color_pending: None,
             fonts,
@@ -155,18 +156,24 @@ impl CaptionStylePanel {
             self.target = target;
             // A rename the change overtook keeps what was typed, as its
             // blur would have.
-            if let Some(i) = self.renaming.take() {
+            if let Some(renaming) = self.renaming.take() {
                 let name = self.name.read(cx).value().trim().to_owned();
                 let this = cx.entity().downgrade();
                 cx.defer(move |cx| {
                     let _ = this.update(cx, |this, cx| {
-                        this.renaming = Some(i);
+                        this.renaming = Some(renaming);
                         this.finish_rename(name, cx);
                     });
                 });
             }
             cx.notify();
         }
+    }
+
+    /// Counts preset reloads: an edit begun under another version is for
+    /// presets no longer loaded.
+    fn presets_version(&self, cx: &App) -> u64 {
+        self.state.read(cx).presets_version
     }
 
     /// Index of the edited style in the profile's presets.
@@ -222,9 +229,10 @@ impl CaptionStylePanel {
     }
 
     /// The style a number field's value applies to: the one it showed when
-    /// its edit began.
-    pub(super) fn numbers_for(&self) -> usize {
-        self.numbers_for
+    /// its edit began, unless the presets reloaded since.
+    pub(super) fn numbers_for(&self, cx: &App) -> Option<usize> {
+        let (i, version) = self.numbers_for;
+        (version == self.presets_version(cx)).then_some(i)
     }
 
     /// Show a picked color now; save it once the picker rests.
@@ -235,26 +243,46 @@ impl CaptionStylePanel {
         cx: &mut Context<Self>,
     ) {
         let style = self.index(cx);
+        let version = self.presets_version(cx);
         if let Some(pending) = self.color_pending.take()
-            && (pending.style, pending.paint) != (style, paint)
+            && (pending.version, pending.style, pending.paint) != (version, style, paint)
         {
             pending.save(&self.state, cx);
         }
+        let Some(name) = self
+            .state
+            .read(cx)
+            .presets
+            .caption_styles
+            .get(style)
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
         self.show_at(style, |s| paint.set(s, color), cx);
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COLOR_SETTLE).await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(pending) = this.color_pending.take() {
-                    pending.save(&this.state, cx);
-                }
+                this.settle_color(cx);
+                // A dropped colour leaves its picker to follow the model.
+                cx.notify();
             });
         });
         self.color_pending = Some(PendingColor {
+            version,
             style,
+            name,
             paint,
             color,
             _timer: timer,
         });
+    }
+
+    /// Save a colour still settling now.
+    fn settle_color(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.color_pending.take() {
+            pending.save(&self.state, cx);
+        }
     }
 
     /// Make preset `i` the edited style's: for new captions, or the track's.
@@ -290,6 +318,8 @@ impl CaptionStylePanel {
 
     /// Remove preset `i`; tracks styled with it fall back to the first.
     fn delete(&mut self, i: usize, cx: &mut Context<Self>) {
+        // Before indices shift under it.
+        self.settle_color(cx);
         self.state.update(cx, |s, cx| {
             if s.presets.caption_styles.len() < 2 {
                 return;
@@ -319,7 +349,7 @@ impl CaptionStylePanel {
         else {
             return;
         };
-        self.renaming = Some(i);
+        self.renaming = Some((i, self.presets_version(cx)));
         self.name.update(cx, |n, cx| {
             n.set_value(name, window, cx);
             n.focus(window, cx);
@@ -329,10 +359,15 @@ impl CaptionStylePanel {
 
     /// Rename the style and the caption tracks that use it.
     fn finish_rename(&mut self, name: String, cx: &mut Context<Self>) {
-        let Some(i) = self.renaming.take() else {
+        let Some((i, version)) = self.renaming.take() else {
             return;
         };
         cx.notify();
+        if version != self.presets_version(cx) {
+            return;
+        }
+        // Before the name it is saved under changes.
+        self.settle_color(cx);
         let state = self.state.read(cx);
         let styles = &state.presets.caption_styles;
         let Some(old) = styles.get(i).map(|s| s.name.clone()) else {
@@ -367,7 +402,7 @@ impl CaptionStylePanel {
     /// Follow the model in the controls that keep their own state.
     fn sync(&mut self, style: &CaptionStyle, window: &mut Window, cx: &mut Context<Self>) {
         if !self.numbers.values().any(|n| n.read(cx).is_editing()) {
-            self.numbers_for = self.index(cx);
+            self.numbers_for = (self.index(cx), self.presets_version(cx));
         }
         if self.font_shown != style.font {
             self.font_shown = style.font.clone();
@@ -405,7 +440,7 @@ impl CaptionStylePanel {
             .gap(px(4.))
             .flex_wrap()
             .children(names.into_iter().enumerate().map(|(i, name)| {
-                if self.renaming == Some(i) {
+                if self.renaming.map(|(r, _)| r) == Some(i) {
                     return div()
                         .w(px(110.))
                         .child(Input::new(&self.name).small())
@@ -501,19 +536,28 @@ impl CaptionStylePanel {
     }
 }
 
-/// A picked color shown but not yet saved, for preset `style`.
+/// A picked color shown but not yet saved, for preset `style` (named
+/// `name`) of presets version `version`.
 struct PendingColor {
+    version: u64,
     style: usize,
+    name: String,
     paint: Paint,
     color: flikk_core::memory::Color,
     _timer: Task<()>,
 }
 
 impl PendingColor {
+    /// Save the colour, unless its style is no longer at its index (the
+    /// presets reloaded or changed since); then it is dropped.
     fn save(self, state: &Entity<EditorState>, cx: &mut App) {
         let (paint, color) = (self.paint, self.color);
         state.update(cx, |s, cx| {
-            s.edit_caption_style(self.style, |style| paint.set(style, color), cx)
+            let same = s.presets_version == self.version
+                && s.presets.caption_styles.get(self.style).map(|p| &p.name) == Some(&self.name);
+            if same {
+                s.edit_caption_style(self.style, |style| paint.set(style, color), cx);
+            }
         });
     }
 }

@@ -85,6 +85,8 @@ pub struct EditorState {
     /// Caption styles, loudness and ducking defaults of the selected style
     /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: flikk_core::memory::Presets,
+    /// Counts reloads of `presets`, so an edit begun before one can tell.
+    pub presets_version: u64,
     /// Index into `presets.caption_styles` used for new captions.
     pub caption_style: usize,
     /// Unsaved caption style the viewer shows while a control is dragged,
@@ -241,6 +243,7 @@ impl EditorState {
             source: None,
             source_marks: Default::default(),
             presets: flikk_core::memory::Presets::default(),
+            presets_version: 0,
             caption_style: 0,
             caption_live: None,
             lettering_styles: Vec::new(),
@@ -617,6 +620,7 @@ impl EditorState {
         }
         self.clear_live();
         self.presets = presets;
+        self.presets_version += 1;
         self.caption_style = 0;
         self.sync_caption_style();
         self.refresh_lettering();
