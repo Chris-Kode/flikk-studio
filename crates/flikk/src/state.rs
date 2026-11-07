@@ -793,7 +793,13 @@ impl EditorState {
         self.agent.is_busy()
     }
 
+    /// Send `text` as the user's message. Does nothing while the agent is
+    /// busy: it would refuse the message, which must then not show, nor
+    /// clear the settled cards.
     pub fn send_chat(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.agent_busy() {
+            return;
+        }
         self.chat.push(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
@@ -2022,8 +2028,8 @@ pub enum ApprovalOutcome {
 // ------------------------------------------------------------- chat stream
 
 impl EditorState {
-    /// Send `text` as the user's message, like [`Self::send_chat`]; the agent
-    /// also reads `context` after it (the resolved `@` references), which
+    /// Send `text` as the user's message, like [`Self::send_chat`] (nothing
+    /// while the agent is busy); the agent also reads `context` after it (the resolved `@` references), which
     /// the chat neither shows nor stores.
     pub fn send_chat_with_context(
         &mut self,
@@ -2031,6 +2037,9 @@ impl EditorState {
         context: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.agent_busy() {
+            return;
+        }
         self.chat.push(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
