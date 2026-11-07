@@ -214,12 +214,12 @@ pub struct Model {
 }
 
 impl Model {
-    /// Every file is on disk.
+    /// Every file is on disk and whole ([`ModelFile::is_present`]).
     pub fn is_downloaded(&self) -> bool {
         self.files.iter().all(ModelFile::is_present)
     }
 
-    /// Bytes of the files not on disk yet.
+    /// Bytes of the files not on disk yet, or not whole.
     pub fn missing_bytes(&self) -> u64 {
         self.files
             .iter()
@@ -262,7 +262,9 @@ pub struct ModelFile {
     pub env: Option<&'static str>,
     /// What errors call it: "sound tagger".
     pub what: &'static str,
-    /// Bytes, as published.
+    /// Bytes, as published at `url`: exact, since a file of any other
+    /// length is taken for a cut or damaged download. 0 when unknown, and
+    /// then any length passes.
     pub size: u64,
 }
 
@@ -284,19 +286,49 @@ impl ModelFile {
         })
     }
 
+    /// On disk and whole. Cheap: no more than the file's metadata is read.
     pub fn is_present(&self) -> bool {
-        self.path().is_file()
+        matches!(self.on_disk().1, OnDisk::Whole)
     }
 
     /// The file on disk, or why it isn't there.
     pub fn locate(&self) -> Result<PathBuf> {
-        let path = self.path();
-        if path.is_file() {
-            return Ok(path);
-        }
-        match self.env.filter(|_| self.overridden().is_some()) {
-            Some(env) => bail!("{} not found at {} (from {env})", self.what, path.display()),
-            None => bail!("{} is not downloaded", self.what),
+        let (path, on_disk) = self.on_disk();
+        match on_disk {
+            OnDisk::Whole => Ok(path),
+            OnDisk::Missing => match self.env.filter(|_| self.overridden().is_some()) {
+                Some(env) => bail!("{} not found at {} (from {env})", self.what, path.display()),
+                None => bail!("{} is not downloaded", self.what),
+            },
+            OnDisk::WrongSize(len) => bail!(
+                "{} is damaged or incomplete ({len} of {} bytes): download it again",
+                self.what,
+                self.size
+            ),
         }
     }
+
+    /// Where the file is read from, and what is there. A file in
+    /// `paths::models()` is whole when it is as long as published (a cut
+    /// or damaged download is not); a copy [`Self::env`] points at may be
+    /// any size, as may a file whose [`Self::size`] is 0.
+    fn on_disk(&self) -> (PathBuf, OnDisk) {
+        let overridden = self.overridden();
+        let any_size = overridden.is_some() || self.size == 0;
+        let path = overridden.unwrap_or_else(|| paths::models().join(self.name));
+        let on_disk = match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() && (any_size || m.len() == self.size) => OnDisk::Whole,
+            Ok(m) if m.is_file() => OnDisk::WrongSize(m.len()),
+            _ => OnDisk::Missing,
+        };
+        (path, on_disk)
+    }
+}
+
+/// What [`ModelFile::on_disk`] found.
+enum OnDisk {
+    Whole,
+    Missing,
+    /// A file this many bytes long, not the size published.
+    WrongSize(u64),
 }

@@ -20,9 +20,10 @@ const STALL: Duration = Duration::from_secs(60);
 /// Where a model stands.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
-    /// Every file is on disk.
+    /// Every file is on disk and whole.
     Downloaded,
-    /// A file is not, and nothing is fetching it.
+    /// A file is not (or is cut short or damaged), and nothing is fetching
+    /// it.
     Missing,
     /// Fetching; 0..1 of its bytes.
     Downloading(f32),
@@ -323,6 +324,14 @@ fn fetch_into(
     out.sync_all()?;
     if total.is_some_and(|t| t != done) {
         bail!("{what} download incomplete ({done} bytes)");
+    }
+    // Checked before it takes the file's name, which would make it look
+    // downloaded.
+    if file.size != 0 && done != file.size {
+        bail!(
+            "{what} download is the wrong size ({done} bytes, {} published): try again",
+            file.size
+        );
     }
     Ok(())
 }
