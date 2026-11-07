@@ -2,12 +2,14 @@
 //! queued, at most `limit` at a time, on threads of the queue's own that
 //! end once nothing is left to run, and report their progress as
 //! [`JobStatus`]. Work queued under a key that is already queued or
-//! running is that same job.
+//! running is that same job. A job can be cancelled by its key: one not
+//! started never runs, and one running sees [`JobProgress::cancelled`].
 
 use crate::ids::{JobId, MediaId};
 use crate::services::{JobState, JobStatus};
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// What a job does; `Err` says why it failed.
@@ -36,9 +38,9 @@ struct Shared<K> {
 }
 
 struct Queue<K> {
-    /// The keys of the jobs queued or running.
-    keys: Vec<(K, JobId)>,
-    waiting: VecDeque<(JobId, Work)>,
+    /// The keys of the jobs queued or running, and their cancel flags.
+    keys: Vec<(K, JobId, Arc<AtomicBool>)>,
+    waiting: VecDeque<(JobId, Arc<AtomicBool>, Work)>,
     /// Threads running jobs.
     threads: usize,
 }
@@ -48,9 +50,16 @@ struct Queue<K> {
 pub struct JobProgress {
     jobs: Arc<Mutex<Vec<JobStatus>>>,
     id: JobId,
+    cancel: Arc<AtomicBool>,
 }
 
 impl JobProgress {
+    /// Whether the job was cancelled ([`JobQueue::cancel`]): it should
+    /// stop as soon as it can; what it returns then is not listed.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     /// 0..1 of the job done.
     pub fn set(&self, fraction: f32) {
         set_state(
@@ -109,7 +118,7 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
     ) -> JobId {
         let shared = &self.shared;
         let mut queue = lock(&shared.queue);
-        if let Some(&(_, id)) = queue.keys.iter().find(|(k, _)| *k == key) {
+        if let Some(&(_, id, _)) = queue.keys.iter().find(|(k, _, _)| *k == key) {
             return id;
         }
         let id = JobId::new();
@@ -119,8 +128,9 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
             media,
             state: JobState::Queued,
         });
-        queue.keys.push((key, id));
-        queue.waiting.push_back((id, Box::new(work)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        queue.keys.push((key, id, cancel.clone()));
+        queue.waiting.push_back((id, cancel, Box::new(work)));
         if queue.threads < shared.limit {
             queue.threads += 1;
             drop(queue);
@@ -162,6 +172,21 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
             })
     }
 
+    /// Cancel the job under `key`, queued or running: it leaves
+    /// [`Self::jobs`] now, one queued never runs, and work pushed under
+    /// `key` after is a new job. Whether there was one.
+    pub fn cancel(&self, key: &K) -> bool {
+        let mut queue = lock(&self.shared.queue);
+        let Some(i) = queue.keys.iter().position(|(k, _, _)| k == key) else {
+            return false;
+        };
+        let (_, id, cancel) = queue.keys.remove(i);
+        cancel.store(true, Ordering::Relaxed);
+        queue.waiting.retain(|(waiting, _, _)| *waiting != id);
+        lock(&self.shared.jobs).retain(|j| j.id != id);
+        true
+    }
+
     /// Drop finished and failed jobs from [`Self::jobs`].
     pub fn clear_finished(&self) {
         lock(&self.shared.jobs)
@@ -180,8 +205,8 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
             if queue.threads == 0 {
                 // Nothing else would ever run them.
                 let message = format!("could not start {}: {e}", shared.name);
-                for (id, _) in std::mem::take(&mut queue.waiting) {
-                    queue.keys.retain(|(_, k)| *k != id);
+                for (id, _, _) in std::mem::take(&mut queue.waiting) {
+                    queue.keys.retain(|(_, k, _)| *k != id);
                     set_state(&shared.jobs, id, outcome(Err(message.clone())));
                 }
             }
@@ -202,18 +227,20 @@ impl<K: PartialEq> Shared<K> {
                 }
                 next
             };
-            let Some((id, work)) = next else {
+            let Some((id, cancel, work)) = next else {
                 return;
             };
             let progress = JobProgress {
                 jobs: self.jobs.clone(),
                 id,
+                cancel,
             };
             progress.set(0.0);
             let result = catch_unwind(AssertUnwindSafe(|| work(&progress)))
                 .unwrap_or_else(|_| Err(format!("{} stopped unexpectedly", self.name)));
             let mut queue = lock(&self.queue);
-            queue.keys.retain(|(_, k)| *k != id);
+            queue.keys.retain(|(_, k, _)| *k != id);
+            // A cancelled job left the list already.
             set_state(&self.jobs, id, outcome(result));
         }
     }

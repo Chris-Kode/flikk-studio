@@ -17,10 +17,14 @@
 //! results: the cache's Clear in Settings → Storage leaves them.
 //!
 //! An item is measured by one thread at a time: one that wants it while
-//! another measures it waits for that. One that failed is not queued
-//! again for [`RETRY_AFTER`]; renders measure it again all the same.
+//! another measures it waits for that and takes its path, so a render
+//! does not measure again what the background is measuring. One that
+//! failed is not queued again for [`RETRY_AFTER`]; renders measure it
+//! again all the same. A background job stops, kept as not measured,
+//! when its item is asked for under another fingerprint (the file
+//! changed) or the stabilizer is dropped (the window closed).
 
-use flikk_core::ids::JobId;
+use flikk_core::ids::{JobId, MediaId};
 use flikk_core::jobs::JobQueue;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::paths;
@@ -92,6 +96,10 @@ struct Shared {
     measured: Condvar,
     /// Items that failed: why, and when.
     failed: Mutex<HashMap<Fingerprint, (String, Instant)>>,
+    /// The fingerprint each media item was last asked for under.
+    wanted: Mutex<HashMap<MediaId, Fingerprint>>,
+    /// The stabilizer was dropped: background jobs stop.
+    closed: AtomicBool,
     version: AtomicU64,
 }
 
@@ -105,10 +113,20 @@ impl LocalStabilizer {
                 measuring: Mutex::default(),
                 measured: Condvar::new(),
                 failed: Mutex::default(),
+                wanted: Mutex::default(),
+                closed: AtomicBool::new(false),
                 version: AtomicU64::new(0),
             }),
             queue: JobQueue::new("flikk-motion", 1),
         }
+    }
+}
+
+impl Drop for LocalStabilizer {
+    fn drop(&mut self) {
+        // The jobs hold `shared`, not this: tell them nobody is left.
+        self.shared.closed.store(true, Ordering::Relaxed);
+        self.shared.measured.notify_all();
     }
 }
 
@@ -144,12 +162,13 @@ impl Shared {
     /// Measure `item`, or take what another thread measuring it found,
     /// calling `waiting` while it waits for that. When it failed lately,
     /// measures it again if `again`, and fails with that error otherwise.
+    /// Stops when `cancel` says so; that is not kept as a failure.
     fn measure(
         &self,
         item: &MediaItem,
         fp: &Fingerprint,
         progress: &dyn Fn(f32),
-        cancel: &AtomicBool,
+        cancel: &dyn Fn() -> bool,
         again: bool,
         waiting: &dyn Fn(),
     ) -> ServiceResult<Arc<CameraPath>> {
@@ -165,7 +184,7 @@ impl Shared {
                 if measuring.insert(fp.clone()) {
                     break;
                 }
-                if cancel.load(Ordering::Relaxed) {
+                if cancel() {
                     return Err(ServiceError("cancelled".into()));
                 }
                 waiting();
@@ -177,6 +196,9 @@ impl Shared {
             }
         }
         let _claim = Measuring(self, fp);
+        if cancel() {
+            return Err(ServiceError("cancelled".into()));
+        }
         let result = catch_unwind(AssertUnwindSafe(|| {
             measure(self.media.as_ref(), item, progress, cancel)
         }))
@@ -194,7 +216,7 @@ impl Shared {
                 Ok(path)
             }
             Err(e) => {
-                if !cancel.load(Ordering::Relaxed) {
+                if !cancel() {
                     lock(&self.failed).insert(fp.clone(), (e.0.clone(), Instant::now()));
                 }
                 Err(e)
@@ -220,10 +242,21 @@ impl Stabilizer for LocalStabilizer {
 
     fn measure(&self, item: &MediaItem) -> Option<JobId> {
         let fp = item.fingerprint.clone()?;
-        if item.kind != MediaKind::Video
-            || self.shared.path(&fp).is_some()
-            || self.shared.failed_lately(&fp).is_some()
+        if item.kind != MediaKind::Video {
+            return None;
+        }
         {
+            // The item's file changed: what it was queued under is not
+            // wanted, unless another item has that fingerprint too.
+            let mut wanted = lock(&self.shared.wanted);
+            if let Some(old) = wanted.insert(item.id, fp.clone())
+                && old != fp
+                && !wanted.values().any(|f| *f == old)
+            {
+                self.queue.cancel(&old);
+            }
+        }
+        if self.shared.path(&fp).is_some() || self.shared.failed_lately(&fp).is_some() {
             return None;
         }
         let shared = self.shared.clone();
@@ -239,10 +272,9 @@ impl Stabilizer for LocalStabilizer {
             format!("Stabilize {name}"),
             Some(item.id),
             move |job| {
-                // Nothing cancels a background job: what it measures is kept.
-                let never = AtomicBool::new(false);
+                let cancel = || job.cancelled() || shared.closed.load(Ordering::Relaxed);
                 shared
-                    .measure(&owned, &fp, &|p| job.set(p), &never, false, &|| {})
+                    .measure(&owned, &fp, &|p| job.set(p), &cancel, false, &|| {})
                     .map(|_| ())
                     .map_err(|e| e.0)
             },
@@ -274,8 +306,9 @@ impl Stabilizer for LocalStabilizer {
                 progress(fraction);
             }
         };
+        let cancelled = || cancel.load(Ordering::Relaxed);
         self.shared
-            .measure(item, &fp, progress, cancel, true, &waiting)
+            .measure(item, &fp, progress, &cancelled, true, &waiting)
     }
 
     fn jobs(&self) -> Vec<JobStatus> {
@@ -329,7 +362,7 @@ fn measure(
     media: &dyn MediaService,
     item: &MediaItem,
     progress: &dyn Fn(f32),
-    cancel: &AtomicBool,
+    cancel: &dyn Fn() -> bool,
 ) -> ServiceResult<CameraPath> {
     let duration = item
         .info
@@ -342,7 +375,7 @@ fn measure(
     let mut previous: Option<Pyramid> = None;
     let mut aspect = 16.0 / 9.0;
     while let Some((t, frame)) = stream.next_frame()? {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel() {
             return Err(ServiceError("cancelled".into()));
         }
         aspect = frame.width.max(1) as f32 / frame.height.max(1) as f32;

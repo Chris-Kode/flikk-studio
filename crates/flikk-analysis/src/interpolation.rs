@@ -12,6 +12,8 @@
 //! waiting: frames are made on
 //! one thread of their own, the newest asked first (the playhead moved
 //! on), and blended until they are made. Renders wait for each. A frame
+//! is made by one thread at a time: a render that wants one being made
+//! waits for it, and the viewer leaves it to whoever makes it. A frame
 //! that fails is not asked for again for [`RETRY_AFTER`], or until the
 //! model is downloaded when it was missing; renders try it again all the
 //! same.
@@ -23,7 +25,7 @@ use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -74,6 +76,9 @@ struct Shared {
     working: AtomicBool,
     /// Keys that failed: whether the model was there then, and when.
     failed: Mutex<HashMap<Key, (bool, Instant)>>,
+    /// Keys being made now, and their end announced.
+    making: Mutex<HashSet<Key>>,
+    finished: Condvar,
     version: AtomicU64,
 }
 
@@ -105,6 +110,8 @@ impl LocalInterpolation {
             wake: Condvar::new(),
             working: AtomicBool::new(false),
             failed: Mutex::default(),
+            making: Mutex::default(),
+            finished: Condvar::new(),
             version: AtomicU64::new(0),
         });
         // Now, so it reads the disk's index before the first frame drawn.
@@ -290,6 +297,35 @@ impl Shared {
         }
     }
 
+    /// Whether another thread is making `key` now.
+    fn being_made(&self, key: Key) -> bool {
+        lock(&self.making).contains(&key)
+    }
+
+    /// The frame of `job`, made here unless it is made already. While
+    /// another thread makes it, waits for that with `wait` and takes its
+    /// frame (making it here when that failed), and leaves it otherwise.
+    fn claim(&self, job: &Job, wait: bool) -> Option<Frame> {
+        {
+            let mut making = lock(&self.making);
+            while !making.insert(job.key) {
+                if !wait {
+                    return None;
+                }
+                making = self
+                    .finished
+                    .wait(making)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        let _claim = Making(self, job.key);
+        // Made by the thread just waited for, or just before the claim.
+        if let Some(frame) = self.find(job.key) {
+            return Some(frame);
+        }
+        self.make(job)
+    }
+
     /// Start the worker unless it is running; whether it is.
     fn start(self: &Arc<Self>) -> bool {
         if self.working.swap(true, Ordering::SeqCst) {
@@ -322,12 +358,9 @@ impl Shared {
                     waiting = self.wake.wait(waiting).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            // `make` catches the model's panics; this, the disk's.
-            let done = catch_unwind(AssertUnwindSafe(|| {
-                if self.find(job.key).is_none() {
-                    self.make(&job);
-                }
-            }));
+            // `make` catches the model's panics; this, the disk's. A
+            // render making this frame now keeps it for the viewer.
+            let done = catch_unwind(AssertUnwindSafe(|| self.claim(&job, false)));
             if let Err(payload) = done {
                 self.fail(job.key, &stopped(payload.as_ref()));
             }
@@ -363,9 +396,9 @@ impl InterpolationService for LocalInterpolation {
         };
         // Renders try again whatever failed before.
         if wait {
-            return self.shared.make(&job);
+            return self.shared.claim(&job, true);
         }
-        if self.shared.failed(key) {
+        if self.shared.failed(key) || self.shared.being_made(key) {
             return None;
         }
         // Without a worker it would wait for good: fail it, to ask again.
@@ -387,6 +420,17 @@ impl InterpolationService for LocalInterpolation {
 
     fn version(&self) -> u64 {
         self.shared.version.load(Ordering::SeqCst)
+    }
+}
+
+/// A key claimed in [`Shared::making`], let go when dropped, a panic
+/// included, so the threads waiting for it go on.
+struct Making<'a>(&'a Shared, Key);
+
+impl Drop for Making<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.making).remove(&self.1);
+        self.0.finished.notify_all();
     }
 }
 
