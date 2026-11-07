@@ -17,6 +17,10 @@
   let frames = new Map(); // id -> callback
   const births = new WeakMap(); // Animation -> virtual ms when first seen
   const decoded = new WeakSet();
+  // Image parameters, decoded once per URL: CSS may paint them where no
+  // <img> shows them, so frames wait for these too.
+  const pictures = new Map(); // url -> Promise
+  let wanted = [];
   const errors = [];
   const sheet = new CSSStyleSheet();
   try {
@@ -236,13 +240,22 @@
       decoded.add(img);
       pending.push(img.decode().catch(() => {}));
     }
+    for (const url of wanted) {
+      if (!pictures.has(url)) {
+        const img = new Image();
+        img.src = url;
+        pictures.set(url, img.decode().then(() => img, () => null));
+      }
+      pending.push(pictures.get(url));
+    }
     await Promise.all(pending);
   };
 
   window.__flikk = {
     errors,
-    // `state`: { time, duration, width, height, params, vars }.
+    // `state`: { time, duration, width, height, params, vars, images }.
     apply(state) {
+      wanted = state.images || [];
       window.flikk = {
         time: now / 1000,
         duration: state.duration,

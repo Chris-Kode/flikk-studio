@@ -1,7 +1,8 @@
 //! Controls for FX parameters, generated from [`ParamSpec`]: a scrubbing
 //! number field (Float/Int), x/y fields (Point), switch (Bool), colour field
-//! (Color), text box (Text), select (Choice) and file chooser (Image), each
-//! with keyframe navigation at the playhead. Like [`super::param`], scrubs
+//! (Color), text box (Text), select (Choice) and image picker (Image: a pool
+//! picture, picked or dropped, or a file), each with keyframe navigation at
+//! the playhead. Like [`super::param`], scrubs
 //! preview live and commit once on release.
 //!
 //! A control is keyed by what owns the parameter ([`FxOwner`]); the owner
@@ -9,16 +10,17 @@
 //! effects, grade) can reuse the controls by adding an owner.
 
 use super::{InspectorPanel, label, row, select_field};
+use crate::ui::MediaDrag;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, ColorField, DropdownMenu as _, IconName, Keyframe, KeyframeNav, NumberField,
-    NumberFieldEvent, NumberFieldState, PopupMenuItem, ScrubLabel, Switch, Textarea, h_flex,
-    v_flex,
+    ColorField, DropdownMenu as _, IconName, Keyframe, KeyframeNav, NumberField, NumberFieldEvent,
+    NumberFieldState, PopupMenuItem, ScrubLabel, Switch, Textarea, h_flex, v_flex,
 };
+use crate::ui::media_pool::item_name;
 use flikk_core::command::{Command, Edge};
 use flikk_core::fx::{self, FxAsset, FxInstance, ParamKind, ParamSpec, ParamValue, Transition};
-use flikk_core::model::{ClipContent, Project};
-use flikk_core::{ClipId, EffectId, Time};
+use flikk_core::model::{ClipContent, MediaKind, Project};
+use flikk_core::{ClipId, EffectId, MediaId, Time};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::SliderEvent;
 use gpui_kit::base::{ColorPickerEvent, ColorPickerState};
@@ -625,38 +627,92 @@ impl InspectorPanel {
                 .into_any_element()
             }
             ParamKind::Image => {
-                let path = value.as_text().unwrap_or_default().to_owned();
-                let file = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
-                let k = key.clone();
+                let path = value.as_text().unwrap_or_default().trim().to_owned();
+                // The pool's pictures, by the name the pool shows.
+                let pool: Vec<(String, String)> = self
+                    .state
+                    .read(cx)
+                    .bus
+                    .project()
+                    .media
+                    .iter()
+                    .filter(|m| m.kind == MediaKind::Image)
+                    .map(|m| (item_name(m), m.path.to_string_lossy().into_owned()))
+                    .collect();
+                let shown = pool
+                    .iter()
+                    .find(|(_, p)| *p == path)
+                    .map(|(n, _)| n.clone())
+                    .or_else(|| {
+                        std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "\u{2014}".into());
+                let drop_key = key.clone();
                 row(
                     label(name),
-                    h_flex()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(11.))
-                                .text_color(if file.is_some() { t::T1 } else { t::T3 })
-                                .child(file.unwrap_or_else(|| "\u{2014}".into())),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("image-{id}")))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::FolderOpen)
-                                .tooltip("Choose image")
-                                .on_click(move |_, _, cx| {
-                                    panel.update(cx, |this, cx| this.choose_image(&k, cx))
-                                }),
-                        ),
+                    select_field(SharedString::from(format!("image-{id}")), shown).dropdown_menu(
+                        move |mut menu, _, _| {
+                            let set = |value: String| {
+                                let (panel, k) = (panel.clone(), key.clone());
+                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                    panel.update(cx, |this, cx| {
+                                        this.set_fx_param(
+                                            &k,
+                                            ParamValue::Text(value.clone()),
+                                            false,
+                                            cx,
+                                        )
+                                    })
+                                }
+                            };
+                            menu = menu.item(
+                                PopupMenuItem::new("None")
+                                    .checked(path.is_empty())
+                                    .on_click(set(String::new())),
+                            );
+                            for (n, p) in &pool {
+                                menu = menu.item(
+                                    PopupMenuItem::new(n.clone())
+                                        .checked(*p == path)
+                                        .on_click(set(p.clone())),
+                                );
+                            }
+                            let (panel, k) = (panel.clone(), key.clone());
+                            menu.item(PopupMenuItem::separator()).item(
+                                PopupMenuItem::new("Choose File\u{2026}")
+                                    .icon(IconName::FolderOpen)
+                                    .on_click(move |_, _, cx| {
+                                        panel.update(cx, |this, cx| this.choose_image(&k, cx))
+                                    }),
+                            )
+                        },
+                    ),
                     None,
                 )
+                .drag_over::<MediaDrag>(|s, _, _, _| s.bg(t::AC_WASH))
+                .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
+                    this.drop_image(&drop_key, drag.media, cx)
+                }))
                 .into_any_element()
             }
+        }
+    }
+
+    /// A pool picture dropped on an image parameter: its file becomes the
+    /// value. Anything but a picture is ignored.
+    fn drop_image(&mut self, key: &ControlKey, media: MediaId, cx: &mut Context<Self>) {
+        let path = self
+            .state
+            .read(cx)
+            .bus
+            .project()
+            .media(media)
+            .filter(|m| m.kind == MediaKind::Image)
+            .map(|m| m.path.to_string_lossy().into_owned());
+        if let Some(path) = path {
+            self.set_fx_param(key, ParamValue::Text(path), false, cx);
         }
     }
 

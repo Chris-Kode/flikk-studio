@@ -22,7 +22,8 @@ pub struct Prepared {
     pub doc_key: u64,
     /// Hash of everything but the time: params, duration, canvas.
     pub state_key: u64,
-    /// `{ time, duration, width, height, params, vars }` for `__flikk.frame`.
+    /// `{ time, duration, width, height, params, vars, images }` for
+    /// `__flikk.frame`.
     pub state: Value,
     /// Lines in front of the author's code, to map error lines back.
     pub header_lines: usize,
@@ -38,7 +39,7 @@ pub fn prepare(call: &FxCall<'_>) -> Prepared {
         code
     };
     let header_lines = if fragment { HEAD.lines().count() } else { 0 };
-    let (params, vars) = params(call.asset, call.values);
+    let (params, vars, images) = params(call.asset, call.values);
     let (w, h) = page_size(call.canvas);
     let vars = format!(
         "{vars}--duration: {}; --width: {w}; --height: {h};",
@@ -50,6 +51,7 @@ pub fn prepare(call: &FxCall<'_>) -> Prepared {
         "height": h,
         "params": params,
         "vars": vars,
+        "images": images,
     });
     let state_key = hash(&state.to_string());
     state["time"] = json!(call.time.max(0.0));
@@ -132,10 +134,15 @@ fn inline(kind: &ParamKind, value: &ParamValue) -> String {
     }
 }
 
-/// `window.flikk.params` and the `:root` declarations.
-fn params(asset: &FxAsset, values: &BTreeMap<String, ParamValue>) -> (Map<String, Value>, String) {
+/// `window.flikk.params`, the `:root` declarations and the image URLs a
+/// frame waits for, since CSS can use them where no `<img>` shows them.
+fn params(
+    asset: &FxAsset,
+    values: &BTreeMap<String, ParamValue>,
+) -> (Map<String, Value>, String, Vec<String>) {
     let mut params = Map::new();
     let mut vars = String::new();
+    let mut images = Vec::new();
     for spec in &asset.params {
         let value = values.get(&spec.name).unwrap_or(&spec.default);
         let name = &spec.name;
@@ -155,6 +162,7 @@ fn params(asset: &FxAsset, values: &BTreeMap<String, ParamValue>) -> (Map<String
                 let css = if url.is_empty() {
                     "none".to_owned()
                 } else {
+                    images.push(url.clone());
                     format!("url({})", css_string(&url))
                 };
                 (json!(url), css)
@@ -170,7 +178,7 @@ fn params(asset: &FxAsset, values: &BTreeMap<String, ParamValue>) -> (Map<String
         let _ = write!(vars, "--{name}: {css}; ");
         params.insert(name.clone(), js);
     }
-    (params, vars)
+    (params, vars, images)
 }
 
 fn num(v: f64) -> String {
