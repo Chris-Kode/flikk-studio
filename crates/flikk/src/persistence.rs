@@ -67,7 +67,8 @@ pub fn launched_with_file() -> bool {
 
 /// Start the session and pick the first project: the file named at
 /// launch, else unsaved changes a crash left, else the most recent file,
-/// else a new "Untitled".
+/// else a new "Untitled". A demo starts on a new "Untitled" it replaces,
+/// tied to none of the user's files.
 pub fn load_session() -> Loaded {
     {
         let mut guard = session();
@@ -83,30 +84,79 @@ pub fn load_session() -> Loaded {
             autosaver: Autosaver::spawn(),
         });
     }
+    let untitled = || new_project("Untitled", SequenceSettings::default());
+    if crate::demo::enabled() {
+        return untitled();
+    }
     if let Some(path) = LAUNCH_FILE.get()
         && let Some(loaded) = open(path)
     {
         return loaded;
     }
+    // Why the file named at launch did not open, or the store did not:
+    // kept over what follows.
+    let error = take_notice();
+    let loaded = crash_recovery()
+        .or_else(open_recent)
+        .unwrap_or_else(untitled);
+    if let Some(error) = error {
+        notify(error);
+    }
+    loaded
+}
+
+/// The newest autosave a crash left that holds newer changes than its
+/// file, as [`open`] would recover them. Ones whose file has caught up are
+/// removed.
+fn crash_recovery() -> Option<Loaded> {
     for autosave in project_file::autosaves() {
-        match project_file::read(&autosave) {
-            Ok(file) => {
-                notify("Recovered unsaved changes");
-                return loaded(file, true);
+        let file = match project_file::read(&autosave) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("flikk: can't recover {}: {e:#}", autosave.display());
+                continue;
             }
-            Err(e) => eprintln!("flikk: can't recover {}: {e:#}", autosave.display()),
+        };
+        let fresh = match file.autosave_of.as_deref() {
+            // Never saved: the autosave is the only copy.
+            None => true,
+            Some(path) => {
+                let saved = project_file::read(path).map(|f| f.project.id);
+                match saved {
+                    // The file holds another project now; opening it would
+                    // not recover this.
+                    Ok(id) if id != file.project.id => false,
+                    _ if holds_newer(&autosave, &file, path) => true,
+                    Ok(_) => {
+                        // Only a strictly newer file has caught up: with
+                        // coarse timestamps the same age may still hide
+                        // changes made just after a save.
+                        if modified(path) > modified(&autosave) {
+                            let _ = std::fs::remove_file(&autosave);
+                        }
+                        false
+                    }
+                    // A file that is missing or broken may still need it.
+                    Err(_) => false,
+                }
+            }
+        };
+        if fresh {
+            notify("Recovered unsaved changes");
+            return Some(loaded(file, true));
         }
     }
-    for path in recent() {
-        if path.exists()
-            && let Some(loaded) = open(&path)
-        {
-            // An older error about another file is not news.
-            let _ = take_notice();
-            return loaded;
-        }
-    }
-    new_project("Untitled", SequenceSettings::default())
+    None
+}
+
+/// The most recent project file that opens.
+fn open_recent() -> Option<Loaded> {
+    let opened = recent()
+        .into_iter()
+        .find_map(|path| path.exists().then(|| open(&path)).flatten())?;
+    // An older error about another file is not news.
+    let _ = take_notice();
+    Some(opened)
 }
 
 /// A new project named `name` with a sequence of `settings`, not saved
@@ -150,17 +200,23 @@ pub fn open(path: &Path) -> Option<Loaded> {
 /// The autosave of project `id` when it holds newer changes to `path`.
 fn recover(path: &Path, id: ProjectId) -> Option<ProjectFile> {
     let autosave = project_file::autosave_path(id);
-    let newer = match (modified(&autosave), modified(path)) {
+    let file = project_file::read(&autosave).ok()?;
+    holds_newer(&autosave, &file, path).then_some(file)
+}
+
+/// `file`, read from `autosave`, holds changes to `path` newer than the
+/// file there (or there is none).
+fn holds_newer(autosave: &Path, file: &ProjectFile, path: &Path) -> bool {
+    let newer = match (modified(autosave), modified(path)) {
         (Some(a), Some(f)) => a > f,
         (a, _) => a.is_some(),
     };
-    if !newer {
-        return None;
-    }
-    let file = project_file::read(&autosave).ok()?;
     let same = |p: &Path| std::fs::canonicalize(p).ok();
-    let of = file.autosave_of.as_deref()?;
-    (of == path || same(of).is_some_and(|of| Some(of) == same(path))).then_some(file)
+    newer
+        && file
+            .autosave_of
+            .as_deref()
+            .is_some_and(|of| of == path || same(of).is_some_and(|of| Some(of) == same(path)))
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -193,7 +249,11 @@ pub fn save(path: &Path, project: &Project) -> bool {
 }
 
 /// Queue unsaved changes for the background writer, for crash recovery.
+/// A demo is not kept.
 pub fn autosave(project: &Project, file: Option<&Path>) {
+    if crate::demo::enabled() {
+        return;
+    }
     if let Some(s) = session().as_ref() {
         s.autosaver.save(Snapshot {
             project: project.clone(),

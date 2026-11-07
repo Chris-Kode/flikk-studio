@@ -102,13 +102,13 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     {
         state.workspace = w;
     }
-    audio_demo_playback(state);
     seed_fx(state, &demo.ids, cx);
     chat_references(state, &demo, cx);
     compose::seed(state);
     stabilize::seed(state);
     person::seed(state);
     depth::seed(state);
+    audio_demo_playback(state, cx);
     cx.notify();
 }
 
@@ -196,9 +196,9 @@ fn audio_demo(p: &mut Project) {
 }
 
 /// `FLIKK_DEMO_PLAY=1` starts playback, so the meters move.
-fn audio_demo_playback(state: &mut EditorState) {
+fn audio_demo_playback(state: &mut EditorState, cx: &mut Context<EditorState>) {
     if std::env::var("FLIKK_DEMO_PLAY").is_ok_and(|v| v == "1") {
-        state.playing = true;
+        state.set_playing(true, cx);
     }
 }
 
