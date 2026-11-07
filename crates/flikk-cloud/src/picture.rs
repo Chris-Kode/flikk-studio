@@ -47,7 +47,7 @@ pub fn fetch(
         return Ok(path);
     };
     let named = with_extension(stem, sniffed);
-    if named != path && std::fs::rename(&path, &named).is_ok() {
+    if named != path && crate::settle(&path, &named).is_ok() {
         return Ok(named);
     }
     Ok(path)

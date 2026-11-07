@@ -314,7 +314,7 @@ fn write_audio(stem: &Path, format: &str, bytes: &[u8]) -> CloudResult<PathBuf> 
     let fail =
         |e: std::io::Error| CloudError::Failed(format!("could not write {}: {e}", path.display()));
     std::fs::write(&part, bytes).map_err(fail)?;
-    std::fs::rename(&part, &path).map_err(fail)?;
+    crate::settle(&part, &path).map_err(fail)?;
     Ok(path)
 }
 

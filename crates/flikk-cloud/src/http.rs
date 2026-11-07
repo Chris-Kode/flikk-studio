@@ -185,7 +185,8 @@ pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Repl
 }
 
 /// Fetch `url` into `path` (through a `.part` file), without holding it in
-/// memory; `progress` gets 0..1 when the server says how long it is.
+/// memory; `progress` gets 0..1 when the server says how long it is. A
+/// file already at `path` is left as it is, and the fetch fails.
 pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), CloudError> {
     let fail =
         |e: std::io::Error| CloudError::Failed(format!("could not write {}: {e}", path.display()));
@@ -232,7 +233,8 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
         }
     };
     match outcome {
-        Ok(()) => std::fs::rename(&part, path).map_err(fail),
+        // Never over a file already there.
+        Ok(()) => crate::settle(&part, path).map_err(fail),
         Err(e) => {
             let _ = std::fs::remove_file(&part);
             Err(e)

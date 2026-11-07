@@ -27,6 +27,7 @@ use flikk_core::cloud::{
     GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
     SpeechService, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -341,10 +342,11 @@ impl GenerationService for Cloud {
         }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;
+        // Held until its file and sidecar are written, or it failed.
         let stem = free_stem(dir, request);
         let (path, cost) = provider
             .api
-            .generate(&key, model.id, request, &stem, task)?;
+            .generate(&key, model.id, request, &stem.path, task)?;
         let info = GenerationInfo {
             capability,
             provider: provider.id.to_owned(),
@@ -442,9 +444,30 @@ impl GenerationService for Cloud {
     }
 }
 
-/// `<dir>/<what>-<a few words of the prompt>`, numbered past any file
-/// already there with that name.
-fn free_stem(dir: &Path, request: &GenerateRequest) -> PathBuf {
+/// Stems handed out to generations still being made, in this process.
+static RESERVED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// A stem only one generation writes to while it is held: in [`RESERVED`]
+/// against this process, and as `<stem>.reserved` on disk against others.
+/// Dropping it gives it back.
+struct Stem {
+    path: PathBuf,
+    placeholder: Option<PathBuf>,
+}
+
+impl Drop for Stem {
+    fn drop(&mut self) {
+        if let Some(placeholder) = &self.placeholder {
+            let _ = std::fs::remove_file(placeholder);
+        }
+        lock(&RESERVED).remove(&self.path);
+    }
+}
+
+/// `<dir>/<what>-<a few words of the prompt>`, numbered past any held
+/// stem and any file already there by that name, finished or not
+/// (`<stem>.mp4`, `<stem>.mp4.part`, `<stem>.mp4.json`).
+fn free_stem(dir: &Path, request: &GenerateRequest) -> Stem {
     let what = match request {
         GenerateRequest::Music { .. } => "music",
         GenerateRequest::SoundEffect { .. } => "sfx",
@@ -464,24 +487,62 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> PathBuf {
     } else {
         format!("{what}-{}", words.join("-"))
     };
+    let mut reserved = lock(&RESERVED);
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     let taken = |stem: &str| {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| {
-                e.path()
-                    .file_stem()
-                    .is_some_and(|s| s.to_string_lossy() == stem)
+        reserved.contains(&dir.join(stem))
+            || names.iter().any(|name| {
+                name.strip_prefix(stem)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
             })
     };
     let mut stem = base.clone();
     let mut n = 2;
-    while taken(&stem) {
+    loop {
+        if !taken(&stem) {
+            let placeholder = dir.join(format!("{stem}.reserved"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&placeholder)
+            {
+                Ok(_) => break hold(&mut reserved, dir.join(&stem), Some(placeholder)),
+                // Another Flikk took it just now.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // Not writable: the write itself will say so.
+                Err(_) => break hold(&mut reserved, dir.join(&stem), None),
+            }
+        }
         stem = format!("{base}-{n}");
         n += 1;
     }
-    dir.join(stem)
+}
+
+fn hold(reserved: &mut BTreeSet<PathBuf>, path: PathBuf, placeholder: Option<PathBuf>) -> Stem {
+    reserved.insert(path.clone());
+    Stem { path, placeholder }
+}
+
+/// Move the finished file at `from` to `to`, never over a file already
+/// there: another generation's, or the user's.
+pub(crate) fn settle(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // A file system without links: a look, then a rename.
+        Err(_) if std::fs::symlink_metadata(to).is_ok() => {
+            Err(std::io::ErrorKind::AlreadyExists.into())
+        }
+        Err(_) => std::fs::rename(from, to),
+    }
 }
 
 /// `<file>.json` beside a generated file: what was asked, of whom, and
@@ -499,7 +560,15 @@ fn write_sidecar(path: &Path, request: &GenerateRequest, info: &GenerationInfo, 
     });
     let mut sidecar = path.as_os_str().to_owned();
     sidecar.push(".json");
-    if let Ok(text) = serde_json::to_string_pretty(&json) {
-        let _ = std::fs::write(sidecar, text);
+    // Never over another's: the stem was held, so none should be there.
+    let Ok(text) = serde_json::to_string_pretty(&json) else {
+        return;
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(sidecar);
+    if let Ok(mut file) = file {
+        let _ = std::io::Write::write_all(&mut file, text.as_bytes());
     }
 }
