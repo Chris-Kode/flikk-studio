@@ -275,6 +275,7 @@ impl Op {
         let timeline = &mut project.timeline;
         match self {
             Op::InsertClip { track, clip } => {
+                valid_clip(clip)?;
                 let t = track_mut(timeline, *track)?;
                 if t.clips
                     .iter()
@@ -299,6 +300,7 @@ impl Op {
                 before,
                 after,
             } => {
+                valid_clip(after)?;
                 let t = track_mut(timeline, *track)?;
                 let ix = t
                     .clips
@@ -422,6 +424,18 @@ impl Op {
     }
 }
 
+/// A clip the timeline can hold: one with a length and a speed. A clip of
+/// no length would pass every overlap check.
+fn valid_clip(clip: &Clip) -> Result<()> {
+    if clip.duration <= crate::time::Time::ZERO {
+        return Err(CoreError::Invalid("a clip needs a duration".into()));
+    }
+    if !(clip.speed.is_finite() && clip.speed > 0.0) {
+        return Err(CoreError::Invalid("a clip needs a speed above zero".into()));
+    }
+    Ok(())
+}
+
 fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
     timeline
         .tracks
@@ -432,13 +446,21 @@ fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
 
 /// Apply ops in order; on failure roll back the ones already applied, so the
 /// project is either fully changed or untouched.
+///
+/// The inverse of an applied op applies to any project that keeps the
+/// timeline's invariants ([`Project::normalize`]). Should one not, the
+/// rollback goes on with the rest and the error is returned, the project
+/// as far as it got: a broken invariant must not take the app down.
 pub fn apply_all(project: &mut Project, ops: &[Op]) -> Result<()> {
     for (i, op) in ops.iter().enumerate() {
         if let Err(e) = op.apply(project) {
             for done in ops[..i].iter().rev() {
-                done.invert()
-                    .apply(project)
-                    .expect("inverse of an applied op always applies");
+                if let Err(undo) = done.invert().apply(project) {
+                    eprintln!(
+                        "flikk-core: rollback of {:?} failed: {undo}",
+                        done.targets()
+                    );
+                }
             }
             return Err(e);
         }

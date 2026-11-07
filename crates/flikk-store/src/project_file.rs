@@ -61,7 +61,8 @@ pub struct ProjectFile {
 }
 
 /// Read a project file or an autosave. Media found only through its
-/// relative path is given that path.
+/// relative path is given that path, and a timeline that breaks the
+/// editor's invariants is repaired ([`Project::normalize`]).
 pub fn read(path: &Path) -> Result<ProjectFile> {
     let bytes = std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?;
     let file: FileIn = serde_json::from_slice(&bytes)
@@ -76,6 +77,9 @@ pub fn read(path: &Path) -> Result<ProjectFile> {
         );
     }
     let mut project = file.project;
+    for fix in project.normalize() {
+        eprintln!("flikk-store: {}: {fix}", file_name(path));
+    }
     let base = file.autosave_of.as_deref().unwrap_or(path).parent();
     if let Some(base) = base {
         for item in &mut project.media {

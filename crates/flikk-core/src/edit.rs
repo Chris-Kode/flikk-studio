@@ -60,7 +60,7 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             fade,
         } => ripple_delete(tl, *range, tracks, *fade),
         Command::DeleteClips { clips, ripple } => delete_clips(tl, clips, *ripple),
-        Command::MoveClip { clip, at, track } => move_clip(tl, *clip, *at, *track),
+        Command::MoveClip { clip, at, track } => move_clip(project, *clip, *at, *track),
         Command::SyncClips {
             reference,
             followers,
@@ -119,10 +119,18 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 .iter()
                 .position(|t| t.id == *track)
                 .ok_or(CoreError::TrackNotFound(*track))?;
-            Ok(ops(vec![Op::RemoveTrack {
+            let mut out = vec![Op::RemoveTrack {
                 index,
                 track: tl.tracks[index].clone(),
-            }]))
+            }];
+            // Ducking follows the music track it names.
+            if tl.ducking.as_ref().is_some_and(|d| d.music_track == *track) {
+                out.push(Op::SetDucking {
+                    before: tl.ducking.clone(),
+                    after: None,
+                });
+            }
+            Ok(ops(out))
         }
 
         Command::SetTransform { clip, transform } => {
@@ -146,34 +154,39 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 words: words.clone(),
             },
         ),
-        Command::EditCaption { clip, text, range } => update_clip(tl, *clip, |c| {
-            match (text, &mut c.content) {
-                (
-                    Some(new),
-                    ClipContent::Caption {
-                        text: old, words, ..
-                    },
-                ) => {
-                    // A fixed typo keeps the word timing; other rewrites lose it.
-                    if new.split_whitespace().count() != old.split_whitespace().count() {
-                        words.clear();
-                    }
-                    *old = new.clone();
-                }
-                (Some(new), ClipContent::Title { text: old, .. }) => *old = new.clone(),
-                _ => {}
+        Command::EditCaption { clip, text, range } => {
+            if range.is_some_and(|r| r.is_empty()) {
+                return Err(CoreError::Invalid("empty range".into()));
             }
-            if let Some(r) = range {
-                // Retiming leaves the words where they are spoken.
-                if let ClipContent::Caption { words, .. } = &mut c.content {
-                    for w in words {
-                        *w = *w + c.start - r.start;
+            update_clip(tl, *clip, |c| {
+                match (text, &mut c.content) {
+                    (
+                        Some(new),
+                        ClipContent::Caption {
+                            text: old, words, ..
+                        },
+                    ) => {
+                        // A fixed typo keeps the word timing; other rewrites lose it.
+                        if new.split_whitespace().count() != old.split_whitespace().count() {
+                            words.clear();
+                        }
+                        *old = new.clone();
                     }
+                    (Some(new), ClipContent::Title { text: old, .. }) => *old = new.clone(),
+                    _ => {}
                 }
-                c.start = r.start;
-                c.duration = r.duration();
-            }
-        }),
+                if let Some(r) = range {
+                    // Retiming leaves the words where they are spoken.
+                    if let ClipContent::Caption { words, .. } = &mut c.content {
+                        for w in words {
+                            *w = *w + c.start - r.start;
+                        }
+                    }
+                    c.start = r.start;
+                    c.duration = r.duration();
+                }
+            })
+        }
         Command::ApplyTitle {
             track,
             template,
@@ -269,10 +282,16 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 after,
             }]))
         }
-        Command::SetDucking { ducking } => Ok(ops(vec![Op::SetDucking {
-            before: tl.ducking.clone(),
-            after: ducking.clone(),
-        }])),
+        Command::SetDucking { ducking } => {
+            if let Some(d) = ducking {
+                tl.track(d.music_track)
+                    .ok_or(CoreError::TrackNotFound(d.music_track))?;
+            }
+            Ok(ops(vec![Op::SetDucking {
+                before: tl.ducking.clone(),
+                after: ducking.clone(),
+            }]))
+        }
 
         Command::ImportMedia { media } => Ok(ops(vec![Op::AddMedia {
             media: media.clone(),
@@ -516,6 +535,21 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 ));
             }
             asset.validate().map_err(CoreError::Invalid)?;
+            // Clips use a program as what it is: an effect stack must not
+            // end up holding a transition.
+            if let Some(old) = project.fx.iter().find(|a| a.id == asset.id)
+                && old.kind != asset.kind
+            {
+                let used = fx::uses(project, &asset.id);
+                if !used.is_empty() {
+                    return Err(CoreError::Invalid(format!(
+                        "the {} is used by {} clip(s); save the {} under a new id",
+                        old.kind.label().to_lowercase(),
+                        used.len(),
+                        asset.kind.label().to_lowercase()
+                    )));
+                }
+            }
             let mut after = project.fx.clone();
             match after.iter_mut().find(|a| a.id == asset.id) {
                 Some(a) => *a = asset.clone(),
@@ -708,11 +742,18 @@ fn delete_clips(tl: &Timeline, ids: &[ClipId], ripple: bool) -> Result<Plan> {
     Ok(ops(out))
 }
 
-fn move_clip(tl: &Timeline, id: ClipId, at: Time, to: Option<TrackId>) -> Result<Plan> {
+fn move_clip(project: &Project, id: ClipId, at: Time, to: Option<TrackId>) -> Result<Plan> {
+    let tl = &project.timeline;
     let (from, clip) = find_clip(tl, id)?;
     let to = to.unwrap_or(from.id);
     editable_track(tl, from.id)?;
     let target = editable_track(tl, to)?;
+    if to != from.id && !fits_track(project, &clip.content, target.kind) {
+        return Err(CoreError::Invalid(format!(
+            "that clip does not go on {} ({:?})",
+            target.name, target.kind
+        )));
+    }
     let moved = Clip {
         start: at,
         ..clip.clone()
@@ -1162,8 +1203,7 @@ fn place_clips(project: &Project, items: &[PlacedClip], mode: InsertMode) -> Res
         if item.clip.start < Time::ZERO || item.clip.duration <= Time::ZERO {
             return Err(CoreError::Invalid("negative start or empty clip".into()));
         }
-        let mut clip = item.clip.clone();
-        clip.id = ClipId::new();
+        let clip = placed_clip(project, &item.clip)?;
         match groups.iter_mut().find(|(t, _)| *t == item.track) {
             Some((_, clips)) => clips.push(clip),
             None => groups.push((item.track, vec![clip])),
@@ -1208,6 +1248,64 @@ fn place_clips(project: &Project, items: &[PlacedClip], mode: InsertMode) -> Res
         out.extend(diff_track(track, next));
     }
     Ok(ops(out))
+}
+
+/// A copy of a caller's clip for [`place_clips`], new ids and all, held to
+/// what the other planners keep: a speed and ramp in range, fades inside
+/// the clip, keyframes in order, and programs of the right kind.
+fn placed_clip(project: &Project, clip: &Clip) -> Result<Clip> {
+    let speed_ok = |s: f64| s.is_finite() && (MIN_SPEED..=MAX_SPEED).contains(&s);
+    if !speed_ok(clip.speed) || !clip.retime.keys.iter().all(|k| speed_ok(k.speed)) {
+        return Err(CoreError::Invalid(format!(
+            "speed must be between {MIN_SPEED} and {MAX_SPEED}"
+        )));
+    }
+    if !clip.keyframes.iter().all(|k| k.value.is_finite()) {
+        return Err(CoreError::Invalid("invalid keyframe value".into()));
+    }
+    let mut c = clip.clone();
+    c.id = ClipId::new();
+    if c.media().is_some() {
+        c.retime.keys.sort_by_key(|k| k.at);
+        c.settle_ramp();
+    } else {
+        c.retime.keys.clear();
+    }
+    c.keyframes.sort_by_key(|k| k.at);
+    c.audio.fade_in = c.audio.fade_in.clamp(Time::ZERO, c.duration);
+    c.audio.fade_out = c.audio.fade_out.clamp(Time::ZERO, c.duration);
+    // Each copy owns its effect instances.
+    let instance = |fx: &FxInstance, kind: FxKind| -> Result<FxInstance> {
+        let mut out = coerced(fx, fx_asset(project, &fx.fx, kind)?);
+        out.id = EffectId::new();
+        out.keyframes.sort_by_key(|k| k.at);
+        Ok(out)
+    };
+    if let ClipContent::Generator { fx } = &mut c.content {
+        *fx = instance(fx, FxKind::Generator)?;
+    }
+    c.effects = c
+        .effects
+        .iter()
+        .map(|e| instance(e, FxKind::Effect))
+        .collect::<Result<_>>()?;
+    let caption = matches!(c.content, ClipContent::Caption { .. });
+    for t in [&mut c.transition_in, &mut c.transition_out]
+        .into_iter()
+        .flatten()
+    {
+        if caption {
+            return Err(CoreError::Invalid("captions take no transitions".into()));
+        }
+        if t.duration <= Time::ZERO {
+            return Err(CoreError::Invalid("a transition needs a duration".into()));
+        }
+        t.fx = instance(&t.fx, FxKind::Transition)?;
+    }
+    for m in &mut c.masks {
+        m.keyframes.sort_by_key(|k| k.at);
+    }
+    Ok(c)
 }
 
 /// Whether `content` may sit on a `kind` track.
