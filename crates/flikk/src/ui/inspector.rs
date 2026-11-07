@@ -79,6 +79,8 @@ pub struct InspectorPanel {
     speed_field: Entity<NumberFieldState>,
     speed_clip: Option<ClipId>,
     speed_ripple: bool,
+    /// The number field whose scrub the viewer shows uncommitted.
+    live_field: Option<EntityId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -201,6 +203,7 @@ impl InspectorPanel {
             speed_field,
             speed_clip: None,
             speed_ripple: false,
+            live_field: None,
             _subscriptions,
         }
     }
@@ -237,7 +240,7 @@ impl InspectorPanel {
     /// Apply a field's new model value, to what it showed when its edit
     /// began.
     fn commit(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+        self.end_live(cx);
         let target = self.target(key, cx);
         let (commands, label) = self.commands(key, v, &target, cx);
         self.run(commands, label, cx);
@@ -248,6 +251,22 @@ impl InspectorPanel {
         let target = self.target(key, cx);
         let (commands, _) = self.commands(key, v, &target, cx);
         self.state.update(cx, |s, cx| s.show_live(&commands, cx));
+    }
+
+    /// Stop showing an uncommitted value in the viewer.
+    fn end_live(&mut self, cx: &mut Context<Self>) {
+        self.live_field = None;
+        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+    }
+
+    /// Ends `field`'s preview when its scrub ends: one released on its
+    /// start value commits nothing, which would leave the preview showing.
+    fn watch_scrub(field: &Entity<NumberFieldState>, cx: &mut Context<Self>) -> Subscription {
+        cx.observe(field, |this, field, cx| {
+            if this.live_field == Some(field.entity_id()) && !field.read(cx).is_editing() {
+                this.end_live(cx);
+            }
+        })
     }
 
     /// What `key` would apply to now: the selection, and for a mask key

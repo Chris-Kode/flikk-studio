@@ -221,7 +221,7 @@ pub struct Param {
     field: Entity<NumberFieldState>,
     factor: f32,
     target: Target,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl Param {
@@ -236,18 +236,22 @@ impl Param {
                 .decimals(spec.decimals)
                 .default_value((value * factor) as f64)
         });
-        let _subscription = cx.subscribe(
+        let events = cx.subscribe(
             &field,
-            move |this, _, ev: &NumberFieldEvent, cx| match *ev {
-                NumberFieldEvent::Change(v) => this.preview(key, v as f32 / factor, cx),
+            move |this, field, ev: &NumberFieldEvent, cx| match *ev {
+                NumberFieldEvent::Change(v) => {
+                    this.live_field = Some(field.entity_id());
+                    this.preview(key, v as f32 / factor, cx)
+                }
                 NumberFieldEvent::Commit(v) => this.commit(key, v as f32 / factor, cx),
             },
         );
+        let scrub = InspectorPanel::watch_scrub(&field, cx);
         Self {
             field,
             factor,
             target: Target::default(),
-            _subscription,
+            _subscriptions: [events, scrub],
         }
     }
 

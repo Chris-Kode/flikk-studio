@@ -105,6 +105,12 @@ impl CaptionStylePanel {
                     this.finish_rename(name, cx);
                 }
             }),
+            // A colour still settling when the panel goes stops showing.
+            cx.on_release(|this, cx| {
+                if this.color_pending.take().is_some() {
+                    this.state.update(cx, |s, cx| s.hide_caption_style(cx));
+                }
+            }),
         ];
         let style = state.read(cx).active_caption_style();
         let mut colors = HashMap::new();

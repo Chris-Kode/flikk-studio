@@ -416,6 +416,15 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Drop both drag previews, e.g. when what they were dragged on is
+    /// replaced.
+    fn clear_live(&mut self) {
+        if self.live.take().is_some() {
+            self.live_version += 1;
+        }
+        self.caption_live = None;
+    }
+
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {
         self.preview = preview;
         cx.notify();
@@ -606,6 +615,7 @@ impl EditorState {
         if presets.caption_styles.is_empty() {
             presets.caption_styles = flikk_core::memory::Presets::default().caption_styles;
         }
+        self.clear_live();
         self.presets = presets;
         self.caption_style = 0;
         self.sync_caption_style();
@@ -730,6 +740,14 @@ impl EditorState {
         self.caption_live = Some((index, style));
         self.refresh_lettering();
         cx.notify();
+    }
+
+    /// Stop showing an unsaved caption style.
+    pub fn hide_caption_style(&mut self, cx: &mut Context<Self>) {
+        if self.caption_live.take().is_some() {
+            self.refresh_lettering();
+            cx.notify();
+        }
     }
 
     /// Change caption style `index` and save it.
@@ -1078,6 +1096,7 @@ impl EditorState {
         self.selected_transition = None;
         self.source = None;
         self.preview = None;
+        self.clear_live();
         self.focused_change = None;
         self.editing_fx = None;
         self.settled.clear();

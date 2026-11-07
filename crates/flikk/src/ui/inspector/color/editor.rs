@@ -125,13 +125,27 @@ impl GradeUi {
     /// Follow the project: called on every render. An edit under way keeps
     /// the target it began on, which it commits to, even when the target
     /// moves on meanwhile (the clip under the playhead, during playback).
-    pub fn sync(&mut self, target: Target, base: Grade, cx: &App) {
+    pub fn sync(&mut self, target: Target, base: Grade, cx: &mut App) {
         if self.editing(cx) {
             return;
         }
+        // A preview left by an edit that committed nothing, or one of
+        // another target, stops showing.
+        if self.live.take().is_some() || self.target != target {
+            self.state.update(cx, |s, cx| s.show_live(&[], cx));
+        }
         self.target = target;
         self.base = base;
-        self.live = None;
+    }
+
+    /// End a preview whose edit is over without a commit: a scrub
+    /// released on its start value.
+    fn end_stale_preview(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() && !self.editing(cx) {
+            self.live = None;
+            self.state.update(cx, |s, cx| s.show_live(&[], cx));
+            cx.notify();
+        }
     }
 
     /// Commands that apply `edit` to the target's grade(s).
@@ -240,6 +254,7 @@ impl GradeUi {
                     }
                     cx.notify();
                 }),
+                cx.observe(&number, |this, _, cx| this.end_stale_preview(cx)),
                 cx.subscribe(&number, move |this, _, ev: &NumberFieldEvent, cx| {
                     match *ev {
                         NumberFieldEvent::Change(v) => {
