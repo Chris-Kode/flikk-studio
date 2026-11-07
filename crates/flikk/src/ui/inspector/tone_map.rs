@@ -110,12 +110,13 @@ impl ToneMapUi {
         });
     }
 
-    /// Show `item`'s values unless a slider is held.
+    /// Show `item`'s values unless a slider is held: a held one keeps the
+    /// media it began on, which its release commits to.
     fn sync(&mut self, media: Vec<MediaId>, item: &MediaItem, window: &mut Window, cx: &mut App) {
-        self.media = media;
         if self.dragging {
             return;
         }
+        self.media = media;
         let exposure = item.tone_map.exposure;
         let peak = shown_peak(item);
         self.exposure.update(cx, |s, cx| {

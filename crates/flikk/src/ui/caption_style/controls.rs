@@ -127,8 +127,14 @@ pub fn number(
     let sub = cx.subscribe(
         &state,
         move |this, _, ev: &NumberFieldEvent, cx| match *ev {
-            NumberFieldEvent::Change(v) => this.show(|s| field.set(s, v as f32), cx),
-            NumberFieldEvent::Commit(v) => this.edit(|s| field.set(s, v as f32), cx),
+            NumberFieldEvent::Change(v) => {
+                let i = this.numbers_for();
+                this.show_at(i, |s| field.set(s, v as f32), cx)
+            }
+            NumberFieldEvent::Commit(v) => {
+                let i = this.numbers_for();
+                this.edit_at(i, |s| field.set(s, v as f32), cx)
+            }
         },
     );
     (state, sub)

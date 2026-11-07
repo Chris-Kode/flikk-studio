@@ -112,27 +112,26 @@ impl GradeUi {
         self.live.as_ref().unwrap_or(&self.base)
     }
 
-    fn dragging(&self, cx: &App) -> bool {
+    /// A drag or a typed value is under way.
+    fn editing(&self, cx: &App) -> bool {
         self.curve_drag.is_some()
             || self.wheel_drag.is_some()
             || self
                 .sliders
                 .values()
-                .any(|s| s.dragging || s.field.read(cx).is_scrubbing())
+                .any(|s| s.dragging || s.field.read(cx).is_editing())
     }
 
-    /// Follow the project: called on every render.
+    /// Follow the project: called on every render. An edit under way keeps
+    /// the target it began on, which it commits to, even when the target
+    /// moves on meanwhile (the clip under the playhead, during playback).
     pub fn sync(&mut self, target: Target, base: Grade, cx: &App) {
-        if target != self.target {
-            self.curve_drag = None;
-            self.wheel_drag = None;
-            self.live = None;
+        if self.editing(cx) {
+            return;
         }
         self.target = target;
         self.base = base;
-        if !self.dragging(cx) {
-            self.live = None;
-        }
+        self.live = None;
     }
 
     /// Commands that apply `edit` to the target's grade(s).

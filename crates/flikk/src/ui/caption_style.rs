@@ -62,6 +62,9 @@ pub struct CaptionStylePanel {
     target: Target,
     page: Page,
     numbers: HashMap<Field, Entity<NumberFieldState>>,
+    /// The style the number fields showed when their edit began: what a
+    /// value typed or scrubbed applies to.
+    numbers_for: usize,
     /// Color pickers, with the color each last showed.
     colors: HashMap<Paint, (Entity<ColorPickerState>, flikk_core::memory::Color)>,
     color_pending: Option<PendingColor>,
@@ -130,6 +133,7 @@ impl CaptionStylePanel {
             target,
             page: Page::Text,
             numbers,
+            numbers_for: 0,
             colors,
             color_pending: None,
             fonts,
@@ -143,7 +147,18 @@ impl CaptionStylePanel {
     pub fn set_target(&mut self, target: Target, cx: &mut Context<Self>) {
         if self.target != target {
             self.target = target;
-            self.renaming = None;
+            // A rename the change overtook keeps what was typed, as its
+            // blur would have.
+            if let Some(i) = self.renaming.take() {
+                let name = self.name.read(cx).value().trim().to_owned();
+                let this = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.renaming = Some(i);
+                        this.finish_rename(name, cx);
+                    });
+                });
+            }
             cx.notify();
         }
     }
@@ -171,17 +186,39 @@ impl CaptionStylePanel {
     /// Change the edited style and save it.
     fn edit(&mut self, f: impl FnOnce(&mut CaptionStyle), cx: &mut Context<Self>) {
         let i = self.index(cx);
+        self.edit_at(i, f, cx);
+    }
+
+    /// Change style `i` and save it.
+    pub(super) fn edit_at(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&mut CaptionStyle),
+        cx: &mut Context<Self>,
+    ) {
         self.state
             .update(cx, |s, cx| s.edit_caption_style(i, f, cx));
     }
 
-    /// Show a change in the viewer without saving it.
-    fn show(&mut self, f: impl FnOnce(&mut CaptionStyle), cx: &mut Context<Self>) {
-        let i = self.index(cx);
-        let mut style = self.style(cx);
+    /// Show a change to style `i` in the viewer without saving it.
+    pub(super) fn show_at(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&mut CaptionStyle),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut style) = self.state.read(cx).caption_styles().get(i).cloned() else {
+            return;
+        };
         f(&mut style);
         self.state
             .update(cx, |s, cx| s.show_caption_style(i, style, cx));
+    }
+
+    /// The style a number field's value applies to: the one it showed when
+    /// its edit began.
+    pub(super) fn numbers_for(&self) -> usize {
+        self.numbers_for
     }
 
     /// Show a picked color now; save it once the picker rests.
@@ -197,7 +234,7 @@ impl CaptionStylePanel {
         {
             pending.save(&self.state, cx);
         }
-        self.show(|s| paint.set(s, color), cx);
+        self.show_at(style, |s| paint.set(s, color), cx);
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COLOR_SETTLE).await;
             let _ = this.update(cx, |this, cx| {
@@ -323,6 +360,9 @@ impl CaptionStylePanel {
 
     /// Follow the model in the controls that keep their own state.
     fn sync(&mut self, style: &CaptionStyle, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.numbers.values().any(|n| n.read(cx).is_editing()) {
+            self.numbers_for = self.index(cx);
+        }
         if self.font_shown != style.font {
             self.font_shown = style.font.clone();
             let font: SharedString = style.font.clone().into();
