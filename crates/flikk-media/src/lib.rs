@@ -27,7 +27,7 @@ use flikk_core::services::{
     ServiceError, ServiceResult,
 };
 use flikk_core::time::{Time, TimeRange};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -40,6 +40,8 @@ pub struct FfmpegMedia {
     peaks: Mutex<HashMap<(Fingerprint, u32), Arc<waveform::Peaks>>>,
     /// How this FFmpeg maps HDR to SDR, found on first use.
     tone_method: OnceLock<hdr::Method>,
+    /// Files hardware decoding failed on: playback decodes them in software.
+    software_only: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FfmpegMedia {
@@ -76,6 +78,7 @@ impl FfmpegMedia {
             frames: Mutex::new(FrameCache::default()),
             peaks: Mutex::new(HashMap::new()),
             tone_method: OnceLock::new(),
+            software_only: Arc::default(),
         })
     }
 
