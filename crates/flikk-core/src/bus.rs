@@ -496,7 +496,27 @@ impl CommandBus {
         commands: Vec<Command>,
         label: impl Into<String>,
     ) -> Result<Outcome> {
-        let outcome = self.apply_user(commands.clone(), label.into())?;
+        self.execute_shared_as(commands, label, Author::User)
+    }
+
+    /// [`Self::execute_shared`] as `author`: applied at once as one undo
+    /// step, with `author` on it, not proposed for review.
+    ///
+    /// Only for results the user already approved, such as what a
+    /// generation they allowed on its approval card made: that card is the
+    /// permission gate, so no category is checked here and nothing waits
+    /// for review. Not being the user's edit, a non-user author's change is
+    /// not counted against the change sets, so the author's own proposals
+    /// to the same things (the clip that places it, its track) don't
+    /// conflict with it. Undoing or redoing it is the user's edit, as any
+    /// undo is.
+    pub fn execute_shared_as(
+        &mut self,
+        commands: Vec<Command>,
+        label: impl Into<String>,
+        author: Author,
+    ) -> Result<Outcome> {
+        let outcome = self.apply(commands.clone(), label.into(), author)?;
         for draft in self.change_sets.iter_mut().filter_map(|s| s.draft.as_mut()) {
             for command in &commands {
                 if let Ok(plan) = command.plan(draft) {
@@ -508,6 +528,11 @@ impl CommandBus {
     }
 
     fn apply_user(&mut self, commands: Vec<Command>, label: String) -> Result<Outcome> {
+        self.apply(commands, label, Author::User)
+    }
+
+    /// Apply `commands` at once as one undo step by `author`.
+    fn apply(&mut self, commands: Vec<Command>, label: String, author: Author) -> Result<Outcome> {
         let mut scratch = self.project.clone();
         let mut all_ops = Vec::new();
         let mut warnings = Vec::new();
@@ -518,7 +543,8 @@ impl CommandBus {
             warnings.extend(w);
         }
         self.project = scratch;
-        self.commit(label, Author::User, all_ops, None);
+        // Not from a change set, so undoing it marks none (`reflect`).
+        self.commit(label, author, all_ops, None);
         // The edit cleared the redo entries.
         self.prune();
         Ok(Outcome::Applied { warnings })
@@ -853,6 +879,7 @@ impl CommandBus {
         if ops.is_empty() {
             return;
         }
+        // Only the user's edits conflict with proposals.
         self.bump(author.is_user(), &ops);
         self.history.push(HistoryEntry {
             label,

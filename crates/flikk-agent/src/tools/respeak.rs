@@ -184,7 +184,7 @@ pub fn finish(
     fix: &Fix,
     summary: &str,
 ) -> Done {
-    let media = match super::generate::add_to_pool(bus, item) {
+    let media = match super::generate::add_to_pool(bus, item, author) {
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };

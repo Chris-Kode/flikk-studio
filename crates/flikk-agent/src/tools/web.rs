@@ -7,7 +7,7 @@ use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, short};
 use crate::bridge::{Content, ToolResult};
 use base64::Engine;
-use flikk_core::bus::CommandBus;
+use flikk_core::bus::{Author, CommandBus};
 use flikk_core::cloud;
 use flikk_core::model::MediaItem;
 use flikk_core::paths;
@@ -146,12 +146,19 @@ fn download(url: &str) -> ToolResultOf<(Vec<u8>, Option<String>)> {
     Ok((bytes, content_type))
 }
 
-/// Back on the UI thread: add the picture to the pool's Web Images bin as
-/// the user's edit, so a proposal can use it.
-pub fn finish(bus: &mut CommandBus, item: MediaItem, mut done: Done) -> Done {
+/// Back on the UI thread: add the picture to the pool's Web Images bin at
+/// once, as `author`'s change (the user's when the turn is gone), so a
+/// proposal can use it.
+pub fn finish(
+    bus: &mut CommandBus,
+    author: Option<&Author>,
+    item: MediaItem,
+    mut done: Done,
+) -> Done {
     let id = item.id;
     let commands = cloud::pool_commands(bus.project(), item, BIN);
-    let note = match bus.execute_shared(commands, "Add web image") {
+    let author = author.cloned().unwrap_or(Author::User);
+    let note = match bus.execute_shared_as(commands, "Add web image", author) {
         Ok(_) => format!(
             " Added to the pool as media {} in the {BIN} bin.",
             short(id)

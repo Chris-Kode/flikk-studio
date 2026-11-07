@@ -6,6 +6,7 @@
 use super::cloud::Generating;
 use super::{ApprovalOutcome, EditorState};
 use crate::agent_link::approve;
+use flikk_core::bus::Author;
 use flikk_core::cloud::{CloudError, GenerationTask, Reading};
 use flikk_core::library::{self, SavedVoice, VoiceSpeaker};
 use flikk_core::respeak::{self, Fix};
@@ -68,7 +69,7 @@ impl EditorState {
                     // to cut in by hand.
                     Ok(item) if this.bus.project().id != owner => {
                         this.generating.retain(|g| g.id != id);
-                        this.keep_for(owner, item);
+                        this.keep_for(owner, item, Author::User);
                     }
                     // Stopped too late: what was made is paid for, so it
                     // goes into the pool, but isn't cut in.
@@ -112,7 +113,8 @@ impl EditorState {
     ) -> ApprovalOutcome {
         let approve::Respoken { item, fix, summary } = made;
         let name = approve::file_name(&item.path);
-        let Some(media) = self.add_generated(item, cx) else {
+        let author = self.agent_author();
+        let Some(media) = self.add_generated_as(item, author, cx) else {
             let e = self.status.clone().unwrap_or_default();
             self.agent.report_failure(
                 id,

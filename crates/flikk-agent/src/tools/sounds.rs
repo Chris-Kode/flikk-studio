@@ -216,7 +216,7 @@ pub fn use_sound(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let (media, commands) = library::sound_media(ctx.bus.project(), sound);
     if !commands.is_empty() {
         ctx.bus
-            .execute_shared(commands, "Add sound")
+            .execute_shared_as(commands, "Add sound", ctx.author.clone())
             .map_err(|e| ToolError(e.to_string()))?;
     }
     let mut text = format!("In the pool as media {}.", short(media));

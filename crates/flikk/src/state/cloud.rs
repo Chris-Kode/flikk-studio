@@ -439,7 +439,7 @@ impl EditorState {
                         if this.bus.project().id == owner {
                             this.add_generated(item, cx);
                         } else {
-                            this.keep_for(owner, item);
+                            this.keep_for(owner, item, Author::User);
                         }
                     }
                     // Stopped: however the provider ended it, it didn't fail.
@@ -528,13 +528,25 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Add `item`, which a provider made, to the pool's Generated bin as
-    /// one undo step, and to the drafts waiting for review so a proposal
-    /// can place it, then analyze it ([`Self::analyze_generated`]). Its id
-    /// when added.
+    /// Add `item`, which a provider made at the user's request, to the
+    /// pool's Generated bin as one undo step, and to the drafts waiting for
+    /// review so a proposal can place it, then analyze it
+    /// ([`Self::analyze_generated`]). Its id when added.
     pub(crate) fn add_generated(
         &mut self,
         item: MediaItem,
+        cx: &mut Context<Self>,
+    ) -> Option<MediaId> {
+        self.add_generated_as(item, Author::User, cx)
+    }
+
+    /// [`Self::add_generated`] as `author`: the agent's for what it asked
+    /// for and the user approved, applied at once (the approval was the
+    /// permission), so its own proposals to place it don't conflict.
+    pub(crate) fn add_generated_as(
+        &mut self,
+        item: MediaItem,
+        author: Author,
         cx: &mut Context<Self>,
     ) -> Option<MediaId> {
         let id = item.id;
@@ -547,16 +559,28 @@ impl EditorState {
         };
         let bin = flikk_core::cloud::generated_bin(&item);
         let commands = flikk_core::cloud::pool_commands(self.bus.project(), item, bin);
-        let result = self.bus.execute_shared(commands, label);
+        let result = self.bus.execute_shared_as(commands, label, author);
         self.finish(result, cx)?;
         self.analyze_generated(cx);
         Some(id)
     }
 
     /// Keep `item`, made for `project` after it was closed, for when it is
-    /// opened again.
-    pub(super) fn keep_for(&mut self, project: flikk_core::ProjectId, item: MediaItem) {
-        self.kept.push((project, item));
+    /// opened again, when it is added as `author`.
+    pub(super) fn keep_for(
+        &mut self,
+        project: flikk_core::ProjectId,
+        item: MediaItem,
+        author: Author,
+    ) {
+        self.kept.push((project, item, author));
+    }
+
+    /// The agent, as what it asked for is added.
+    pub(super) fn agent_author(&self) -> Author {
+        Author::Agent {
+            role: self.settings.role,
+        }
     }
 
     /// Add what was made for the project just opened while it was closed.
@@ -564,11 +588,11 @@ impl EditorState {
         let open = self.bus.project().id;
         let (ours, others) = std::mem::take(&mut self.kept)
             .into_iter()
-            .partition::<Vec<_>, _>(|(p, _)| *p == open);
+            .partition::<Vec<_>, _>(|(p, _, _)| *p == open);
         self.kept = others;
         let n = ours
             .into_iter()
-            .filter_map(|(_, item)| self.add_generated(item, cx))
+            .filter_map(|(_, item, author)| self.add_generated_as(item, author, cx))
             .count();
         if n > 0 {
             self.status = Some(match n {
@@ -588,7 +612,8 @@ impl EditorState {
         summary: &str,
     ) -> ApprovalOutcome {
         let name = approve::file_name(&item.path);
-        self.keep_for(project, item);
+        let author = self.agent_author();
+        self.keep_for(project, item, author);
         self.agent.report_outcome(
             id,
             format!(
@@ -656,7 +681,8 @@ impl EditorState {
         } = made;
         let name = approve::file_name(&item.path);
         let bin = flikk_core::cloud::generated_bin(&item);
-        let Some(media) = self.add_generated(item, cx) else {
+        let author = self.agent_author();
+        let Some(media) = self.add_generated_as(item, author, cx) else {
             let e = self.status.clone().unwrap_or_default();
             self.agent.report_failure(
                 id,

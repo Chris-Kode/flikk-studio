@@ -174,8 +174,12 @@ pub struct EditorState {
     pub generating: Vec<Generating>,
     next_generation: u64,
     /// What was made for a project closed before it was done, added to its
-    /// pool when it is opened again.
-    kept: Vec<(flikk_core::ProjectId, flikk_core::model::MediaItem)>,
+    /// pool when it is opened again as the author with it.
+    kept: Vec<(
+        flikk_core::ProjectId,
+        flikk_core::model::MediaItem,
+        flikk_core::bus::Author,
+    )>,
     /// Generated items in the pool already looked at for analysis.
     generated_seen: HashSet<flikk_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
@@ -1314,8 +1318,10 @@ impl EditorState {
         let events = self.agent.pump(&mut self.bus, &self.services);
         // Proposals and closed sets; cheap while nothing changed.
         self.proposals.sync(&self.bus);
+        // Its jobs ran with the user's leave, so they come in as its own.
         for (project, item) in self.agent.take_orphans() {
-            self.keep_for(project, item);
+            let author = self.agent_author();
+            self.keep_for(project, item, author);
         }
         // A job the agent was allowed may have added what a provider made.
         self.analyze_generated(cx);
