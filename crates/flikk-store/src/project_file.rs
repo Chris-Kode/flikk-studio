@@ -1,7 +1,7 @@
 //! `.flikk` project files: the project as JSON, wherever the user saves it.
 //!
 //! Files are written atomically (a temporary file beside the target,
-//! flushed, then renamed over it), so a crash mid-save leaves the last good
+//! flushed, then renamed over it and the folder synced), so a crash mid-save leaves the last good
 //! version. Media keeps its absolute path plus its path relative to the
 //! file; opening tries the absolute path, then the relative one, so a folder
 //! holding a project and its footage can move or change machines.
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub const EXTENSION: &str = "flikk";
@@ -135,11 +136,18 @@ pub(crate) fn write_file(
 
 /// Write beside the target, flush, then rename over it.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
     if let Some(dir) = dir {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_file_name(format!(".{}.tmp", file_name(path)));
+    // Unique per write, so two writers of one file never share a temp file.
+    let tmp = path.with_file_name(format!(
+        ".{}.{}-{}.tmp",
+        file_name(path),
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -149,7 +157,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    Ok(written?)
+    written?;
+    // Make the rename itself durable. Best effort: not every file system
+    // lets a folder be synced.
+    #[cfg(unix)]
+    if let Some(dir) = dir {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
 }
 
 /// `path` from `dir` (`../Footage/a.mov`); `None` across drives or for
@@ -235,7 +250,26 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// older than [`BACKUP_EVERY`], keeping the newest [`BACKUPS_KEPT`].
 pub fn backup(path: &Path, id: ProjectId) -> Result<()> {
     let name = name_of(path);
-    let dir = flikk_core::paths::backups().join(format!("{} {id}", sanitize(&name)));
+    let root = flikk_core::paths::backups();
+    let dir = root.join(format!("{} {id}", sanitize(&name)));
+    if !dir.exists() {
+        // The project was renamed: its backups move along instead of being
+        // left behind in the old name's folder.
+        let suffix = format!(" {id}");
+        let old = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+            });
+        if let Some(old) = old {
+            let _ = std::fs::rename(old, &dir);
+        }
+    }
     std::fs::create_dir_all(&dir)?;
     let mut kept: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&dir)?
         .flatten()
@@ -244,9 +278,12 @@ pub fn backup(path: &Path, id: ProjectId) -> Result<()> {
         .filter_map(|p| Some((modified(&p)?, p)))
         .collect();
     kept.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-    let recent = kept
-        .first()
-        .is_some_and(|(t, _)| t.elapsed().map_or(true, |age| age < BACKUP_EVERY));
+    // A time in the future (the clock went back) only counts as recent
+    // within the same window, so it can't hold off backups until then.
+    let recent = kept.first().is_some_and(|(t, _)| {
+        let age = t.elapsed().unwrap_or_else(|e| e.duration());
+        age < BACKUP_EVERY
+    });
     if !recent {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
         let copy = dir.join(format!("{} {stamp}.{EXTENSION}", sanitize(&name)));

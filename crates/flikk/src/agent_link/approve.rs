@@ -265,16 +265,13 @@ fn save_rule(args: &Value, project: &Project, settings: &mut AgentSettings) -> R
         id: RuleId::new(),
         text: str_arg(args, "text")?.to_owned(),
         scope,
-        status: RuleStatus::Proposed,
+        status: RuleStatus::Approved,
         supersedes,
         created_at: flikk_store::now(),
         evidence: strings(args.get("evidence")),
     };
-    // Approving through the store also retires the rule it supersedes.
-    store(|s| {
-        s.save_rule(profile, &rule)?;
-        s.set_rule_status(rule.id, RuleStatus::Approved)
-    })?;
+    // Saving it approved also retires the rule it supersedes, in one write.
+    store(|s| s.save_rule(profile, &rule))?;
     Ok(Started::Done("Saved".into()))
 }
 

@@ -36,8 +36,12 @@ impl Store {
     }
 
     /// Ids of the models the user picked in Settings → Integrations, per user.
+    /// Lenient like the others: one bad entry drops only itself.
     pub fn model_picks(&self) -> Result<Vec<String>> {
-        Ok(self.meta(MODEL_PICKS)?.unwrap_or_default())
+        Ok(self
+            .meta::<serde_json::Value>(MODEL_PICKS)?
+            .map(lenient)
+            .unwrap_or_default())
     }
 
     pub fn save_model_picks(&self, ids: &[&str]) -> Result<()> {
