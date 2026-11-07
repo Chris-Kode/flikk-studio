@@ -2,7 +2,7 @@
 //! programs: arguments → `Command`s proposed through the bus. Authoring
 //! (`create_fx`, `update_fx`) validates and compiles before proposing.
 
-use super::edit::{ease, edge, propose_then, track_or_new};
+use super::edit::{ease, edge, new_track, propose_then, track_or_new};
 use super::{Done, Step, ToolCtx, propose};
 use crate::args::*;
 use flikk_core::command::{Command, Edge};
@@ -537,27 +537,17 @@ fn add_generator(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, T
     // HTML motion graphics read as titles; shader pictures as overlays.
     // Without a track: the first of that kind free over the range, else a
     // new one on top.
-    let (kind, letter) = match asset.language {
-        FxLanguage::Html => (TrackKind::Title, "T"),
-        FxLanguage::Glsl => (TrackKind::Overlay, "O"),
+    let kind = match asset.language {
+        FxLanguage::Html => TrackKind::Title,
+        FxLanguage::Glsl => TrackKind::Overlay,
     };
     let free = p.timeline.tracks.iter().find(|t| {
         t.kind == kind && !t.locked && !t.clips.iter().any(|c| c.range().overlaps(&range))
     });
     let (commands, track) = match (args.has("track"), free) {
         (false, Some(t)) => (Vec::new(), Some(t.id)),
-        (false, None) => {
-            let n = p.timeline.tracks.iter().filter(|t| t.kind == kind).count() + 1;
-            (
-                vec![Command::AddTrack {
-                    kind,
-                    index: 0,
-                    name: format!("{letter}{n}"),
-                }],
-                None,
-            )
-        }
-        (true, _) => track_or_new(ctx, args, kind, letter)?,
+        (false, None) => (vec![new_track(p, kind)], None),
+        (true, _) => track_or_new(ctx, args, kind)?,
     };
     let mut done = match track {
         Some(track) => {
@@ -566,7 +556,7 @@ fn add_generator(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, T
             all.push(command);
             propose(ctx, all, reason)
         }
-        None => propose_then(ctx, commands, reason, kind, make(inst)),
+        None => propose_then(ctx, commands, reason, make(inst)),
     };
     if !done.result.is_error {
         let p = ctx.project();

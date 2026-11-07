@@ -27,6 +27,8 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
             | Command::RemoveMarker { .. }
             | Command::AddTrack { .. }
             | Command::SetTrackLocked { .. }
+            | Command::RenameTrack { .. }
+            | Command::MoveTrack { .. }
             | Command::ImportMedia { .. }
             | Command::UpdateMedia { .. }
             | Command::RemoveMedia { .. }
@@ -289,6 +291,39 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                 track: *track,
                 before,
                 after,
+            }]))
+        }
+        Command::RenameTrack { track, name } => {
+            let t = tl.track(*track).ok_or(CoreError::TrackNotFound(*track))?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(CoreError::Invalid("a track needs a name".into()));
+            }
+            let before = TrackProps::of(t);
+            let after = TrackProps {
+                name: name.to_owned(),
+                ..before.clone()
+            };
+            Ok(ops(vec![Op::UpdateTrack {
+                track: *track,
+                before,
+                after,
+            }]))
+        }
+        Command::MoveTrack { track, index } => {
+            let from = tl
+                .tracks
+                .iter()
+                .position(|t| t.id == *track)
+                .ok_or(CoreError::TrackNotFound(*track))?;
+            let to = (*index).min(tl.tracks.len() - 1);
+            if from == to {
+                return Err(CoreError::Invalid("the track is already there".into()));
+            }
+            Ok(ops(vec![Op::MoveTrack {
+                track: *track,
+                from,
+                to,
             }]))
         }
         Command::SetDucking { ducking } => {

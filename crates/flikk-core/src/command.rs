@@ -196,6 +196,15 @@ pub enum Command {
         track: TrackId,
         locked: bool,
     },
+    RenameTrack {
+        track: TrackId,
+        name: String,
+    },
+    /// Put a track at `index` in the stack (0 = top).
+    MoveTrack {
+        track: TrackId,
+        index: usize,
+    },
     /// Paste or duplicate: place copies of clips. Insert pushes later clips
     /// on each target track right by the span placed there; overwrite
     /// replaces what is underneath.
@@ -589,6 +598,8 @@ impl Command {
             | AddTrack { .. }
             | RemoveTrack { .. }
             | SetTrackLocked { .. }
+            | RenameTrack { .. }
+            | MoveTrack { .. }
             | PlaceClips { .. }
             | SetSpeed { .. }
             | SetSpeedRamp { .. }

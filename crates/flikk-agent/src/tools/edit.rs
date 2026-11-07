@@ -13,7 +13,7 @@ use flikk_core::heard::{self, Target};
 use flikk_core::memory::Presets;
 use flikk_core::model::{
     BlendMode, ClipColor, ClipContent, Curves, Ducking, Ease, Fit, Format, Grade, MarkerKind,
-    Property, TrackKind, Transform,
+    Project, Property, TrackKind, Transform,
 };
 use flikk_core::query;
 use flikk_core::{Time, TimeRange, TrackId};
@@ -58,7 +58,39 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             return Ok(with_notes(propose(ctx, commands, &reason), notes).into());
         }
         "cut_words" => return cut_words(ctx, args, &reason),
-        "insert_clip" => insert_clip(ctx, args)?,
+        "insert_clip" => return insert_clip(ctx, args, &reason),
+        "add_track" => return add_track(ctx, args, &reason),
+        "rename_track" => {
+            let p = ctx.project();
+            let track = track_id(p, args.str("track")?)?;
+            vec![Command::RenameTrack {
+                track,
+                name: free_name(p, args.str("name")?, Some(track))?,
+            }]
+        }
+        "move_track" => {
+            let p = ctx.project();
+            let track = track_id(p, args.str("track")?)?;
+            let index = stack_index(p, args, Some(track))?
+                .ok_or_else(|| ToolError("give `above`, `below` or `position`".into()))?;
+            vec![Command::MoveTrack { track, index }]
+        }
+        "remove_track" => {
+            let p = ctx.project();
+            let track = track_id(p, args.str("track")?)?;
+            let t = p
+                .timeline
+                .track(track)
+                .ok_or_else(|| ToolError("track not found".into()))?;
+            if !t.clips.is_empty() {
+                return fail(format!(
+                    "{} still holds {} clips; move or delete them first",
+                    t.name,
+                    t.clips.len()
+                ));
+            }
+            vec![Command::RemoveTrack { track }]
+        }
         "move_clip" => {
             let p = ctx.project();
             vec![Command::MoveClip {
@@ -233,14 +265,9 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             vec![Command::EditCaption { clip, text, range }]
         }
         "apply_title" => {
-            let (mut commands, track) = track_or_new(ctx, args, TrackKind::Title, "T1")?;
+            let (mut commands, track) = track_or_new(ctx, args, TrackKind::Title)?;
             let Some(track) = track else {
-                return Ok(
-                    propose_then(ctx, commands, &reason, TrackKind::Title, |_, t| {
-                        title(args, t)
-                    })
-                    .into(),
-                );
+                return Ok(propose_then(ctx, commands, &reason, |_, t| title(args, t)).into());
             };
             commands.push(title(args, track)?);
             commands
@@ -355,34 +382,38 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
             let p = ctx.project();
             let media = media_id(p, args.str("media")?)?;
             let duration = media_duration(p, media)?;
+            let at = args.time("at")?;
+            let place = move |track| Command::InsertClip {
+                media,
+                source: TimeRange::new(Time::ZERO, duration),
+                track,
+                at,
+                mode: InsertMode::Overwrite,
+            };
             let track = match args.opt_str("track")? {
-                Some(t) => track_id(p, t)?,
+                Some(t) => Some(track_id(p, t)?),
                 None => p
                     .timeline
                     .tracks
                     .iter()
                     .rev()
                     .find(|t| t.kind == TrackKind::Audio && !t.locked)
-                    .map(|t| t.id)
-                    .ok_or_else(|| ToolError("there is no audio track".into()))?,
+                    .map(|t| t.id),
             };
-            vec![Command::InsertClip {
-                media,
-                source: TimeRange::new(Time::ZERO, duration),
-                track,
-                at: args.time("at")?,
-                mode: InsertMode::Overwrite,
-            }]
+            match track {
+                Some(track) => vec![place(track)],
+                None => {
+                    let add = vec![new_track(p, TrackKind::Audio)];
+                    return Ok(propose_then(ctx, add, &reason, |_, t| Ok(place(t))).into());
+                }
+            }
         }
 
         "add_overlay" => {
-            let (mut commands, track) = track_or_new(ctx, args, TrackKind::Overlay, "O1")?;
+            let (mut commands, track) = track_or_new(ctx, args, TrackKind::Overlay)?;
             let Some(track) = track else {
                 return Ok(
-                    propose_then(ctx, commands, &reason, TrackKind::Overlay, |ctx, t| {
-                        overlay(ctx, args, t)
-                    })
-                    .into(),
+                    propose_then(ctx, commands, &reason, |ctx, t| overlay(ctx, args, t)).into(),
                 );
             };
             commands.push(overlay(ctx, args, track)?);
@@ -648,7 +679,7 @@ fn media_duration(
         .ok_or_else(|| ToolError(format!("{media} has not been probed yet; give `source`")))
 }
 
-fn insert_clip(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
+fn insert_clip(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
     let p = ctx.project();
     let media = media_id(p, args.str("media")?)?;
     let source = match args.opt_range("source")? {
@@ -663,24 +694,163 @@ fn insert_clip(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
     } else {
         TrackKind::Video
     };
-    let track = match args.opt_str("track")? {
-        Some(t) => track_id(p, t)?,
-        None => first_track(p, kind)
-            .map(|t| t.id)
-            .ok_or_else(|| ToolError(format!("there is no {} track", kind_name(kind))))?,
-    };
     let mode = match args.opt_str("mode")? {
         None | Some("insert") => InsertMode::Insert,
         Some("overwrite") => InsertMode::Overwrite,
         Some(m) => return fail(format!("unknown mode `{m}`")),
     };
-    Ok(vec![Command::InsertClip {
+    let at = args.time("at")?;
+    let place = move |track| Command::InsertClip {
         media,
         source,
         track,
-        at: args.time("at")?,
+        at,
         mode,
-    }])
+    };
+    let (add, track) = track_or_new(ctx, args, kind)?;
+    Ok(match track {
+        Some(track) => propose(ctx, vec![place(track)], reason),
+        None => propose_then(ctx, add, reason, |_, t| Ok(place(t))),
+    }
+    .into())
+}
+
+/// `add_track`: a track of any kind, named for what it holds, placed in
+/// the stack where asked (default: where the timeline puts new tracks).
+fn add_track(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolError> {
+    let p = ctx.project();
+    let kind = match args.str("kind")?.trim() {
+        "video" => TrackKind::Video,
+        "audio" => TrackKind::Audio,
+        "caption" => TrackKind::Caption,
+        "title" => TrackKind::Title,
+        "overlay" => TrackKind::Overlay,
+        k => return fail(format!("unknown kind `{k}`")),
+    };
+    let (slot, default_name) = p.timeline.new_track_slot(kind);
+    let name = match args.opt_str("name")? {
+        Some(name) => free_name(p, name, None)?,
+        None => default_name,
+    };
+    let index = stack_index(p, args, None)?.unwrap_or(slot);
+    let before = track_ids(p);
+    let done = propose(ctx, vec![Command::AddTrack { kind, index, name }], reason);
+    if done.result.is_error {
+        return Ok(done.into());
+    }
+    let p = ctx.project();
+    let added = added_track(p, &before)
+        .and_then(|t| p.timeline.track(t))
+        .map(|t| format!("New track: @track {} ({})", short(t.id), t.name));
+    Ok(with_notes(done, added).into())
+}
+
+/// `name` trimmed, refused when empty or when another track (not `keep`)
+/// already has it: tools find tracks by name.
+fn free_name(p: &Project, name: &str, keep: Option<TrackId>) -> ToolResultOf<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return fail("`name` is empty");
+    }
+    if p.timeline
+        .tracks
+        .iter()
+        .any(|t| Some(t.id) != keep && t.name.eq_ignore_ascii_case(name))
+    {
+        return fail(format!("a track is already named `{name}`"));
+    }
+    Ok(name.to_owned())
+}
+
+/// Where `above`, `below` or `position` puts a track in the stack (0 =
+/// top), counted without `moving` (the track being moved, if any).
+fn stack_index(p: &Project, args: &Args, moving: Option<TrackId>) -> ToolResultOf<Option<usize>> {
+    let others: Vec<TrackId> = p
+        .timeline
+        .tracks
+        .iter()
+        .map(|t| t.id)
+        .filter(|t| Some(*t) != moving)
+        .collect();
+    let at = |name: &str| -> ToolResultOf<usize> {
+        let id = track_id(p, name)?;
+        others
+            .iter()
+            .position(|t| *t == id)
+            .ok_or_else(|| ToolError("a track cannot go next to itself".into()))
+    };
+    let given = [
+        args.opt_str("above")?.is_some(),
+        args.opt_str("below")?.is_some(),
+        args.opt_str("position")?.is_some(),
+    ];
+    if given.iter().filter(|g| **g).count() > 1 {
+        return fail("give only one of `above`, `below` and `position`");
+    }
+    if let Some(t) = args.opt_str("above")? {
+        return Ok(Some(at(t)?));
+    }
+    if let Some(t) = args.opt_str("below")? {
+        return Ok(Some(at(t)? + 1));
+    }
+    match args.opt_str("position")? {
+        None => Ok(None),
+        Some("top") => Ok(Some(0)),
+        Some("bottom") => Ok(Some(others.len())),
+        Some(other) => fail(format!("`position` is top or bottom, not `{other}`")),
+    }
+}
+
+/// The command that adds a track of `kind` where the timeline puts new
+/// ones, with its free default name.
+pub(super) fn new_track(p: &Project, kind: TrackKind) -> Command {
+    let (index, name) = p.timeline.new_track_slot(kind);
+    Command::AddTrack { kind, index, name }
+}
+
+/// Propose a new track of `kind` on its own and return its id, or the
+/// failed proposal.
+fn propose_new_track(
+    ctx: &mut ToolCtx,
+    kind: TrackKind,
+    reason: &str,
+) -> Result<TrackId, Box<Done>> {
+    let add = vec![new_track(ctx.project(), kind)];
+    let before = track_ids(ctx.project());
+    let done = propose(ctx, add, reason);
+    if done.result.is_error {
+        return Err(Box::new(done));
+    }
+    added_track(ctx.project(), &before)
+        .ok_or_else(|| Box::new(Done::error("could not create the track")))
+}
+
+fn track_ids(p: &Project) -> Vec<TrackId> {
+    p.timeline.tracks.iter().map(|t| t.id).collect()
+}
+
+/// The track that is not among `before`.
+fn added_track(p: &Project, before: &[TrackId]) -> Option<TrackId> {
+    p.timeline
+        .tracks
+        .iter()
+        .find(|t| !before.contains(&t.id))
+        .map(|t| t.id)
+}
+
+/// `done`, noting the new `track` proposed first to hold it.
+fn with_new_track(mut done: Done, p: &Project, track: TrackId) -> Done {
+    if let Some(t) = p.timeline.track(track) {
+        done.summary = format!("new {} track + {}", kind_name(t.kind), done.summary);
+    }
+    let note = p.timeline.track(track).map(|t| {
+        format!(
+            "New track @track {} ({}) holds it; rename it for what it holds.",
+            short(t.id),
+            t.name
+        )
+    });
+    with_notes(done, note)
 }
 
 /// The given track, the first of `kind`, or (when there is none) an
@@ -690,7 +860,6 @@ pub(super) fn track_or_new(
     ctx: &ToolCtx,
     args: &Args,
     kind: TrackKind,
-    name: &str,
 ) -> ToolResultOf<(Vec<Command>, Option<TrackId>)> {
     let p = ctx.project();
     if let Some(t) = args.opt_str("track")? {
@@ -699,14 +868,7 @@ pub(super) fn track_or_new(
     if let Some(t) = first_track(p, kind) {
         return Ok((vec![], Some(t.id)));
     }
-    Ok((
-        vec![Command::AddTrack {
-            kind,
-            index: 0,
-            name: name.into(),
-        }],
-        None,
-    ))
+    Ok((vec![new_track(p, kind)], None))
 }
 
 /// Propose the new track, then what `make` puts on it.
@@ -714,21 +876,20 @@ pub(super) fn propose_then(
     ctx: &mut ToolCtx,
     add_track: Vec<Command>,
     reason: &str,
-    kind: TrackKind,
     make: impl FnOnce(&ToolCtx, TrackId) -> ToolResultOf<Command>,
 ) -> Done {
+    let before = track_ids(ctx.project());
     let first = propose(ctx, add_track, reason);
     if first.result.is_error {
         return first;
     }
-    let Some(track) = first_track(ctx.project(), kind).map(|t| t.id) else {
+    let Some(track) = added_track(ctx.project(), &before) else {
         return Done::error("could not create the track");
     };
     match make(ctx, track) {
         Ok(c) => {
-            let mut done = propose(ctx, vec![c], reason);
-            done.summary = format!("new {} track + {}", kind_name(kind), done.summary);
-            done
+            let done = propose(ctx, vec![c], reason);
+            with_new_track(done, ctx.project(), track)
         }
         Err(ToolError(e)) => Done::error(e),
     }
@@ -1203,10 +1364,8 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
     let p = ctx.project();
     let range = args.range_or_all("range", p)?;
     let track = match args.opt_str("track")? {
-        Some(t) => track_id(p, t)?,
-        None => first_track(p, TrackKind::Caption)
-            .map(|t| t.id)
-            .ok_or_else(|| ToolError("there is no caption track".into()))?,
+        Some(t) => Some(track_id(p, t)?),
+        None => first_track(p, TrackKind::Caption).map(|t| t.id),
     };
     let style = flikk_core::memory::CaptionStyle::default();
     let max_chars = args
@@ -1217,6 +1376,13 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
     if words.is_empty() {
         return Err(ToolError(format!("No transcribed speech in {range}.")));
     }
+    let (track, added) = match track {
+        Some(t) => (t, false),
+        None => match propose_new_track(ctx, TrackKind::Caption, reason) {
+            Ok(t) => (t, true),
+            Err(done) => return Ok((*done).into()),
+        },
+    };
     let pause = Time::from_millis(600);
     let longest = Time::from_millis(4000);
     let mut commands = Vec::new();
@@ -1285,6 +1451,9 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
     let n = commands.len();
     let mut done = propose(ctx, commands, reason);
     done.summary = format!("generate_captions {range}: {n} captions");
+    if added {
+        done = with_new_track(done, ctx.project(), track);
+    }
     Ok(done.into())
 }
 

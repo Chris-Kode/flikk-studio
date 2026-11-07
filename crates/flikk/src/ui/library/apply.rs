@@ -165,7 +165,7 @@ fn add_generator(s: &mut EditorState, asset: &FxAsset, cx: &mut Context<EditorSt
         Some(found) => found,
         None => {
             let kind = kinds[0];
-            let name = new_track_name(project, kind);
+            let (_, name) = project.timeline.new_track_slot(kind);
             // A new track's id is made by the planner, so the generator
             // follows as its own step.
             let added = s.execute(
@@ -224,21 +224,6 @@ fn gap_at(project: &Project, track: TrackId, at: Time) -> Option<TimeRange> {
         end = end.min(next);
     }
     (end - at >= Time::from_secs_f64(MIN_GAP)).then(|| TimeRange::new(at, end))
-}
-
-pub(super) fn new_track_name(project: &Project, kind: TrackKind) -> String {
-    let prefix = match kind {
-        TrackKind::Title => "T",
-        TrackKind::Overlay => "O",
-        _ => "V",
-    };
-    let n = project
-        .timeline
-        .tracks
-        .iter()
-        .filter(|t| t.kind == kind)
-        .count();
-    format!("{prefix}{}", n + 1)
 }
 
 /// The chat reference for a program: `@fx <key or id8>` and its name.

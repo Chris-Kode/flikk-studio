@@ -262,7 +262,7 @@ impl Builder {
         if let Some(t) = free {
             return Ok(t);
         }
-        let (index, name) = new_track_slot(&self.work.timeline, kind);
+        let (index, name) = self.work.timeline.new_track_slot(kind);
         let track = Track::new(kind, name);
         let id = track.id;
         self.push(Op::InsertTrack { index, track })?;
@@ -319,29 +319,6 @@ impl Builder {
             warnings: Vec::new(),
         }
     }
-}
-
-/// Where a new track of `kind` goes and its name: video above the other
-/// video tracks, audio below the last track.
-fn new_track_slot(tl: &Timeline, kind: TrackKind) -> (usize, String) {
-    let prefix = match kind {
-        TrackKind::Audio => "A",
-        _ => "V",
-    };
-    let mut n = tl.tracks.iter().filter(|t| t.kind == kind).count() + 1;
-    while tl.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
-        n += 1;
-    }
-    let index = match kind {
-        TrackKind::Audio => tl.tracks.len(),
-        _ => tl
-            .tracks
-            .iter()
-            .position(|t| t.kind == TrackKind::Video)
-            .or_else(|| tl.tracks.iter().position(|t| t.kind == TrackKind::Audio))
-            .unwrap_or(tl.tracks.len()),
-    };
-    (index, format!("{prefix}{n}"))
 }
 
 /// [`Command::SyncClips`](crate::command::Command::SyncClips).

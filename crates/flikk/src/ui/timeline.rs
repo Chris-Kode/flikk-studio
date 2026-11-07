@@ -222,27 +222,6 @@ fn step_cut(s: &mut EditorState, forward: bool, cx: &mut Context<EditorState>) {
     }
 }
 
-/// Where a new track of `kind` goes, and its name: captions on top,
-/// picture tracks above the topmost video track, audio at the bottom.
-fn new_track_slot(tl: &Timeline, kind: TrackKind) -> (usize, String) {
-    let prefix = kind_prefix(kind);
-    let mut n = tl.tracks.iter().filter(|t| t.kind == kind).count() + 1;
-    while tl.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
-        n += 1;
-    }
-    let index = match kind {
-        TrackKind::Caption => 0,
-        TrackKind::Audio => tl.tracks.len(),
-        _ => tl
-            .tracks
-            .iter()
-            .position(|t| t.kind == TrackKind::Video)
-            .or_else(|| tl.tracks.iter().position(|t| t.kind == TrackKind::Audio))
-            .unwrap_or(tl.tracks.len()),
-    };
-    (index, format!("{prefix}{n}"))
-}
-
 /// "Add … track" items, one per kind.
 fn add_track_items(menu: PopupMenu, panel: &Entity<TimelinePanel>) -> PopupMenu {
     [
@@ -1513,7 +1492,7 @@ impl TimelinePanel {
 
     fn add_track(&mut self, kind: TrackKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let (index, name) = new_track_slot(&s.bus.project().timeline, kind);
+            let (index, name) = s.bus.project().timeline.new_track_slot(kind);
             s.edit(Command::AddTrack { kind, index, name }, cx);
         });
     }
@@ -2448,22 +2427,12 @@ fn track_codes(tl: &Timeline) -> Vec<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let mut codes = vec![String::new(); tl.tracks.len()];
     for (i, track) in order {
-        let prefix = kind_prefix(track.kind);
+        let prefix = track.kind.prefix();
         let n = counts.entry(prefix).or_default();
         *n += 1;
         codes[i] = format!("{prefix}{n}");
     }
     codes
-}
-
-fn kind_prefix(kind: TrackKind) -> &'static str {
-    match kind {
-        TrackKind::Video => "V",
-        TrackKind::Audio => "A",
-        TrackKind::Caption => "C",
-        TrackKind::Title => "T",
-        TrackKind::Overlay => "O",
-    }
 }
 
 /// A header's name when the track has only its code.

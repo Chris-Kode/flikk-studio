@@ -3,7 +3,7 @@
 //! the project first; saving one to the library links the project's copy to
 //! it. Using a sound adds it to the pool first.
 
-use super::apply::{apply_fx, new_track_name, picture_clips, sound_clips};
+use super::apply::{apply_fx, picture_clips, sound_clips};
 use crate::state::EditorState;
 use crate::ui::media_pool::import::{build_item, is_audio};
 use flikk_core::command::{Command, InsertMode};
@@ -331,7 +331,7 @@ fn free_audio_track(
     let command = Command::AddTrack {
         kind: TrackKind::Audio,
         index: before.len(),
-        name: new_track_name(s.bus.project(), TrackKind::Audio),
+        name: s.bus.project().timeline.new_track_slot(TrackKind::Audio).1,
     };
     s.execute(command, cx)?;
     let tracks = &s.bus.project().timeline.tracks;

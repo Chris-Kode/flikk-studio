@@ -73,6 +73,13 @@ pub enum Op {
         before: TrackProps,
         after: TrackProps,
     },
+    /// Reorder: the track at `from` goes to `to` (indexes before and
+    /// after the move).
+    MoveTrack {
+        track: TrackId,
+        from: usize,
+        to: usize,
+    },
     SetDucking {
         before: Option<Ducking>,
         after: Option<Ducking>,
@@ -187,7 +194,9 @@ impl Op {
                     .chain(track.clips.iter().map(|c| Target::Clip(c.id)))
                     .collect()
             }
-            Op::UpdateTrack { track, .. } => vec![Target::Track(*track)],
+            Op::UpdateTrack { track, .. } | Op::MoveTrack { track, .. } => {
+                vec![Target::Track(*track)]
+            }
             Op::SetDucking { .. } => vec![Target::Ducking],
             Op::SetTimelineGrade { .. } => vec![Target::Grade],
             Op::SetSequence { .. } => vec![Target::Sequence],
@@ -239,6 +248,11 @@ impl Op {
                 track,
                 before: after,
                 after: before,
+            },
+            Op::MoveTrack { track, from, to } => Op::MoveTrack {
+                track,
+                from: to,
+                to: from,
             },
             Op::SetDucking { before, after } => Op::SetDucking {
                 before: after,
@@ -366,6 +380,18 @@ impl Op {
                 t.mix = after.mix.clone();
                 t.locked = after.locked;
                 t.caption_style = after.caption_style.clone();
+            }
+            Op::MoveTrack { track, to, .. } => {
+                // Found by id: pending proposals before it may have shifted
+                // the indexes.
+                let from = timeline
+                    .tracks
+                    .iter()
+                    .position(|t| t.id == *track)
+                    .ok_or(CoreError::TrackNotFound(*track))?;
+                let moved = timeline.tracks.remove(from);
+                let to = (*to).min(timeline.tracks.len());
+                timeline.tracks.insert(to, moved);
             }
             Op::SetDucking { before, after } => {
                 if timeline.ducking != *before {

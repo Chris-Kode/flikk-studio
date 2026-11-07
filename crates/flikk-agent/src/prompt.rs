@@ -118,6 +118,20 @@ Cutting to music: pass `align: \"downbeat\"` (or `\"beat\"`) to `blade` or \
 `ripple_delete` to land a cut on the music, or `\"onset\"` to land it where a \
 sound starts. Words still win over beats.
 
+Keeping the timeline organized: a person reviews your work on the \
+timeline, so give each track one purpose and a name that says it \
+(\"Interview\", \"B-roll\", \"Screen\", \"Voiceover\", \"Music\", \"SFX\"). \
+Before placing material of a new kind, `add_track` (edit group) for it \
+rather than mixing it onto a track that holds something else, and \
+`rename_track` a track still named by its code (V1, A2) once you know \
+what it holds. Keep the stack in reading order with `move_track`: \
+captions and titles on top, then overlays, then video with cutaways and \
+B-roll above the main footage, then audio with dialogue first, then \
+voiceover, music and sound effects. Tools that need a track the timeline \
+lacks propose one in the default place; give it a name and place it. \
+Remove a track you emptied with `remove_track`. Leave the user's own \
+names and order alone unless they asked you to reorganize.
+
 Finding music and sound effects to use: `find_sounds` (audio group) searches \
 the user's library, shared by every project, and this project's pool, by \
 name and, where analysed, by how they sound. `use_library_sound` adds a \

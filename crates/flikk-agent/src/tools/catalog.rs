@@ -529,6 +529,55 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "add_track",
+            Some(EditTimeline),
+            "Propose a new track. Name it for what it will hold (\"Interview\", \"B-roll\", \"Music\", \"SFX\") so the user can review the timeline at a glance. Returns its id.",
+            object(
+                json!({
+                    "kind": one_of(&["video", "audio", "caption", "title", "overlay"], "What the track holds"),
+                    "name": string("Unique track name (default: its code, e.g. V2)"),
+                    "above": string("Put it right above this track (name or id)"),
+                    "below": string("Put it right below this track (name or id)"),
+                    "position": one_of(&["top", "bottom"], "Top or bottom of the stack"),
+                    "reason": reason()
+                }),
+                &["kind"],
+            ),
+        ),
+        spec(
+            "rename_track",
+            Some(EditTimeline),
+            "Propose a new name for a track, saying what it holds.",
+            object(
+                json!({ "track": string("Track name or id"), "name": string("Unique new name"), "reason": reason() }),
+                &["track", "name"],
+            ),
+        ),
+        spec(
+            "move_track",
+            Some(EditTimeline),
+            "Propose moving a track up or down the stack. Upper video tracks cover lower ones.",
+            object(
+                json!({
+                    "track": string("Track name or id"),
+                    "above": string("Put it right above this track (name or id)"),
+                    "below": string("Put it right below this track (name or id)"),
+                    "position": one_of(&["top", "bottom"], "Top or bottom of the stack"),
+                    "reason": reason()
+                }),
+                &["track"],
+            ),
+        ),
+        spec(
+            "remove_track",
+            Some(EditTimeline),
+            "Propose removing an empty track. Move or delete its clips first.",
+            object(
+                json!({ "track": string("Track name or id"), "reason": reason() }),
+                &["track"],
+            ),
+        ),
+        spec(
             "insert_clip",
             Some(EditTimeline),
             "Propose placing a media item (or part of it) on a track.",
@@ -536,7 +585,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                 json!({
                     "media": string("Media id"),
                     "source": range("Source range in the media's own time (default: all of it)"),
-                    "track": string("Track name or id (default: first video or audio track)"),
+                    "track": string("Track name or id (default: first video or audio track, created if missing)"),
                     "at": time("Timeline seconds"),
                     "mode": one_of(&["insert", "overwrite"], "insert pushes later clips right (default)"),
                     "reason": reason()
@@ -892,7 +941,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({
                     "range": range("Timeline range"),
-                    "track": string("Caption track name or id (default: first caption track)"),
+                    "track": string("Caption track name or id (default: first caption track, created if missing)"),
                     "max_chars": number("Longest caption in characters (default from the caption style)"),
                     "reason": reason()
                 }),
@@ -1075,7 +1124,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             Some(Audio),
             "Propose a sound effect from the media pool at a time.",
             object(
-                json!({ "media": string("Media id"), "at": time("Timeline seconds"), "track": string("Audio track (default: last audio track)"), "reason": reason() }),
+                json!({ "media": string("Media id"), "at": time("Timeline seconds"), "track": string("Audio track (default: last unlocked audio track, created if missing)"), "reason": reason() }),
                 &["media", "at"],
             ),
         ),

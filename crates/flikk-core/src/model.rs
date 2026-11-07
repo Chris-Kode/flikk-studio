@@ -395,6 +395,28 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    /// Where a new track of `kind` goes and its free default name:
+    /// captions on top, audio below the last track, the rest above the
+    /// video tracks.
+    pub fn new_track_slot(&self, kind: TrackKind) -> (usize, String) {
+        let prefix = kind.prefix();
+        let mut n = self.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+        while self.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
+            n += 1;
+        }
+        let index = match kind {
+            TrackKind::Caption => 0,
+            TrackKind::Audio => self.tracks.len(),
+            _ => self
+                .tracks
+                .iter()
+                .position(|t| t.kind == TrackKind::Video)
+                .or_else(|| self.tracks.iter().position(|t| t.kind == TrackKind::Audio))
+                .unwrap_or(self.tracks.len()),
+        };
+        (index, format!("{prefix}{n}"))
+    }
+
     pub fn track(&self, id: TrackId) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == id)
     }
@@ -572,6 +594,19 @@ pub enum TrackKind {
     Title,
     Caption,
     Overlay,
+}
+
+impl TrackKind {
+    /// The letter a track's short code starts with: V1, A2, C1…
+    pub fn prefix(self) -> &'static str {
+        match self {
+            TrackKind::Video => "V",
+            TrackKind::Audio => "A",
+            TrackKind::Caption => "C",
+            TrackKind::Title => "T",
+            TrackKind::Overlay => "O",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
