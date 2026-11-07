@@ -254,8 +254,19 @@ impl TranscriptPanel {
             .text_size(px(12.))
             .line_height(px(16.));
         let item = if self.editing == Some(id) {
-            item.child(time)
-                .child(div().flex_1().child(Input::new(&self.editor).small()))
+            item.child(time).child(
+                div()
+                    .flex_1()
+                    // Escape drops the edit and keeps the caption as it was.
+                    .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                        if ev.keystroke.key == "escape" {
+                            this.finish_edit(None, window, cx);
+                            window.focus(&this.focus, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(Input::new(&self.editor).small()),
+            )
         } else {
             let edit_text = row.text.to_string();
             item.py(px(6.))

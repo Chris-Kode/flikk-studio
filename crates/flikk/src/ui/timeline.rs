@@ -630,8 +630,7 @@ impl TimelinePanel {
         match hit {
             Hit::Ruler => {
                 self.drag = Some(Drag::Scrub);
-                self.state
-                    .update(cx, |s, cx| s.seek(at.floor_to_frame(rate), cx));
+                self.scrub_to(at.floor_to_frame(rate), cx);
             }
             Hit::Lane { .. } => {
                 let additive = ev.modifiers.shift || ev.modifiers.secondary();
@@ -910,6 +909,18 @@ impl TimelinePanel {
         }
     }
 
+    /// Move the playhead for a ruler scrub. The scrub owns the playhead, so
+    /// playback stops for it and stays stopped after, like the frame and cut
+    /// steps.
+    fn scrub_to(&self, t: Time, cx: &mut App) {
+        self.state.update(cx, |s, cx| {
+            if s.playing {
+                s.set_playing(false, cx);
+            }
+            s.seek(t, cx);
+        });
+    }
+
     fn drag_to(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(p);
         let at = self.viewport.time(x);
@@ -923,7 +934,7 @@ impl TimelinePanel {
                 let t = self
                     .snap_time(at.max(Time::ZERO), &[], cx)
                     .floor_to_frame(rate);
-                self.state.update(cx, |s, cx| s.seek(t, cx));
+                self.scrub_to(t, cx);
             }
             Some(Drag::Move {
                 clips,
