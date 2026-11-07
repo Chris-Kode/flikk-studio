@@ -51,4 +51,6 @@ id_type!(
     MaskId,
     // A program or preset in the user's library.
     LibraryId,
+    // A file or folder attached to a chat for the agent to read.
+    AttachmentId,
 );

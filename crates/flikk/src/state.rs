@@ -433,6 +433,7 @@ impl EditorState {
             in_out: self.in_out,
             selection: self.selection.clone(),
             history: Vec::new(),
+            attachments: self.attachments().to_vec(),
         }
     }
 
@@ -596,6 +597,76 @@ impl EditorState {
     pub fn mention(&mut self, refs: Vec<(String, SharedString)>, cx: &mut Context<Self>) {
         self.pending_mentions.extend(refs);
         cx.notify();
+    }
+
+    /// Files and folders attached to the active chat, which the agent may
+    /// read.
+    pub fn attachments(&self) -> &[Attachment] {
+        self.chats
+            .sessions
+            .iter()
+            .find(|s| s.id == self.chats.active)
+            .map_or(&[], |s| s.attachments.as_slice())
+    }
+
+    /// Attach `paths` to `chat` of `project`, the chat open when the user
+    /// picked or dropped them; dropped if that is no longer the open one.
+    /// Paths already attached, unreadable or inside Flikk's own data are
+    /// left out. Refused while the agent replies, so what it may read stays
+    /// fixed for the whole turn.
+    pub fn attach(
+        &mut self,
+        project: flikk_core::ProjectId,
+        chat: &str,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if project != self.bus.project().id || chat != self.chats.active {
+            return;
+        }
+        if self.agent_busy() {
+            self.status = Some("Attach once the agent has replied".into());
+            cx.notify();
+            return;
+        }
+        let own = std::fs::canonicalize(flikk_core::paths::home()).ok();
+        let mut refused = Vec::new();
+        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == chat) else {
+            return;
+        };
+        for path in paths {
+            match Attachment::of(&path) {
+                Ok(a) if own.as_ref().is_some_and(|own| a.path.starts_with(own)) => {
+                    refused.push(format!("{} holds Flikk's own data", a.path.display()));
+                }
+                Ok(a) if session.attachments.iter().any(|b| b.path == a.path) => {}
+                Ok(a) => session.attachments.push(a),
+                Err(e) => refused.push(e),
+            }
+        }
+        if !refused.is_empty() {
+            self.status = Some(refused.join("; "));
+        }
+        persistence::save_chats(project, &self.chats);
+        cx.notify();
+    }
+
+    /// Stop the agent reading an attachment of the active chat. Refused
+    /// while the agent replies, like [`Self::attach`].
+    pub fn detach(&mut self, id: flikk_core::ids::AttachmentId, cx: &mut Context<Self>) {
+        if self.agent_busy() {
+            return;
+        }
+        let active = self.chats.active.clone();
+        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == active) else {
+            return;
+        };
+        let before = session.attachments.len();
+        session.attachments.retain(|a| a.id != id);
+        if session.attachments.len() != before {
+            persistence::save_chats(self.bus.project().id, &self.chats);
+            cx.notify();
+        }
     }
 
     /// References queued by [`Self::mention`], oldest first.
@@ -1029,10 +1100,11 @@ impl EditorState {
         }
         self.save_chat();
         self.chats.active = id.to_owned();
-        // A chat left without a message has nothing to come back to.
+        // A chat left without a message or attachment has nothing to come
+        // back to.
         self.chats
             .sessions
-            .retain(|s| s.id == id || !s.messages.is_empty());
+            .retain(|s| s.id == id || !s.messages.is_empty() || !s.attachments.is_empty());
         self.chat = active_messages(&self.chats);
         self.reset_chat_view();
         self.agent.set_chat(id);

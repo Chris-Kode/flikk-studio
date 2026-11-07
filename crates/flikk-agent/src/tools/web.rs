@@ -14,6 +14,7 @@ use flikk_core::paths;
 use flikk_core::services::MediaService;
 use image::ImageFormat;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub const TOOL: &str = "view_web_image";
@@ -56,32 +57,13 @@ fn fetch(url: &str, add: bool, media: Option<&dyn MediaService>) -> ToolResultOf
             "{url} is not a PNG, JPEG, GIF or WebP picture{kind}. Pass the address of the image itself, such as an <img> src or the page's og:image, not the page."
         ))
     };
-    let format = image::guess_format(&bytes).map_err(|_| not_a_picture())?;
-    let ext = match format {
-        ImageFormat::Png => "png",
-        ImageFormat::Jpeg => "jpg",
-        ImageFormat::Gif => "gif",
-        ImageFormat::WebP => "webp",
-        _ => return Err(not_a_picture()),
-    };
-    let picture = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|e| ToolError(format!("Could not read the picture at {url}: {e}")))?;
-    let (width, height) = (picture.width(), picture.height());
-    let shown = if width.max(height) > MAX_SIDE {
-        picture.thumbnail(MAX_SIDE, MAX_SIDE)
-    } else {
-        picture
-    };
-    let mut png = Vec::new();
-    shown
-        .to_rgba8()
-        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-        .map_err(|e| ToolError(format!("Could not show the picture: {e}")))?;
-    let dir = paths::cache().join("agent").join("web");
-    std::fs::create_dir_all(&dir)?;
-    let seen = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&seen, &png)?;
-
+    let Picture {
+        ext,
+        width,
+        height,
+        png,
+        seen,
+    } = picture(&bytes, "web").ok_or_else(not_a_picture)??;
     let text = format!("{width}×{height} {ext} picture from {url}.");
     let done = Done {
         result: ToolResult {
@@ -107,6 +89,68 @@ fn fetch(url: &str, add: bool, media: Option<&dyn MediaService>) -> ToolResultOf
     Ok(JobDone::Fetched {
         item: Box::new(cloud::image_item(kept, media)),
         done: Box::new(done),
+        bin: BIN,
+    })
+}
+
+/// A PNG, JPEG, GIF or WebP picture as the agent sees it.
+pub(super) struct Picture {
+    pub ext: &'static str,
+    pub width: u32,
+    pub height: u32,
+    /// The copy shown, scaled down to [`MAX_SIDE`].
+    pub png: Vec<u8>,
+    /// Where that copy is kept for the activity row.
+    pub seen: PathBuf,
+}
+
+impl Picture {
+    pub fn content(&self) -> Content {
+        Content::Image {
+            data: base64::engine::general_purpose::STANDARD.encode(&self.png),
+            mime_type: "image/png".into(),
+        }
+    }
+}
+
+/// `bytes` as a picture to show, kept under the cache's `agent/<dir>`;
+/// `None` when they are not a PNG, JPEG, GIF or WebP picture.
+pub(super) fn picture(bytes: &[u8], dir: &str) -> Option<ToolResultOf<Picture>> {
+    let format = image::guess_format(bytes).ok()?;
+    let ext = match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Gif => "gif",
+        ImageFormat::WebP => "webp",
+        _ => return None,
+    };
+    Some(show(bytes, format, ext, dir))
+}
+
+fn show(bytes: &[u8], format: ImageFormat, ext: &'static str, dir: &str) -> ToolResultOf<Picture> {
+    let picture = image::load_from_memory_with_format(bytes, format)
+        .map_err(|e| ToolError(format!("Could not read the picture: {e}")))?;
+    let (width, height) = (picture.width(), picture.height());
+    let shown = if width.max(height) > MAX_SIDE {
+        picture.thumbnail(MAX_SIDE, MAX_SIDE)
+    } else {
+        picture
+    };
+    let mut png = Vec::new();
+    shown
+        .to_rgba8()
+        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .map_err(|e| ToolError(format!("Could not show the picture: {e}")))?;
+    let dir = paths::cache().join("agent").join(dir);
+    std::fs::create_dir_all(&dir)?;
+    let seen = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&seen, &png)?;
+    Ok(Picture {
+        ext,
+        width,
+        height,
+        png,
+        seen,
     })
 }
 
@@ -146,21 +190,22 @@ fn download(url: &str) -> ToolResultOf<(Vec<u8>, Option<String>)> {
     Ok((bytes, content_type))
 }
 
-/// Back on the UI thread: add the picture to the pool's Web Images bin at
-/// once, as `author`'s change (the user's when the turn is gone), so a
-/// proposal can use it.
+/// Back on the UI thread: add the picture to the pool's `bin` at once, as
+/// `author`'s change (the user's when the turn is gone), so a proposal can
+/// use it.
 pub fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
     item: MediaItem,
     mut done: Done,
+    bin: &str,
 ) -> Done {
     let id = item.id;
-    let commands = cloud::pool_commands(bus.project(), item, BIN);
+    let commands = cloud::pool_commands(bus.project(), item, bin);
     let author = author.cloned().unwrap_or(Author::User);
-    let note = match bus.execute_shared_as(commands, "Add web image", author) {
+    let note = match bus.execute_shared_as(commands, "Add picture", author) {
         Ok(_) => format!(
-            " Added to the pool as media {} in the {BIN} bin.",
+            " Added to the pool as media {} in the {bin} bin.",
             short(id)
         ),
         Err(e) => format!(" Could not add it to the pool: {e}"),

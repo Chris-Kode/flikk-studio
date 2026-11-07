@@ -2,7 +2,7 @@
 //! (PRD AG2).
 
 use crate::args::{kind_name, range_json, secs, short};
-use flikk_core::agent::{AgentSettings, ChatRole, EditorContext};
+use flikk_core::agent::{AgentSettings, AttachmentKind, ChatRole, EditorContext};
 use flikk_core::bus::AgentRole;
 use flikk_core::memory::{RuleScope, RuleStatus, StyleRule};
 use flikk_core::model::{ClipContent, Project};
@@ -10,12 +10,15 @@ use serde_json::{Value, json};
 
 const TOOLS: &str = "\
 You work inside Flikk, a desktop video editor. Your only tools are the \
-`flikk` MCP tools; you cannot run commands, read files or browse.";
+`flikk` MCP tools; you cannot run commands or browse, and you read files \
+only with `list_files`, `read_file` and `search_files`, inside what the user \
+attached to the chat.";
 
 const TOOLS_WEB: &str = "\
 You work inside Flikk, a desktop video editor. Your tools are the \
 `flikk` MCP tools plus web search and reading web pages; you cannot run \
-commands or read files. Use the web to check what you put on screen \
+commands, and you read files only with `list_files`, `read_file` and \
+`search_files`, inside what the user attached to the chat. Use the web to check what you put on screen \
 (names, titles, dates, quotes) or to look up how to do something, and \
 say what you looked up. Keep private details of the project out of your \
 searches. Reading a page gives you its text only; to see a picture on it, \
@@ -48,6 +51,11 @@ lists downbeats (every beat on request), and `view_audio` draws up to 30 s as a 
 spectrogram when an exact edge matters. Read the script before you judge \
 anything you would hear. To make a song end with the video, use `fit_music` \
 rather than cutting or fading it by hand.
+
+Attachments (`attachments` in the editor context) are files and folders the \
+user shared with you as reference. Read what the request needs, not the \
+whole folder. When the project itself must use one of their files, bring it \
+in with `copy_file` and use the copy: the attachment can move or go away.
 
 Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or \
 frames \"f:1234\" at the sequence rate; use timecode or frames when a cut \
@@ -372,6 +380,25 @@ pub fn editor_context(project: &Project, ctx: &EditorContext) -> Value {
     }
     if let Some((media, r)) = ctx.selection.words {
         out["selected_words"] = json!({ "media": short(media), "source_range": range_json(r) });
+    }
+    if !ctx.attachments.is_empty() {
+        out["attachments"] = ctx
+            .attachments
+            .iter()
+            .map(|a| {
+                let mut item = json!({
+                    "path": a.path.display().to_string(),
+                    "kind": match a.kind {
+                        AttachmentKind::File => "file",
+                        AttachmentKind::Folder => "folder",
+                    },
+                });
+                if !a.path.exists() {
+                    item["missing"] = json!(true);
+                }
+                item
+            })
+            .collect();
     }
     out
 }

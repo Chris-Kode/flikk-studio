@@ -379,6 +379,56 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "list_files",
+            Some(Files),
+            "List what is inside the files and folders the user attached to the chat, the only places on disk you may read. Like git sees them: ignored, hidden, dependency and build folders are left out. Paths are relative to their attached folder.",
+            object(
+                json!({
+                    "path": string("An attached folder or a folder inside one (default: every attachment)"),
+                    "depth": number("Levels of folders to go down (default 3)")
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "read_file",
+            Some(Files),
+            "Read a file inside what the user attached: text with line numbers, or a PNG, JPEG, GIF or WebP picture to look at. Long files come in parts; pass `offset` for the next.",
+            object(
+                json!({
+                    "path": string("Path inside an attached folder, or a full path"),
+                    "offset": number("First line to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
+                &["path"],
+            ),
+        ),
+        spec(
+            "search_files",
+            Some(Files),
+            "Search the text files inside what the user attached for a regex, line by line (`(?i)` ignores case). Gives path:line: text.",
+            object(
+                json!({
+                    "pattern": string("Regular expression"),
+                    "path": string("An attached folder, or a folder or file inside one (default: every attachment)"),
+                    "glob": string("Only files matching this glob, such as *.css or src/**/*.ts")
+                }),
+                &["pattern"],
+            ),
+        ),
+        spec(
+            "copy_file",
+            Some(Files),
+            "Copy a file out of what the user attached into Flikk's own data, for when the project itself must use it (a font, a logo): the attachment can move or go away. Gives the copy's path. With `add_to_pool`, a picture also goes into the pool's Attached bin.",
+            object(
+                json!({
+                    "path": string("Path inside an attached folder, or a full path"),
+                    "add_to_pool": boolean("Also add the picture to the media pool")
+                }),
+                &["path"],
+            ),
+        ),
+        spec(
             "get_layout",
             Some(View),
             "Where everything visible at a time is on screen, topmost first: each item's box around what it draws (pixels and fractions of the frame), its transform (values off their neutral default), whether it sits inside the title-safe area, and which items overlap. Use it before placing things so they don't cover each other or faces.",

@@ -11,6 +11,7 @@ mod audio;
 pub mod catalog;
 mod depth;
 mod edit;
+mod files;
 mod fx;
 pub mod generate;
 pub mod groups;
@@ -224,6 +225,8 @@ pub enum JobDone {
     Fetched {
         item: Box<flikk_core::model::MediaItem>,
         done: Box<Done>,
+        /// The pool bin it goes to.
+        bin: &'static str,
     },
     /// Words said again for a fix, to add to the pool and cut in on the UI
     /// thread.
@@ -267,7 +270,12 @@ pub fn list(
         .filter(|t| t.name != image::TOOL || images)
         .filter(|t| match groups {
             Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
-            None => t.name != groups::LOAD_TOOLS && t.name != groups::RUN_TOOL,
+            // Attached files are only for the editor's own chat.
+            None => {
+                t.name != groups::LOAD_TOOLS
+                    && t.name != groups::RUN_TOOL
+                    && !files::TOOLS.contains(&t.name)
+            }
         })
         .map(ToolSpec::to_mcp)
         .collect()
@@ -396,6 +404,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "fit_music" => music::fit_music(ctx, &args),
         "replace_words" => respeak::serve(ctx, &args),
         "sync_audio" => sync::serve(ctx, &args),
+        tool if files::TOOLS.contains(&tool) => files::serve(ctx, tool, &args),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool if depth::TOOLS.contains(&tool) => depth::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),

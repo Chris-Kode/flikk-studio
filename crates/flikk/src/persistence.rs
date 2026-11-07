@@ -12,7 +12,7 @@
 //! and saves projects, and [`take_notice`] says why.
 
 use flikk_agent::session::MAIN_CHAT;
-use flikk_core::agent::{AgentSettings, ChatMessage};
+use flikk_core::agent::{AgentSettings, Attachment, ChatMessage};
 use flikk_core::bus::CommandBus;
 use flikk_core::changeset::{self, ChangeSet, ItemState};
 use flikk_core::ids::ProjectId;
@@ -353,6 +353,9 @@ pub struct ChatSession {
     /// Unix seconds of the last message, or of creation.
     pub at: i64,
     pub messages: Vec<ChatMessage>,
+    /// Files and folders the agent may read in this chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl ChatSession {
@@ -362,6 +365,7 @@ impl ChatSession {
             title: String::new(),
             at,
             messages: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }

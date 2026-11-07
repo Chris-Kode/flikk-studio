@@ -77,6 +77,12 @@ pub fn web() -> PathBuf {
     sub("web")
 }
 
+/// Fonts and pictures the agent copied out of a chat's attachments, so the
+/// project keeps them when the attached folder moves.
+pub fn attached() -> PathBuf {
+    sub("attached")
+}
+
 /// API keys, owner-only, where the system has no credential store.
 pub fn credentials() -> PathBuf {
     let _ = std::fs::create_dir_all(home());

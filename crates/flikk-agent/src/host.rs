@@ -307,7 +307,11 @@ impl AgentHost {
             });
             return;
         }
-        self.external.context = context.clone();
+        // Attachments are for this chat's own turns, never other clients.
+        self.external.context = EditorContext {
+            attachments: Vec::new(),
+            ..context.clone()
+        };
         self.external.settings = settings.clone();
         self.queued = Some(Queued {
             message,
@@ -963,12 +967,12 @@ impl AgentHost {
                         &summary,
                     )
                 }
-                JobDone::Fetched { item, done } => {
+                JobDone::Fetched { item, done, bin } => {
                     let author = match origin {
                         Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
-                    tools::web::finish(bus, author.as_ref(), *item, *done)
+                    tools::web::finish(bus, author.as_ref(), *item, *done, bin)
                 }
                 JobDone::Respoken { item, fix, summary } => {
                     let author = match origin {

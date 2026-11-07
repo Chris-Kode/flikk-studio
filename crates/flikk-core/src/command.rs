@@ -34,13 +34,16 @@ pub enum ToolCategory {
     Effects,
     /// Music and sound effects made by a provider, which cost credits.
     Generate,
+    /// Reading the files and folders the user attached to the chat.
+    Files,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 14] = [
+    pub const ALL: [ToolCategory; 15] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
+        Self::Files,
         Self::EditTimeline,
         Self::Transform,
         Self::Captions,
@@ -55,7 +58,10 @@ impl ToolCategory {
     ];
 
     pub fn is_read(self) -> bool {
-        matches!(self, Self::ReadProject | Self::ReadAnalysis | Self::View)
+        matches!(
+            self,
+            Self::ReadProject | Self::ReadAnalysis | Self::View | Self::Files
+        )
     }
 
     pub fn label(self) -> &'static str {
@@ -74,6 +80,7 @@ impl ToolCategory {
             Self::Media => "Media",
             Self::Effects => "Effects and motion graphics",
             Self::Generate => "Generate media",
+            Self::Files => "Attached files",
         }
     }
 }

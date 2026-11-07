@@ -189,6 +189,64 @@ pub struct EditorContext {
     /// them, since the model no longer has them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<(ChatRole, String)>,
+    /// Files and folders the user attached to the chat: the only places the
+    /// agent may read from disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file or folder the user attached to a chat. Attaching is the user's
+/// leave for the agent to read it, and everything inside a folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: AttachmentId,
+    /// Canonical, so symlinks and `..` are resolved before anything is
+    /// compared against it.
+    pub path: PathBuf,
+    pub kind: AttachmentKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    File,
+    Folder,
+}
+
+impl Attachment {
+    /// `path` as an attachment, or why it can't be one.
+    pub fn of(path: &std::path::Path) -> Result<Self, String> {
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+        let kind = if meta.is_dir() {
+            AttachmentKind::Folder
+        } else {
+            AttachmentKind::File
+        };
+        Ok(Self {
+            id: AttachmentId::new(),
+            path,
+            kind,
+        })
+    }
+
+    /// The last part of the path, for chips and lists.
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+
+    /// Whether `path` (canonical) is this attachment or inside it.
+    pub fn covers(&self, path: &std::path::Path) -> bool {
+        match self.kind {
+            AttachmentKind::File => path == self.path,
+            AttachmentKind::Folder => path.starts_with(&self.path),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

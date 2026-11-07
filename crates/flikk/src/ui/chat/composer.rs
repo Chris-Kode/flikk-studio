@@ -1,7 +1,9 @@
 //! Message input: Enter sends, Shift+Enter breaks the line, `@` opens the
 //! reference list (inserted as chips) and `/` at the start lists recipes.
 //! Clips, media, FX and transcript words dropped on it, and references
-//! other panels queue with "Add to chat", become chips too.
+//! other panels queue with "Add to chat", become chips too. Files and
+//! folders picked with the paperclip or dropped from the system are
+//! attached to the chat, for the agent to read, and shown above the input.
 
 use super::chips::{chip, mark_element};
 use super::recipes;
@@ -13,7 +15,9 @@ use crate::ui::kit::{
     Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
 use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
-use flikk_core::agent::{AgentModel, Backend, ModelChoice, effort_label};
+use flikk_core::agent::{
+    AgentModel, Attachment, AttachmentKind, Backend, ModelChoice, effort_label,
+};
 use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -539,10 +543,85 @@ impl Composer {
         )
     }
 
+    /// Pick files and folders to attach to the open chat. The pick goes to
+    /// the chat it was made in, or nowhere if that is no longer open.
+    fn prompt_attach(&mut self, cx: &mut Context<Self>) {
+        let (project, chat) = self.open_chat(cx);
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await {
+                this.update(cx, |this, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.attach(project, &chat, paths, cx))
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn open_chat(&self, cx: &App) -> (flikk_core::ProjectId, String) {
+        let s = self.state.read(cx);
+        (s.bus.project().id, s.active_chat().to_owned())
+    }
+
+    /// The chat's attachments: a chip each, with the full path on hover
+    /// and a cross to remove it. Crossed out when the path is gone.
+    fn render_attachments(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.state.read(cx);
+        // Fixed while the agent replies: the turn reads what it was sent with.
+        let locked = state.agent_busy();
+        let attachments = state.attachments().to_vec();
+        if attachments.is_empty() {
+            return None;
+        }
+        let chips = attachments.into_iter().enumerate().map(|(ix, a)| {
+            let Attachment { id, kind, .. } = a;
+            let exists = a.path.exists();
+            let icon = match kind {
+                AttachmentKind::Folder => IconName::Folder,
+                AttachmentKind::File => IconName::File,
+            };
+            let group: SharedString = format!("chat-attachment-{ix}").into();
+            let state = self.state.clone();
+            chip(Some(Mark::Icon(icon, t::T2)), a.name())
+                .id(("chat-attachment", ix))
+                .group(group.clone())
+                .pr(px(3.))
+                .when(!exists, |el| el.text_color(t::T3).line_through())
+                .tooltip(Tooltip::text(a.path.display().to_string()))
+                .when(!locked, |el| {
+                    el.child(
+                        div()
+                            .id(("chat-attachment-remove", ix))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .invisible()
+                            .group_hover(group, |s| s.visible())
+                            .cursor_pointer()
+                            .text_color(t::T3)
+                            .hover(|s| s.text_color(t::T1))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .tooltip(Tooltip::text("Remove"))
+                            .child(Icon::new(IconName::X).size(px(11.)))
+                            .on_click(move |_, _, cx| state.update(cx, |s, cx| s.detach(id, cx))),
+                    )
+                })
+        });
+        Some(h_flex().flex_wrap().gap(px(4.)).px(px(2.)).children(chips))
+    }
+
     /// While something is dragged over the composer: the dashed target it
-    /// drops into, inserting chips.
+    /// drops into, inserting chips, or attaching files from the system.
     fn render_drop_target(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let show = |s: StyleRefinement| s.opacity(1.);
+        let can_attach = !self.state.read(cx).agent_busy();
         v_flex()
             .absolute()
             .inset_0()
@@ -562,6 +641,16 @@ impl Composer {
             .drag_over::<FxDrag>(move |s, _, _, _| show(s))
             .drag_over::<AudioFxDrag>(move |s, _, _, _| show(s))
             .drag_over::<SoundDrag>(move |s, _, _, _| show(s))
+            // Not while the agent replies: see `EditorState::attach`.
+            .when(can_attach, |el| {
+                el.drag_over::<ExternalPaths>(move |s, _, _, _| show(s))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        let (project, chat) = this.open_chat(cx);
+                        let paths = paths.paths().to_vec();
+                        this.state
+                            .update(cx, |s, cx| s.attach(project, &chat, paths, cx))
+                    }))
+            })
             .on_drop(cx.listener(|this, drag: &RefDrag, window, cx| {
                 this.insert_refs(drag.refs.clone(), window, cx)
             }))
@@ -680,6 +769,7 @@ impl Render for Composer {
                     .bg(t::G)
                     .when(focused, |el| el.shadow(t::field_ring()))
                     .when(!focused, |el| el.hover(|s| s.border_color(t::LN_HV)))
+                    .children(self.render_attachments(cx))
                     .child(
                         Textarea::new(&self.input)
                             .bare()
@@ -711,6 +801,15 @@ impl Render for Composer {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_reference(window, cx)
                                     })),
+                            )
+                            .child(
+                                Button::new("chat-attach")
+                                    .icon(IconName::Paperclip)
+                                    .ghost()
+                                    .small()
+                                    .disabled(busy)
+                                    .tooltip("Attach files or folders")
+                                    .on_click(cx.listener(|this, _, _, cx| this.prompt_attach(cx))),
                             )
                             .child(self.render_model_pickers(cx))
                             .child(div().flex_1())

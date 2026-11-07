@@ -28,8 +28,9 @@ use std::path::PathBuf;
 pub const LOAD_TOOLS: &str = "load_tools";
 pub const RUN_TOOL: &str = "run_tool";
 
-/// Listed on every turn: reading, looking, listening and cutting.
-pub const CORE: [&str; 21] = [
+/// Listed on every turn: reading, looking, listening and cutting, and the
+/// attached files (they say so when nothing is attached).
+pub const CORE: [&str; 25] = [
     "get_timeline",
     "get_selection",
     "list_media",
@@ -49,6 +50,10 @@ pub const CORE: [&str; 21] = [
     "cut_words",
     "trim",
     "move_clip",
+    "list_files",
+    "read_file",
+    "search_files",
+    "copy_file",
     "ask_user",
     LOAD_TOOLS,
 ];
@@ -83,6 +88,7 @@ pub fn key(group: ToolCategory) -> &'static str {
         ToolCategory::ReadAnalysis => "analysis",
         ToolCategory::View => "view",
         ToolCategory::Media => "media",
+        ToolCategory::Files => "files",
     }
 }
 
