@@ -58,17 +58,18 @@ use flikk_core::ids::JobId;
 use flikk_core::jobs::{JobProgress, JobQueue};
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::services::{
-    AnalysisConfig, AnalysisService, JobStatus, ServiceError, ServiceResult,
+    AnalysisConfig, AnalysisService, Coverage, JobStatus, ServiceError, ServiceResult,
 };
 #[cfg(feature = "aligner")]
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::time::{Time, TimeRange};
 use flikk_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 pub use depth::LocalDepth;
 pub use ffmpeg::binary as ffmpeg_binary;
@@ -142,6 +143,13 @@ struct Shared {
     /// failed is not among them, so the next request runs it again; only
     /// results without failures are written to disk.
     results: Mutex<HashMap<Fingerprint, Cached>>,
+    /// Fingerprints with no result on disk the last time it was read, so
+    /// that asking again reads nothing. A job's result goes to `results`,
+    /// which is asked first.
+    absent: Mutex<HashSet<Fingerprint>>,
+    /// The steps a plain request asks for, without a script and with one,
+    /// and when they were worked out: it looks for the models on disk.
+    wanted: Mutex<[Option<(Instant, AnalysisSteps)>; 2]>,
     #[cfg(feature = "whisper")]
     voice: Box<dyn flikk_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
@@ -221,6 +229,8 @@ impl LocalAnalysis {
             options,
             diarizer,
             results: Mutex::default(),
+            absent: Mutex::default(),
+            wanted: Mutex::default(),
             #[cfg(feature = "whisper")]
             voice: flikk_models::voice_activity::runner(ModelTask::VoiceActivity.model()),
             #[cfg(feature = "whisper")]
@@ -383,6 +393,7 @@ impl AnalysisService for LocalAnalysis {
 
     fn configure(&self, config: AnalysisConfig) {
         *lock(&self.shared.config) = config;
+        *lock(&self.shared.wanted) = [None, None];
     }
 
     fn jobs(&self) -> Vec<JobStatus> {
@@ -391,6 +402,20 @@ impl AnalysisService for LocalAnalysis {
 
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>> {
         self.shared.cached(fingerprint)
+    }
+
+    fn coverage(&self, item: &MediaItem) -> Coverage {
+        let Some(cached) = item
+            .fingerprint
+            .as_ref()
+            .and_then(|fp| self.shared.entry(fp))
+        else {
+            return Coverage::None;
+        };
+        match cached.steps.covers(&self.shared.wanted(has_script(item))) {
+            true => Coverage::Full,
+            false => Coverage::Partial,
+        }
     }
 
     fn time_script(&self, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
@@ -455,12 +480,31 @@ impl Shared {
         self.entry(fp).map(|c| c.analysis)
     }
 
-    /// Memory first, then the disk cache.
+    /// What [`Plan::for_item`] runs for an item that is not sound only,
+    /// worked out again after [`WANTED_FOR`], as models come and go.
+    fn wanted(&self, script: bool) -> AnalysisSteps {
+        let now = Instant::now();
+        let fresh = |(at, _): &(Instant, AnalysisSteps)| now.duration_since(*at) < WANTED_FOR;
+        if let Some((_, steps)) = lock(&self.wanted)[script as usize].filter(fresh) {
+            return steps;
+        }
+        let steps = Plan::new(&lock(&self.config), false, script).ran();
+        lock(&self.wanted)[script as usize] = Some((now, steps));
+        steps
+    }
+
+    /// Memory first, then the disk cache, once.
     fn entry(&self, fp: &Fingerprint) -> Option<Cached> {
         if let Some(c) = lock(&self.results).get(fp) {
             return Some(c.clone());
         }
-        let (analysis, steps) = cache::load(fp)?;
+        if lock(&self.absent).contains(fp) {
+            return None;
+        }
+        let Some((analysis, steps)) = cache::load(fp) else {
+            lock(&self.absent).insert(fp.clone());
+            return None;
+        };
         let loaded = Cached {
             analysis: Arc::new(analysis),
             steps,
@@ -469,6 +513,15 @@ impl Shared {
         let mut results = lock(&self.results);
         Some(results.entry(fp.clone()).or_insert(loaded).clone())
     }
+}
+
+/// How long [`Shared::wanted`] holds the steps it worked out.
+const WANTED_FOR: Duration = Duration::from_secs(2);
+
+/// A voiceover, whose script stands in for transcription.
+fn has_script(item: &MediaItem) -> bool {
+    let generated = item.generated.as_deref();
+    generated.and_then(GenerationInfo::script).is_some()
 }
 
 /// Maps each pipeline step onto its share of the job's progress bar.
@@ -532,8 +585,7 @@ struct Plan {
 impl Plan {
     /// The plan for analyzing `item` with the steps configured now.
     fn for_item(shared: &Shared, item: &MediaItem, sound_only: bool) -> Self {
-        let generated = item.generated.as_deref();
-        let script = generated.and_then(GenerationInfo::script).is_some() && !sound_only;
+        let script = has_script(item) && !sound_only;
         Self::new(&lock(&shared.config), sound_only, script)
     }
 

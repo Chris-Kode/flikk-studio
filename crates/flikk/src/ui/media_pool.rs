@@ -22,7 +22,7 @@ use crate::ui::library::shared;
 use crate::ui::{FolderDrag, MediaDrag};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Bin, MediaItem, MediaKind};
-use flikk_core::services::{JobState, JobStatus};
+use flikk_core::services::{Coverage, JobState, JobStatus};
 use flikk_core::{BinId, MediaId, Time};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -304,7 +304,8 @@ impl MediaPoolPanel {
         let job = self.jobs.iter().rev().find(|j| j.media == Some(id));
         let fp = item.fingerprint.as_ref();
         let script = item.generated.as_deref().and_then(|g| g.script());
-        let again = fp.and_then(|fp| analysis.analysis(fp)).is_some();
+        // Results that lack a step are added to; whole ones are replaced.
+        let again = analysis.coverage(item) == Coverage::Full;
         Some(match job.map(|j| &j.state) {
             Some(JobState::Queued) => AnalyzeEntry::Queued,
             Some(JobState::Running { .. }) => AnalyzeEntry::Running,
@@ -2196,7 +2197,8 @@ enum AnalyzeEntry {
     Unreadable,
     /// A model it needs is missing: opens where to get it.
     SetUp,
-    /// `again` when it has results, which analyzing replaces.
+    /// `again` when its results cover every step, which analyzing
+    /// replaces; otherwise analyzing adds the steps they lack.
     Ready {
         again: bool,
     },
@@ -2375,7 +2377,7 @@ fn selection_menu(
     }
     let mut menu = menu;
     // Analyze when every clip can: each runs fresh or again as it would
-    // alone, and "again" only when every one has results.
+    // alone, and "again" only when every one has whole results.
     let ready: Option<Vec<(MediaId, bool)>> = media
         .iter()
         .map(|m| match panel.read(cx).analyze_entry(*m, cx) {

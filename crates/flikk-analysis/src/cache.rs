@@ -73,7 +73,7 @@ pub fn load(fp: &Fingerprint) -> Option<(Analysis, AnalysisSteps)> {
 /// what it holds tells: the speech steps with a transcript; shot changes
 /// with a transcript or shots, as the sound-only pass made neither; the
 /// sound steps always, as every pass ran them, so nothing is heard again
-/// that may have been heard. "Analyze again" makes what is missing.
+/// that may have been heard. "Analyze" makes what is missing.
 fn held(analysis: &Analysis) -> AnalysisSteps {
     let speech = analysis.transcript.is_some();
     AnalysisSteps {
