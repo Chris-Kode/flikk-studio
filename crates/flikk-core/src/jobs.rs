@@ -151,6 +151,17 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         lock(&self.shared.jobs).clone()
     }
 
+    /// Why job `id` failed, if it has.
+    pub fn failed(&self, id: JobId) -> Option<String> {
+        lock(&self.shared.jobs)
+            .iter()
+            .find(|j| j.id == id)
+            .and_then(|j| match &j.state {
+                JobState::Failed { message } => Some(message.clone()),
+                _ => None,
+            })
+    }
+
     /// Drop finished and failed jobs from [`Self::jobs`].
     pub fn clear_finished(&self) {
         lock(&self.shared.jobs)

@@ -579,24 +579,29 @@ impl LocalSubjects {
                 model_prompt(prompt),
             );
             self.picks.clear_finished();
-            self.picks
-                .push(key.clone(), "Find subject", Some(item.id), move |_| {
-                    let made =
-                        catch_unwind(AssertUnwindSafe(|| s.segment(model, &item, key.1, &prompt)))
-                            .unwrap_or_else(|p| {
-                                Err(ServiceError(stopped("Finding the subject", &*p)))
-                            });
-                    match made {
-                        Ok(m) => {
-                            s.keep_prompted(&key, Packed::pack(&m), true);
-                            Ok(())
+            let job =
+                self.picks
+                    .push(key.clone(), "Find subject", Some(item.id), move |_| {
+                        let made = catch_unwind(AssertUnwindSafe(|| {
+                            s.segment(model, &item, key.1, &prompt)
+                        }))
+                        .unwrap_or_else(|p| Err(ServiceError(stopped("Finding the subject", &*p))));
+                        match made {
+                            Ok(m) => {
+                                s.keep_prompted(&key, Packed::pack(&m), true);
+                                Ok(())
+                            }
+                            Err(e) => {
+                                s.fail(prompt_id(&key), e.0.clone());
+                                Err(e.0)
+                            }
                         }
-                        Err(e) => {
-                            s.fail(prompt_id(&key), e.0.clone());
-                            Err(e.0)
-                        }
-                    }
-                });
+                    });
+            // Failed unrun (no thread could start): kept, or it is asked
+            // for again on every frame.
+            if let Some(message) = self.picks.failed(job) {
+                shared.fail(id, message);
+            }
         }
         let Some(job) = plan.track.clone() else {
             return;
@@ -641,7 +646,7 @@ impl LocalSubjects {
             ran: false,
         };
         self.tracks.clear_finished();
-        self.tracks.push(
+        let id = self.tracks.push(
             job.clone(),
             "Track subject",
             Some(item.id),
@@ -661,6 +666,10 @@ impl LocalSubjects {
                 })
             },
         );
+        // Failed unrun (no thread could start): kept, as above.
+        if let Some(message) = self.tracks.failed(id) {
+            shared.fail(track_id(&key), message);
+        }
     }
 }
 
