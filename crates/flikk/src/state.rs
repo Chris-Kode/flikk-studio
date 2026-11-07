@@ -290,6 +290,13 @@ impl EditorState {
         this.load_agent_memory();
         this.load_presets();
         this.load_agent_models(cx);
+        // Quitting mid-render stops the renders and removes their part
+        // files, rather than leaving ffmpeg to finish a cut file.
+        cx.on_app_quit(|this, _| {
+            this.render_queue.shutdown();
+            async {}
+        })
+        .detach();
         this
     }
 

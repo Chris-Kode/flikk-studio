@@ -278,7 +278,13 @@ fn settled(
                 .into_any_element(),
             Some(RenderState::Failed { message }) => failed(message),
             Some(RenderState::Canceled) => note(IconName::CircleX, "Canceled"),
-            Some(RenderState::Done) | None => done(file.clone()),
+            // The name it was written under: another file may have taken
+            // the one it was queued with.
+            Some(RenderState::Done) => done(state.render_job(*job).map_or_else(
+                || file.clone(),
+                |j| crate::agent_link::approve::file_name(&j.output),
+            )),
+            None => done(file.clone()),
         },
     }
 }
