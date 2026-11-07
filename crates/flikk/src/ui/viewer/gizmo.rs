@@ -85,6 +85,8 @@ struct Drag {
     shape: Shape,
     /// The clip's transform at the playhead when the drag began.
     start: Transform,
+    /// The playhead when the drag began, where its keyframes go.
+    at: Time,
     /// Where the drag began, in sequence and screen pixels.
     from: [f32; 2],
     from_screen: Point<Pixels>,
@@ -110,6 +112,8 @@ struct GroupDrag {
     members: Vec<Member>,
     /// The box when the drag began.
     corners: [[f32; 2]; 4],
+    /// The playhead when the drag began, where its keyframes go.
+    at: Time,
     from: [f32; 2],
     from_screen: Point<Pixels>,
     moved: bool,
@@ -153,6 +157,8 @@ pub(super) struct Overlay {
 pub(super) struct Gizmo {
     /// Layout of a paused frame and what it was made for.
     pub shapes: Option<(Request, Vec<Shape>)>,
+    /// The number of the layout in `shapes`.
+    epoch: u64,
     drag: Option<Drag>,
     group_drag: Option<GroupDrag>,
     pub hover: Option<Handle>,
@@ -325,8 +331,12 @@ impl Gizmo {
             .map(|(_, s)| s.as_slice())
     }
 
-    /// A newer layout arrived.
-    pub fn set_shapes(&mut self, request: Request, shapes: Vec<Shape>) {
+    /// Layout number `epoch` arrived: it replaces an older one only.
+    pub fn set_shapes(&mut self, request: Request, epoch: u64, shapes: Vec<Shape>) {
+        if epoch <= self.epoch {
+            return;
+        }
+        self.epoch = epoch;
         self.shapes = Some((request, shapes));
         if !self.dragging() {
             self.held.clear();
@@ -596,6 +606,7 @@ impl Gizmo {
             shape,
             now: start.clone(),
             start,
+            at: playhead,
             from: screen.to_sequence(p),
             from_screen: p,
             alone: modifiers.alt,
@@ -645,6 +656,7 @@ impl Gizmo {
             members,
             now: GroupMove::about(box_center(&corners)),
             corners,
+            at: playhead,
             from: screen.to_sequence(p),
             from_screen: p,
             moved: false,
@@ -659,10 +671,9 @@ impl Gizmo {
         modifiers: Modifiers,
         screen: &Screen,
         project: &Project,
-        playhead: Time,
     ) -> Option<Vec<Command>> {
         if self.group_drag.is_some() {
-            return self.group_drag_to(p, modifiers, screen, project, playhead);
+            return self.group_drag_to(p, modifiers, screen, project);
         }
         let others: Vec<[f32; 4]> = self
             .shapes
@@ -685,7 +696,7 @@ impl Gizmo {
         d.now = tf;
         self.guides = guides;
         let (_, clip) = project.timeline.clip(d.clip)?;
-        Some(transform_commands(clip, playhead, &d.now))
+        Some(transform_commands(clip, d.at, &d.now))
     }
 
     /// [`Self::drag_to`] for the group box.
@@ -695,7 +706,6 @@ impl Gizmo {
         modifiers: Modifiers,
         screen: &Screen,
         project: &Project,
-        playhead: Time,
     ) -> Option<Vec<Command>> {
         let safe = self.safe_areas;
         let g = self.group_drag.as_mut()?;
@@ -751,12 +761,12 @@ impl Gizmo {
         }
         g.now = now;
         self.guides = guides;
-        Some(group_commands(g, project, playhead))
+        Some(group_commands(g, project))
     }
 
     /// End the drag: the commands to commit (none for a click), and whether
     /// it was a click.
-    pub fn end(&mut self, project: &Project, playhead: Time) -> (Vec<Command>, bool) {
+    pub fn end(&mut self, project: &Project) -> (Vec<Command>, bool) {
         self.guides.clear();
         if let Some(g) = self.group_drag.take() {
             if !g.moved {
@@ -767,7 +777,7 @@ impl Gizmo {
                 .iter()
                 .map(|m| (m.clip, m.shape.placed(&g.now.transform(&m.shape, &m.start))))
                 .collect();
-            return (group_commands(&g, project, playhead), false);
+            return (group_commands(&g, project), false);
         }
         let Some(d) = self.drag.take() else {
             return (Vec::new(), false);
@@ -777,7 +787,7 @@ impl Gizmo {
         }
         self.held = vec![(d.clip, d.shape.placed(&d.now))];
         let caption = d.shape.lettering && !d.alone;
-        (commit(project, d.clip, playhead, &d.now, caption), false)
+        (commit(project, d.clip, d.at, &d.now, caption), false)
     }
 
     /// Show `clip` with transform `tf` until a newer layout arrives.
@@ -802,14 +812,14 @@ impl Gizmo {
 }
 
 /// The commands that give every member of `g` its place in the group's
-/// current move.
-fn group_commands(g: &GroupDrag, project: &Project, playhead: Time) -> Vec<Command> {
+/// current move, keyed where the drag began.
+fn group_commands(g: &GroupDrag, project: &Project) -> Vec<Command> {
     g.members
         .iter()
         .filter_map(|m| {
             let (_, clip) = project.timeline.clip(m.clip)?;
             let tf = g.now.transform(&m.shape, &m.start);
-            Some(transform_commands(clip, playhead, &tf))
+            Some(transform_commands(clip, g.at, &tf))
         })
         .flatten()
         .collect()

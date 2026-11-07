@@ -318,8 +318,20 @@ impl MaskEditor {
     /// Drop the pen's points, any drag and the subject preview.
     pub fn cancel(&mut self) {
         self.pen.clear();
+        self.pen_clip = None;
         self.drag = None;
         self.hover = None;
+    }
+
+    /// Drop the pen's path when the clip it was started on is gone.
+    pub fn forget_lost_pen(&mut self, project: &Project) {
+        let lost = self
+            .pen_clip
+            .is_some_and(|clip| project.timeline.clip(clip).is_none());
+        if lost {
+            self.pen.clear();
+            self.pen_clip = None;
+        }
     }
 
     /// Drop the drag in progress, committing nothing; whether there was one.
@@ -525,7 +537,8 @@ impl MaskEditor {
                 return Some(Vec::new());
             }
             Some(Tool::Pen) => {
-                // Points placed on another clip don't carry over.
+                // The path belongs to the clip it was started on: points
+                // placed on another clip don't carry over.
                 if self.pen_clip != Some(clip.id) {
                     self.pen.clear();
                     self.pen_clip = Some(clip.id);
@@ -540,6 +553,7 @@ impl MaskEditor {
                     points: std::mem::take(&mut self.pen),
                     smooth: !modifiers.alt,
                 });
+                self.pen_clip = None;
                 self.selected = Some(mask.id);
                 self.tool = None;
                 let mut next = masks.clone();

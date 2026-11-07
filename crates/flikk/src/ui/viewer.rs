@@ -164,6 +164,28 @@ struct Request {
     frame: i64,
 }
 
+/// What a click on the frame does.
+#[derive(Clone, Copy, PartialEq)]
+enum ClickMode {
+    /// Picks a depth effect's focus.
+    Focus((flikk_core::ClipId, flikk_core::EffectId)),
+    Masks,
+    Items,
+}
+
+/// A click that came before its frame was laid out, kept until it is.
+struct HeldClick {
+    at: Point<Pixels>,
+    modifiers: Modifiers,
+    /// Where the frame was on screen at the press.
+    screen: Screen,
+    mode: ClickMode,
+    /// The frame it was made on.
+    request: Request,
+    /// The mouse is already up: a click, not the start of a drag.
+    released: bool,
+}
+
 /// Mouse down on the frame.
 struct Press {
     /// The items under it, topmost first.
@@ -186,6 +208,8 @@ struct Job {
     project: Arc<Project>,
     services: Services,
     request: Request,
+    /// Its number among the paused frames asked for.
+    seq: u64,
     t: Time,
     disk: Option<Globals>,
 }
@@ -212,6 +236,11 @@ pub struct ViewerPanel {
     composing: bool,
     /// The newest paused frame asked for while composing.
     pending: Option<Job>,
+    /// Paused frames asked for so far, which numbers them.
+    frames: u64,
+    /// The number of the picture on screen, and its paused frame (none
+    /// for playback's).
+    on_screen: (u64, Option<Request>),
     /// Images replaced since the last paint, to free from the sprite atlas.
     retired: Vec<Arc<RenderImage>>,
     playback: Option<Playback>,
@@ -237,8 +266,10 @@ pub struct ViewerPanel {
     /// The mouse is over a picture with the subject tool, so a preview
     /// that arrives is shown.
     hovering: bool,
-    /// A layout is being made for this frame.
-    laying_out: Option<Request>,
+    /// A layout is being made for this frame, with its number.
+    laying_out: Option<(Request, u64)>,
+    /// Layouts asked for so far, which numbers them.
+    layouts: u64,
     /// Device pixels per sequence pixel; `None` fits the frame to the panel.
     zoom: Option<f32>,
     /// Offset of the frame from the panel centre while zoomed.
@@ -247,8 +278,8 @@ pub struct ViewerPanel {
     panning: Option<(Point<Pixels>, Point<Pixels>)>,
     /// Mouse down on the frame.
     pressed: Option<Press>,
-    /// A click that came before the frame was laid out, picked once it is.
-    pending_pick: Option<Point<Pixels>>,
+    /// A click that came before the frame was laid out, applied once it is.
+    held_click: Option<HeldClick>,
     /// The frame on screen from the last layout.
     frame_rect: Rc<Cell<Bounds<Pixels>>>,
     /// Device pixels per logical pixel at the last layout.
@@ -272,6 +303,8 @@ impl ViewerPanel {
             snapshot: None,
             composing: false,
             pending: None,
+            frames: 0,
+            on_screen: (0, None),
             retired: Vec::new(),
             playback: None,
             frame_width: Rc::new(Cell::new(640)),
@@ -285,11 +318,12 @@ impl ViewerPanel {
             next_preview: None,
             hovering: false,
             laying_out: None,
+            layouts: 0,
             zoom: None,
             pan: Point::default(),
             panning: None,
             pressed: None,
-            pending_pick: None,
+            held_click: None,
             frame_rect: Rc::new(Cell::new(Bounds::default())),
             scale_factor: Rc::new(Cell::new(1.0)),
             last_source: None,
@@ -301,6 +335,15 @@ impl ViewerPanel {
     fn show(&mut self, picture: Option<Arc<RenderImage>>) {
         if let Some(old) = std::mem::replace(&mut self.picture, picture) {
             self.retired.push(old);
+        }
+    }
+
+    /// Show paused frame number `seq` (`request`), unless a newer one is on
+    /// screen.
+    fn show_frame(&mut self, seq: u64, request: Request, picture: Option<Arc<RenderImage>>) {
+        if seq > self.on_screen.0 {
+            self.on_screen = (seq, Some(request));
+            self.show(picture);
         }
     }
 
@@ -563,6 +606,9 @@ impl ViewerPanel {
             return;
         };
         self.ahead = None;
+        // A paused frame still waiting is not composed once playback runs.
+        self.pending = None;
+        self.held_click = None;
         let playhead = state.monitor_time();
         // A seek while playing restarts the audio at the new position; video
         // follows the playhead on its own.
@@ -599,6 +645,9 @@ impl ViewerPanel {
             p.player.take()
         });
         if let Some(picture) = picture {
+            // Newer than any paused frame still composing.
+            self.frames += 1;
+            self.on_screen = (self.frames, None);
             self.show(Some(picture));
             self.requested = None;
         }
@@ -619,6 +668,16 @@ impl ViewerPanel {
             return;
         }
         self.requested = Some(request);
+        self.frames += 1;
+        let seq = self.frames;
+        // A click held for another frame's layout no longer applies.
+        if self
+            .held_click
+            .as_ref()
+            .is_some_and(|c| c.request != request)
+        {
+            self.held_click = None;
+        }
         if self.ahead.as_ref().is_some_and(|(r, _)| r.key != key) {
             self.ahead = None;
         }
@@ -638,7 +697,7 @@ impl ViewerPanel {
         if let Some(picture) = cached {
             // Whatever is still composing is older: don't show it.
             self.pending = None;
-            self.show(Some(picture));
+            self.show_frame(seq, request, Some(picture));
             self.render_ahead_later(request, cx);
             self.lay_out(request, cx);
             return;
@@ -647,6 +706,7 @@ impl ViewerPanel {
             project,
             services: state.services.clone(),
             request,
+            seq,
             t: Time::from_frame(request.frame, rate),
             disk,
         };
@@ -659,7 +719,7 @@ impl ViewerPanel {
 
     fn compose(&mut self, job: Job, cx: &mut Context<Self>) {
         self.composing = true;
-        let request = job.request;
+        let (request, seq) = (job.request, job.seq);
         let cache = self.cache.clone();
         cx.spawn(async move |this, cx| {
             let picture = cx
@@ -702,12 +762,14 @@ impl ViewerPanel {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.composing = false;
-                // Show progress toward the latest request, but nothing older
-                // than a frame already shown from the cache.
-                let current = this.requested == Some(request);
-                if this.playback.is_none() && (current || this.pending.is_some()) {
-                    this.show(picture);
+                if this.playback.is_some() {
+                    this.pending = None;
+                    return;
                 }
+                // Show progress toward the latest request, but nothing older
+                // than the picture on screen (a later cache hit, say).
+                let current = this.requested == Some(request);
+                this.show_frame(seq, request, picture);
                 // Latest request wins: compose the newest one asked for meanwhile.
                 if let Some(next) = this.pending.take() {
                     this.compose(next, cx);
@@ -730,13 +792,16 @@ impl ViewerPanel {
             .shapes
             .as_ref()
             .is_some_and(|(r, _)| *r == request);
-        if laid_out || self.laying_out == Some(request) || self.gizmo.dragging() {
+        let underway = self.laying_out.is_some_and(|(r, _)| r == request);
+        if laid_out || underway || self.gizmo.dragging() {
             return;
         }
         let Some((_, project)) = self.snapshot.clone().filter(|(k, _)| *k == request.key) else {
             return;
         };
-        self.laying_out = Some(request);
+        self.layouts += 1;
+        let epoch = self.layouts;
+        self.laying_out = Some((request, epoch));
         let services = self.state.read(cx).services.clone();
         cx.spawn(async move |this, cx| {
             let shapes = cx
@@ -749,23 +814,25 @@ impl ViewerPanel {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.laying_out == Some(request) {
+                if this.laying_out.is_some_and(|(_, e)| e == epoch) {
                     this.laying_out = None;
                 }
-                this.gizmo.set_shapes(request, shapes);
-                if this.requested == Some(request)
-                    && let Some(p) = this.pending_pick.take()
-                {
-                    let screen = this.screen(cx);
-                    let under = this.gizmo.clips_at(p, &screen, Some(request));
-                    this.state.update(cx, |s, cx| {
-                        s.select_clips(under.first().copied().into_iter().collect(), cx)
-                    });
-                }
+                // Layouts can finish out of order: an older one is dropped.
+                this.gizmo.set_shapes(request, epoch, shapes);
+                this.lay_out_shown(cx);
+                this.replay_click(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Lay out the paused frame on screen, if it still needs it (an older
+    /// layout finished last, or a drag held it back).
+    fn lay_out_shown(&mut self, cx: &mut Context<Self>) {
+        if let Some(request) = self.requested.filter(|r| self.on_screen.1 == Some(*r)) {
+            self.lay_out(request, cx);
+        }
     }
 
     /// Where the sequence is on screen.
@@ -780,6 +847,50 @@ impl ViewerPanel {
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let screen = self.screen(cx);
+        self.press(ev.position, ev.modifiers, screen, cx);
+    }
+
+    /// What a click does now.
+    fn click_mode(&self, cx: &App) -> ClickMode {
+        match self.state.read(cx).depth_pick {
+            Some(pick) => ClickMode::Focus(pick),
+            None if self.masks.on => ClickMode::Masks,
+            None => ClickMode::Items,
+        }
+    }
+
+    /// Apply the held click once its frame is laid out, as the click it
+    /// was; drop it if the frame or the kind of click changed meanwhile.
+    fn replay_click(&mut self, cx: &mut Context<Self>) {
+        let Some(click) = self.held_click.take() else {
+            return;
+        };
+        if self.requested != Some(click.request) || self.click_mode(cx) != click.mode {
+            return;
+        }
+        let laid_out = self
+            .gizmo
+            .shapes
+            .as_ref()
+            .is_some_and(|(r, _)| *r == click.request);
+        if !laid_out {
+            self.held_click = Some(click);
+            return;
+        }
+        self.press(click.at, click.modifiers, click.screen, cx);
+        if click.released {
+            self.release(cx);
+        }
+    }
+
+    /// Mouse down at `p` on the frame at `screen`.
+    fn press(
+        &mut self,
+        p: Point<Pixels>,
+        modifiers: Modifiers,
+        screen: Screen,
+        cx: &mut Context<Self>,
+    ) {
         let state = self.state.read(cx);
         if !self.editable(state) {
             return;
@@ -789,31 +900,39 @@ impl ViewerPanel {
         let editable = state.preview.is_none();
         let mut selected = state.selection.clips.clone();
         let request = self.requested;
-        let under = self.gizmo.clips_at(ev.position, &screen, request);
-        let handle =
-            self.gizmo
-                .handle_at(ev.position, &screen, project, &selected, playhead, request);
+        let under = self.gizmo.clips_at(p, &screen, request);
+        let handle = self
+            .gizmo
+            .handle_at(p, &screen, project, &selected, playhead, request);
         // Not laid out yet (just edited or seeked): the box just dragged
-        // still works; anything else is picked once the layout arrives.
+        // still works; anything else waits for the layout.
         let laid_out = self
             .gizmo
             .shapes
             .as_ref()
             .is_some_and(|(r, _)| Some(*r) == request);
         if !laid_out && handle.is_none() {
-            self.pending_pick = Some(ev.position);
+            let mode = self.click_mode(cx);
+            self.held_click = request.map(|request| HeldClick {
+                at: p,
+                modifiers,
+                screen,
+                mode,
+                request,
+                released: false,
+            });
             return;
         }
-        self.pending_pick = None;
+        self.held_click = None;
         if let Some(pick) = self.state.read(cx).depth_pick {
-            self.pick_focus(pick, ev.position, &screen, cx);
+            self.pick_focus(pick, p, &screen, cx);
             return;
         }
         if self.masks.on {
-            self.mask_press(ev, &screen, under, cx);
+            self.mask_press(p, modifiers, &screen, under, cx);
             return;
         }
-        let alt = ev.modifiers.alt;
+        let alt = modifiers.alt;
         let mut press = Press {
             under: under.clone(),
             alt,
@@ -821,7 +940,7 @@ impl ViewerPanel {
         };
         // Shift-click adds the item under the mouse, or takes a selected
         // one out on release (a drag moves them all instead).
-        if ev.modifiers.shift
+        if modifiers.shift
             && let Some(&clip) = under.first()
         {
             if selected.contains(&clip) {
@@ -837,7 +956,7 @@ impl ViewerPanel {
                 let (project, request) = (state.bus.project(), self.requested);
                 if !self.gizmo.begin_group(
                     gizmo::Handle::Body,
-                    ev.position,
+                    p,
                     &screen,
                     project,
                     &selected,
@@ -848,8 +967,8 @@ impl ViewerPanel {
                     self.gizmo.begin(
                         gizmo::Handle::Body,
                         first,
-                        ev.position,
-                        ev.modifiers,
+                        p,
+                        modifiers,
                         &screen,
                         project,
                         playhead,
@@ -871,7 +990,7 @@ impl ViewerPanel {
                 let state = self.state.read(cx);
                 self.gizmo.begin_group(
                     handle,
-                    ev.position,
+                    p,
                     &screen,
                     state.bus.project(),
                     &selected,
@@ -911,8 +1030,8 @@ impl ViewerPanel {
             self.gizmo.begin(
                 handle,
                 clip,
-                ev.position,
-                ev.modifiers,
+                p,
+                modifiers,
                 &screen,
                 state.bus.project(),
                 playhead,
@@ -926,7 +1045,8 @@ impl ViewerPanel {
     /// another item (no transform).
     fn mask_press(
         &mut self,
-        ev: &MouseDownEvent,
+        p: Point<Pixels>,
+        modifiers: Modifiers,
         screen: &Screen,
         under: Vec<flikk_core::ClipId>,
         cx: &mut Context<Self>,
@@ -942,15 +1062,8 @@ impl ViewerPanel {
         let commands = shape.and_then(|shape| {
             let subjects = self.subjects(&shape, cx);
             let project = self.state.read(cx).bus.project();
-            self.masks.press(
-                ev.position,
-                ev.modifiers,
-                screen,
-                project,
-                &shape,
-                playhead,
-                &subjects,
-            )
+            self.masks
+                .press(p, modifiers, screen, project, &shape, playhead, &subjects)
         });
         match commands {
             Some(commands) if !commands.is_empty() => {
@@ -988,9 +1101,29 @@ impl ViewerPanel {
         true
     }
 
+    /// Drop a gizmo or mask drag once the frame can't be edited (playback
+    /// started, or a source opened), committing nothing: its live preview
+    /// would restart playback on every move, and its keyframes land at a
+    /// time no longer shown. Whether there was one.
+    fn drop_stale_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let dragging = self.gizmo.dragging() || self.masks.dragging();
+        if !dragging || self.editable(self.state.read(cx)) {
+            return false;
+        }
+        self.gizmo.cancel();
+        self.masks.cancel_drag();
+        self.pressed = None;
+        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+        true
+    }
+
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         if let Some((from, pan)) = self.panning {
             self.pan = pan + (ev.position - from);
+            cx.notify();
+            return;
+        }
+        if self.drop_stale_drag(cx) {
             cx.notify();
             return;
         }
@@ -1017,13 +1150,9 @@ impl ViewerPanel {
             if !ev.dragging() {
                 return;
             }
-            let commands = self.gizmo.drag_to(
-                ev.position,
-                ev.modifiers,
-                &screen,
-                state.bus.project(),
-                playhead,
-            );
+            let commands =
+                self.gizmo
+                    .drag_to(ev.position, ev.modifiers, &screen, state.bus.project());
             if let Some(commands) = commands {
                 self.state.update(cx, |s, cx| s.show_live(&commands, cx));
             }
@@ -1057,6 +1186,20 @@ impl ViewerPanel {
         if ev.button != MouseButton::Left {
             return;
         }
+        // A press still waiting for its layout is a click.
+        if let Some(click) = self.held_click.as_mut() {
+            click.released = true;
+            return;
+        }
+        if self.drop_stale_drag(cx) {
+            cx.notify();
+            return;
+        }
+        self.release(cx);
+    }
+
+    /// The left button up: end the drag, or act on the click.
+    fn release(&mut self, cx: &mut Context<Self>) {
         let pressed = self.pressed.take();
         if self.masks.dragging() {
             let commands = self.masks.end();
@@ -1074,7 +1217,7 @@ impl ViewerPanel {
             return;
         }
         let state = self.state.read(cx);
-        let (commands, click) = self.gizmo.end(state.bus.project(), state.playhead);
+        let (commands, click) = self.gizmo.end(state.bus.project());
         let selection = state.selection.clips.clone();
         let selected = selection.first().copied();
         let applied = self.state.update(cx, |s, cx| {
@@ -1088,6 +1231,8 @@ impl ViewerPanel {
         if !applied {
             self.gizmo.cancel();
         }
+        // A layout held back by the drag.
+        self.lay_out_shown(cx);
         // Shift-click on a selected item: out of the selection.
         if click && let Some(clip) = pressed.as_ref().and_then(|p| p.deselect) {
             let rest: Vec<_> = selection.into_iter().filter(|c| *c != clip).collect();
@@ -1802,6 +1947,10 @@ impl Render for ViewerPanel {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        // Before playback starts from a drag's live preview.
+        self.drop_stale_drag(cx);
+        self.masks
+            .forget_lost_pen(self.state.read(cx).bus.project());
         self.sync_subjects(cx);
         self.sync_playback(cx);
         if self.playback.is_none() {
