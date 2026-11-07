@@ -29,6 +29,12 @@ pub struct ProviderStatus {
     /// store.
     pub key: Option<KeySource>,
     pub check: Check,
+    /// Bumped by each set or removal of its key: a key read or saved
+    /// before then is dropped.
+    keyed: u64,
+    /// Bumped by each check, set or removal of its key: an older check's
+    /// answer is dropped.
+    checked: u64,
 }
 
 impl ProviderStatus {
@@ -86,6 +92,15 @@ pub struct Generating {
     pub failed: Option<CloudError>,
 }
 
+impl Generating {
+    /// Stopped by the user and not over yet: its row stays until the
+    /// provider says. What the provider made by then is kept, as it is paid
+    /// for.
+    pub fn stopping(&self) -> bool {
+        self.failed.is_none() && self.task.cancelled()
+    }
+}
+
 /// How often a running generation's row is redrawn with where it is.
 const STAGE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -94,6 +109,10 @@ impl EditorState {
     /// wait, or ask the user), then bring the notices up to date.
     pub(super) fn load_keys(&mut self, cx: &mut Context<Self>) {
         let cloud = self.cloud.clone();
+        // A key set or removed while they are read is newer.
+        let asked: Vec<u64> = (flikk_cloud::PROVIDERS.iter())
+            .map(|p| self.provider_status(p).keyed)
+            .collect();
         let read = cx.background_executor().spawn(async move {
             flikk_cloud::PROVIDERS
                 .iter()
@@ -103,8 +122,11 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let found = read.await;
             let _ = this.update(cx, |this, cx| {
-                for (id, source) in found {
-                    this.providers.entry(id).or_default().key = Some(source);
+                for ((id, source), keyed) in found.into_iter().zip(asked) {
+                    let status = this.providers.entry(id).or_default();
+                    if status.keyed == keyed {
+                        status.key = Some(source);
+                    }
                 }
                 this.refresh_model_notices();
                 cx.notify();
@@ -138,6 +160,9 @@ impl EditorState {
     }
 
     fn read_account(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        let status = self.providers.entry(provider.id).or_default();
+        status.checked += 1;
+        let checked = status.checked;
         let cloud = self.cloud.clone();
         let check = cx
             .background_executor()
@@ -145,8 +170,11 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let result = check.await;
             let _ = this.update(cx, |this, cx| {
-                this.providers.entry(provider.id).or_default().check = Check::from_account(result);
-                cx.notify();
+                let status = this.providers.entry(provider.id).or_default();
+                if status.checked == checked {
+                    status.check = Check::from_account(result);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -161,6 +189,7 @@ impl EditorState {
         key: String,
         cx: &mut Context<Self>,
     ) {
+        let keyed = self.rekey(provider);
         self.providers.entry(provider.id).or_default().check = Check::Checking;
         let cloud = self.cloud.clone();
         let saved = cx.background_executor().spawn(async move {
@@ -171,6 +200,13 @@ impl EditorState {
             let result = saved.await;
             let _ = this.update(cx, |this, cx| {
                 let status = this.providers.entry(provider.id).or_default();
+                // Set or removed again since.
+                if status.keyed != keyed {
+                    return;
+                }
+                // This checked the new key; one asked for meanwhile may have
+                // read the old one.
+                status.checked += 1;
                 match result {
                     Ok((source, account)) => {
                         status.key = Some(source);
@@ -192,8 +228,7 @@ impl EditorState {
                         }
                     }
                 }
-                this.refresh_model_notices();
-                cx.notify();
+                this.key_changed(provider, cx);
             });
         })
         .detach();
@@ -201,6 +236,7 @@ impl EditorState {
     }
 
     pub fn remove_api_key(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        let keyed = self.rekey(provider);
         let cloud = self.cloud.clone();
         let removed = cx.background_executor().spawn(async move {
             let result = cloud.keys().remove(provider);
@@ -209,21 +245,41 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let (source, result) = removed.await;
             let _ = this.update(cx, |this, cx| {
-                this.providers.insert(
-                    provider.id,
-                    ProviderStatus {
-                        key: Some(source),
-                        check: match result {
-                            Ok(()) => Check::Unchecked,
-                            Err(e) => Check::store_failed(e),
-                        },
-                    },
-                );
-                this.refresh_model_notices();
-                cx.notify();
+                let status = this.providers.entry(provider.id).or_default();
+                // Set again since.
+                if status.keyed != keyed {
+                    return;
+                }
+                // A check asked for meanwhile may have read the old key.
+                status.checked += 1;
+                status.key = Some(source);
+                status.check = match result {
+                    Ok(()) => Check::Unchecked,
+                    Err(e) => Check::store_failed(e),
+                };
+                this.key_changed(provider, cx);
             });
         })
         .detach();
+    }
+
+    /// A set or removal of `provider`'s key starts: keys read and checks
+    /// asked for before it are dropped. Its count.
+    fn rekey(&mut self, provider: &'static Provider) -> u64 {
+        let status = self.providers.entry(provider.id).or_default();
+        status.keyed += 1;
+        status.checked += 1;
+        status.keyed
+    }
+
+    /// `provider`'s key was set or removed: the notices, and the account's
+    /// voices when it does voiceovers.
+    fn key_changed(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        if self.voice_provider().as_deref() == Some(provider.id) {
+            self.invalidate_voices(cx);
+        }
+        self.refresh_model_notices();
+        cx.notify();
     }
 
     /// Have `provider` do `capability` on its default model, or this
@@ -258,9 +314,14 @@ impl EditorState {
         if settings.choice(capability) == choice {
             return;
         }
+        let voices = self.voice_provider();
         settings.set(capability, choice);
         persistence::with_store(|s| s.save_cloud_settings(&settings));
         self.cloud.set_settings(settings);
+        // The voices listed are another provider's.
+        if self.voice_provider() != voices {
+            self.invalidate_voices(cx);
+        }
         self.configure_analysis();
         self.refresh_model_notices();
         cx.notify();
@@ -358,6 +419,7 @@ impl EditorState {
         let (cloud, services) = (self.cloud.clone(), self.services.clone());
         let project = (!grabs.is_empty()).then(|| self.bus.project().clone());
         let following = task.clone();
+        let stopped = task.clone();
         let made = cx.background_executor().spawn(async move {
             use flikk_core::cloud::GenerationService as _;
             if let Some(project) = &project {
@@ -380,6 +442,8 @@ impl EditorState {
                             this.keep_for(owner, item);
                         }
                     }
+                    // Stopped: however the provider ended it, it didn't fail.
+                    Err(_) if stopped.cancelled() => this.generating.retain(|g| g.id != id),
                     Err(CloudError::Cancelled) => this.generating.retain(|g| g.id != id),
                     Err(e) => {
                         if let Some(g) = this.generating.iter_mut().find(|g| g.id == id) {
@@ -417,10 +481,13 @@ impl EditorState {
 
     /// Ask the provider to stop generation `id`; its row goes when it has.
     pub fn stop_generation(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(g) = self.generating.iter().find(|g| g.id == id) {
+        let Some(g) = self.generating.iter().find(|g| g.id == id) else {
+            return;
+        };
+        if !g.stopping() {
             g.task.cancel();
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// The voice that last read a voiceover.

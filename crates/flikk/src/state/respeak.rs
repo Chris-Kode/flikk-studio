@@ -55,6 +55,7 @@ impl EditorState {
             failed: None,
         });
         let services = self.services.clone();
+        let stopped = task.clone();
         let made = cx.background_executor().spawn({
             let fix = fix.clone();
             async move { respeak::make(&fix, &source, &reading, &services, &task) }
@@ -69,6 +70,12 @@ impl EditorState {
                         this.generating.retain(|g| g.id != id);
                         this.keep_for(owner, item);
                     }
+                    // Stopped too late: what was made is paid for, so it
+                    // goes into the pool, but isn't cut in.
+                    Ok(item) if stopped.cancelled() => {
+                        this.generating.retain(|g| g.id != id);
+                        this.add_generated(item, cx);
+                    }
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
                         if let Some(media) = this.add_generated(item, cx) {
@@ -80,6 +87,8 @@ impl EditorState {
                             }
                         }
                     }
+                    // Stopped: it ends, without failing.
+                    Err(_) if stopped.cancelled() => this.generating.retain(|g| g.id != id),
                     Err(e) => {
                         if let Some(g) = this.generating.iter_mut().find(|g| g.id == id) {
                             g.failed = Some(CloudError::Failed(e));
