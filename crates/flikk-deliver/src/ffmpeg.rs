@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 /// `$FLIKK_FFMPEG`, else `ffmpeg` from `PATH`.
 pub fn ffmpeg() -> PathBuf {
@@ -186,20 +188,34 @@ pub(crate) fn run(
         String::from_utf8_lossy(&buf).into_owned()
     });
 
+    // Read on a thread of its own, so a cancel is seen even while ffmpeg
+    // prints nothing (a stalled source or encoder).
     let stdout = child.stdout.take().expect("piped");
+    let (times, timed) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Some(us) = line.strip_prefix("out_time_us=")
+                && let Ok(us) = us.trim().parse::<f64>()
+                && times.send(us).is_err()
+            {
+                break;
+            }
+        }
+    });
     let mut canceled = false;
-    for line in BufReader::new(stdout).lines() {
+    loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             canceled = true;
             break;
         }
-        let Ok(line) = line else { break };
-        if let Some(us) = line.strip_prefix("out_time_us=")
-            && let Ok(us) = us.trim().parse::<f64>()
-            && total_secs > 0.0
-        {
-            progress((us / 1e6 / total_secs).clamp(0.0, 1.0) as f32);
+        match timed.recv_timeout(Duration::from_millis(50)) {
+            Ok(us) if total_secs > 0.0 => {
+                progress((us / 1e6 / total_secs).clamp(0.0, 1.0) as f32);
+            }
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     let status = child.wait()?;

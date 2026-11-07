@@ -14,6 +14,7 @@ use flikk_core::model::Project;
 use flikk_core::paths;
 use flikk_core::services::Services;
 use std::any::Any;
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -452,15 +453,24 @@ fn render(
         spec.loudnorm = Some(Loudnorm::Apply(target, measured));
     }
 
-    spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
-    composed::letter(&request.project, &mut spec, &request.services);
+    let composite = composed::wanted(&request.project, spec.range, &request.services);
+    composed::route(&request.project, &mut spec, &request.services, composite);
     let g = graph::build(&request.project, &spec, &work.0)?;
     // Removed however the render ends, once published or not.
     let tmp = TempOutput::new(out);
     let progress = |p: f32| progress(share + p * (1.0 - share));
-    let attempts = attempts(settings, spec.video)?;
+    let attempts = attempts(settings, &spec, cancel)?;
     let last = attempts.len() - 1;
+    // How far the encode got, so a fallback carries on from there rather
+    // than start the bar over.
+    let reached = Cell::new(0.0f32);
     for (i, hw) in attempts.iter().enumerate() {
+        let from = reached.get();
+        let progress = |p: f32| {
+            let p = from + p.clamp(0.0, 1.0) * (1.0 - from);
+            reached.set(reached.get().max(p));
+            progress(p);
+        };
         let result = encode(
             request,
             &spec,
@@ -472,7 +482,17 @@ fn render(
             cancel,
         );
         match result {
-            Ok(()) => return publish(&tmp, out, job),
+            Ok(()) => {
+                // Software worked where the hardware before it failed: skip
+                // that hardware for this size from now on.
+                if i > 0 {
+                    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+                    for hw in attempts[..i].iter().flatten() {
+                        failed.push((hw.clone(), spec.width, spec.height));
+                    }
+                }
+                return publish(&tmp, out, job);
+            }
             Err(e) => {
                 // The next attempt starts from nothing.
                 let _ = std::fs::remove_file(tmp.path());
@@ -489,23 +509,40 @@ fn render(
     unreachable!("at least one attempt")
 }
 
-/// The encoders to try in turn: `None` is software.
-fn attempts(settings: &RenderSettings, video: bool) -> Result<Vec<Option<HwEncoder>>> {
-    let Some((codec, _)) = settings.hardware_codec().filter(|_| video) else {
+/// Hardware encoders that failed a render software then finished, with
+/// the size they failed at, for this session.
+static FAILED: Mutex<Vec<(HwEncoder, u32, u32)>> = Mutex::new(Vec::new());
+
+/// The encoders to try in turn: `None` is software. Waits for the
+/// hardware probe, unless `cancel` is set meanwhile.
+fn attempts(
+    settings: &RenderSettings,
+    spec: &GraphSpec,
+    cancel: &AtomicBool,
+) -> Result<Vec<Option<HwEncoder>>> {
+    let Some((codec, _)) = settings.hardware_codec().filter(|_| spec.video) else {
         return Ok(vec![None]);
     };
-    let best = || hw::probe().best(codec).cloned();
+    if settings.encoder == Encoder::Software {
+        return Ok(vec![None]);
+    }
+    let probe = hw::probe_until(cancel).ok_or_else(|| anyhow!("canceled"))?;
+    let best = probe.best(codec).cloned();
     Ok(match settings.encoder {
         Encoder::Software => vec![None],
         Encoder::Hardware => {
-            vec![Some(best().ok_or_else(|| {
+            vec![Some(best.ok_or_else(|| {
                 anyhow!("no hardware encoder for this format on this machine")
             })?)]
         }
-        Encoder::Auto => match best() {
-            Some(hw) => vec![Some(hw), None],
-            None => vec![None],
-        },
+        Encoder::Auto => {
+            let failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+            let size = (spec.width, spec.height);
+            match best.filter(|hw| !failed.iter().any(|(f, w, h)| f == hw && (*w, *h) == size)) {
+                Some(hw) => vec![Some(hw), None],
+                None => vec![None],
+            }
+        }
     })
 }
 

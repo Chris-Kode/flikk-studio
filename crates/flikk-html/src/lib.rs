@@ -75,22 +75,38 @@ impl HtmlEngine {
         cache.frames.contains_key(key)
     }
 
+    /// Keep a frame rendered elsewhere (by a render's crew).
+    fn remember(&self, key: Key, frame: Frame) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.put(key, frame);
+    }
+
     fn send(&self, request: Request) -> ServiceResult<()> {
         let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
-        if requests.is_none() {
-            let (tx, rx) = mpsc::channel();
-            let exe = self.browser.clone();
-            let handle = std::thread::Builder::new()
-                .name("flikk-html".into())
-                .spawn(move || worker::run(exe, rx))
-                .map_err(ServiceError::new)?;
-            *requests = Some(tx);
-            *self.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        let request = match requests.as_ref() {
+            Some(tx) => match tx.send(request) {
+                Ok(()) => return Ok(()),
+                // The worker is gone (it panicked): start a new one.
+                Err(mpsc::SendError(request)) => request,
+            },
+            None => request,
+        };
+        let (tx, rx) = mpsc::channel();
+        let exe = self.browser.clone();
+        let handle = std::thread::Builder::new()
+            .name("flikk-html".into())
+            .spawn(move || worker::run(exe, rx, Arc::default()))
+            .map_err(ServiceError::new)?;
+        let old = self
+            .thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(handle);
+        if let Some(old) = old {
+            let _ = old.join();
         }
-        requests
-            .as_ref()
-            .expect("started")
-            .send(request)
+        let tx = requests.insert(tx);
+        tx.send(request)
             .map_err(|_| ServiceError::new("the HTML engine stopped"))
     }
 }

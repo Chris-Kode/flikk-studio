@@ -10,7 +10,7 @@ use flikk_core::services::{Frame, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -97,7 +97,9 @@ struct Worker {
     front: Option<String>,
 }
 
-pub fn run(exe: PathBuf, requests: Receiver<Request>) {
+/// Run requests until the channel closes, or until `stop` is set: then
+/// those still waiting are dropped unanswered.
+pub fn run(exe: PathBuf, requests: Receiver<Request>, stop: Arc<AtomicBool>) {
     let mut worker = Worker {
         exe,
         browser: None,
@@ -106,6 +108,9 @@ pub fn run(exe: PathBuf, requests: Receiver<Request>) {
         front: None,
     };
     for request in requests {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         match request {
             Request::Frame {
                 job,

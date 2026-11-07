@@ -53,10 +53,11 @@ pub struct GraphSpec {
     pub loudnorm: Option<Loudnorm>,
     /// The picture arrives composited on input 0 (RGBA frames from
     /// `flikk_core::compose`, see [`crate::composed`]); the graph only burns
-    /// in captions and builds the audio.
+    /// in captions and builds the audio. Set with `lettered` by
+    /// [`crate::composed::route`].
     pub piped: bool,
     /// The piped frames already have captions and titles lettered on them
-    /// (see [`crate::composed::letter`]); the graph leaves them out.
+    /// (see [`crate::composed::route`]); the graph leaves them out.
     pub lettered: bool,
 }
 

@@ -240,9 +240,13 @@ impl Browser {
         if running_as_root() {
             cmd.arg("--no-sandbox");
         }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("starting {}", exe.display()))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(anyhow!(e).context(format!("starting {}", exe.display())));
+            }
+        };
         let port_file = profile.join("DevToolsActivePort");
         let deadline = Instant::now() + Duration::from_secs(20);
         let (port, path) = loop {

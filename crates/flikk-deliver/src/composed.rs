@@ -3,7 +3,7 @@
 //! render when a clip cannot be drawn) and piped into FFmpeg as
 //! raw RGBA, where the graph ([`GraphSpec::piped`]) burns in captions and
 //! titles (so the compositor leaves them out, unless FFmpeg cannot burn them
-//! in, see [`letter`]) and builds the audio in the same process.
+//! in, see [`route`]) and builds the audio in the same process.
 
 use crate::Letterer;
 use crate::ffmpeg::{self, Process, command};
@@ -185,15 +185,18 @@ pub(crate) fn wanted(project: &Project, range: TimeRange, services: &Services) -
     services.media.is_some() && compose::needs_compositor(project, range)
 }
 
-/// Pipe `spec` through the compositor to letter its captions and titles
-/// there, when FFmpeg has no `ass` filter to burn them in with.
-pub(crate) fn letter(project: &Project, spec: &mut GraphSpec, services: &Services) {
+/// Set how `spec`'s picture is made, once its other fields are final:
+/// piped through the compositor when `composite` asks for it, or to letter
+/// its captions and titles there when FFmpeg has no `ass` filter to burn
+/// them in with. Both flags are set here together, so no caller can leave
+/// one stale.
+pub(crate) fn route(project: &Project, spec: &mut GraphSpec, services: &Services, composite: bool) {
     spec.lettered = spec.video
         && spec.burn_captions
         && services.media.is_some()
         && graph::has_text(project, spec.range)
         && !ffmpeg::has_ass();
-    spec.piped |= spec.lettered;
+    spec.piped = spec.video && (composite || spec.lettered);
 }
 
 /// Source pictures for a render: decoded in step with the frames from the
