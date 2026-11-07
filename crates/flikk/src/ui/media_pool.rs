@@ -112,20 +112,14 @@ pub struct MediaPoolPanel {
     /// The bin open in the pool; `None` is the top level.
     bin: Option<BinId>,
     renaming: Option<BinId>,
-    selected: Option<MediaId>,
-    /// Items selected with it, by cmd/ctrl- or shift-click or the band.
-    also: Vec<MediaId>,
-    /// Selected folders.
-    chosen: Vec<BinId>,
-    /// What was clicked or stepped to last: where shift-click runs from
-    /// and the arrow keys move from.
-    cursor: Option<Entry>,
+    /// The selected items and folders, and the cursor.
+    sel: Selection,
     thumbs: Thumbs,
     jobs: Vec<JobStatus>,
     /// Proxy creation progress, written from background threads.
     proxies: Arc<Mutex<HashMap<MediaId, f32>>>,
-    /// Proxies already looked for, by path (see `hdr.rs`).
-    hdr_proxies: std::collections::HashSet<std::path::PathBuf>,
+    /// Proxy builds started this session, by path (see `hdr.rs`).
+    hdr_proxies: HashMap<PathBuf, hdr::Tried>,
     /// Files dragged in from outside, while they are over the items.
     dropping: Option<Vec<PathBuf>>,
     /// The items area last frame, for the grid's columns and for keeping
@@ -180,9 +174,12 @@ impl MediaPoolPanel {
                 }
             }
         });
-        let selected = crate::demo::enabled()
-            .then(|| state.read(cx).bus.project().media.first().map(|m| m.id))
-            .flatten();
+        let mut sel = Selection::default();
+        if crate::demo::enabled()
+            && let Some(first) = state.read(cx).bus.project().media.first()
+        {
+            sel.set(&[Entry::Media(first.id)]);
+        }
         if let Some(form) = crate::demo::generate_form() {
             cx.defer_in(window, move |this: &mut Self, window, cx| {
                 match form.as_str() {
@@ -239,10 +236,7 @@ impl MediaPoolPanel {
             layout: Layout::Grid,
             bin: None,
             renaming: None,
-            selected,
-            also: Vec::new(),
-            chosen: Vec::new(),
-            cursor: None,
+            sel,
             thumbs: Thumbs::default(),
             jobs: Vec::new(),
             proxies: Arc::default(),
@@ -363,8 +357,7 @@ impl MediaPoolPanel {
             match entry {
                 Entry::Folder(id) => self.open_bin(Some(id), cx),
                 Entry::Media(id) => {
-                    self.set_entries(&[entry]);
-                    self.cursor = Some(entry);
+                    self.sel.select_one(entry);
                     self.open(id, cx);
                 }
             }
@@ -372,35 +365,21 @@ impl MediaPoolPanel {
             return;
         }
         if m.shift
-            && let Some(anchor) = self.cursor
+            && let Some(anchor) = self.sel.cursor()
         {
             let order = self.order(cx);
             let at = |e: Entry| order.iter().position(|x| *x == e);
             if let Some((a, b)) = at(anchor).zip(at(entry)) {
-                self.set_entries(&order[a.min(b)..=a.max(b)]);
+                self.sel.set(&order[a.min(b)..=a.max(b)]);
                 cx.notify();
                 return;
             }
         }
         if m.secondary() {
-            let mut entries = self.entries();
-            match entries.iter().position(|e| *e == entry) {
-                Some(i) => {
-                    entries.remove(i);
-                    if entry == Entry::Media(self.selected.unwrap_or_default()) {
-                        // The next in the selection leads.
-                        self.selected = None;
-                    }
-                }
-                None => entries.push(entry),
-            }
-            self.set_entries(&entries);
-            self.cursor = Some(entry);
-            cx.notify();
-            return;
+            self.sel.toggle(entry);
+        } else {
+            self.sel.select_one(entry);
         }
-        self.set_entries(&[entry]);
-        self.cursor = Some(entry);
         cx.notify();
     }
 
@@ -417,41 +396,10 @@ impl MediaPoolPanel {
         folders.chain(items).collect()
     }
 
-    /// Everything selected: folders, then items with the lead first.
-    fn entries(&self) -> Vec<Entry> {
-        let folders = self.chosen.iter().map(|f| Entry::Folder(*f));
-        let items = self.selection().into_iter().map(Entry::Media);
-        folders.chain(items).collect()
-    }
-
-    /// Select `entries`; the item leading stays so if it is among them.
-    fn set_entries(&mut self, entries: &[Entry]) {
-        let media: Vec<MediaId> = entries
-            .iter()
-            .filter_map(|e| match e {
-                Entry::Media(m) => Some(*m),
-                Entry::Folder(_) => None,
-            })
-            .collect();
-        self.chosen = entries
-            .iter()
-            .filter_map(|e| match e {
-                Entry::Folder(f) => Some(*f),
-                Entry::Media(_) => None,
-            })
-            .collect();
-        let lead = self
-            .selected
-            .filter(|s| media.contains(s))
-            .or(media.first().copied());
-        self.selected = lead;
-        self.also = media.into_iter().filter(|m| Some(*m) != lead).collect();
-    }
-
     /// What an action on `entry` applies to: the selection when `entry`
     /// is in it, else `entry` alone. As items and folders.
     fn split_of(&self, entry: Entry) -> (Vec<MediaId>, Vec<BinId>) {
-        let entries = self.entries();
+        let entries = self.sel.entries();
         let entries = if entries.contains(&entry) {
             entries
         } else {
@@ -471,7 +419,7 @@ impl MediaPoolPanel {
     /// `,` and `.`: edit the selection into the timeline at the
     /// playhead, in pool order.
     fn edit_selected(&mut self, mode: InsertMode, cx: &mut Context<Self>) {
-        let Some(first) = self.selected else {
+        let Some(first) = self.sel.lead() else {
             return;
         };
         let ids = self.in_pool_order(&self.group_of(first), cx);
@@ -490,10 +438,7 @@ impl MediaPoolPanel {
 
     /// Clear the selection, which closes the details.
     fn deselect(&mut self, cx: &mut Context<Self>) {
-        self.cursor = None;
-        if self.selected.take().is_some() || !self.also.is_empty() || !self.chosen.is_empty() {
-            self.also.clear();
-            self.chosen.clear();
+        if self.sel.reset() {
             cx.notify();
         }
     }
@@ -535,18 +480,10 @@ impl MediaPoolPanel {
         }
     }
 
-    /// The selected items, the one clicked first leading.
-    fn selection(&self) -> Vec<MediaId> {
-        self.selected
-            .into_iter()
-            .chain(self.also.iter().copied())
-            .collect()
-    }
-
     /// What an action on `id` applies to: the selection when `id` is in
     /// it, else `id` alone.
     fn group_of(&self, id: MediaId) -> Vec<MediaId> {
-        let selection = self.selection();
+        let selection = self.sel.items();
         if selection.contains(&id) {
             selection
         } else {
@@ -561,15 +498,14 @@ impl MediaPoolPanel {
         if order.is_empty() {
             return;
         }
-        let from = self.cursor.or(self.selected.map(Entry::Media));
+        let from = self.sel.cursor().or(self.sel.lead().map(Entry::Media));
         let at = from.and_then(|c| order.iter().position(|e| *e == c));
         let next = match at {
             Some(at) => (at as isize + by).clamp(0, order.len() as isize - 1) as usize,
             None if by < 0 => order.len() - 1,
             None => 0,
         };
-        self.set_entries(&[order[next]]);
-        self.cursor = Some(order[next]);
+        self.sel.select_one(order[next]);
         self.reveal.set(true);
         cx.notify();
     }
@@ -585,7 +521,7 @@ impl MediaPoolPanel {
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
         let order = self.order(cx);
-        self.set_entries(&order);
+        self.sel.set(&order);
         cx.notify();
     }
 
@@ -617,11 +553,7 @@ impl MediaPoolPanel {
                     .confirm("Remove", move |_, cx| {
                         state.update(cx, |s, cx| s.remove_media(&ids, cx));
                         let _ = panel.update(cx, |this, cx| {
-                            this.also.retain(|a| !ids.contains(a));
-                            if this.selected.is_some_and(|s| ids.contains(&s)) {
-                                this.selected = None;
-                                this.also.clear();
-                            }
+                            this.sel.remove(&ids, |_| false);
                             cx.notify();
                         });
                         true
@@ -649,13 +581,11 @@ impl MediaPoolPanel {
     /// The selected items to sync when `id` is one of them, reference
     /// first, and whether they hold a recorder and a camera.
     fn sync_group(&self, id: MediaId, cx: &App) -> Option<(Vec<MediaId>, bool)> {
-        let selected = self.selected?;
-        if self.also.is_empty() || (selected != id && !self.also.contains(&id)) {
+        let all = self.sel.items();
+        if all.len() < 2 || !all.contains(&id) {
             return None;
         }
         let project = self.state.read(cx).bus.project();
-        let mut all = vec![selected];
-        all.extend(&self.also);
         let group = flikk_core::sync::pool_order(project, &all);
         if group.len() < 2 {
             return None;
@@ -670,7 +600,7 @@ impl MediaPoolPanel {
     }
 
     fn selected_item(&self, cx: &App) -> Option<MediaItem> {
-        let id = self.selected?;
+        let id = self.sel.lead()?;
         self.state.read(cx).bus.project().media(id).cloned()
     }
 
@@ -868,12 +798,7 @@ impl MediaPoolPanel {
             let stay = tree.ancestry(self.bin).find(|b| !gone(Some(*b)));
             self.open_bin(stay, cx);
         }
-        self.chosen.retain(|f| !gone(Some(*f)));
-        self.also.retain(|a| !media.contains(a));
-        if self.selected.is_some_and(|s| media.contains(&s)) {
-            self.selected = None;
-            self.also.clear();
-        }
+        self.sel.remove(&media, |f| gone(Some(f)));
         self.state
             .update(cx, |s, cx| s.remove_from_pool(&media, Some(keep), cx));
         cx.notify();
@@ -1040,10 +965,7 @@ impl MediaPoolPanel {
     fn open_bin(&mut self, bin: Option<BinId>, cx: &mut Context<Self>) {
         if self.bin != bin {
             self.bin = bin;
-            self.selected = None;
-            self.also.clear();
-            self.chosen.clear();
-            self.cursor = None;
+            self.sel.reset();
             self.scroll.set_offset(point(px(0.), px(0.)));
         }
         cx.notify();
@@ -1209,7 +1131,7 @@ impl MediaPoolPanel {
         };
         let panel = cx.entity();
         let entry = Entry::Folder(id);
-        let selected = self.chosen.contains(&id);
+        let selected = self.sel.has_folder(id);
         // Grabbing a selected folder drags the selection.
         let drag = {
             let (mut media, folders) = if selected {
@@ -1248,7 +1170,7 @@ impl MediaPoolPanel {
         let el = el
             .relative()
             .child(self.place_marker(entry))
-            .when(self.cursor == Some(entry), |d| {
+            .when(self.sel.cursor() == Some(entry), |d| {
                 d.child(self.reveal_marker())
             });
         let more = folder_more(id, &panel);
@@ -1334,7 +1256,7 @@ impl MediaPoolPanel {
                 .filter(|_| item.kind == MediaKind::Audio)
                 .map(|p| p.fraction()),
             progress: self.progress(item.id),
-            selected: self.selected == Some(item.id) || self.also.contains(&item.id),
+            selected: self.sel.has_item(item.id),
             offline: state.offline.contains(&item.id),
         }
     }
@@ -1359,8 +1281,8 @@ impl MediaPoolPanel {
         let id = item.id;
         let group = SharedString::from(format!("media-{id}"));
         // The lead item counts the selection, folders too.
-        let picked = self.also.len() + self.chosen.len() + 1;
-        let multi = (self.selected == Some(id) && picked > 1).then_some(picked);
+        let picked = self.sel.count();
+        let multi = (self.sel.lead() == Some(id) && picked > 1).then_some(picked);
         // Skimming: the pointer's place across a video's picture picks
         // the frame.
         let duration = item.info.as_ref().map(|i| i.duration);
@@ -1571,7 +1493,7 @@ impl MediaPoolPanel {
                     media: first,
                     name: name.into(),
                     more: more.to_vec(),
-                    folders: self.chosen.clone(),
+                    folders: self.sel.folders().to_vec(),
                 }
             }
             _ => MediaDrag::one(id, item_name(item).into()),
@@ -1587,7 +1509,7 @@ impl MediaPoolPanel {
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
             .child(self.place_marker(Entry::Media(id)))
-            .when(self.cursor == Some(Entry::Media(id)), |d| {
+            .when(self.sel.cursor() == Some(Entry::Media(id)), |d| {
                 d.child(self.reveal_marker())
             })
     }
@@ -1629,7 +1551,7 @@ impl MediaPoolPanel {
         self.band = Some(Band {
             from: at,
             to: at,
-            base: self.entries(),
+            base: self.sel.entries(),
             moved: false,
         });
     }
@@ -1668,7 +1590,7 @@ impl MediaPoolPanel {
             .into_iter()
             .filter(|e| base.contains(e) || hits.contains(e))
             .collect();
-        self.set_entries(&picked);
+        self.sel.set(&picked);
         cx.notify();
     }
 
@@ -1975,15 +1897,15 @@ impl Render for MediaPoolPanel {
             .track_focus(&self.focus)
             .key_context("MediaPool")
             .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
-                let (media, folders) = (this.selection(), this.chosen.clone());
+                let (media, folders) = (this.sel.items(), this.sel.folders().to_vec());
                 this.confirm_delete(media, folders, window, cx);
             }))
             .on_action(cx.listener(|this, _: &PlaySelected, _, cx| this.play_selected(cx)))
             .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
-                match this.cursor.filter(|_| this.entries().len() == 1) {
+                match this.sel.cursor().filter(|_| this.sel.count() == 1) {
                     Some(Entry::Folder(id)) => this.open_bin(Some(id), cx),
                     _ => {
-                        if let Some(id) = this.selected {
+                        if let Some(id) = this.sel.lead() {
                             this.open(id, cx);
                         }
                     }
@@ -1996,18 +1918,18 @@ impl Render for MediaPoolPanel {
                 let parent = BinTree::of(bins).ancestry(this.bin).nth(1);
                 this.open_bin(parent, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &RenameSelected, window, cx| match this.cursor {
-                    Some(Entry::Folder(id)) if this.chosen.contains(&id) => {
+            .on_action(cx.listener(
+                |this, _: &RenameSelected, window, cx| match this.sel.cursor() {
+                    Some(Entry::Folder(id)) if this.sel.has_folder(id) => {
                         this.start_rename(id, window, cx)
                     }
                     _ => {
-                        if let Some(id) = this.selected {
+                        if let Some(id) = this.sel.lead() {
                             this.start_item_rename(id, window, cx);
                         }
                     }
-                }),
-            )
+                },
+            ))
             .on_action(cx.listener(|this, _: &MarkSourceIn, _, cx| {
                 this.state.update(cx, |s, cx| s.mark_source(false, cx));
             }))
@@ -2046,15 +1968,18 @@ impl Render for MediaPoolPanel {
             .bin
             .is_some_and(|id| !project.bins.iter().any(|b| b.id == id))
         {
+            // As `open_bin(None)` does; `project` still borrows `cx`.
             self.bin = None;
+            self.sel.reset();
+            self.scroll.set_offset(point(px(0.), px(0.)));
         }
         self.placed.borrow_mut().clear();
         let items = self.visible_items(cx);
         let folders = self.folders(cx);
-        self.dragged = if self.entries().len() < 2 {
+        self.dragged = if self.sel.count() < 2 {
             Vec::new()
         } else {
-            let selection = self.selection();
+            let selection = self.sel.items();
             items
                 .iter()
                 .map(|m| m.id)
@@ -2516,6 +2441,138 @@ type Placed = (Entry, Bounds<Pixels>);
 enum Entry {
     Folder(BinId),
     Media(MediaId),
+}
+
+use selection::Selection;
+
+mod selection {
+    use super::Entry;
+    use flikk_core::{BinId, MediaId};
+
+    /// What the pool has selected. Its parts change only through these
+    /// methods, so they always change together.
+    #[derive(Default)]
+    pub(super) struct Selection {
+        /// The item that leads: the details show it.
+        lead: Option<MediaId>,
+        /// Items selected with it, by cmd/ctrl- or shift-click or the band.
+        also: Vec<MediaId>,
+        /// Selected folders.
+        folders: Vec<BinId>,
+        /// What was clicked or stepped to last: where shift-click runs
+        /// from and the arrow keys move from.
+        cursor: Option<Entry>,
+    }
+
+    impl Selection {
+        pub(super) fn lead(&self) -> Option<MediaId> {
+            self.lead
+        }
+
+        pub(super) fn cursor(&self) -> Option<Entry> {
+            self.cursor
+        }
+
+        pub(super) fn folders(&self) -> &[BinId] {
+            &self.folders
+        }
+
+        /// The selected items, the lead first.
+        pub(super) fn items(&self) -> Vec<MediaId> {
+            self.lead
+                .into_iter()
+                .chain(self.also.iter().copied())
+                .collect()
+        }
+
+        /// Everything selected: folders, then items with the lead first.
+        pub(super) fn entries(&self) -> Vec<Entry> {
+            let folders = self.folders.iter().map(|f| Entry::Folder(*f));
+            let items = self.items().into_iter().map(Entry::Media);
+            folders.chain(items).collect()
+        }
+
+        /// How many items and folders are selected.
+        pub(super) fn count(&self) -> usize {
+            self.folders.len() + usize::from(self.lead.is_some()) + self.also.len()
+        }
+
+        pub(super) fn has_item(&self, id: MediaId) -> bool {
+            self.lead == Some(id) || self.also.contains(&id)
+        }
+
+        pub(super) fn has_folder(&self, id: BinId) -> bool {
+            self.folders.contains(&id)
+        }
+
+        /// Just `entry`, with the cursor on it.
+        pub(super) fn select_one(&mut self, entry: Entry) {
+            self.set(&[entry]);
+            self.cursor = Some(entry);
+        }
+
+        /// Select `entries`; the lead stays so if it is among them, else
+        /// the first item leads. The cursor stays.
+        pub(super) fn set(&mut self, entries: &[Entry]) {
+            let media: Vec<MediaId> = entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Media(m) => Some(*m),
+                    Entry::Folder(_) => None,
+                })
+                .collect();
+            self.folders = entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Folder(f) => Some(*f),
+                    Entry::Media(_) => None,
+                })
+                .collect();
+            let lead = self
+                .lead
+                .filter(|s| media.contains(s))
+                .or(media.first().copied());
+            self.lead = lead;
+            self.also = media.into_iter().filter(|m| Some(*m) != lead).collect();
+        }
+
+        /// Cmd/ctrl-click: add `entry`, or drop it (the next item leads
+        /// if it led). The cursor moves to it.
+        pub(super) fn toggle(&mut self, entry: Entry) {
+            let mut entries = self.entries();
+            match entries.iter().position(|e| *e == entry) {
+                Some(i) => {
+                    entries.remove(i);
+                }
+                None => entries.push(entry),
+            }
+            self.set(&entries);
+            self.cursor = Some(entry);
+        }
+
+        /// Forget `media` and the folders `gone` names, once they are
+        /// removed. The rest stays selected; the next item leads if the
+        /// lead went.
+        pub(super) fn remove(&mut self, media: &[MediaId], gone: impl Fn(BinId) -> bool) {
+            let out = |e: &Entry| match *e {
+                Entry::Media(m) => media.contains(&m),
+                Entry::Folder(f) => gone(f),
+            };
+            let left: Vec<Entry> = self.entries().into_iter().filter(|e| !out(e)).collect();
+            self.set(&left);
+            if self.cursor.as_ref().is_some_and(out) {
+                self.cursor = None;
+            }
+        }
+
+        /// Select nothing and drop the cursor; whether anything was
+        /// selected.
+        pub(super) fn reset(&mut self) -> bool {
+            let had = self.count() > 0;
+            *self = Self::default();
+            had
+        }
+    }
 }
 
 /// A rubber band across the items, in their scrolling space.

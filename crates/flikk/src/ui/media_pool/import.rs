@@ -1,7 +1,7 @@
 //! Import: probe and fingerprint off-thread, add with `ImportMedia`, then
 //! make the playback proxy (PRD M1, M4). Analysis waits for the user.
 
-use super::MediaPoolPanel;
+use super::{MediaPoolPanel, hdr};
 use flikk_core::command::Command;
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::MediaService;
@@ -71,7 +71,8 @@ impl MediaPoolPanel {
         if applied.is_none() {
             return;
         }
-        self.selected = Some(item.id);
+        // Just the new item, so Delete removes only it.
+        self.sel.select_one(super::Entry::Media(item.id));
         if let Some(media) = services.media
             && item.kind == MediaKind::Video
             && item.proxy.is_none()
@@ -87,6 +88,13 @@ impl MediaPoolPanel {
         cx: &mut Context<Self>,
     ) {
         let id = item.id;
+        // Noted as `refresh_proxies` notes its builds, with the tone map
+        // it starts on.
+        let (planned, key) = (flikk_media::proxy_path_for(&item), hdr::tone_key(&item));
+        if let Some(planned) = &planned {
+            self.hdr_proxies
+                .insert(planned.clone(), hdr::Tried::Started);
+        }
         let progress = self.proxies.clone();
         progress.lock().unwrap().insert(id, 0.0);
         cx.spawn(async move |this, cx| {
@@ -103,10 +111,14 @@ impl MediaPoolPanel {
                 .await;
             progress.lock().unwrap().remove(&id);
             this.update(cx, |this, cx| {
-                if let Some(path) = path {
+                let made = path.is_some();
+                let project = this.state.read(cx).bus.project();
+                let same = project.media(id).is_some_and(|m| hdr::tone_key(m) == key);
+                // Not one for a tone map the item has left.
+                if let Some(path) = path.filter(|_| same) {
                     this.set_proxy(id, path, cx);
                 }
-                cx.notify();
+                this.proxy_built(id, planned, key, made, cx);
             })
             .ok();
         })
