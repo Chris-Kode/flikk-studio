@@ -682,7 +682,7 @@ impl Render for MixerPanel {
             .iter()
             .filter_map(|id| project.timeline.clip(*id).map(|(t, _)| t.id))
             .collect();
-        let any_solo = tracks.iter().any(|t| t.mix.solo);
+        let soloing = project.timeline.soloing();
         for key in tracks.iter().map(|t| Some(t.id)).chain([None]) {
             self.meters
                 .entry(key)
@@ -701,7 +701,7 @@ impl Render for MixerPanel {
                 let strip = StripState {
                     code: format!("A{}", i + 1).into(),
                     selected: selected.contains(&track.id),
-                    soloed_out: any_solo && !track.mix.solo,
+                    soloed_out: soloing && !track.mix.solo,
                 };
                 self.strip(i, track, strip, window, cx)
             })

@@ -1639,10 +1639,6 @@ impl TimelinePanel {
         let overlay: Vec<OverlayItem> =
             overlay::collect(&project.timeline, state.bus.chat_change_sets());
         let tl = &project.timeline;
-        let any_solo = tl
-            .tracks
-            .iter()
-            .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
         let rate = tl.settings.rate;
 
         let mut marquee = None;
@@ -1817,7 +1813,7 @@ impl TimelinePanel {
                     .collect();
                 let audio = track.kind == TrackKind::Audio;
                 let hidden = !audio && track.mix.mute;
-                let silent = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+                let silent = audio && !tl.audible(track);
                 let fade = if hidden {
                     0.3
                 } else if silent {
@@ -2151,23 +2147,19 @@ impl TimelinePanel {
             .playhead
             .timecode(state.bus.project().timeline.settings.rate);
         let tl = &state.bus.project().timeline;
-        let any_solo = tl
-            .tracks
-            .iter()
-            .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
         let rows: Vec<_> = self
             .rows(tl)
             .into_iter()
-            .zip(tl.tracks.iter().cloned())
+            .zip(tl.tracks.iter().map(|t| (t.clone(), tl.audible(t))))
             .zip(track_codes(tl))
             .collect();
         let panel = cx.entity();
-        let children = rows.into_iter().map(|((row, track), code)| {
+        let children = rows.into_iter().map(|((row, (track, heard)), code)| {
             let id = track.id;
             let locked = track.locked;
             let panel = panel.clone();
             let audio = track.kind == TrackKind::Audio;
-            let muted = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+            let muted = audio && !heard;
             let hidden = !audio && track.mix.mute;
             let key = |name: &str| SharedString::from(format!("{name}-{}", track.id));
             let name = if track.name == code {

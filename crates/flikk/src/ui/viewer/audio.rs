@@ -22,7 +22,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use flikk_core::audiofx::dsp::{self, Chain, Curve};
 use flikk_core::audiofx::stretch::Stretch;
 use flikk_core::audiofx::{self, Ramp};
-use flikk_core::model::{Clip, ClipContent, MediaItem, Project, Property, TrackKind};
+use flikk_core::model::{Clip, ClipContent, MediaItem, Project, Property};
 use flikk_core::services::{MediaService, PcmStream};
 use flikk_core::speed::RampAudio;
 use flikk_core::sync::varispeed::{Varispeed, is_varispeed};
@@ -324,13 +324,11 @@ const RMS_WINDOW_S: f64 = 0.3;
 
 impl Mixer {
     fn new(media: Arc<dyn MediaService>, project: &Project, from: Time, rate: u32) -> Self {
-        let tracks = &project.timeline.tracks;
-        let solo = tracks
+        let tl = &project.timeline;
+        let buses: Vec<Bus> = tl
+            .tracks
             .iter()
-            .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
-        let buses: Vec<Bus> = tracks
-            .iter()
-            .filter(|t| t.kind == TrackKind::Audio && !t.mix.mute && (!solo || t.mix.solo))
+            .filter(|t| tl.audible(t))
             .map(|t| {
                 let sources = audiofx::spans(t)
                     .into_iter()
