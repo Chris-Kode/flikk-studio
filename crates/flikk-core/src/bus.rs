@@ -9,7 +9,11 @@ use crate::ids::*;
 use crate::model::Project;
 use crate::ops::{Op, Target, apply_all, invert_all};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+/// Resolved change sets kept besides those an undo or redo entry is theirs,
+/// for the review cards that still show what came of them.
+const KEPT_RESOLVED: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +136,8 @@ pub struct CommandBus {
     /// The chat open in the editor. The agent's change sets are stamped with
     /// it, and only its sets are shown.
     chat: Option<String>,
+    /// Counts resolutions, so the latest resolved sets are the ones kept.
+    resolutions: u64,
 }
 
 impl CommandBus {
@@ -144,6 +150,7 @@ impl CommandBus {
             version: 0,
             user_touched: Vec::new(),
             chat: None,
+            resolutions: 0,
         }
     }
 
@@ -213,30 +220,88 @@ impl CommandBus {
     }
 
     /// What `author` sees: the open change set's draft for agents, the
-    /// committed project otherwise.
+    /// committed project otherwise. A set with no items yet plans its first
+    /// on the committed project, so that is what it sees.
     pub fn view_for(&self, author: &Author) -> &Project {
-        self.open_set(author)
+        self.open_draft(author)
             .and_then(|s| s.draft.as_ref())
             .unwrap_or(&self.project)
+    }
+
+    /// The bus version [`Self::view_for`] shows the project at: a job that
+    /// works on a snapshot of it proposes with [`Self::execute_since`] and
+    /// this, so edits made meanwhile conflict rather than being undone.
+    pub fn view_version(&self, author: &Author) -> u64 {
+        self.open_draft(author)
+            .map_or(self.version, |s| s.base_version)
+    }
+
+    fn open_draft(&self, author: &Author) -> Option<&ChangeSet> {
+        self.open_set(author)
+            .filter(|s| !s.items.is_empty() && s.draft.is_some())
     }
 
     /// Start `author`'s turn in the open chat: the chat's set still waiting
     /// for review opens again, so the turn sees those proposals and adds to
     /// them, and one review takes them all. Returns the set and how many
     /// items it had.
+    ///
+    /// An author has one open set. One of another chat goes to review
+    /// first; several of this chat's (one left open, one an undo made
+    /// pending again) become the one set.
     pub fn reopen_change_set(&mut self, author: &Author) -> Option<(ChangeSetId, usize)> {
-        let set = self.change_sets.iter_mut().find(|s| {
-            &s.author == author
-                && s.state == ChangeSetState::Pending
-                && s.chat.is_some()
-                && s.chat == self.chat
-        })?;
+        let chat = self.chat.clone();
+        let ours = |s: &ChangeSet| &s.author == author && s.chat.is_some() && s.chat == chat;
+        let stray: Vec<_> = self
+            .change_sets
+            .iter()
+            .filter(|s| &s.author == author && s.state == ChangeSetState::Open && !ours(s))
+            .map(|s| s.id)
+            .collect();
+        for id in stray {
+            self.close_change_set(id);
+        }
+        let waiting = |s: &ChangeSet| {
+            ours(s) && matches!(s.state, ChangeSetState::Open | ChangeSetState::Pending)
+        };
+        let keep = self
+            .change_sets
+            .iter()
+            .position(|s| waiting(s) && s.state == ChangeSetState::Open)
+            .or_else(|| self.change_sets.iter().position(&waiting))?;
+        let id = self.change_sets[keep].id;
+        let mut merged = Vec::new();
+        let mut i = 0;
+        self.change_sets.retain(|s| {
+            let merge = i != keep && waiting(s);
+            i += 1;
+            if merge {
+                merged.push(s.clone());
+            }
+            !merge
+        });
+        let set = self
+            .change_sets
+            .iter_mut()
+            .find(|s| s.id == id)
+            .expect("kept above");
+        for other in &merged {
+            set.items.extend(other.items.iter().cloned());
+        }
         set.state = ChangeSetState::Open;
-        if set.draft.is_none() || set.base_version != self.version {
+        if !merged.is_empty() || set.draft.is_none() || set.base_version != self.version {
             // The project changed since: replay the pending items on it.
             rebuild(set, &self.project, &self.user_touched, self.version);
         }
-        Some((set.id, set.items.len()))
+        let len = set.items.len();
+        // Undoing what was accepted from a merged set reaches it here.
+        let gone: HashSet<_> = merged.iter().map(|s| s.id).collect();
+        for entry in self.history.undo.iter_mut().chain(&mut self.history.redo) {
+            if entry.change_set.is_some_and(|c| gone.contains(&c)) {
+                entry.change_set = Some(id);
+            }
+        }
+        Some((id, len))
     }
 
     /// Permission check for anything the bus does not execute itself
@@ -265,7 +330,27 @@ impl CommandBus {
             return self.apply_user(vec![command], label);
         }
         match self.check(&author, command.category())? {
-            Permission::Propose => self.propose(command, author, reason),
+            Permission::Propose => self.propose(command, author, reason, None),
+            _ => Err(CoreError::PermissionDenied(command.category())),
+        }
+    }
+
+    /// Like [`Self::execute`] for a non-user author, for a command worked
+    /// out on the project as it was at version `since` (a job's snapshot,
+    /// see [`Self::view_version`]): the user's edits since then to what the
+    /// command changes conflict with it, as if it had been proposed then.
+    pub fn execute_since(
+        &mut self,
+        command: Command,
+        author: Author,
+        reason: impl Into<String>,
+        since: u64,
+    ) -> Result<Outcome> {
+        if author.is_user() {
+            return self.execute(command, author, reason);
+        }
+        match self.check(&author, command.category())? {
+            Permission::Propose => self.propose(command, author, reason.into(), Some(since)),
             _ => Err(CoreError::PermissionDenied(command.category())),
         }
     }
@@ -311,10 +396,18 @@ impl CommandBus {
         }
         self.project = scratch;
         self.commit(label, Author::User, all_ops, None);
+        // The edit cleared the redo entries.
+        self.prune();
         Ok(Outcome::Applied { warnings })
     }
 
-    fn propose(&mut self, command: Command, author: Author, reason: String) -> Result<Outcome> {
+    fn propose(
+        &mut self,
+        command: Command,
+        author: Author,
+        reason: String,
+        since: Option<u64>,
+    ) -> Result<Outcome> {
         let version = self.version;
         let project = &self.project;
         let chat = if author.is_agent() {
@@ -338,6 +431,7 @@ impl CommandBus {
                     items: Vec::new(),
                     base_version: version,
                     draft: None,
+                    resolved_at: 0,
                 });
                 self.change_sets.last_mut().unwrap()
             }
@@ -359,7 +453,10 @@ impl CommandBus {
             ops,
             warnings: warnings.clone(),
             state: ItemState::Pending,
-            base_version: set.base_version,
+            // Planned on the draft, but from what the project was at
+            // `since`: edits after either conflict.
+            base_version: since.map_or(set.base_version, |v| v.min(set.base_version)),
+            accepted_at: None,
         };
         let item_id = item.id;
         set.items.push(item);
@@ -384,12 +481,12 @@ impl CommandBus {
             .find(|s| s.id == id && s.state == ChangeSetState::Open)
         {
             if set.pending_items().next().is_none() {
-                set.state = ChangeSetState::Resolved;
-                set.draft = None;
+                resolve(set, &mut self.resolutions);
             } else {
                 set.state = ChangeSetState::Pending;
             }
         }
+        self.prune();
     }
 
     /// Accept the given items (all pending ones if `None`) as one undo step.
@@ -437,8 +534,17 @@ impl CommandBus {
         if !all_ops.is_empty() {
             self.project = scratch;
             self.commit(label, author, all_ops, Some(id));
+            let version = self.version;
+            for item in self.change_sets[ix]
+                .items
+                .iter_mut()
+                .filter(|i| report.accepted.contains(&i.id))
+            {
+                item.accepted_at = Some(version);
+            }
         }
         self.refresh_set(ix);
+        self.prune();
         Ok(report)
     }
 
@@ -455,6 +561,7 @@ impl CommandBus {
                 }
             }
             self.refresh_set(ix);
+            self.prune();
         }
     }
 
@@ -467,8 +574,7 @@ impl CommandBus {
             return;
         }
         if set.state != ChangeSetState::Open && set.pending_items().next().is_none() {
-            set.state = ChangeSetState::Resolved;
-            set.draft = None;
+            resolve(set, &mut self.resolutions);
         } else {
             rebuild(set, &self.project, &self.user_touched, self.version);
         }
@@ -484,6 +590,7 @@ impl CommandBus {
         }
         // Undo and redo are the user's edits, whoever made the entry.
         self.bump(true, &entry.ops);
+        self.reflect(&entry, false);
         let label = entry.label.clone();
         self.history.redo.push(entry);
         Ok(Some(label))
@@ -498,9 +605,74 @@ impl CommandBus {
             return Err(e);
         }
         self.bump(true, &entry.ops);
+        self.reflect(&entry, true);
         let label = entry.label.clone();
         self.history.undo.push(entry);
         Ok(Some(label))
+    }
+
+    /// Show on its change set whether `entry`, just undone or redone, is
+    /// applied. Undone, the items it accepted are proposals again, planned
+    /// on the project as it is now (the undo is no conflict for them), and
+    /// their set waits for review; redone, they are accepted again.
+    fn reflect(&mut self, entry: &HistoryEntry, applied: bool) {
+        let Some(ix) = entry
+            .change_set
+            .and_then(|id| self.change_sets.iter().position(|s| s.id == id))
+        else {
+            return;
+        };
+        let version = self.version;
+        let set = &mut self.change_sets[ix];
+        let mut any = false;
+        for item in set
+            .items
+            .iter_mut()
+            .filter(|i| i.accepted_at == Some(entry.version))
+        {
+            any = true;
+            if applied {
+                item.state = ItemState::Accepted;
+            } else {
+                item.state = ItemState::Pending;
+                item.base_version = version;
+            }
+        }
+        if !any {
+            return;
+        }
+        if !applied && set.state == ChangeSetState::Resolved {
+            set.state = ChangeSetState::Pending;
+        }
+        self.refresh_set(ix);
+    }
+
+    /// Drop resolved sets nothing brings back, past the latest
+    /// [`KEPT_RESOLVED`]: a set an undo or redo entry is from stays, as
+    /// undoing that entry makes it pending again.
+    fn prune(&mut self) {
+        let referenced: HashSet<ChangeSetId> = self
+            .history
+            .undo
+            .iter()
+            .chain(&self.history.redo)
+            .filter_map(|e| e.change_set)
+            .collect();
+        let droppable =
+            |s: &ChangeSet| s.state == ChangeSetState::Resolved && !referenced.contains(&s.id);
+        let mut order: Vec<u64> = self
+            .change_sets
+            .iter()
+            .filter(|s| droppable(s))
+            .map(|s| s.resolved_at)
+            .collect();
+        if order.len() <= KEPT_RESOLVED {
+            return;
+        }
+        order.sort_unstable();
+        let oldest_kept = order[order.len() - KEPT_RESOLVED];
+        self.change_sets
+            .retain(|s| !droppable(s) || s.resolved_at >= oldest_kept);
     }
 
     fn commit(
@@ -538,6 +710,14 @@ impl CommandBus {
             );
         }
     }
+}
+
+/// Nothing in `set` is left to review.
+fn resolve(set: &mut ChangeSet, resolutions: &mut u64) {
+    *resolutions += 1;
+    set.state = ChangeSetState::Resolved;
+    set.resolved_at = *resolutions;
+    set.draft = None;
 }
 
 /// Whether `ops` change anything the user changed after version `since`.

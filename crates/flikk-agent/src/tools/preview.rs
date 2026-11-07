@@ -499,6 +499,7 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let services = ctx.services.clone();
     let canvas = (p.timeline.settings.width, p.timeline.settings.height);
     let size = (480, (480 * canvas.1 as u64 / canvas.0.max(1) as u64) as u32);
+    let since = ctx.version();
     let job: Job = Box::new(move || {
         let render = |s: &Source| render_source(&services, s, canvas, size);
         let reference = match render(&reference_src) {
@@ -543,6 +544,8 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             commands,
             reason,
             excerpts,
+            since,
+            rebase: None,
         }
     });
     Ok(Step::Job(job))

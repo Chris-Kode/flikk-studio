@@ -46,6 +46,7 @@ pub fn fit_music(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         options.loops = loops;
     }
     let request = Request::new(project, clip, target, options).map_err(ToolError)?;
+    let since = ctx.version();
     let services = ctx.services.clone();
     let job: Job = Box::new(move || match request.fit(&services) {
         Err(e) => JobDone::Done(Done::error(e)),
@@ -85,6 +86,8 @@ pub fn fit_music(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 commands: vec![command],
                 reason,
                 excerpts: lines,
+                since,
+                rebase: None,
             }
         }
     });

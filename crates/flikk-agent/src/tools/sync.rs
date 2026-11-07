@@ -17,6 +17,7 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .to_owned();
     let mute = args.opt_bool("replace_camera_audio")?.unwrap_or(false);
     let project = ctx.project().clone();
+    let since = ctx.version();
     let pool: Vec<_> = args
         .strings("media")?
         .iter()
@@ -48,7 +49,7 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 Ok(results) => {
                     let excerpts = report(&names, &results);
                     let synced = sync::place_command(&project, &order, at, results, mute);
-                    finish(synced.command, reason, excerpts)
+                    finish(synced.command, reason, excerpts, since)
                 }
             }
         });
@@ -84,7 +85,7 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 Ok(results) => {
                     let excerpts = report(&names, &results);
                     let synced = sync::clips_command(&project, &recordings, results, mute);
-                    finish(synced.command, reason, excerpts)
+                    finish(synced.command, reason, excerpts, since)
                 }
             },
         );
@@ -95,12 +96,15 @@ fn finish(
     command: Option<flikk_core::command::Command>,
     reason: String,
     excerpts: Vec<String>,
+    since: u64,
 ) -> JobDone {
     match command {
         Some(c) => JobDone::Propose {
             commands: vec![c],
             reason,
             excerpts,
+            since,
+            rebase: None,
         },
         None => JobDone::Done(Done::error(format!(
             "Nothing matched, so nothing was proposed.\n{}",

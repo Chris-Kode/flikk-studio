@@ -32,6 +32,11 @@ pub struct ChangeItem {
     /// after it conflict.
     #[serde(default)]
     pub base_version: u64,
+    /// Bus version of the undo entry that applied it, while it is in the
+    /// history: undoing that entry makes the item pending again, redoing it
+    /// accepted.
+    #[serde(default)]
+    pub accepted_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +46,8 @@ pub enum ChangeSetState {
     Open,
     /// Complete, waiting for review.
     Pending,
-    /// Every item accepted, rejected or conflicted.
+    /// Every item accepted, rejected or conflicted. Undoing an accepted
+    /// item's entry makes the set pending again.
     Resolved,
 }
 
@@ -62,6 +68,9 @@ pub struct ChangeSet {
     /// while it keeps working on the set.
     #[serde(skip)]
     pub draft: Option<Project>,
+    /// When it was resolved, counted by the bus, for keeping the latest.
+    #[serde(skip)]
+    pub(crate) resolved_at: u64,
 }
 
 impl ChangeSet {

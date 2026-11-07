@@ -865,6 +865,8 @@ impl AgentHost {
                     commands,
                     reason,
                     excerpts,
+                    since,
+                    rebase,
                 } => {
                     let ctx = match origin {
                         Origin::Turn => {
@@ -897,7 +899,8 @@ impl AgentHost {
                     };
                     match ctx {
                         Some(mut ctx) => {
-                            let mut done = tools::propose(&mut ctx, commands, &reason);
+                            let mut done =
+                                tools::propose_job(&mut ctx, commands, &reason, since, rebase);
                             if !done.result.is_error
                                 && let Some(bridge::Content::Text { text }) =
                                     done.result.content.first_mut()

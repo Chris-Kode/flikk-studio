@@ -1314,6 +1314,7 @@ fn normalize(ctx: &mut ToolCtx, args: &Args, reason: String) -> Result<Step, Too
     if all.is_empty() {
         return Err(ToolError("No audio clips to normalize.".into()));
     }
+    let since = ctx.version();
     let job: Job = Box::new(move || {
         let mut commands = Vec::new();
         let mut excerpts = Vec::new();
@@ -1341,6 +1342,8 @@ fn normalize(ctx: &mut ToolCtx, args: &Args, reason: String) -> Result<Step, Too
             commands,
             reason: format!("{reason} (target {target} LUFS)"),
             excerpts,
+            since,
+            rebase: None,
         }
     });
     Ok(Step::Job(job))
