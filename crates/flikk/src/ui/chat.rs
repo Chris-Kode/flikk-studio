@@ -143,6 +143,14 @@ impl ChatPanel {
         self.scroll_to_end(cx);
     }
 
+    /// Pick `choice` for the question in message `ix`, if that question is
+    /// still the open one; a stale chip sends nothing.
+    fn answer(&mut self, ix: usize, choice: String, cx: &mut Context<Self>) {
+        if self.state.read(cx).open_question() == Some(ix) {
+            self.send(choice, cx);
+        }
+    }
+
     /// Show the newest message and keep following the thread.
     fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
         self.list.set_follow_mode(FollowMode::Tail);
@@ -454,12 +462,15 @@ impl ChatPanel {
         let Some(msg) = state.chat.get(ix).cloned() else {
             return div().into_any_element();
         };
+        // The user's next message answered it, even with agent rows between.
         let answer = state
             .chat
-            .get(ix + 1)
-            .filter(|m| m.role == ChatRole::User)
+            .get(ix + 1..)
+            .and_then(|rest| rest.iter().find(|m| m.role == ChatRole::User))
             .map(|m| m.text.clone());
-        let busy = state.agent_busy();
+        // Only the question still waiting on an answer takes a pick: older
+        // and answered ones, and any in a reopened chat, are done.
+        let open = state.open_question() == Some(ix) && !state.agent_busy();
         if msg.role == ChatRole::User {
             return h_flex()
                 .w_full()
@@ -513,10 +524,9 @@ impl ChatPanel {
                             .child(choice.clone());
                     }
                     let reply = choice.clone();
-                    button
-                        .label(choice.clone())
-                        .disabled(answer.is_some() || busy)
-                        .on_click(cx.listener(move |this, _, _, cx| this.send(reply.clone(), cx)))
+                    button.label(choice.clone()).disabled(!open).on_click(
+                        cx.listener(move |this, _, _, cx| this.answer(ix, reply.clone(), cx)),
+                    )
                 }),
             ));
         }

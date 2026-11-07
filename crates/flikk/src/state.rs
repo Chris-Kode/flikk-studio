@@ -130,6 +130,9 @@ pub struct EditorState {
     /// now: text and tool calls may go on in it. Off once a turn ends, so
     /// an external client's calls after it start their own message.
     stream_open: bool,
+    /// The agent's question still waiting on an answer. Only its choices
+    /// can be picked. Never saved: a reopened chat owes no answer.
+    question: Option<OpenQuestion>,
     /// Requests the user settled since their last message, and what came of them.
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
@@ -300,6 +303,7 @@ impl EditorState {
             agent: AgentLink::new(),
             _pump: pump,
             stream_open: false,
+            question: None,
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
             models_seen: (downloaded, 0),
@@ -1074,6 +1078,7 @@ impl EditorState {
         self.preview = None;
         self.stream_open = false;
         self.agent_error = None;
+        self.question = None;
     }
 
     // --------------------------------------------------------------- projects
@@ -1331,7 +1336,14 @@ impl EditorState {
                     }
                     _ => self.push_agent(text, vec![]),
                 },
-                AgentEvent::Question { text, choices } => self.push_agent(text, choices),
+                AgentEvent::Question { text, choices } => {
+                    self.push_agent(text, choices);
+                    // A later question in the turn replaces this one.
+                    self.question = Some(OpenQuestion {
+                        chat: self.chats.active.clone(),
+                        message: self.chat.len() - 1,
+                    });
+                }
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => {
                     self.tool_done(&entry, cx);
@@ -1364,6 +1376,14 @@ impl EditorState {
     /// shows once.
     fn post_change_set(&mut self, change_set: ChangeSetId) {
         self.bus.close_change_set(change_set);
+        // The open question moves up by the rows removed before it.
+        if let Some(q) = &mut self.question {
+            let before = self.chat[..q.message.min(self.chat.len())]
+                .iter()
+                .filter(|m| m.change_set == Some(change_set))
+                .count();
+            q.message -= before;
+        }
         self.chat.retain(|m| m.change_set != Some(change_set));
     }
 
@@ -2240,7 +2260,26 @@ pub enum ApprovalOutcome {
 
 // ------------------------------------------------------------- chat stream
 
+/// A question the agent asked with `ask_user` that no message has answered
+/// yet.
+#[derive(Clone, Debug)]
+struct OpenQuestion {
+    /// The chat it was asked in.
+    chat: String,
+    /// Its message's index in that chat.
+    message: usize,
+}
+
 impl EditorState {
+    /// Index in `chat` of the agent's question still waiting on an answer:
+    /// only its choices can be picked.
+    pub fn open_question(&self) -> Option<usize> {
+        self.question
+            .as_ref()
+            .filter(|q| q.chat == self.chats.active && q.message < self.chat.len())
+            .map(|q| q.message)
+    }
+
     /// Send `text` as the user's message, like [`Self::send_chat`] (nothing
     /// while the agent is busy); the agent also reads `context` after it (the resolved `@` references), which
     /// the chat neither shows nor stores.
@@ -2272,6 +2311,9 @@ impl EditorState {
         };
         self.agent.send(message, editor, &self.settings);
         self.agent_error = None;
+        // Picked or typed, this message is the answer, and the question
+        // closes with it.
+        self.question = None;
         self.clear_settled();
         self.save_chat();
         cx.notify();
