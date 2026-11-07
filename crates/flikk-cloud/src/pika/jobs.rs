@@ -99,6 +99,7 @@ pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> Cloud
             http::Look::Refused(reply) => return Err(error(&reply)),
             http::Look::Stopped => {}
         }
+        task.looked(failures);
     }
 }
 

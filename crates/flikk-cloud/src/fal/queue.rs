@@ -110,6 +110,7 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
             http::Look::Again(why) => {
                 failures += 1;
                 last_failure = why;
+                task.looked(failures);
                 continue;
             }
             http::Look::Stopped => continue,
@@ -118,6 +119,7 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
             http::Look::Refused(reply) => return Err(error(&reply)),
         };
         failures = 0;
+        task.looked(failures);
         let said = status["status"].as_str();
         if !matches!(said, Some("IN_QUEUE" | "IN_PROGRESS" | "COMPLETED")) {
             // A status fal didn't document: its end, or one waited out.
@@ -173,12 +175,17 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
         }
     }
 
-    // Made, and paid for: asked for again while it doesn't come.
+    // Made, and paid for: asked for again while it doesn't come, and no
+    // longer stopped.
+    task.unstoppable();
     let made = Instant::now();
     let mut failures = 0;
     loop {
         match http::look(&response_url, &headers, made.elapsed() < FRESH, None) {
-            http::Look::Answer(result) => return Ok(result),
+            http::Look::Answer(result) => {
+                task.looked(0);
+                return Ok(result);
+            }
             http::Look::Refused(reply) => return Err(error(&reply)),
             http::Look::Again(why) if made.elapsed() > RESULT_PATIENCE => {
                 return Err(CloudError::Failed(format!(
@@ -187,6 +194,7 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
             }
             http::Look::Again(_) | http::Look::Stopped => {
                 failures += 1;
+                task.looked(failures);
                 std::thread::sleep(http::backoff(POLL, failures));
             }
         }
