@@ -133,6 +133,9 @@ impl Api for ElevenLabs {
             GenerateRequest::Video { .. } => Err(CloudError::Unavailable(format!(
                 "{NAME} doesn't make video"
             ))),
+            GenerateRequest::Image { .. } => Err(CloudError::Unavailable(format!(
+                "{NAME} doesn't make pictures"
+            ))),
         }
     }
 

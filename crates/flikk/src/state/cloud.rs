@@ -1,6 +1,7 @@
 //! Online providers in the editor: each one's key and account as Settings →
-//! Integrations shows them, the provider picked for each capability, and music, sound effects, voiceovers and videos made from
-//! the media pool or approved for the agent. The requests themselves are
+//! Integrations shows them, the provider picked for each capability, and
+//! music, sound effects, voiceovers, videos and pictures made from the media
+//! pool or approved for the agent. The requests themselves are
 //! `flikk-cloud`'s.
 
 use super::{ApprovalOutcome, EditorState};
@@ -8,7 +9,7 @@ use crate::agent_link::approve;
 use crate::notices::{Level, Notice, NoticeAction};
 use crate::persistence;
 use flikk_agent::tools::video::FrameGrab;
-use flikk_cloud::{Account, KeySource, Provider};
+use flikk_cloud::{Account, CloudModel, KeySource, Provider};
 use flikk_core::MediaId;
 use flikk_core::analysis::AnalysisSteps;
 use flikk_core::bus::{Author, CommandBus};
@@ -71,8 +72,8 @@ impl Check {
     }
 }
 
-/// Music, a sound effect, a voiceover or a video being made from the media
-/// pool.
+/// Music, a sound effect, a voiceover, a video or a picture being made from
+/// the media pool.
 #[derive(Clone, Debug)]
 pub struct Generating {
     pub id: u64,
@@ -181,6 +182,7 @@ impl EditorState {
                         Capability::SoundEffects,
                         Capability::Voiceover,
                         Capability::Video,
+                        Capability::Image,
                     ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
@@ -273,6 +275,15 @@ impl EditorState {
         }
     }
 
+    /// The provider and model making pictures, when one is set and has a
+    /// key: it makes the agent's too, whatever the agent's own setting.
+    pub fn image_provider(&self) -> Option<(&'static Provider, &'static CloudModel)> {
+        let (provider, model) = self.cloud.picked(Capability::Image)?;
+        self.provider_status(provider)
+            .has_key()
+            .then_some((provider, model))
+    }
+
     /// The provider transcribing in place of the local speech models.
     pub fn online_transcription(&self) -> Option<&'static Provider> {
         self.cloud
@@ -319,12 +330,13 @@ impl EditorState {
     /// Make `request` with the provider picked for it, then add the file
     /// to the pool's Generated bin; the user asked, from the media pool.
     pub fn generate(&mut self, request: GenerateRequest, cx: &mut Context<Self>) {
-        self.generate_video(request, Vec::new(), cx);
+        self.generate_with_frames(request, Vec::new(), cx);
     }
 
     /// [`Self::generate`], first grabbing the program's frames that
-    /// `request` starts or ends on.
-    pub fn generate_video(
+    /// `request` names: those a video starts or ends on, or a picture
+    /// follows.
+    pub fn generate_with_frames(
         &mut self,
         request: GenerateRequest,
         grabs: Vec<FrameGrab>,

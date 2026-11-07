@@ -1,6 +1,6 @@
 //! Work an online provider does instead of this machine: transcription (in
-//! place of the local speech models), music, sound effects, voiceovers and
-//! video.
+//! place of the local speech models), music, sound effects, voiceovers,
+//! video and pictures.
 //! What can be done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
 //! and the interfaces the editor calls ([`SpeechService`],
 //! [`GenerationService`]). `flikk-cloud` implements them for each provider it
@@ -27,15 +27,18 @@ pub enum Capability {
     SoundEffects,
     Voiceover,
     Video,
+    /// Pictures, from a description or from pictures to edit or follow.
+    Image,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 6] = [
         Self::Transcription,
         Self::Music,
         Self::SoundEffects,
         Self::Voiceover,
         Self::Video,
+        Self::Image,
     ];
 
     pub fn label(self) -> &'static str {
@@ -45,6 +48,7 @@ impl Capability {
             Self::SoundEffects => "Sound effects",
             Self::Voiceover => "Voiceover",
             Self::Video => "Video",
+            Self::Image => "Image",
         }
     }
 
@@ -248,6 +252,25 @@ pub enum GenerateRequest {
         /// Sound made with it, where the model makes sound.
         #[serde(default = "sound_on")]
         audio: bool,
+    },
+    /// A picture from a description alone, or from pictures it edits or
+    /// follows (image to image); see [`ImageMode`].
+    Image {
+        /// What it shows, its style and light, and any words in it. With
+        /// references it names them by place: `@Image1`, `@Image2`.
+        prompt: String,
+        /// "16:9", "1:1"…; `None` lets the model choose.
+        #[serde(default)]
+        aspect: Option<String>,
+        /// "2K"; `None` takes the model's default.
+        #[serde(default)]
+        resolution: Option<String>,
+        /// Pictures it edits or follows, in the order the prompt counts them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<PathBuf>,
+        /// A transparent background, where the model makes one.
+        #[serde(default)]
+        transparent: bool,
     },
 }
 
@@ -481,6 +504,97 @@ impl VideoModel {
     }
 }
 
+/// How a picture is made, by what its request carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageMode {
+    Text,
+    /// From pictures it edits or follows.
+    Edit,
+}
+
+/// What one image model can make, so a request is checked before it costs
+/// anything.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageModel {
+    pub name: &'static str,
+    /// Aspect ratios it takes, "16:9"…
+    pub aspects: &'static [&'static str],
+    /// It can pick the shape itself (from the first picture, when editing).
+    pub auto_aspect: bool,
+    /// Its resolutions ("1K", "2K"), the default first; none when it has no
+    /// choice.
+    pub resolutions: &'static [&'static str],
+    /// The most pictures it edits or follows at once; 0 when it only makes
+    /// pictures from a description.
+    pub references: usize,
+    /// It makes pictures with a transparent background.
+    pub transparent: bool,
+}
+
+impl ImageModel {
+    /// Why it can't make `request`, before any money is spent on it.
+    pub fn check(&self, request: &GenerateRequest) -> CloudResult<()> {
+        let GenerateRequest::Image {
+            aspect,
+            resolution,
+            references,
+            transparent,
+            ..
+        } = request
+        else {
+            return Ok(());
+        };
+        let refuse = |message: String| {
+            Err(CloudError::BadPrompt {
+                message,
+                suggestion: None,
+            })
+        };
+        let name = self.name;
+        if let Some(aspect) = aspect
+            && !self.aspects.contains(&aspect.as_str())
+        {
+            return refuse(if self.aspects.is_empty() {
+                format!("{name} has no choice of shape")
+            } else {
+                format!(
+                    "{name} makes {} pictures, not {aspect}",
+                    self.aspects.join(", ")
+                )
+            });
+        }
+        if let Some(resolution) = resolution
+            && !self
+                .resolutions
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(resolution))
+        {
+            return refuse(if self.resolutions.is_empty() {
+                format!("{name} has no choice of resolution")
+            } else {
+                format!(
+                    "{name} makes {} pictures, not {resolution}",
+                    self.resolutions.join(" or ")
+                )
+            });
+        }
+        if !references.is_empty() && self.references == 0 {
+            return refuse(format!("{name} only makes pictures from a description"));
+        }
+        if references.len() > self.references {
+            return refuse(format!(
+                "{name} follows at most {} pictures; this has {}",
+                self.references,
+                references.len()
+            ));
+        }
+        if *transparent && !self.transparent {
+            return refuse(format!("{name} doesn't make transparent pictures"));
+        }
+        Ok(())
+    }
+}
+
 /// Who reads a voiceover, and how.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reading {
@@ -534,6 +648,7 @@ impl GenerateRequest {
             Self::SoundEffect { .. } => Capability::SoundEffects,
             Self::Voiceover { .. } => Capability::Voiceover,
             Self::Video { .. } => Capability::Video,
+            Self::Image { .. } => Capability::Image,
         }
     }
 
@@ -541,7 +656,8 @@ impl GenerateRequest {
         match self {
             Self::Music { prompt, .. }
             | Self::SoundEffect { prompt, .. }
-            | Self::Video { prompt, .. } => prompt,
+            | Self::Video { prompt, .. }
+            | Self::Image { prompt, .. } => prompt,
             Self::Voiceover { text, .. } => text,
         }
     }
@@ -555,6 +671,15 @@ impl GenerateRequest {
                 ..
             } => Some(VideoMode::Image),
             Self::Video { .. } => Some(VideoMode::Text),
+            _ => None,
+        }
+    }
+
+    /// How a picture is made; `None` for anything else.
+    pub fn image_mode(&self) -> Option<ImageMode> {
+        match self {
+            Self::Image { references, .. } if !references.is_empty() => Some(ImageMode::Edit),
+            Self::Image { .. } => Some(ImageMode::Text),
             _ => None,
         }
     }
@@ -575,7 +700,7 @@ impl GenerateRequest {
             Self::Music { length, .. }
             | Self::SoundEffect { length, .. }
             | Self::Video { length, .. } => *length,
-            Self::Voiceover { .. } => None,
+            Self::Voiceover { .. } | Self::Image { .. } => None,
         }
     }
 
@@ -591,6 +716,7 @@ impl GenerateRequest {
             Self::SoundEffect { .. } => "Sound effect",
             Self::Voiceover { .. } => "Voiceover",
             Self::Video { .. } => "Video",
+            Self::Image { .. } => "Image",
         };
         match self.length() {
             Some(t) => format!("{what}, {:.0} s: {}", t.as_secs_f64(), self.prompt()),
@@ -1041,10 +1167,13 @@ pub trait GenerationService: Send + Sync {
     fn voice_provider(&self) -> Option<String>;
     /// What the model picked for video can make, when one is.
     fn video_model(&self) -> Option<VideoModel>;
+    /// What the model picked for pictures can make, when one is.
+    fn image_model(&self) -> Option<ImageModel>;
     /// Whether videos are made with sound, as the user set it.
     fn video_sound(&self) -> bool;
     /// Make `request` into a new file in `dir`, reporting to `task` and
-    /// stopping when it is cancelled. Slow: minutes for music and video.
+    /// stopping when it is cancelled. Slow: minutes for music and video,
+    /// up to a couple for a picture.
     fn generate(
         &self,
         request: &GenerateRequest,
@@ -1102,6 +1231,7 @@ pub fn media_item(
 ) -> MediaItem {
     let kind = match generated.info.capability {
         Capability::Video => MediaKind::Video,
+        Capability::Image => MediaKind::Image,
         _ => MediaKind::Audio,
     };
     MediaItem {

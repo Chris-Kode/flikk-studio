@@ -24,12 +24,14 @@ the pool when the user asks for it. Nothing else from the web comes into \
 the project.";
 
 const IMAGES: &str = "\
-Making pictures: `generate_image` (generate group) makes one with the \
-user's ChatGPT plan. Use it when the user asks for a picture, one call per \
-picture; each counts against their plan. Describe it fully in the prompt, \
-with its shape and any words in it exactly as written. It lands in the \
-pool's Images Generated bin, and the call returns its media id: use it like \
-any other picture in the pool.";
+Making pictures: `generate_image` (generate group) makes one, with the image \
+provider the user set up or else their ChatGPT plan. Use it when the user \
+asks for a picture, one call per picture; each costs them money or counts \
+against their plan. Describe it fully in the prompt, with any words in it \
+exactly as written. With a provider it can also edit or follow pictures in \
+the pool and frames of the program (`references`, `frames_at`). It lands \
+in the pool's Images Generated bin, and the call returns its media id: use \
+it like any other picture in the pool.";
 
 const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
@@ -265,9 +267,11 @@ before you finish, and save them to the user's library with \
 `save_fx_to_library`, and save audio from the pool to it with \
 `save_sound_to_library`.";
 
-pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
+/// The system prompt for `role`; `images` when the turn may make pictures
+/// ([`crate::tools::image::offered`]).
+pub fn system_prompt(role: AgentRole, settings: &AgentSettings, images: bool) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
-    if crate::tools::image::offered(settings) {
+    if images {
         out.push_str("\n\n");
         out.push_str(IMAGES);
     }

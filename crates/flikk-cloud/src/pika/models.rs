@@ -1,11 +1,12 @@
 //! The video models on Pika's API that the editor offers: Pika's own, and
-//! the other vendors' Pika hosts. How each takes a request (its endpoints,
+//! the other vendors' Pika hosts; and the image models it hosts (see
+//! [`IMAGE`]). How each takes a request (its endpoints,
 //! and the names and forms of its fields) differs from model to model; what
 //! each can make is its [`VideoModel`], as Pika's catalog
 //! (`GET /catalog/apis/{api_id}?expand=inputs`) gives it. The provider's
 //! catalog lists the same ids, in the same order, the default first.
 
-use flikk_core::cloud::{ReferenceLimits, VideoModel, VideoSound};
+use flikk_core::cloud::{ImageModel, ReferenceLimits, VideoModel, VideoSound};
 
 /// One model: what it can make, and how to ask for it.
 pub struct PikaVideo {
@@ -627,4 +628,234 @@ pub const VIDEO: &[PikaVideo] = &[
 
 pub fn find(id: &str) -> Option<&'static PikaVideo> {
     VIDEO.iter().find(|m| m.id == id)
+}
+
+// ------------------------------------------------------------------ images
+
+/// One image model: what it can make, and how to ask for it. Its endpoints
+/// are `{id}/text-to-image` and, when the spec takes pictures,
+/// `{id}/image-to-image`, which takes them as `image_urls`.
+pub struct PikaImage {
+    /// The catalog id, kept in the user's settings: the start of Pika's
+    /// `api_id`s for it.
+    pub id: &'static str,
+    pub spec: ImageModel,
+    pub shape: ImageShape,
+    /// The field the resolution goes in ("resolution", "size"), when the
+    /// spec has a choice of it.
+    pub resolution: &'static str,
+    /// `background` takes "transparent" or "opaque".
+    pub background: bool,
+}
+
+/// How the shape is asked for.
+pub enum ImageShape {
+    /// `aspect_ratio`, one of the spec's ratios; this word lets the model
+    /// pick, else the field is left out.
+    AspectRatio(Option<&'static str>),
+    /// `size`, as the pixel size this table gives each of the spec's ratios.
+    Size(&'static [(&'static str, &'static str)]),
+    /// No choice: the model picks.
+    None,
+}
+
+impl PikaImage {
+    pub fn path(&self, edit: bool) -> String {
+        let function = if edit {
+            "image-to-image"
+        } else {
+            "text-to-image"
+        };
+        format!("{}/{function}", self.id)
+    }
+}
+
+const NANO_BANANA_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9",
+];
+
+const GPT_IMAGE_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9",
+];
+
+const SEEDREAM_ASPECTS: &[&str] = &["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"];
+
+const GROK_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9", "2:1", "1:2",
+];
+
+/// The pixel sizes Ideogram 4.5 takes for each ratio, the larger of the two
+/// it offers.
+const IDEOGRAM_SIZES: &[(&str, &str)] = &[
+    ("16:9", "2560x1440"),
+    ("9:16", "1440x2560"),
+    ("1:1", "2048x2048"),
+    ("4:3", "2304x1728"),
+    ("3:4", "1728x2304"),
+    ("3:2", "2496x1664"),
+    ("2:3", "1664x2496"),
+    ("5:4", "2240x1792"),
+    ("4:5", "1792x2240"),
+    ("16:10", "2560x1600"),
+    ("10:16", "1600x2560"),
+    ("2:1", "2880x1440"),
+    ("1:2", "1440x2880"),
+    ("3:1", "3072x1024"),
+    ("1:3", "1024x3072"),
+];
+
+const IDEOGRAM_ASPECTS: &[&str] = &[
+    "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "16:10", "10:16", "2:1",
+    "1:2", "3:1", "1:3",
+];
+
+const fn nano_banana(name: &'static str) -> ImageModel {
+    ImageModel {
+        name,
+        aspects: NANO_BANANA_ASPECTS,
+        auto_aspect: true,
+        resolutions: &["1K", "2K", "4K"],
+        references: 16,
+        transparent: false,
+    }
+}
+
+const fn gpt_image(name: &'static str) -> ImageModel {
+    ImageModel {
+        name,
+        aspects: GPT_IMAGE_ASPECTS,
+        auto_aspect: false,
+        resolutions: &["1K", "2K", "4K"],
+        references: 16,
+        transparent: true,
+    }
+}
+
+pub const IMAGE: &[PikaImage] = &[
+    PikaImage {
+        id: "google/gemini-nano-banana-2.1",
+        spec: nano_banana("Nano Banana 2.1"),
+        shape: ImageShape::AspectRatio(Some("auto")),
+        resolution: "resolution",
+        background: false,
+    },
+    PikaImage {
+        id: "google/gemini-3-pro-image",
+        spec: nano_banana("Nano Banana Pro"),
+        shape: ImageShape::AspectRatio(Some("auto")),
+        resolution: "resolution",
+        background: false,
+    },
+    PikaImage {
+        id: "openai/gpt-image-2",
+        spec: gpt_image("GPT Image 2"),
+        shape: ImageShape::AspectRatio(None),
+        resolution: "resolution",
+        background: true,
+    },
+    PikaImage {
+        id: "openai/gpt-image-2.6-flare",
+        spec: gpt_image("GPT Image 2.6 Flare"),
+        shape: ImageShape::AspectRatio(None),
+        resolution: "resolution",
+        background: true,
+    },
+    PikaImage {
+        id: "openai/gpt-image-2.6-sunburst",
+        spec: gpt_image("GPT Image 2.6 Sunburst"),
+        shape: ImageShape::AspectRatio(None),
+        resolution: "resolution",
+        background: true,
+    },
+    PikaImage {
+        id: "bytedance/seedream-5.0-pro",
+        spec: ImageModel {
+            name: "Seedream 5.0 Pro",
+            aspects: SEEDREAM_ASPECTS,
+            // Left out, it picks from the prompt.
+            auto_aspect: true,
+            resolutions: &["2K", "1.5K", "1K"],
+            references: 10,
+            transparent: false,
+        },
+        shape: ImageShape::AspectRatio(None),
+        resolution: "size",
+        background: false,
+    },
+    PikaImage {
+        id: "bytedance/seedream-5.0-lite",
+        spec: ImageModel {
+            name: "Seedream 5.0 Lite",
+            aspects: SEEDREAM_ASPECTS,
+            auto_aspect: true,
+            resolutions: &["2K", "3K", "4K"],
+            references: 14,
+            transparent: false,
+        },
+        shape: ImageShape::AspectRatio(None),
+        resolution: "size",
+        background: false,
+    },
+    PikaImage {
+        id: "ideogram/ideogram-4.5",
+        spec: ImageModel {
+            name: "Ideogram 4.5",
+            aspects: IDEOGRAM_ASPECTS,
+            auto_aspect: true,
+            resolutions: &[],
+            references: 5,
+            transparent: false,
+        },
+        shape: ImageShape::Size(IDEOGRAM_SIZES),
+        resolution: "",
+        background: false,
+    },
+    PikaImage {
+        id: "x-ai/grok-imagine-image-2.0",
+        spec: ImageModel {
+            name: "Grok Imagine Image 2.0",
+            aspects: GROK_ASPECTS,
+            auto_aspect: true,
+            resolutions: &["1K", "2K"],
+            references: 5,
+            transparent: false,
+        },
+        shape: ImageShape::AspectRatio(Some("auto")),
+        resolution: "resolution",
+        background: false,
+    },
+    PikaImage {
+        id: "meta/muse-image-1.0",
+        spec: ImageModel {
+            name: "Muse Image",
+            aspects: &[],
+            auto_aspect: true,
+            resolutions: &[],
+            references: 10,
+            transparent: false,
+        },
+        shape: ImageShape::None,
+        resolution: "",
+        background: false,
+    },
+    PikaImage {
+        id: "recraft/recraft-4.1",
+        // Its `size` is refused for now ("not enabled on this environment
+        // yet"), so it picks the shape.
+        spec: ImageModel {
+            name: "Recraft 4.1",
+            aspects: &[],
+            auto_aspect: true,
+            resolutions: &[],
+            references: 0,
+            transparent: false,
+        },
+        shape: ImageShape::None,
+        resolution: "",
+        background: false,
+    },
+];
+
+pub fn find_image(id: &str) -> Option<&'static PikaImage> {
+    IMAGE.iter().find(|m| m.id == id)
 }

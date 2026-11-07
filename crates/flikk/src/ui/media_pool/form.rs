@@ -1,7 +1,7 @@
-//! The rows of a form dialog (Video, Voiceover, Generate, Voices): a 96 px
-//! label column beside its control, a slider with its value, the line that
-//! says why the form can't go ahead, and the tags a prompt paints in the
-//! accent.
+//! The rows of a form dialog (Video, Image, Voiceover, Generate, Voices): a
+//! 96 px label column beside its control, a slider with its value, the line
+//! that says why the form can't go ahead, and the tags a prompt paints in
+//! the accent.
 
 use std::ops::Range;
 

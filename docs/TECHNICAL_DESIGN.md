@@ -91,7 +91,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Persistence | Projects are `.flikk` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.flikkfx`), presets (`.flikkpreset`: effects, audio effects or a grade with their values) sounds (`.flikksound`, their audio in `paths::assets()`, `library/assets/`, a folder per content) and voices (`.flikkvoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`flikk-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.flikk` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$FLIKK_HOME` or `~/.flikk`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
-| Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video, image) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "flikk"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.flikk` files or logs |
 
 | Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`flikk-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
@@ -1146,13 +1146,19 @@ on the UI thread and run it off it:
   tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
   25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
   the original under `paths::web()` and adds it to the pool's "Web Images"
-  bin as the user's edit. An "Image generation" switch (off by default, either
-  backend) lists the `flikk` tool
-  `generate_image` in the Generate category, so it asks each time unless
-  the user allowed generating. The switch turns on, and the tool and its
-  prompt section are offered, only while Codex's saved sign-in carries a
-  paid ChatGPT plan (`chatgpt_plan_type` in its ID token, not `free`); the
-  switch is dimmed with a tooltip otherwise. It sends the request Codex's own image tool
+  bin as the user's edit. The `flikk` tool `generate_image` (Generate
+  category, so it asks each time unless the user allowed generating) is
+  offered while someone can make the picture (`image::route`): the image
+  provider picked in Settings → Integrations when one is set with a key,
+  whatever the agent's own setting says (see "Generating pictures"), else
+  the user's ChatGPT plan. The "Image generation" switch (off by default,
+  either backend) is for the ChatGPT plan only: it turns on, and the tool
+  and its prompt section are offered that way, only while Codex's saved
+  sign-in carries a paid ChatGPT plan (`chatgpt_plan_type` in its ID token,
+  not `free`); the switch is dimmed with a tooltip otherwise, and dimmed
+  with the provider and model in its tooltip while an image provider is
+  set, keeping its value for when it is not. The ChatGPT plan makes
+  pictures from a description only. It sends the request Codex's own image tool
   sends (`POST chatgpt.com/backend-api/codex/images/generations`: the
   prompt, `gpt-image-2`, automatic size and quality, opaque or transparent
   background) with Codex's ChatGPT sign-in from `$CODEX_HOME/auth.json`
@@ -1272,6 +1278,40 @@ on the UI thread and run it off it:
   model's `cloud::VideoSound` says whether it makes sound at all, always
   (no switch: Pika H3 Flex, Kling 4.0, Kling 3.0 Turbo on Pika), or on a
   switch; only the last are made silent.
+* **Generating pictures:** `Capability::Image` is a row in Settings →
+  Integrations like video, with fal and Pika as providers. On fal: Nano
+  Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and
+  Sunburst, FLUX 3 and FLUX 3 Klein, Seedream 5.0 Pro, Ideogram 4.5, Grok
+  Imagine Image 2.0, Qwen Image 3, Krea 3 and Recraft V4.1 Pro. On Pika:
+  Nano Banana 2.1 (the default) and Pro, GPT Image 2, 2.6 Flare and 2.6
+  Sunburst, Seedream 5.0 Pro and Lite, Ideogram 4.5, Grok Imagine Image
+  2.0, Muse Image and Recraft 4.1. A `GenerateRequest::Image` carries a
+  prompt, an optional shape and resolution, a transparent background, and
+  the pictures it edits or follows (`ImageMode::Edit` when there are any:
+  image to image), which the prompt names `@Image1`, `@Image2` and the
+  models read as "image 1". Each model's `cloud::ImageModel` (shapes,
+  whether it can pick one, resolutions, how many pictures it follows,
+  transparency) refuses what it can't make before anything is spent. Each
+  model is an entry in `fal/models.rs` or `pika/models.rs` (`IMAGE`)
+  saying how it takes a request: `aspect_ratio` and `resolution`, or fal's
+  named `image_size` (only the five ratios fal names), or Pika's `size` in
+  pixels (Ideogram), or no shape at all (Muse, Recraft on Pika); the
+  pictures it follows in
+  `image_urls`, or one to edit plus `reference_image_urls` (Ideogram on
+  fal). fal runs it on its queue (`fal/image.rs`), Pika as a media job
+  (`pika/image.rs`), both after uploading the pictures as for video; the
+  file comes back as `images[0]`, and `picture::fetch` names it by what
+  its first bytes say it is. It lands in the "Images Generated" bin with a
+  `<file>.json`, and is not analyzed. The media pool's Image form (the
+  Generate menu, or "Generate image…" on a picture, which it then edits)
+  takes the prompt, pictures in the pool and the frame at the playhead
+  (grabbed when it is made), the model's shapes (starting on the
+  sequence's), resolutions and transparency. With a provider picked, the
+  agent's `generate_image` makes the same request through it, whatever the
+  agent's "Image generation" switch says, taking `aspect`, `resolution`,
+  `references` (pictures in the pool) and `frames_at` (the program at
+  those times, grabbed just before); the approval carries which way it
+  goes (`via`), so an older ChatGPT request still reads.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

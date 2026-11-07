@@ -363,12 +363,20 @@ impl SettingsPanel {
                 let on = *ix == 1;
                 this.update(cx, |s| s.web = on);
             }));
-        // On only with a paid ChatGPT plan to make the pictures with.
+        // On only with a paid ChatGPT plan to make the pictures with; the
+        // provider set in Integrations makes them instead when there is one.
         let linked = self.chatgpt.is_some();
+        let provider = self
+            .state
+            .read(cx)
+            .image_provider()
+            .map(|(p, m)| format!("Set in Integrations: {} · {}", p.name, m.name));
+        let overridden = provider.is_some();
         let images = Segmented::new("perm-images")
             .compact()
             .items(["Off", "On"])
-            .disabled_item(1, !linked)
+            .disabled_item(0, overridden)
+            .disabled_item(1, overridden || !linked)
             .selected((settings.image_generation && linked) as usize)
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 let on = *ix == 1;
@@ -379,13 +387,12 @@ impl SettingsPanel {
                 }
                 this.update(cx, |s| s.image_generation = on);
             }));
+        let tip = provider.or_else(|| {
+            (!linked).then(|| "Needs a paid ChatGPT plan signed in with Codex".to_owned())
+        });
         let images = div()
             .id("perm-images-tip")
-            .when(!linked, |d| {
-                d.tooltip(Tooltip::text(
-                    "Needs a paid ChatGPT plan signed in with Codex",
-                ))
-            })
+            .when_some(tip, |d, tip| d.tooltip(Tooltip::text(tip)))
             .child(images);
         v_flex()
             .child(section_label("Permissions").when(differs, |el| {
@@ -403,7 +410,7 @@ impl SettingsPanel {
             .child(perm_row("Web", false, web.into_any_element()))
             .child(perm_row(
                 "Image generation",
-                !linked,
+                !linked || overridden,
                 images.into_any_element(),
             ))
     }

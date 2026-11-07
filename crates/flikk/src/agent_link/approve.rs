@@ -146,9 +146,11 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
             use flikk_agent::tools::image;
             let request =
                 image::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
-            let media = inputs.services.media.clone();
+            let services = inputs.services.clone();
+            let project = request.grabs_frames().then(|| inputs.project.clone());
             Ok(Started::Generate(Box::new(move || {
-                let item = image::make(&request, media.as_deref()).map_err(|e| anyhow!(e.0))?;
+                let item =
+                    image::make(&request, project.as_ref(), &services).map_err(|e| anyhow!(e.0))?;
                 Ok(Generated {
                     item,
                     placement: None,

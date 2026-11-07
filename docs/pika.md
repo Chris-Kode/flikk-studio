@@ -5,7 +5,8 @@ paid, prepaid aggregator: one key reaches Pika's own models and about 170
 operations from other vendors (Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs
 and more). The editor uses it as a video provider for Pika's own models and
 the other vendors' video models that fit its video request (see "What the
-editor uses").
+editor uses"), and as an image provider for the other vendors' image models
+(see "Image operations").
 
 Read on 2026-11-02 from `llms.txt`, the per-operation specifications, the
 public catalog and `openapi.json` (links at the end). The catalog's
@@ -226,6 +227,40 @@ specifications say for every reference model; MiniMax H3's fields say
   two hours. The video is downloaded from `output.video.url` without the
   key; the job's charge is not recorded.
 
+## Image operations
+
+Each image model is two operations at `POST /v1/media/{vendor}/{model}/…`:
+`text-to-image`, and `image-to-image` (editing, or following, 1 to its
+limit of pictures as `image_urls`). Jobs, uploads and errors are as for
+video; a completed job has `output.images[].url` (and `content_type`). Read
+on 2026-11-07 from the catalog's `input_schema`.
+
+`crates/flikk-cloud/src/pika/` (`models::IMAGE`, `image.rs`):
+
+| Model (catalog id) | Shape | Resolution | Pictures | Transparent |
+| --- | --- | --- | --- | --- |
+| Nano Banana 2.1 (`google/gemini-nano-banana-2.1`, default) | `aspect_ratio`, `auto` | `resolution` 1K, 2K, 4K | 16 | — |
+| Nano Banana Pro (`google/gemini-3-pro-image`) | as above | as above | 16 | — |
+| GPT Image 2, 2.6 Flare, 2.6 Sunburst (`openai/gpt-image-2`, `-2.6-flare`, `-2.6-sunburst`) | `aspect_ratio`, no `auto` (1:1 left out) | `resolution` 1K, 2K, 4K | 16 | `background` |
+| Seedream 5.0 Pro (`bytedance/seedream-5.0-pro`) | `aspect_ratio` (left out: picked from the prompt) | `size` 2K, 1.5K, 1K | 10 | — |
+| Seedream 5.0 Lite (`bytedance/seedream-5.0-lite`) | as above | `size` 2K, 3K, 4K | 14 | — |
+| Ideogram 4.5 (`ideogram/ideogram-4.5`) | `size` in pixels: the larger size its text-to-image enum has for each ratio (editing takes any `WxH` in multiples of 32 up to 4,194,304 pixels, which these are) | — | 5 | — |
+| Grok Imagine Image 2.0 (`x-ai/grok-imagine-image-2.0`) | `aspect_ratio`, `auto` | `resolution` 1K, 2K | 5 | — |
+| Muse Image (`meta/muse-image-1.0`) | none (`size` left at `auto`) | — | 10 | — |
+| Recraft 4.1 (`recraft/recraft-4.1`) | none: its `size` answers 422 "not enabled on this environment yet" | — | text only | — |
+
+`num_images`, `seed`, `quality`, `output_format` and the like keep their
+defaults; one picture is made per request. Not used: Seedream 4.0, 4.5 and
+the 5.0 Pro layer decomposition, Gemini 3.1 Flash Image and Flash Lite,
+Ideogram 4.0 (and Transparent) and P-Image, GPT Image 2.5, Grok Imagine
+Image and Image Quality, and Topaz Image Upscale.
+
+Pika validates an image request's body before its key too: with a made-up
+key, every model's text-to-image body (no shape, each shape, each
+resolution, transparent where offered) and image-to-image body (one
+picture, its most pictures, pictures with a shape) as `image.rs` writes it
+answers 401, which is how Recraft 4.1's refused `size` was found.
+
 ## Verified
 
 - Every field, enum and limit above against the live catalog
@@ -258,4 +293,6 @@ the key, and the failed-job bodies for balance, rate limits and moderation
 - <https://dev.pika.art/llms/pika/pika-2.5/text-to-video>,
   [image-to-video](https://dev.pika.art/llms/pika/pika-2.5/image-to-video)
 - <https://dev.pika.art/llms/pika/pikaframes/image-to-video>
+- <https://dev.pika.art/llms/openai/gpt-image-2/text-to-image> (the image
+  job's output)
 - <https://dev.pika.art/models>, <https://dev.pika.art/pricing>

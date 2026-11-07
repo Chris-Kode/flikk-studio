@@ -39,11 +39,11 @@ impl FrameGrab {
         }
     }
 
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         json!({ "at": secs(self.at), "path": self.path })
     }
 
-    fn from_json(value: &Value) -> Option<Self> {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
         Some(Self {
             at: Time::from_secs_f64(value.get("at")?.as_f64()?),
             path: PathBuf::from(value.get("path")?.as_str()?),

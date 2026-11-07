@@ -165,8 +165,7 @@ pub fn request(
             )
         }
         super::image::TOOL => {
-            super::image::check(ctx)?;
-            let request = super::image::parse(args)?;
+            let request = super::image::parse(project, ctx.settings, ctx.services, args)?;
             (
                 super::image::summary(&request),
                 super::image::request_json(&request),
