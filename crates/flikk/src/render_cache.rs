@@ -26,9 +26,11 @@ pub use store::store;
 
 use crate::persistence;
 use crate::state::EditorState;
+use flikk_core::changeset::ChangeSet;
 use flikk_core::model::Project;
-use flikk_core::{ChangeSetId, Time, TimeRange};
+use flikk_core::{ChangeSetId, ProjectId, Time, TimeRange};
 use gpui_kit::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use worker::Worker;
@@ -49,9 +51,12 @@ const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// content.
 #[derive(Clone, Copy, PartialEq)]
 struct Signature {
+    /// The bus version starts again at 0 in every project.
+    project: ProjectId,
     version: u64,
     preview: Option<ChangeSetId>,
-    draft: usize,
+    /// [`draft_hash`] of the previewed change set.
+    draft: u64,
     live: u64,
     globals: Globals,
 }
@@ -146,6 +151,33 @@ impl Background {
     pub fn status(&self) -> Option<Arc<Status>> {
         self.status.clone()
     }
+
+    /// Another project is shown: forget the last one's plan, render bar and
+    /// worker. Plans and measures still running for it are dropped when
+    /// they land, since their signature or plan no longer matches.
+    fn reset(&mut self) {
+        self.plan = None;
+        self.planning = None;
+        self.status = None;
+        self.worker = None;
+        self.retry_at = None;
+    }
+}
+
+/// What a change set's draft is built from: it changes whenever the draft
+/// does (items added, accepted, rejected or conflicted, or rebuilt on a
+/// newer project).
+fn draft_hash(set: &ChangeSet) -> u64 {
+    let mut h = DefaultHasher::new();
+    set.id.hash(&mut h);
+    set.base_version.hash(&mut h);
+    set.draft.is_some().hash(&mut h);
+    for item in &set.items {
+        item.id.hash(&mut h);
+        std::mem::discriminant(&item.state).hash(&mut h);
+        item.base_version.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Settings → Storage changed the background render's settings.
@@ -199,12 +231,13 @@ pub fn image(plan: &Plan, frame: i64) -> Option<Arc<RenderImage>> {
 fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let now = Instant::now();
     let sig = Signature {
+        project: state.bus.project().id,
         version: state.bus.version(),
         preview: state.preview,
         draft: state
             .preview
             .and_then(|id| state.bus.change_set(id))
-            .map_or(0, |set| set.items.len()),
+            .map_or(0, draft_hash),
         live: state.live_version,
         globals: globals(state),
     };
@@ -213,6 +246,10 @@ fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
         || state.render_queue.is_busy();
     let playhead = state.playhead;
     let bg = &mut state.render;
+    if bg.seen.is_some_and(|s| s.project != sig.project) {
+        bg.reset();
+        cx.notify();
+    }
     if bg.seen != Some(sig) {
         bg.seen = Some(sig);
         bg.changed = now;
@@ -252,7 +289,11 @@ fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let pending = bg.status.as_ref().is_some_and(|s| s.pending());
     if store().background() && idle && waited && pending && bg.worker.is_none() {
         let from = playhead.to_frame(plan.rate);
-        bg.worker = Some(Worker::start(project, state.services.clone(), plan, from));
+        bg.worker = Worker::start(project, state.services.clone(), plan, from);
+        // The thread could not start: wait before trying again.
+        if bg.worker.is_none() {
+            bg.retry_at = Some(now + RETRY);
+        }
     } else if !store().background() {
         bg.worker = None;
     }

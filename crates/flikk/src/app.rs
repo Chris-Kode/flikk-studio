@@ -10,8 +10,8 @@ use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, DropdownMenu as _, IconName, Indicator, Kbd, Panel, PanelHeader, PanelTabs,
-    PopupMenuItem, Progress, ScrollableElement as _, Segmented, h_flex, h_resizable,
+    Button, DialogExt as _, DropdownMenu as _, IconName, Indicator, Kbd, Panel, PanelHeader,
+    PanelTabs, PopupMenuItem, Progress, ScrollableElement as _, Segmented, h_flex, h_resizable,
     resizable_panel, v_resizable,
 };
 use crate::ui::{
@@ -118,8 +118,9 @@ pub struct Flikk {
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
-    /// Footage dropped on the welcome page, imported once its new project
-    /// is open.
+    /// Footage dropped on the welcome page, imported once the New project
+    /// it started is open. Any other way of leaving the page, or of
+    /// starting or opening a project, clears it.
     footage: Option<Vec<PathBuf>>,
     _observe: Subscription,
     _welcome: Option<Subscription>,
@@ -145,11 +146,18 @@ impl Flikk {
         let _welcome = welcome.as_ref().map(|(page, _)| {
             cx.subscribe_in(page, window, |this, _, ev: &WelcomeEvent, window, cx| {
                 match ev {
-                    WelcomeEvent::Continue => this.welcome = None,
-                    WelcomeEvent::Create(paths) => {
-                        this.footage = Some(paths.clone());
-                        projects::new_project(&this.state, window, cx);
+                    WelcomeEvent::Continue => {
+                        this.welcome = None;
+                        this.footage = None;
                     }
+                    WelcomeEvent::Create(paths) => {
+                        // Another dialog is up: New project won't open.
+                        if !window.has_active_dialog(cx) {
+                            this.footage = Some(paths.clone());
+                            projects::new_project(&this.state, window, cx);
+                        }
+                    }
+                    WelcomeEvent::ForgetFootage => this.footage = None,
                 }
                 cx.notify();
             })
@@ -196,7 +204,8 @@ impl Flikk {
     }
 
     /// Leave the welcome page once another project is open, importing the
-    /// footage it was started from.
+    /// footage it was started from. Footage is only still held here when
+    /// that project came from the New project dialog it opened.
     fn state_changed(&mut self, cx: &mut Context<Self>) {
         let project = self.state.read(cx).bus.project().id;
         if self.welcome.as_ref().is_some_and(|(_, at)| *at != project) {
@@ -887,9 +896,14 @@ impl Render for Flikk {
                 }),
             )
             .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+                // A fresh New project, not the one dropped footage opened.
+                if !window.has_active_dialog(cx) {
+                    this.footage = None;
+                }
                 projects::new_project(&this.state, window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
+                this.footage = None;
                 projects::open_dialog(&this.state, window, cx)
             }))
             .on_action(cx.listener(|this, _: &SaveProject, window, cx| {
