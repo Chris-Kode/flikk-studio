@@ -8,6 +8,7 @@
 
 use super::{MediaPoolPanel, form, listen_button, play_button};
 use crate::state::EditorState;
+use crate::state::voices::Listening;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
@@ -21,7 +22,7 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const EMOTIONS: [&str; 11] = [
     "[happy]",
@@ -98,8 +99,10 @@ pub struct VoiceoverForm {
     loading: bool,
     /// Samples heard so far, by voice id.
     samples: HashMap<String, MediaItem>,
-    /// Voice whose sample is on its way.
-    fetching: Option<String>,
+    /// Voices whose sample is on its way.
+    fetching: HashSet<String>,
+    /// The voice last asked to hear, and what the player was doing then.
+    wanted_sample: Option<(String, Listening)>,
     /// Why the voices didn't load.
     load_error: Option<SharedString>,
     /// Why the last sample didn't come.
@@ -189,7 +192,8 @@ impl VoiceoverForm {
             picked: None,
             loading: true,
             samples: HashMap::new(),
-            fetching: None,
+            fetching: HashSet::new(),
+            wanted_sample: None,
             load_error: None,
             sample_error: None,
             script,
@@ -336,7 +340,8 @@ impl VoiceoverForm {
         true
     }
 
-    /// Fetch the sample of `voice`, then play it.
+    /// Fetch the sample of `voice`, then play it if it is still the one
+    /// last asked to hear and nothing was played or stopped meanwhile.
     fn fetch_sample(&mut self, voice: Voice, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let (generation, media) = (
@@ -347,7 +352,12 @@ impl VoiceoverForm {
             return;
         };
         let id = voice.id.clone();
-        self.fetching = Some(id.clone());
+        self.wanted_sample = Some((id.clone(), state.listening()));
+        // On its way already: it plays when it comes, as now asked.
+        if !self.fetching.insert(id.clone()) {
+            cx.notify();
+            return;
+        }
         self.sample_error = None;
         let fetch = cx.background_executor().spawn(async move {
             let path = generation.voice_sample(&voice)?;
@@ -356,10 +366,20 @@ impl VoiceoverForm {
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| {
-                this.fetching = None;
+                this.fetching.remove(&id);
+                let then = this
+                    .wanted_sample
+                    .take_if(|(last, _)| *last == id)
+                    .map(|(_, then)| then);
                 match result {
                     Ok(item) => {
-                        this.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+                        if let Some(then) = then {
+                            this.state.update(cx, |s, cx| {
+                                if s.still_listening(&then) {
+                                    s.toggle_source(&item, cx);
+                                }
+                            });
+                        }
                         this.samples.insert(id, item);
                     }
                     Err(e) => this.sample_error = Some(e.to_string().into()),
@@ -391,7 +411,7 @@ impl VoiceoverForm {
     fn sample_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let voice = self.voice(cx).cloned();
         let id = voice.as_ref().map(|v| &v.id);
-        if id.is_some() && id == self.fetching.as_ref() {
+        if id.is_some_and(|id| self.fetching.contains(id)) {
             return div()
                 .flex()
                 .flex_none()
