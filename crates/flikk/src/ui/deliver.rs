@@ -19,6 +19,8 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// What an export button writes.
@@ -92,6 +94,8 @@ pub struct DeliverPanel {
     /// For H.264 and HEVC; saved for the user.
     encoder: Encoder,
     polling: bool,
+    /// The running still export's cancel flag.
+    still: Option<Arc<AtomicBool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -189,6 +193,7 @@ impl DeliverPanel {
             whole_timeline: false,
             encoder: saved_encoder(),
             polling: false,
+            still: None,
             _subscriptions,
         }
     }
@@ -425,6 +430,17 @@ impl DeliverPanel {
             if path.extension().is_none() {
                 path.set_extension(kind.extension());
             }
+            let cancel = Arc::new(AtomicBool::new(false));
+            if matches!(kind, Export::Still) {
+                let started = this.update(cx, |this, cx| {
+                    this.still = Some(cancel.clone());
+                    cx.notify();
+                });
+                if started.is_err() {
+                    return;
+                }
+            }
+            let flag = cancel.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -433,17 +449,35 @@ impl DeliverPanel {
                         Export::Ass => flikk_deliver::export_ass(&project, &styles, &path),
                         Export::Otio => flikk_deliver::export_otio(&project, &path),
                         Export::Fcpxml => flikk_deliver::export_fcpxml(&project, &path),
-                        Export::Still => flikk_deliver::export_frame(
-                            &project, playhead, &styles, &services, &path,
+                        Export::Still => flikk_deliver::export_frame_until(
+                            &project, playhead, &styles, &services, &path, &flag,
                         ),
                     }
                 })
                 .await;
-            if let Err(e) = result {
-                let _ = this.update(cx, |this, cx| this.set_status(format!("{e:#}"), cx));
-            }
+            let _ = this.update(cx, |this, cx| {
+                if this.still.as_ref().is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                    this.still = None;
+                    cx.notify();
+                }
+                // A canceled still clears quietly.
+                if let Err(e) = result
+                    && !cancel.load(Ordering::Relaxed)
+                {
+                    this.set_status(format!("{e:#}"), cx);
+                }
+            });
         })
         .detach();
+    }
+
+    /// Stop the running still export. Its button stays held down until the
+    /// frame being composed is done.
+    fn cancel_still(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.still {
+            cancel.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
     }
 
     fn set_encoder(&mut self, encoder: Encoder, cx: &mut Context<Self>) {
@@ -737,16 +771,32 @@ impl DeliverPanel {
         let rows: Vec<AnyElement> = Export::GROUPS
             .iter()
             .map(|&(label, kinds)| {
-                let buttons: Vec<Button> = kinds
+                let mut buttons: Vec<Button> = kinds
                     .iter()
                     .map(|&kind| {
+                        let still = matches!(kind, Export::Still);
                         Button::new(kind.label())
                             .small()
                             .label(kind.label())
-                            .when(matches!(kind, Export::Still), |b| b.icon(IconName::Frame))
+                            .when(still, |b| {
+                                b.icon(IconName::Frame).loading(self.still.is_some())
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.export(kind, cx)))
                     })
                     .collect();
+                if kinds.iter().any(|k| matches!(k, Export::Still))
+                    && let Some(cancel) = &self.still
+                {
+                    buttons.push(
+                        Button::new("still-cancel")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .tooltip("Cancel")
+                            .disabled(cancel.load(Ordering::Relaxed))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_still(cx))),
+                    );
+                }
                 h_flex()
                     .gap(px(10.))
                     .child(

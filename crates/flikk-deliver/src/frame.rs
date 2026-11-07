@@ -7,17 +7,18 @@ use crate::ffmpeg::{self, TempOutput, ensure_free, filter_script_args, publish_e
 use crate::graph::{self, GraphSpec};
 use crate::preset::RenderSettings;
 use crate::queue::{WorkDir, write_script};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::services::Services;
 use flikk_core::{Time, TimeRange};
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Write the frame at timeline time `t` as a PNG at sequence size, with
-/// captions burned in. Refuses to overwrite `path`.
+/// captions burned in. Refuses to overwrite `path`. Never canceled; see
+/// [`export_frame_until`].
 pub fn export_frame(
     project: &Project,
     t: Time,
@@ -25,6 +26,21 @@ pub fn export_frame(
     services: &Services,
     path: &Path,
 ) -> Result<()> {
+    let never = AtomicBool::new(false);
+    export_frame_until(project, t, caption_styles, services, path, &never)
+}
+
+/// [`export_frame`], failing with "canceled" once `cancel` is set: FFmpeg
+/// is killed, and nothing is written to `path`.
+pub fn export_frame_until(
+    project: &Project,
+    t: Time,
+    caption_styles: &[CaptionStyle],
+    services: &Services,
+    path: &Path,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    check(cancel)?;
     ensure_free(path)?;
     let rate = project.timeline.settings.rate;
     let start = t.max(Time::ZERO).floor_to_frame(rate);
@@ -37,6 +53,7 @@ pub fn export_frame(
     composed::route(project, &mut spec, services, services.media.is_some());
     let work = WorkDir::new()?;
     let g = graph::build(project, &spec, &work.0)?;
+    check(cancel)?;
     let script = write_script(&work.0, "frame.txt", &g.script)?;
     // Removed however the export ends, once published or not.
     let tmp = TempOutput::new(path);
@@ -61,12 +78,22 @@ pub fn export_frame(
         .map(OsString::from),
     );
     args.push(tmp.path().into());
-    let cancel = AtomicBool::new(false);
     if spec.piped {
         let mut frames = Frames::new(project, services, &spec);
-        composed::run(&args, &g, &mut frames, &|_| {}, &cancel)?;
+        composed::run(&args, &g, &mut frames, &|_| {}, cancel)?;
     } else {
-        ffmpeg::run(&args, 0.0, &|_| {}, &cancel)?;
+        ffmpeg::run(&args, 0.0, &|_| {}, cancel)?;
     }
+    // The one frame is composed whole, so a cancel while it was drawn is
+    // only seen here: the temp file goes, unpublished.
+    check(cancel)?;
     publish_exact(&tmp, path)
+}
+
+/// Fail with "canceled", like renders, once `cancel` is set.
+fn check(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("canceled");
+    }
+    Ok(())
 }
