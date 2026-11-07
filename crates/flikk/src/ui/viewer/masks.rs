@@ -136,6 +136,8 @@ pub(super) struct MaskEditor {
     pub tinted: bool,
     /// The path being drawn with the pen, in picture uv.
     pen: Vec<[f32; 2]>,
+    /// The clip the pen's points were placed on.
+    pen_clip: Option<ClipId>,
     drag: Option<Drag>,
     pub hover: Option<Hover>,
 }
@@ -148,6 +150,7 @@ impl Default for MaskEditor {
             selected: None,
             tinted: true,
             pen: Vec::new(),
+            pen_clip: None,
             drag: None,
             hover: None,
         }
@@ -319,6 +322,11 @@ impl MaskEditor {
         self.hover = None;
     }
 
+    /// Drop the drag in progress, committing nothing; whether there was one.
+    pub fn cancel_drag(&mut self) -> bool {
+        self.drag.take().is_some()
+    }
+
     /// `clip`'s masks: as being dragged, else as in `project`.
     fn masks(&self, project: &Project, clip: ClipId) -> Vec<Mask> {
         if let Some(d) = self.drag.as_ref().filter(|d| d.clip == clip) {
@@ -402,7 +410,9 @@ impl MaskEditor {
         if let Some(h) = self.hover.as_ref().filter(|h| h.clip == shape.clip) {
             out.preview = h.outlines.iter().map(seq).collect();
         }
-        out.pen = self.pen.iter().map(|uv| to_seq(shape, *uv)).collect();
+        if self.pen_clip == Some(shape.clip) {
+            out.pen = self.pen.iter().map(|uv| to_seq(shape, *uv)).collect();
+        }
         out
     }
 
@@ -515,6 +525,11 @@ impl MaskEditor {
                 return Some(Vec::new());
             }
             Some(Tool::Pen) => {
+                // Points placed on another clip don't carry over.
+                if self.pen_clip != Some(clip.id) {
+                    self.pen.clear();
+                    self.pen_clip = Some(clip.id);
+                }
                 let closes = self.pen.len() >= 3
                     && near(screen.to_screen(to_seq(shape, self.pen[0])), p, REACH);
                 if !closes {

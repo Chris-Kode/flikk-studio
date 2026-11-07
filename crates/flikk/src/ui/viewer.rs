@@ -2066,6 +2066,12 @@ impl Render for ViewerPanel {
                 }
             }))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| {
+                // Mid-drag, Escape only drops the drag.
+                if this.masks.cancel_drag() {
+                    this.state.update(cx, |s, cx| s.show_live(&[], cx));
+                    cx.notify();
+                    return;
+                }
                 if this.masks.drawing() {
                     this.masks.cancel();
                     cx.notify();
