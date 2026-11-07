@@ -164,8 +164,9 @@ pub fn render_program(
         MaskView::Cut,
         |ctx| ctx.program(t),
     );
+    let unread = pictures.failure();
     pictures.finish();
-    match failed {
+    match failed.or(unread) {
         Some(e) => Err(e),
         None => Ok(frame.unwrap_or_else(|| black(size))),
     }

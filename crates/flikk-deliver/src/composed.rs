@@ -215,6 +215,10 @@ impl Pictures for Originals {
     fn finish(&mut self) {
         self.0.finish();
     }
+
+    fn failure(&mut self) -> Option<String> {
+        self.0.failure()
+    }
 }
 
 /// Composes the frames of `spec`'s range in order.
