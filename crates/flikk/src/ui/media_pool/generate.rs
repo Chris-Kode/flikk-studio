@@ -339,7 +339,8 @@ impl MediaPoolPanel {
     fn generation_action(&self, g: &Generating, cx: &mut Context<Self>) -> Button {
         let id = g.id;
         let running = g.failed.is_none();
-        if running && g.task.can_stop() {
+        // A stopped one keeps its Stop button, held down, until it ends.
+        if running && (g.task.can_stop() || g.stopping()) {
             Button::new(("generation-stop", id as usize))
                 .ghost()
                 .xsmall()
