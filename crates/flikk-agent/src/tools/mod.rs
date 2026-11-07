@@ -36,6 +36,7 @@ use crate::args::{Args, ToolError};
 use crate::bridge::ToolResult;
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
 use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission};
+use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
 use flikk_core::memory::{Recipe, SourceFact, StyleRule};
 use flikk_core::model::Project;
@@ -43,6 +44,58 @@ use flikk_core::services::Services;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Stops what a turn's jobs are doing when the turn is cancelled: every
+/// generation and long wait they started through it. Clones share it.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<Mutex<Stops>>);
+
+#[derive(Default)]
+struct Stops {
+    stopped: bool,
+    tasks: Vec<GenerationTask>,
+    flags: Vec<Arc<AtomicBool>>,
+}
+
+impl Stop {
+    fn stops(&self) -> std::sync::MutexGuard<'_, Stops> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A generation to follow and stop with the rest; stopped already if
+    /// they were.
+    pub fn task(&self) -> GenerationTask {
+        let task = GenerationTask::default();
+        let mut stops = self.stops();
+        if stops.stopped {
+            task.cancel();
+        }
+        stops.tasks.push(task.clone());
+        task
+    }
+
+    /// A flag set when they are stopped, for waits that take one.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        let mut stops = self.stops();
+        let flag = Arc::new(AtomicBool::new(stops.stopped));
+        stops.flags.push(flag.clone());
+        flag
+    }
+
+    /// Stop them all, and any started from now on.
+    pub fn stop(&self) {
+        let mut stops = self.stops();
+        stops.stopped = true;
+        for task in &stops.tasks {
+            task.cancel();
+        }
+        for flag in &stops.flags {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Long-term memory the host was given (the store owns it).
 #[derive(Clone, Debug, Default)]
@@ -65,6 +118,8 @@ pub struct ToolCtx<'a> {
     pub editor: &'a EditorContext,
     pub settings: &'a AgentSettings,
     pub memory: &'a Memory,
+    /// Stops the jobs the calls start, with their turn.
+    pub stop: &'a Stop,
 }
 
 impl ToolCtx<'_> {

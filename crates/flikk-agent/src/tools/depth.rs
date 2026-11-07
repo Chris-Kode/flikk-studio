@@ -15,7 +15,6 @@ use flikk_core::model::{Clip, Project};
 use flikk_core::{EffectId, Time, TimeRange};
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub const TOOLS: [&str; 2] = ["add_depth_effect", "set_depth_focus"];
 
@@ -177,9 +176,9 @@ fn focus(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .to_source(at)
         .ok_or_else(|| ToolError("the clip shows no source there".into()))?;
     let clip = Arc::new(clip.clone());
+    let cancel = ctx.stop.flag();
     let job: Job = Box::new(move || {
         let frame = TimeRange::new(source, source + Time(1));
-        let cancel = AtomicBool::new(false);
         if let Err(e) = service.complete(&item, frame, &|_| {}, &cancel) {
             return JobDone::Done(Done::error(format!("Could not make the depth map: {e}")));
         }

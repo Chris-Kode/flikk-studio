@@ -247,14 +247,17 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let request = parse(ctx.project(), ctx.settings, ctx.services, args)?;
     let services = ctx.services.clone();
     let project = request.grabs_frames().then(|| ctx.project().clone());
-    let job: Job = Box::new(move || match make(&request, project.as_ref(), &services) {
-        Ok(item) => JobDone::Generated {
-            item: Box::new(item),
-            placement: None,
-            summary: summary(&request),
+    let task = ctx.stop.task();
+    let job: Job = Box::new(
+        move || match make(&request, project.as_ref(), &services, &task) {
+            Ok(item) => JobDone::Generated {
+                item: Box::new(item),
+                placement: None,
+                summary: summary(&request),
+            },
+            Err(ToolError(e)) => JobDone::Done(Done::error(e)),
         },
-        Err(ToolError(e)) => JobDone::Done(Done::error(e)),
-    });
+    );
     Ok(Step::Job(job))
 }
 
@@ -265,6 +268,7 @@ pub fn make(
     request: &Request,
     project: Option<&Project>,
     services: &Services,
+    task: &GenerationTask,
 ) -> ToolResultOf<MediaItem> {
     let (request, grabs) = match request {
         Request::Provider { request, grabs } => (request, grabs),
@@ -279,9 +283,8 @@ pub fn make(
         };
         video::grab_all(project, services, grabs).map_err(ToolError)?;
     }
-    let task = GenerationTask::default();
     let made = generation
-        .generate(request, &paths::generated(), &task)
+        .generate(request, &paths::generated(), task)
         .map_err(|e| ToolError(error_text(&e)))?;
     Ok(cloud::media_item(&made, services.media.as_deref()))
 }

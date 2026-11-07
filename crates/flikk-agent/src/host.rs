@@ -21,15 +21,16 @@
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::groups::{self, Usage};
-use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
+use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
 use crate::{prompt, recipes, session};
-use flikk_core::ChangeSetId;
 use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
 use flikk_core::bus::{AgentRole, Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::command::ToolCategory;
 use flikk_core::memory::{Recipe, SourceFact, StyleRule};
+use flikk_core::model::MediaItem;
 use flikk_core::services::Services;
+use flikk_core::{ChangeSetId, ProjectId};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ struct External {
     /// Editor context and settings of the latest turn, used for their calls.
     context: EditorContext,
     settings: AgentSettings,
+    /// Never stopped: a client stops its own calls.
+    stop: Stop,
 }
 
 /// A memory, deliver or generate request waiting for the user. Approving
@@ -75,6 +78,10 @@ struct Queued {
 }
 
 struct Turn {
+    /// Numbers turns, so a job of an earlier one is told apart.
+    id: u64,
+    /// Stops what its jobs are doing when it is cancelled.
+    stop: Stop,
     author: Author,
     backend: Backend,
     project: flikk_core::ProjectId,
@@ -101,8 +108,18 @@ struct Turn {
     web_calls: HashMap<String, u64>,
 }
 
-/// A finished job, with the call id its start was shown under.
-type JobResult = (Origin, Reply, String, Value, JobDone, u64);
+/// A finished job: who started it, in which turn and on which project, and
+/// the call id its start was shown under.
+struct JobResult {
+    origin: Origin,
+    turn: Option<u64>,
+    project: ProjectId,
+    reply: Reply,
+    tool: String,
+    args: Value,
+    out: JobDone,
+    call: u64,
+}
 
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
@@ -127,6 +144,10 @@ pub struct AgentHost {
     external: External,
     /// Id of the next call shown while it runs.
     next_call: u64,
+    next_turn: u64,
+    /// What jobs made for a project that was no longer open when they
+    /// finished, for the editor to keep for it.
+    orphans: Vec<(ProjectId, MediaItem)>,
 }
 
 impl Default for AgentHost {
@@ -154,6 +175,8 @@ impl AgentHost {
             outcomes: Vec::new(),
             external: External::default(),
             next_call: 1,
+            next_turn: 1,
+            orphans: Vec::new(),
         }
     }
 
@@ -221,16 +244,24 @@ impl AgentHost {
         });
     }
 
-    /// Stop the turn: kill the subprocess. The partial change set is still
-    /// offered for review on the next pump.
+    /// Stop the turn: kill the subprocess and stop the generations and
+    /// waits its jobs started. The partial change set is still offered for
+    /// review on the next pump.
     pub fn cancel(&mut self) {
         self.queued = None;
         if let Some(turn) = self.turn.as_mut() {
             turn.cancelled = true;
+            turn.stop.stop();
             if let Some(r) = &turn.running {
                 r.kill();
             }
         }
+    }
+
+    /// What jobs made for projects that were closed before they finished,
+    /// with the project each belongs to.
+    pub fn take_orphans(&mut self) -> Vec<(ProjectId, MediaItem)> {
+        std::mem::take(&mut self.orphans)
     }
 
     pub fn pending_approvals(&self) -> &[PendingApproval] {
@@ -383,7 +414,11 @@ impl AgentHost {
             label: recipe.map_or_else(|| "Thinking".to_owned(), |r| format!("Running /{r}")),
             fraction: None,
         });
+        let id = self.next_turn;
+        self.next_turn += 1;
         self.turn = Some(Turn {
+            id,
+            stop: Stop::default(),
             author,
             backend,
             project: project_id,
@@ -615,6 +650,7 @@ impl AgentHost {
                         editor: &turn.context,
                         settings: &turn.settings,
                         memory: &self.memory,
+                        stop: &turn.stop,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
@@ -622,7 +658,8 @@ impl AgentHost {
                         }
                         Step::Job(job) => {
                             turn.jobs += 1;
-                            self.spawn_job(origin, reply, tool, args, job);
+                            let started = (Some(turn.id), bus.project().id);
+                            self.spawn_job(origin, started, reply, tool, args, job);
                         }
                     }
                 }
@@ -639,6 +676,7 @@ impl AgentHost {
                         editor: &self.external.context,
                         settings: &self.external.settings,
                         memory: &self.memory,
+                        stop: &self.external.stop,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
@@ -646,7 +684,8 @@ impl AgentHost {
                         }
                         Step::Job(job) => {
                             self.external.jobs += 1;
-                            self.spawn_job(origin, reply, tool, args, job);
+                            let started = (None, bus.project().id);
+                            self.spawn_job(origin, started, reply, tool, args, job);
                         }
                     }
                 }
@@ -654,10 +693,12 @@ impl AgentHost {
         }
     }
 
-    /// Run `job` off-thread, shown in the chat while it runs.
+    /// Run `job` off-thread, shown in the chat while it runs. `from` is
+    /// the turn (for the editor's own calls) and project it started in.
     fn spawn_job(
         &mut self,
         origin: Origin,
+        from: (Option<u64>, ProjectId),
         reply: Reply,
         tool: String,
         args: Value,
@@ -670,26 +711,64 @@ impl AgentHost {
             entry: started(tool.clone(), args.clone(), String::new(), call),
         });
         let tx = self.jobs_tx.clone();
+        let (turn, project) = from;
         std::thread::spawn(move || {
             let out = job();
-            let _ = tx.send((origin, reply, tool, args, out, call));
+            let _ = tx.send(JobResult {
+                origin,
+                turn,
+                project,
+                reply,
+                tool,
+                args,
+                out,
+                call,
+            });
         });
     }
 
     fn drain_jobs(&mut self, bus: &mut CommandBus, services: &Services) {
         let results: Vec<_> = self.jobs_rx.try_iter().collect();
-        for (origin, reply, tool, args, out, call) in results {
-            match origin {
+        for JobResult {
+            origin,
+            turn,
+            project,
+            reply,
+            tool,
+            args,
+            out,
+            call,
+        } in results
+        {
+            // A job of an earlier turn (cancelled, or ended) is not this
+            // one's: it neither counts here nor acts for it.
+            let live = match origin {
                 Origin::Turn => {
-                    if let Some(turn) = self.turn.as_mut() {
-                        turn.jobs = turn.jobs.saturating_sub(1);
+                    let live = self.turn.as_ref().is_some_and(|t| Some(t.id) == turn);
+                    if live && let Some(t) = self.turn.as_mut() {
+                        t.jobs = t.jobs.saturating_sub(1);
                     }
+                    live
                 }
                 Origin::External(_) => {
                     self.external.jobs = self.external.jobs.saturating_sub(1);
                     self.external.last_call = Some(Instant::now());
+                    true
                 }
+            };
+            // The project it started on was closed: what it made is kept
+            // for that project, and nothing touches the open one.
+            if bus.project().id != project {
+                let done = self.orphan(project, out);
+                self.finish_call(origin, reply, tool, args, done, Some(call));
+                continue;
             }
+            let turn_author = || {
+                self.turn
+                    .as_ref()
+                    .filter(|t| live && !t.cancelled)
+                    .map(|t| t.author.clone())
+            };
             let done = match out {
                 JobDone::Done(done) => done,
                 JobDone::Generated {
@@ -698,11 +777,7 @@ impl AgentHost {
                     summary,
                 } => {
                     let author = match origin {
-                        Origin::Turn => self
-                            .turn
-                            .as_ref()
-                            .filter(|t| !t.cancelled)
-                            .map(|t| t.author.clone()),
+                        Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::generate::finish(
@@ -716,11 +791,7 @@ impl AgentHost {
                 JobDone::Fetched { item, done } => tools::web::finish(bus, *item, *done),
                 JobDone::Respoken { item, fix, summary } => {
                     let author = match origin {
-                        Origin::Turn => self
-                            .turn
-                            .as_ref()
-                            .filter(|t| !t.cancelled)
-                            .map(|t| t.author.clone()),
+                        Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::respeak::finish(bus, author.as_ref(), *item, &fix, &summary)
@@ -734,7 +805,7 @@ impl AgentHost {
                         Origin::Turn => {
                             self.turn
                                 .as_ref()
-                                .filter(|t| !t.cancelled)
+                                .filter(|t| live && !t.cancelled)
                                 .map(|turn| ToolCtx {
                                     bus: &mut *bus,
                                     services,
@@ -744,6 +815,7 @@ impl AgentHost {
                                     editor: &turn.context,
                                     settings: &turn.settings,
                                     memory: &self.memory,
+                                    stop: &turn.stop,
                                 })
                         }
                         Origin::External(_) => Some(ToolCtx {
@@ -755,6 +827,7 @@ impl AgentHost {
                             editor: &self.external.context,
                             settings: &self.external.settings,
                             memory: &self.memory,
+                            stop: &self.external.stop,
                         }),
                     };
                     match ctx {
@@ -775,6 +848,27 @@ impl AgentHost {
                 }
             };
             self.finish_call(origin, reply, tool, args, done, Some(call));
+        }
+    }
+
+    /// What a job came to when the project it started on is no longer
+    /// open: what it made is kept for that project, anything else dropped.
+    fn orphan(&mut self, project: ProjectId, out: JobDone) -> Done {
+        let kept = "Made it, but its project was closed meanwhile; it goes into that \
+                    project's media pool when it is opened again.";
+        match out {
+            JobDone::Done(done) => done,
+            JobDone::Generated { item, .. } | JobDone::Respoken { item, .. } => {
+                self.orphans.push((project, *item));
+                Done::text("Kept for its project", kept)
+            }
+            JobDone::Fetched { item, .. } => {
+                self.orphans.push((project, *item));
+                Done::text("Kept for its project", kept)
+            }
+            JobDone::Propose { .. } => {
+                Done::error("Its project was closed before the change could be proposed.")
+            }
         }
     }
 

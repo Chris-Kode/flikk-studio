@@ -175,8 +175,8 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail(unavailable(&request));
     }
     let media = ctx.services.media.clone();
+    let task = ctx.stop.task();
     let job: Job = Box::new(move || {
-        let task = cloud::GenerationTask::default();
         match generation.generate(&request, &flikk_core::paths::generated(), &task) {
             Ok(made) => JobDone::Generated {
                 item: Box::new(flikk_core::cloud::media_item(&made, media.as_deref())),

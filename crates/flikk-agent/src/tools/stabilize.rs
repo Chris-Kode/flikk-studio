@@ -11,7 +11,6 @@ use flikk_core::command::{Command, ToolCategory};
 use flikk_core::model::Project;
 use flikk_core::stabilize::{self, Plan, Stabilization, StabilizeCrop, StabilizeMode};
 use serde_json::{Value, json};
-use std::sync::atomic::AtomicBool;
 
 pub fn specs() -> Vec<ToolSpec> {
     let ids = json!({ "type": "array", "items": { "type": "string" }, "description": "More clip ids, changed alike" });
@@ -129,8 +128,8 @@ pub fn get_shake(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             "Stabilization is not available here (no media engine).".into(),
         ));
     };
+    let stop = ctx.stop.flag();
     let job: Job = Box::new(move || {
-        let never = AtomicBool::new(false);
         let rows: Vec<Value> = ids
             .iter()
             .map(|id| {
@@ -146,7 +145,7 @@ pub fn get_shake(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     row["error"] = json!("not a video clip from the pool");
                     return row;
                 };
-                let path = match stabilizer.complete(item, &|_| {}, &never) {
+                let path = match stabilizer.complete(item, &|_| {}, &stop) {
                     Ok(p) => p,
                     Err(e) => {
                         row["error"] = json!(e.to_string());
