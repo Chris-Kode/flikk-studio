@@ -53,6 +53,10 @@ pub struct SettingsPanel {
     /// generation needs: looked up when the panel opens and when the switch
     /// is clicked.
     chatgpt: Option<String>,
+    /// The settings the fields were last filled from: a change made
+    /// elsewhere since goes into them, so a stale field cannot write the
+    /// old value back.
+    shown: AgentSettings,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -155,7 +159,49 @@ impl SettingsPanel {
             tile,
             language,
             chatgpt: image::subscription(),
+            shown: settings,
             _subscriptions,
+        }
+    }
+
+    /// Put changes made elsewhere into the instructions, sliders and
+    /// language.
+    fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.state.read(cx).settings.clone();
+        if settings == self.shown {
+            return;
+        }
+        let old = std::mem::replace(&mut self.shown, settings.clone());
+        if settings.instructions != old.instructions
+            && self.instructions.read(cx).value().as_ref() != settings.instructions.as_str()
+        {
+            let text = settings.instructions.clone();
+            self.instructions
+                .update(cx, |i, cx| i.set_value(text, window, cx));
+        }
+        for (slider, new, old) in [
+            (
+                &self.frames,
+                settings.vision.frames_per_collage,
+                old.vision.frames_per_collage,
+            ),
+            (
+                &self.tile,
+                settings.vision.tile_width,
+                old.vision.tile_width,
+            ),
+        ] {
+            if new != old {
+                slider.update(cx, |s, cx| s.set_value(new as f32, window, cx));
+            }
+        }
+        if settings.language != old.language {
+            let ix = LANGUAGES
+                .iter()
+                .position(|(_, code)| *code == settings.language.as_deref())
+                .unwrap_or(0);
+            self.language
+                .update(cx, |s, cx| s.set_selected_index(Some(ix), window, cx));
         }
     }
 
@@ -419,6 +465,7 @@ impl SettingsPanel {
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_models(window, cx);
+        self.sync_fields(window, cx);
         let settings = self.state.read(cx).settings.clone();
         let value = |state: &Entity<SliderState>| {
             (state.read(cx).value().start().round() as u32).to_string()

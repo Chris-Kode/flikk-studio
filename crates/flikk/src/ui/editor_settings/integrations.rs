@@ -223,10 +223,17 @@ impl IntegrationsTab {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (ix, &provider) in PROVIDERS.iter().enumerate() {
             let status = self.state.read(cx).provider_status(provider);
-            // A key read after the page opened is checked as it shows.
+            // A key read after the page opened is checked as it shows, once:
+            // renders before the deferred check runs queue it again.
             if status.has_key() && status.check == Check::Unchecked {
                 let state = self.state.clone();
-                cx.defer(move |cx| state.update(cx, |s, cx| s.check_account(provider, cx)));
+                cx.defer(move |cx| {
+                    state.update(cx, |s, cx| {
+                        if s.provider_status(provider).check == Check::Unchecked {
+                            s.check_account(provider, cx)
+                        }
+                    })
+                });
             }
             if status.key != Some(KeySource::Stored) {
                 self.replacing[ix] = false;

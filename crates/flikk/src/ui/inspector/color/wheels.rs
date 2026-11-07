@@ -270,6 +270,11 @@ fn listen(
             return;
         }
         moved.update(cx, |ui, cx| {
+            // The release was missed: the drag ends uncommitted.
+            if ev.pressed_button != Some(MouseButton::Left) {
+                ui.cancel_drag(cx);
+                return;
+            }
             let e = edit(ui.shown(), ev.position, on_bar);
             ui.preview(e, cx);
             cx.notify();

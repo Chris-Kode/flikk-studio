@@ -12,9 +12,10 @@ use crate::ui::kit::{Button, IconName, NumberField, Segmented, Switch, h_flex, v
 use crate::ui::mixer::clip::ClipAudioFx;
 use flikk_core::analysis::Loudness;
 use flikk_core::command::Command;
-use flikk_core::model::{Clip, Ducking};
+use flikk_core::model::{Clip, Ducking, Project};
 use flikk_core::{ClipId, Time, TimeRange};
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 impl InspectorPanel {
@@ -62,7 +63,7 @@ impl InspectorPanel {
     /// request, and normalizing it to the targets.
     fn loudness_view(&self, cx: &mut Context<Self>) -> Div {
         let scope = self.loudness_scope(cx);
-        let reading = combined(&scope, &self.loudness);
+        let reading = combined(&scope, &self.measured(&scope, cx));
         let has_service = self.state.read(cx).services.analysis.is_some();
         let measure = Button::new("measure")
             .ghost()
@@ -133,9 +134,8 @@ impl InspectorPanel {
         let jobs: Vec<(ClipId, PathBuf, TimeRange)> = scope
             .iter()
             .filter_map(|c| {
-                let path = project.media(c.media()?)?.path.clone();
-                let start = c.to_source(c.start)?;
-                Some((c.id, path, TimeRange::new(start, start + c.duration)))
+                let (path, range) = span(project, c)?;
+                Some((c.id, path, range))
             })
             .collect();
         self.measuring = true;
@@ -146,7 +146,8 @@ impl InspectorPanel {
                 .spawn(async move {
                     jobs.into_iter()
                         .filter_map(|(id, path, range)| {
-                            analysis.loudness(&path, Some(range)).ok().map(|l| (id, l))
+                            let l = analysis.loudness(&path, Some(range)).ok()?;
+                            Some((id, (path, range, l)))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -161,18 +162,32 @@ impl InspectorPanel {
         .detach();
     }
 
+    /// The readings still true of `clips`: measured on the span each
+    /// covers now.
+    fn measured(&self, clips: &[Clip], cx: &App) -> HashMap<ClipId, Loudness> {
+        let project = self.project(cx);
+        clips
+            .iter()
+            .filter_map(|c| {
+                let (path, range, l) = self.loudness.get(&c.id)?;
+                (span(project, c)? == (path.clone(), *range)).then_some((c.id, *l))
+            })
+            .collect()
+    }
+
     /// One batch of `SetGain` that moves the timeline as a whole.
     fn normalize(&mut self, cx: &mut Context<Self>) {
         let target = self.lufs_target.read(cx).value() as f32;
         let peak = self.peak_target.read(cx).value() as f32;
         let scope = self.loudness_scope(cx);
-        let Some(all) = combined(&scope, &self.loudness) else {
+        let measured = self.measured(&scope, cx);
+        let Some(all) = combined(&scope, &measured) else {
             return;
         };
         let delta = (target - all.integrated_lufs).min(peak - all.true_peak_db);
         let commands = scope
             .iter()
-            .filter(|c| self.loudness.contains_key(&c.id))
+            .filter(|c| measured.contains_key(&c.id))
             .map(|c| Command::SetGain {
                 clip: c.id,
                 db: c.audio.gain_db + delta,
@@ -243,12 +258,16 @@ impl InspectorPanel {
     }
 }
 
+/// The source file and range a clip plays, which its loudness is measured on.
+fn span(project: &Project, c: &Clip) -> Option<(PathBuf, TimeRange)> {
+    let path = project.media(c.media()?)?.path.clone();
+    let start = c.to_source(c.start)?;
+    Some((path, TimeRange::new(start, start + c.duration)))
+}
+
 /// Duration-weighted power mean of the clips' loudness plus their gain, and
 /// the highest true peak. `None` until every clip is measured.
-fn combined(
-    clips: &[Clip],
-    measured: &std::collections::HashMap<ClipId, Loudness>,
-) -> Option<Loudness> {
+fn combined(clips: &[Clip], measured: &HashMap<ClipId, Loudness>) -> Option<Loudness> {
     if clips.is_empty() {
         return None;
     }

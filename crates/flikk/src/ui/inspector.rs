@@ -33,20 +33,22 @@ use flikk_core::agent::Workspace;
 use flikk_core::analysis::Loudness;
 use flikk_core::command::{Command, Edge};
 use flikk_core::model::{Clip, ClipContent, Ducking, Project, Property, Track};
-use flikk_core::{ClipId, Time};
+use flikk_core::{ClipId, Time, TimeRange};
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use param::{Key, Param, Target};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 pub struct InspectorPanel {
     state: Entity<EditorState>,
     params: HashMap<Key, Param>,
     /// Clip whose grade "paste" applies to the selection.
     copied_grade: Option<ClipId>,
-    /// Integrated loudness and true peak per clip, before clip gain.
-    loudness: HashMap<ClipId, Loudness>,
+    /// Integrated loudness and true peak per clip, before clip gain, with
+    /// the source span measured: a trim or a new source makes it stale.
+    loudness: HashMap<ClipId, (PathBuf, TimeRange, Loudness)>,
     measuring: bool,
     lufs_target: Entity<NumberFieldState>,
     peak_target: Entity<NumberFieldState>,

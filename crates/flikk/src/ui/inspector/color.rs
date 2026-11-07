@@ -174,9 +174,12 @@ impl InspectorPanel {
         let clip = clips[0].clone();
         let g = clip.grade.clone();
         let ids: Vec<ClipId> = clips.iter().map(|c| c.id).collect();
+        // A copied clip since deleted has nothing to paste (until an undo
+        // brings it back).
         let source = self
             .copied_grade
-            .filter(|from| ids.iter().any(|id| id != from));
+            .filter(|from| ids.iter().any(|id| id != from))
+            .filter(|from| self.project(cx).timeline.clip(*from).is_some());
         let references = self.references(&ids, cx);
         let matching = ui.read(cx).matching;
         let can_match =
@@ -498,28 +501,40 @@ impl InspectorPanel {
                 Some((clip.grade.clone(), frame))
             };
             let Some((ref_grade, ref_frame)) = frame_of(reference) else {
-                return Vec::new();
+                return (None, Vec::new());
             };
-            targets
+            let matched = targets
                 .into_iter()
                 .filter_map(|id| {
                     let (current, frame) = frame_of(id)?;
                     let grade =
                         flikk_core::scopes::match_frames(&ref_frame, &ref_grade, &frame, &current);
-                    Some(Command::SetGrade {
-                        clips: vec![id],
-                        grade,
-                    })
+                    Some((id, current, grade))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (Some(ref_grade), matched)
         });
         cx.spawn(async move |this, cx| {
-            let commands = task.await;
+            let (ref_grade, matched) = task.await;
             let _ = this.update(cx, |this, cx| {
                 ui.update(cx, |ui, cx| {
                     ui.matching = false;
                     cx.notify();
                 });
+                // Grades changed while measuring were not the ones matched
+                // under: those keep the change.
+                let project = this.project(cx);
+                let grade_of = |id| project.timeline.clip(id).map(|(_, c)| &c.grade);
+                let same_reference =
+                    ref_grade.is_some() && grade_of(reference) == ref_grade.as_ref();
+                let commands = matched
+                    .into_iter()
+                    .filter(|(id, seen, _)| same_reference && grade_of(*id) == Some(seen))
+                    .map(|(id, _, grade)| Command::SetGrade {
+                        clips: vec![id],
+                        grade,
+                    })
+                    .collect();
                 this.run(commands, "match_grade", cx);
             });
         })

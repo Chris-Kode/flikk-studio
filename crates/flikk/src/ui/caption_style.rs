@@ -549,14 +549,32 @@ struct PendingColor {
 
 impl PendingColor {
     /// Save the colour, unless its style is no longer at its index (the
-    /// presets reloaded or changed since); then it is dropped.
+    /// presets reloaded or changed since); then it is dropped. A scrub
+    /// previewed meanwhile keeps showing.
     fn save(self, state: &Entity<EditorState>, cx: &mut App) {
         let (paint, color) = (self.paint, self.color);
         state.update(cx, |s, cx| {
             let same = s.presets_version == self.version
                 && s.presets.caption_styles.get(self.style).map(|p| &p.name) == Some(&self.name);
-            if same {
-                s.edit_caption_style(self.style, |style| paint.set(style, color), cx);
+            if !same {
+                return;
+            }
+            let live = {
+                let shown = s.caption_styles();
+                shown
+                    .iter()
+                    .zip(&s.presets.caption_styles)
+                    .position(|(shown, saved)| shown != saved)
+                    .map(|i| (i, shown[i].clone()))
+            };
+            s.edit_caption_style(self.style, |style| paint.set(style, color), cx);
+            if let Some((i, mut style)) = live {
+                if i == self.style {
+                    paint.set(&mut style, color);
+                }
+                if s.presets.caption_styles.get(i) != Some(&style) {
+                    s.show_caption_style(i, style, cx);
+                }
             }
         });
     }

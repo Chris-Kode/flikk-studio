@@ -148,6 +148,15 @@ impl GradeUi {
         }
     }
 
+    /// Drop a curve or wheel drag whose release was missed (let go outside
+    /// the window, or while the controls were not drawn), uncommitted.
+    pub fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        self.curve_drag = None;
+        self.wheel_drag = None;
+        self.end_stale_preview(cx);
+        cx.notify();
+    }
+
     /// Commands that apply `edit` to the target's grade(s).
     fn commands(&self, edit: &dyn Fn(&mut Grade), cx: &App) -> (Vec<Command>, &'static str) {
         let project = self.state.read(cx).bus.project();

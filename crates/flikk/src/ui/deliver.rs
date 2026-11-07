@@ -80,6 +80,8 @@ pub struct DeliverPanel {
     custom: [Entity<InputState>; 4],
     /// Sequence size the custom width and height were last filled from.
     sequence_size: (u32, u32),
+    /// Sample rate the format labels were last written with.
+    sample_rate: u32,
     /// The output the user chose; without one it follows the project name
     /// in the default folder. Each render writes the first free name from it.
     output: Option<PathBuf>,
@@ -126,26 +128,29 @@ impl DeliverPanel {
         let mut _subscriptions = vec![
             cx.observe_in(&state, window, |this: &mut Self, state, window, cx| {
                 let seq = &state.read(cx).bus.project().timeline.settings;
-                let size = (seq.width, seq.height);
+                let (size, rate) = ((seq.width, seq.height), seq.sample_rate);
                 if size != this.sequence_size {
                     this.sequence_size = size;
                     for (input, v) in this.custom.iter().zip([size.0, size.1]) {
                         input.update(cx, |i, cx| i.set_value(v.to_string(), window, cx));
                     }
                 }
+                if rate != this.sample_rate {
+                    this.sample_rate = rate;
+                    this.relabel_formats(window, cx);
+                }
                 cx.notify();
             }),
+            // By row, not label: the labels name the sample rate, which can
+            // change while the list shows.
             cx.subscribe(
                 &format_select,
-                |this, _, event: &SelectEvent<SharedString>, cx| {
-                    let SelectEvent::Confirm(label) = event;
-                    let seq = this.sequence(cx);
+                |this, select, _: &SelectEvent<SharedString>, cx| {
                     let card = this.card_of(this.preset);
-                    let picked = this.cards[card]
-                        .presets
-                        .iter()
-                        .copied()
-                        .find(|&ix| format_label(&this.presets[ix], &seq) == *label);
+                    let picked = select
+                        .read(cx)
+                        .selected_index()
+                        .and_then(|row| this.cards[card].presets.get(row).copied());
                     if let Some(ix) = picked {
                         this.select_preset(ix, cx);
                     }
@@ -177,6 +182,7 @@ impl DeliverPanel {
             format_select,
             custom,
             sequence_size: (seq.width, seq.height),
+            sample_rate: seq.sample_rate,
             output: None,
             loudness: false,
             burn_captions: true,
@@ -226,6 +232,21 @@ impl DeliverPanel {
             s.set_selected_index(Some(0), window, cx);
         });
         self.select_preset(members[0], cx);
+    }
+
+    /// Write the chosen card's format labels anew, keeping the pick.
+    fn relabel_formats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self.sequence(cx);
+        let members = &self.cards[self.card_of(self.preset)].presets;
+        let formats = members
+            .iter()
+            .map(|&ix| format_label(&self.presets[ix], &seq))
+            .collect();
+        let row = members.iter().position(|&ix| ix == self.preset);
+        self.format_select.update(cx, |s, cx| {
+            s.set_items(formats, window, cx);
+            s.set_selected_index(row, window, cx);
+        });
     }
 
     fn set_status(&self, message: impl Into<String>, cx: &mut Context<Self>) {

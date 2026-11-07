@@ -84,6 +84,7 @@ pub struct SelectState<T: SelectItem> {
     trigger_width: Pixels,
     scroll: UniformListScrollHandle,
     _query: Subscription,
+    _focus_out: Subscription,
 }
 
 impl<T: SelectItem> EventEmitter<SelectEvent<T>> for SelectState<T> {}
@@ -101,9 +102,18 @@ impl<T: SelectItem> SelectState<T> {
                 this.refilter(cx);
             }
         });
+        let list_focus = cx.focus_handle();
+        // Focus leaves the list when it is closed, disabled or no longer
+        // drawn; it is closed then, so it does not reopen by itself later.
+        // Focus stays where it went.
+        let _focus_out = cx.on_focus_out(&list_focus, window, |this, _, _, cx| {
+            if std::mem::take(&mut this.open) {
+                cx.notify();
+            }
+        });
         Self {
             focus_handle: cx.focus_handle(),
-            list_focus: cx.focus_handle(),
+            list_focus,
             selected: selected.filter(|&ix| ix < items.len()),
             items,
             searchable: false,
@@ -114,6 +124,7 @@ impl<T: SelectItem> SelectState<T> {
             trigger_width: px(0.),
             scroll: UniformListScrollHandle::new(),
             _query,
+            _focus_out,
         }
     }
 

@@ -443,6 +443,7 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
         return;
     }
     let settings = state.read(cx).bus.project().timeline.settings.clone();
+    let opened = settings.clone();
     let form = cx.new(|_| ProjectForm {
         state: state.clone(),
         place: None,
@@ -450,7 +451,7 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
     });
     let state = state.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
-        let (form, state) = (form.clone(), state.clone());
+        let (form, state, opened) = (form.clone(), state.clone(), opened.clone());
         let ready = form.read(cx).ready(cx);
         dialog
             .title("Project settings")
@@ -458,9 +459,21 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
             .pt(px(16.))
             .child(form.clone())
             .confirm("Apply", move |_, cx| {
-                let after = form.read(cx).settings.clone();
+                let picked = form.read(cx).settings.clone();
                 state.update(cx, |s, cx| {
                     let before = s.bus.project().timeline.settings.clone();
+                    // Only what was changed in the form: the rest keeps
+                    // changes made elsewhere while it was open.
+                    let mut after = before.clone();
+                    if (picked.width, picked.height) != (opened.width, opened.height) {
+                        (after.width, after.height) = (picked.width, picked.height);
+                    }
+                    if picked.rate != opened.rate {
+                        after.rate = picked.rate;
+                    }
+                    if picked.sample_rate != opened.sample_rate {
+                        after.sample_rate = picked.sample_rate;
+                    }
                     let mut commands = Vec::new();
                     if (before.width, before.height) != (after.width, after.height) {
                         commands.push(Command::SetFormat {
