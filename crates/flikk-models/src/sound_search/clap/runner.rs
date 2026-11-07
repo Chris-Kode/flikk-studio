@@ -32,6 +32,10 @@ impl SoundSearch for Clap {
 
     fn embed(&self, windows: &[&[f32]]) -> Result<Vec<Vec<f32>>> {
         let mut session = self.audio.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *session = None;
+        }
         if session.is_none() {
             *session = Some(onnx::session(&AUDIO.locate()?, AUDIO.what)?);
         }
@@ -40,6 +44,10 @@ impl SoundSearch for Clap {
 
     fn describe(&self, text: &str) -> Result<Vec<f32>> {
         let mut loaded = self.text.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *loaded = None;
+        }
         if loaded.is_none() {
             *loaded = Some((
                 onnx::session(&TEXT.locate()?, TEXT.what)?,

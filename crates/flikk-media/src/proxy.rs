@@ -138,19 +138,34 @@ pub(crate) fn ensure_proxy(
                 progress((us / total_us).clamp(0.0, 0.99) as f32);
             }
         }
-        if let Some(message) = process.finish() {
-            return Err(ServiceError(format!(
+        match process.finish() {
+            Some(message) => Err(ServiceError(format!(
                 "proxy {}: {message}",
                 item.path.display()
-            )));
+            ))),
+            None => Ok(()),
         }
-        std::fs::rename(&tmp, &out).map_err(|e| err("proxy", e))
     };
-    let result = run(command(true)).or_else(|_| {
-        let _ = std::fs::remove_file(&tmp);
-        progress(0.0);
-        run(command(false))
-    });
+    // Only an encode that failed is tried again in software: a rename that
+    // failed would fail the same way after it.
+    let result = run(command(true))
+        .or_else(|_| {
+            let _ = std::fs::remove_file(&tmp);
+            progress(0.0);
+            run(command(false))
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, &out).or_else(|e| {
+                // Another build of the same file got there first (on
+                // Windows, a proxy being played can't be replaced).
+                if out.is_file() {
+                    let _ = std::fs::remove_file(&tmp);
+                    Ok(())
+                } else {
+                    Err(err("proxy", e))
+                }
+            })
+        });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

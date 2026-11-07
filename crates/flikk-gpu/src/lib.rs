@@ -31,10 +31,11 @@ use flikk_core::services::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 use wrap::Wrapped;
 
@@ -239,7 +240,7 @@ impl Gpu {
 
     /// The engine state, with the program cache trimmed (between calls, so
     /// a chain's programs stay put while it runs).
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.programs.len() >= MAX_PROGRAMS {
             state.programs.clear();
@@ -248,12 +249,17 @@ impl Gpu {
     }
 
     /// Compile `asset` into the cache (once per key, on a thread with room
-    /// for the compiler, see [`COMPILE_STACK`]); its error otherwise.
-    fn program(&self, state: &mut State, asset: &FxAsset) -> Result<u64, String> {
+    /// for the compiler, see [`COMPILE_STACK`]); its key or its error, and
+    /// the engine state locked.
+    fn program(&self, asset: &FxAsset) -> (MutexGuard<'_, State>, Result<u64, String>) {
         let key = wrap::program_key(asset);
+        let state = self.lock();
         if let Some(cached) = state.programs.get(&key) {
-            return cached.as_ref().map(|_| key).map_err(Clone::clone);
+            let found = cached.as_ref().map(|_| key).map_err(Clone::clone);
+            return (state, found);
         }
+        // Compiled without the lock, so other batches go on meanwhile.
+        drop(state);
         // A compiler thread that could not start is not cached, nor is a
         // failure on a lost device: neither is the shader's fault.
         let compiled = std::thread::scope(|scope| {
@@ -267,16 +273,24 @@ impl Gpu {
                     .join()
                     .unwrap_or_else(|_| Err("the shader compiler crashed".into())),
             )
-        })?;
+        });
+        // Not trimmed, so the program is still there for the caller.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let compiled = match compiled {
+            Ok(compiled) => compiled,
+            Err(e) => return (state, Err(e)),
+        };
         if let Err(e) = &compiled
             && self.is_lost()
         {
-            return Err(e.clone());
+            return (state, Err(e.clone()));
         }
-        match state.programs.entry(key).or_insert(compiled) {
+        // Compiled twice at once: the first one in stays.
+        let found = match state.programs.entry(key).or_insert(compiled) {
             Ok(_) => Ok(key),
             Err(e) => Err(e.clone()),
-        }
+        };
+        (state, found)
     }
 
     fn compile(&self, asset: &FxAsset) -> Result<Program, String> {
@@ -394,52 +408,64 @@ impl Gpu {
         } else {
             OUT_FORMAT
         };
-        self.pipeline(&mut program, format);
+        let built = self.pipeline(&mut program, format).map(|_| ());
+        // The shader's own error says more than its pipeline's.
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(format!("the GPU rejected the shader: {e}"));
         }
+        built?;
         Ok(program)
     }
 
+    /// `program`'s pipeline drawing into `format`, built the first time;
+    /// the GPU's error when it rejects it, not kept, so it is tried again.
     fn pipeline<'p>(
         &self,
         program: &'p mut Program,
         format: wgpu::TextureFormat,
-    ) -> &'p wgpu::RenderPipeline {
+    ) -> Result<&'p wgpu::RenderPipeline, String> {
         let Program {
             module,
             layout,
             pipelines,
             ..
         } = program;
-        pipelines.entry(format).or_insert_with(|| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("flikk-gpu program"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: &self.vertex,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-        })
+        let slot = match pipelines.entry(format) {
+            Entry::Occupied(built) => return Ok(built.into_mut()),
+            Entry::Vacant(slot) => slot,
+        };
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("flikk-gpu program"),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &self.vertex,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            return Err(format!("the GPU rejected the shader: {e}"));
+        }
+        Ok(slot.insert(pipeline))
     }
 
     /// A pooled texture usable as a render target and a sampled input.
@@ -630,10 +656,7 @@ impl FxService for GpuFx {
     fn check(&self, asset: &FxAsset) -> ServiceResult<()> {
         asset.validate().map_err(ServiceError)?;
         let gpu = self.gpu()?;
-        let mut state = gpu.lock();
-        gpu.program(&mut state, asset)
-            .map(|_| ())
-            .map_err(ServiceError)
+        gpu.program(asset).1.map(|_| ()).map_err(ServiceError)
     }
 
     fn batch(&self) -> Box<dyn FxBatch + '_> {

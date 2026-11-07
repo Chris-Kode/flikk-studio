@@ -205,15 +205,16 @@ impl Batch {
     ) -> ServiceResult<()> {
         expect_kind(call.asset, kind)?;
         let fx = self.fx.clone();
-        let mut state = fx.lock();
-        let key = fx
-            .program(&mut state, call.asset)
-            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
+        let (mut state, key) = fx.program(call.asset);
+        let key = key.map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
         let images = fx.images(&mut state, call);
         let Some(Ok(program)) = state.programs.get_mut(&key) else {
             return Err(ServiceError("program evicted mid-call".into()));
         };
-        let pipeline = fx.pipeline(program, target.format()).clone();
+        let pipeline = fx
+            .pipeline(program, target.format())
+            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?
+            .clone();
         let layout = program.bind_layout.clone();
         let depth_binding = program.wrapped.depth;
         let clock = Clock::new(call, target.width(), target.height());

@@ -64,6 +64,10 @@ impl DepthEstimator for DepthAnything {
         let input = pixels(picture, w, h)?;
         let sizes = [("batch_size", 1), ("height", h as i64), ("width", w as i64)];
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // Its file was deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            sessions.forget();
+        }
         sessions.run(&MODEL_FILE.locate()?, MODEL_FILE.what, &sizes, |session| {
             let input = TensorRef::from_array_view(([1, 3, h, w], &input[..]))
                 .map_err(|e| anyhow!("{e}"))?;

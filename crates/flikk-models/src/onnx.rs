@@ -58,6 +58,12 @@ impl GpuSessions {
         }
     }
 
+    /// Let go of every session, as when its model was deleted.
+    pub fn forget(&mut self) {
+        self.gpu.clear();
+        self.cpu = None;
+    }
+
     /// `run` in a session for `sizes`, once more on the CPU if the GPU fails.
     pub fn run<T>(
         &mut self,

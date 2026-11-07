@@ -35,6 +35,10 @@ impl Silero {
         // Route whisper.cpp's chatter through `log` instead of stderr.
         whisper_rs::install_logging_hooks();
         let mut vad = self.vad.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *vad = None;
+        }
         if vad.is_none() {
             let model = FILE.locate()?;
             let path = model.to_str().context("model path is not valid UTF-8")?;

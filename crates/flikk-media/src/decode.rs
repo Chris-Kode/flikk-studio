@@ -95,7 +95,7 @@ pub(crate) fn still(
         max_width,
         tone.map(str::to_string),
     );
-    if let Some(frame) = media.frames.lock().unwrap().get(&key) {
+    if let Some(frame) = crate::lock(&media.frames).get(&key) {
         return Ok(frame);
     }
     // FFmpeg returns the first frame at or after the seek point; aim half a
@@ -118,7 +118,7 @@ pub(crate) fn still(
             path.display()
         ))
     })?;
-    media.frames.lock().unwrap().put(key, frame.clone());
+    crate::lock(&media.frames).put(key, frame.clone());
     Ok(frame)
 }
 
@@ -266,7 +266,7 @@ pub(crate) fn playback(
     let fd = rate.frame_duration();
     let first = from.max(Time::ZERO).floor_to_frame(rate);
     let (path, tone) = video_source(media, item)?;
-    let hwaccel = !media.software_only.lock().unwrap().contains(&path);
+    let hwaccel = !crate::lock(&media.software_only).contains(&path);
     let mut stream = FfmpegFrames {
         ffmpeg: media.ffmpeg(),
         path,
@@ -350,7 +350,7 @@ impl FfmpegFrames {
     }
 
     fn software_only(&self) {
-        self.software_only.lock().unwrap().insert(self.path.clone());
+        crate::lock(&self.software_only).insert(self.path.clone());
     }
 
     fn fail(&mut self, message: String) -> ServiceError {

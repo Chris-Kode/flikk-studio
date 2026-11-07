@@ -27,6 +27,10 @@ fn err(e: impl std::fmt::Display) -> anyhow::Error {
 impl Sam2Mlx {
     fn net(&self) -> Result<MutexGuard<'_, Option<Net>>> {
         let mut net = self.net.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *net = None;
+        }
         if net.is_none() {
             *net = Some(Net::load(&WEIGHTS.locate()?)?);
         }

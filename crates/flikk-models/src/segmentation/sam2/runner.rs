@@ -82,6 +82,10 @@ struct Memory {
 impl Sam2 {
     fn graphs(&self, memory: bool) -> Result<MutexGuard<'_, Option<Graphs>>> {
         let mut graphs = self.graphs.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *graphs = None;
+        }
         if graphs.is_none() {
             *graphs = Some(Graphs {
                 encoder: onnx::session(&ENCODER.locate()?, ENCODER.what)?,

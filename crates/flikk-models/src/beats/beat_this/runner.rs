@@ -20,6 +20,10 @@ pub struct BeatThis {
 impl BeatTracker for BeatThis {
     fn track(&self, stream: Stream) -> Result<(Vec<Time>, Vec<Time>)> {
         let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *session = None;
+        }
         if session.is_none() {
             *session = Some(onnx::session(&FILE.locate()?, FILE.what)?);
         }
