@@ -2,7 +2,7 @@
 //! (PRD AG2).
 
 use crate::args::{kind_name, range_json, secs, short};
-use flikk_core::agent::{AgentSettings, EditorContext};
+use flikk_core::agent::{AgentSettings, ChatRole, EditorContext};
 use flikk_core::bus::AgentRole;
 use flikk_core::memory::{RuleScope, RuleStatus, StyleRule};
 use flikk_core::model::{ClipContent, Project};
@@ -394,6 +394,51 @@ pub fn active_rules<'a>(rules: &'a [StyleRule], project: &Project) -> Vec<&'a St
     };
     out.sort_by_key(|r| (rank(r), r.created_at));
     out
+}
+
+/// Most messages a recap carries, newest kept.
+const RECAP_MESSAGES: usize = 20;
+/// Longest a message reads in a recap, in characters.
+const RECAP_MESSAGE_CHARS: usize = 600;
+/// Most characters of messages in a recap.
+const RECAP_CHARS: usize = 8000;
+
+/// `message` with a recap of the chat's earlier messages before it, for the
+/// first turn of a new backend session in a chat that already has some
+/// (the last one was lost, or ran on the other backend or role). Unchanged
+/// when there is nothing to recap.
+pub fn with_recap(message: String, history: &[(ChatRole, String)]) -> String {
+    let mut lines = Vec::new();
+    let mut total = 0;
+    for (role, text) in history.iter().rev() {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        let text = match text.char_indices().nth(RECAP_MESSAGE_CHARS) {
+            Some((end, _)) => format!("{}…", &text[..end]),
+            None => text,
+        };
+        total += text.chars().count();
+        if lines.len() == RECAP_MESSAGES || (total > RECAP_CHARS && !lines.is_empty()) {
+            break;
+        }
+        let who = match role {
+            ChatRole::User => "User",
+            ChatRole::Agent => "You",
+        };
+        lines.push(format!("{who}: {text}"));
+    }
+    if lines.is_empty() {
+        return message;
+    }
+    lines.reverse();
+    format!(
+        "<earlier_chat>\nEarlier in this chat (your previous session is gone, so these are \
+         its last messages, oldest first, long ones shortened). The project may have changed \
+         since: read it rather than relying on this.\n{}\n</earlier_chat>\n\n{message}",
+        lines.join("\n")
+    )
 }
 
 /// The user message as sent to the backend: context block, then the text.

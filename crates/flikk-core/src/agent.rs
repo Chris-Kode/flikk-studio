@@ -184,6 +184,11 @@ pub struct EditorContext {
     pub playhead: Time,
     pub in_out: Option<TimeRange>,
     pub selection: Selection,
+    /// The chat's earlier messages with text, oldest first, not counting
+    /// the one being sent. A turn that starts a new backend session recaps
+    /// them, since the model no longer has them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<(ChatRole, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

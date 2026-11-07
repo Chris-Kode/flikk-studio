@@ -463,6 +463,10 @@ impl AgentHost {
         let system_prompt = prompt::system_prompt(self.role, &q.settings, images);
         let backend = q.settings.backend;
         let resume = session::load(project.id, &self.chat, backend, self.role);
+        // A new session doesn't have the chat's earlier messages.
+        if resume.is_none() {
+            message = prompt::with_recap(message, &q.context.history);
+        }
         let picked = groups::pick(&text, project, &q.context, self.role);
         // A conversation keeps the list it started with, so its cached
         // prompt stays valid; a new one starts from this message's picks.
@@ -664,6 +668,7 @@ impl AgentHost {
         } else if turn.spec.resume.is_some() {
             let mut spec = turn.spec.clone();
             spec.resume = None;
+            spec.message = prompt::with_recap(spec.message, &turn.context.history);
             match backend::start(backend::adapter(turn.backend), spec.clone()) {
                 Ok(r) => {
                     turn.spec = spec;

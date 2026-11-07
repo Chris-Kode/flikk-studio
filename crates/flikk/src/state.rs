@@ -386,6 +386,7 @@ impl EditorState {
             playhead: self.playhead,
             in_out: self.in_out,
             selection: self.selection.clone(),
+            history: Vec::new(),
         }
     }
 
@@ -881,22 +882,18 @@ impl EditorState {
     /// busy: it would refuse the message, which must then not show, nor
     /// clear the settled cards.
     pub fn send_chat(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.agent_busy() {
-            return;
-        }
-        self.chat.push(ChatMessage {
-            role: ChatRole::User,
-            text: text.clone(),
-            choices: vec![],
-            change_set: None,
-            tools: vec![],
-            at: now(),
-        });
-        let context = self.context();
-        self.agent.send(text, context, &self.settings);
-        self.clear_settled();
-        self.save_chat();
-        cx.notify();
+        self.send_chat_with_context(text, None, cx);
+    }
+
+    /// The chat's messages so far as the agent is reminded of them when its
+    /// session is new: what the user and the agent wrote, without tool rows
+    /// and cards.
+    fn chat_history(&self) -> Vec<(ChatRole, String)> {
+        self.chat
+            .iter()
+            .filter(|m| m.change_set.is_none() && !m.text.trim().is_empty())
+            .map(|m| (m.role, m.text.clone()))
+            .collect()
     }
 
     fn save_chat(&mut self) {
@@ -2187,6 +2184,7 @@ impl EditorState {
         if self.agent_busy() {
             return;
         }
+        let history = self.chat_history();
         self.chat.push(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
@@ -2199,7 +2197,10 @@ impl EditorState {
             Some(context) => format!("{text}\n\n{context}"),
             None => text,
         };
-        let editor = self.context();
+        let editor = EditorContext {
+            history,
+            ..self.context()
+        };
         self.agent.send(message, editor, &self.settings);
         self.clear_settled();
         self.save_chat();
