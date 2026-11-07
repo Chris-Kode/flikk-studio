@@ -84,6 +84,7 @@ pub fn load_session() -> Loaded {
             autosaver: Autosaver::spawn(),
         });
     }
+    sweep_demo_chats();
     let untitled = || new_project("Untitled", SequenceSettings::default());
     if crate::demo::enabled() {
         return untitled();
@@ -107,25 +108,40 @@ pub fn load_session() -> Loaded {
 
 /// The newest autosave a crash left that holds newer changes than its
 /// file, as [`open`] would recover them. Ones whose file has caught up are
-/// removed.
+/// removed, and so are demos older versions autosaved. One whose file now
+/// holds another project comes back unsaved, tied to no file.
 fn crash_recovery() -> Option<Loaded> {
     for autosave in project_file::autosaves() {
-        let file = match project_file::read(&autosave) {
+        let mut file = match project_file::read(&autosave) {
             Ok(file) => file,
             Err(e) => {
                 eprintln!("flikk: can't recover {}: {e:#}", autosave.display());
                 continue;
             }
         };
+        if crate::demo::is_seed_project(&file.project) {
+            let _ = std::fs::remove_file(&autosave);
+            continue;
+        }
+        let mut notice = "Recovered unsaved changes".to_owned();
         let fresh = match file.autosave_of.as_deref() {
             // Never saved: the autosave is the only copy.
             None => true,
             Some(path) => {
                 let saved = project_file::read(path).map(|f| f.project.id);
                 match saved {
-                    // The file holds another project now; opening it would
-                    // not recover this.
-                    Ok(id) if id != file.project.id => false,
+                    // The file holds another project now (saved over, or
+                    // replaced), so no file has these changes: they open
+                    // as a project not saved yet. Saving or discarding it
+                    // removes the autosave.
+                    Ok(id) if id != file.project.id => {
+                        notice = format!(
+                            "Recovered unsaved changes; {} holds another project now",
+                            project_file::name_of(path)
+                        );
+                        file.autosave_of = None;
+                        true
+                    }
                     _ if holds_newer(&autosave, &file, path) => true,
                     Ok(_) => {
                         // Only a strictly newer file has caught up: with
@@ -142,7 +158,7 @@ fn crash_recovery() -> Option<Loaded> {
             }
         };
         if fresh {
-            notify("Recovered unsaved changes");
+            notify(notice);
             return Some(loaded(file, true));
         }
     }
@@ -388,7 +404,12 @@ fn legacy_chats(project: ProjectId) -> Chats {
     }
 }
 
+/// Save the project's chats. A demo's are not kept: like its project, they
+/// would never be opened again.
 pub fn save_chats(project: ProjectId, chats: &Chats) {
+    if crate::demo::enabled() {
+        return;
+    }
     let path = chats_path(project);
     let tmp = path.with_extension("json.tmp");
     let written = serde_json::to_vec(chats)
@@ -400,5 +421,58 @@ pub fn save_chats(project: ProjectId, chats: &Chats) {
             let _ = std::fs::remove_file(legacy_chat_path(project));
         }
         Err(e) => notify(format!("Couldn't save the chat: {e}")),
+    }
+}
+
+/// Remove the chats earlier demos left: each demo was a new project and its
+/// chats were saved, though nothing opens it again. One is known by the
+/// demo's seeded conversation, and kept when its project has an autosave
+/// or a backup (it was saved to a file, which may still open it).
+fn sweep_demo_chats() {
+    let Ok(entries) = std::fs::read_dir(flikk_core::paths::projects()) else {
+        return;
+    };
+    let backups: Vec<String> = std::fs::read_dir(flikk_core::paths::backups())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    for path in entries.flatten().map(|e| e.path()) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let (id, sessions) = if let Some(id) = name.strip_suffix(".chats.json") {
+            (id, true)
+        } else if let Some(id) = name.strip_suffix(".chat.json") {
+            (id, false)
+        } else {
+            continue;
+        };
+        let Ok(id) = uuid::Uuid::parse_str(id).map(ProjectId) else {
+            continue;
+        };
+        // Backup folders end with the project's short id.
+        let short = format!(" {id}");
+        if project_file::autosave_path(id).exists() || backups.iter().any(|b| b.ends_with(&short)) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let demo = if sessions {
+            serde_json::from_slice::<Chats>(&bytes).is_ok_and(|chats| {
+                chats
+                    .sessions
+                    .iter()
+                    .any(|s| crate::demo::is_seed_chat(&s.messages))
+            })
+        } else {
+            serde_json::from_slice::<Vec<ChatMessage>>(&bytes)
+                .is_ok_and(|messages| crate::demo::is_seed_chat(&messages))
+        };
+        if demo {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

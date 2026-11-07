@@ -39,6 +39,41 @@ pub fn enabled() -> bool {
     std::env::var("FLIKK_DEMO").is_ok_and(|v| v == "1")
 }
 
+/// The seeded conversation's first two asks, [`ASKED_APART`] seconds apart.
+const FIRST_ASK: &str = "Put a lower third on Maya when she first speaks";
+const SECOND_ASK: &str =
+    "remove the long pauses where nothing happens, and zoom in whenever I point something out";
+const FIRST_ASK_AGO: i64 = 900;
+const SECOND_ASK_AGO: i64 = 420;
+const ASKED_APART: i64 = FIRST_ASK_AGO - SECOND_ASK_AGO;
+
+/// `messages` start with the conversation [`seed`] makes: a chat of a
+/// demo project.
+pub fn is_seed_chat(messages: &[ChatMessage]) -> bool {
+    let Some(first) = messages.first() else {
+        return false;
+    };
+    first.role == ChatRole::User
+        && first.text == FIRST_ASK
+        && messages.iter().any(|m| {
+            m.role == ChatRole::User && m.text == SECOND_ASK && m.at == first.at + ASKED_APART
+        })
+}
+
+/// `project` is a demo: all its media is the seed's stand-ins, which are
+/// not real files.
+pub fn is_seed_project(project: &Project) -> bool {
+    !project.media.is_empty()
+        && project.media.iter().all(|m| {
+            m.path.parent() == Some(std::path::Path::new(DEMO_MEDIA))
+                && m.path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| m.fingerprint.as_ref() == Some(&fingerprint(name)))
+                && !m.path.exists()
+        })
+}
+
 /// `FLIKK_DEMO_FX=effects|generator|transition|library|code`: seed
 /// effects, a generator, a transition and a project program, and open that
 /// view of the library stream's panels.
@@ -347,7 +382,7 @@ fn project() -> Demo {
     );
     let logo = MediaItem {
         id: MediaId::new(),
-        path: PathBuf::from("/demo/logo.png"),
+        path: PathBuf::from(DEMO_MEDIA).join("logo.png"),
         kind: MediaKind::Image,
         fingerprint: Some(fingerprint("logo.png")),
         info: None,
@@ -546,11 +581,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
         role: AgentRole::Editor,
     };
     let ids = &demo.ids;
-    let mut chat = vec![msg(
-        ChatRole::User,
-        "Put a lower third on Maya when she first speaks",
-        now - 900,
-    )];
+    let mut chat = vec![msg(ChatRole::User, FIRST_ASK, now - FIRST_ASK_AGO)];
 
     let proposed = |outcome: flikk_core::Result<Outcome>| match outcome {
         Ok(Outcome::Proposed { change_set, .. }) => Some(change_set),
@@ -575,11 +606,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
         ));
     }
 
-    chat.push(msg(
-        ChatRole::User,
-        "remove the long pauses where nothing happens, and zoom in whenever I point something out",
-        now - 420,
-    ));
+    chat.push(msg(ChatRole::User, SECOND_ASK, now - SECOND_ASK_AGO));
     // Zooms first, then cuts latest-first, so every time is still in the
     // original timeline. The first reason titles the set.
     let mut pending = None;
@@ -779,10 +806,13 @@ fn fingerprint(name: &str) -> Fingerprint {
     Fingerprint(format!("{h:016x}{:016x}", h.rotate_left(17)))
 }
 
+/// Where the seed's media claims to be; nothing is there.
+const DEMO_MEDIA: &str = "/demo";
+
 fn media(name: &str, kind: MediaKind, duration: f64, bin: &Bin, tags: &[&str]) -> MediaItem {
     MediaItem {
         id: MediaId::new(),
-        path: PathBuf::from(format!("/demo/{name}")),
+        path: PathBuf::from(DEMO_MEDIA).join(name),
         kind,
         fingerprint: Some(fingerprint(name)),
         info: Some(MediaInfo {
