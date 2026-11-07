@@ -47,6 +47,9 @@ fn main() {
     let _ = std::thread::Builder::new()
         .name("flikk-cache-sweep".into())
         .spawn(flikk_core::cache_sweep::sweep);
+    let _ = std::thread::Builder::new()
+        .name("flikk-generated-sweep".into())
+        .spawn(flikk_cloud::sweep_leftovers);
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {

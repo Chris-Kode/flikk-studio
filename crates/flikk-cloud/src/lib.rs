@@ -468,6 +468,7 @@ impl Drop for Stem {
 /// stem and any file already there by that name, finished or not
 /// (`<stem>.mp4`, `<stem>.mp4.part`, `<stem>.mp4.json`).
 fn free_stem(dir: &Path, request: &GenerateRequest) -> Stem {
+    // One of `KINDS`, which the sweep knows them by.
     let what = match request {
         GenerateRequest::Music { .. } => "music",
         GenerateRequest::SoundEffect { .. } => "sfx",
@@ -526,6 +527,83 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> Stem {
 fn hold(reserved: &mut BTreeSet<PathBuf>, path: PathBuf, placeholder: Option<PathBuf>) -> Stem {
     reserved.insert(path.clone());
     Stem { path, placeholder }
+}
+
+/// What [`free_stem`] names its stems after.
+const KINDS: [&str; 5] = ["music", "sfx", "voiceover", "video", "image"];
+
+/// How old a placeholder or part must be to count as left by a run that
+/// ended: a generation is followed for a couple of hours at most, and a
+/// part is written to all along, so one this old has nobody holding it.
+const LEFTOVER_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove what runs that crashed or were killed left in the generated
+/// folder: `<stem>.reserved` placeholders, which keep a name from being
+/// used again, and the `.part` files of downloads and fixes that never
+/// settled. Only files by those exact names and older than
+/// [`LEFTOVER_AGE`], so another running Flikk's are left alone; nothing
+/// outside the folder, nothing in folders below it. Slow: file I/O, so
+/// off the UI thread.
+pub fn sweep_leftovers() {
+    let dir = flikk_core::paths::generated();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(is_leftover) {
+            continue;
+        }
+        // Not followed: a link is never one of these.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age > LEFTOVER_AGE);
+        if meta.is_file() && stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether `name` is one this crate or a fix leaves behind when its run
+/// ends early:
+/// - `<stem>.reserved`, from [`free_stem`];
+/// - `<stem>.<ext>.part`, from `http::download` and the audio writers;
+/// - `.fix[-words].wav.<pid>-<n>.part`, from `respeak` saving a fix.
+fn is_leftover(name: &str) -> bool {
+    let generated = |stem: &str| {
+        !stem.contains('.')
+            && KINDS.iter().any(|kind| {
+                stem.strip_prefix(kind)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+            })
+    };
+    let alnum = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if let Some(stem) = name.strip_suffix(".reserved") {
+        return generated(stem);
+    }
+    let Some(file) = name.strip_suffix(".part") else {
+        return false;
+    };
+    if let Some(fix) = file.strip_prefix('.') {
+        let Some((base, tag)) = fix.split_once(".wav.") else {
+            return false;
+        };
+        let fix_base = base == "fix" || base.starts_with("fix-");
+        return fix_base
+            && !base.contains('.')
+            && tag
+                .split_once('-')
+                .is_some_and(|(pid, n)| digits(pid) && digits(n));
+    }
+    file.rsplit_once('.')
+        .is_some_and(|(stem, ext)| generated(stem) && alnum(ext))
 }
 
 /// Move the finished file at `from` to `to`, never over a file already
