@@ -418,6 +418,20 @@ impl Timeline {
             .unwrap_or(Time::ZERO)
     }
 
+    /// Whether an audio track is soloed, so only soloed ones are heard.
+    pub fn soloing(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.kind == TrackKind::Audio && t.mix.solo)
+    }
+
+    /// Whether `track` is heard: an audio track, not muted and, while any
+    /// is soloed ([`Self::soloing`]), soloed itself. The one mute and solo
+    /// rule for playback, render and the agent.
+    pub fn audible(&self, track: &Track) -> bool {
+        track.kind == TrackKind::Audio && !track.mix.mute && (track.mix.solo || !self.soloing())
+    }
+
     /// Protected ranges that a cut over `range` would touch (PRD F4).
     pub fn protected_overlapping(&self, range: TimeRange) -> impl Iterator<Item = &Marker> {
         self.markers

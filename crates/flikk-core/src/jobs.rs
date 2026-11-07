@@ -60,15 +60,16 @@ impl JobProgress {
         self.cancel.load(Ordering::Relaxed)
     }
 
-    /// 0..1 of the job done.
+    /// 0..1 of the job done. Ignored once the job has finished or failed,
+    /// so a late report from a clone does not make it run again.
     pub fn set(&self, fraction: f32) {
-        set_state(
-            &self.jobs,
-            self.id,
-            JobState::Running {
+        if let Some(job) = lock(&self.jobs).iter_mut().find(|j| j.id == self.id)
+            && matches!(job.state, JobState::Queued | JobState::Running { .. })
+        {
+            job.state = JobState::Running {
                 fraction: fraction.clamp(0.0, 1.0),
-            },
-        );
+            };
+        }
     }
 }
 

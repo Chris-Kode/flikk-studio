@@ -166,8 +166,17 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
                             text: old, words, ..
                         },
                     ) => {
-                        // A fixed typo keeps the word timing; other rewrites lose it.
-                        if new.split_whitespace().count() != old.split_whitespace().count() {
+                        // A fixed typo keeps the word timing; other rewrites lose it,
+                        // the same number of words too when most of them changed.
+                        let (was, now): (Vec<&str>, Vec<&str>) = (
+                            old.split_whitespace().collect(),
+                            new.split_whitespace().collect(),
+                        );
+                        let changed = was.iter().zip(&now).filter(|(a, b)| a != b).count();
+                        if was.len() != now.len()
+                            || words.len() != now.len()
+                            || changed * 2 > now.len()
+                        {
                             words.clear();
                         }
                         *old = new.clone();
@@ -1687,10 +1696,30 @@ fn set_transition(
         }
         None => None,
     };
-    update_clip(tl, id, |c| match edge {
+    let mut plan = update_clip(tl, id, |c| match edge {
         Edge::Start => c.transition_in = transition,
         Edge::End => c.transition_out = transition,
-    })
+    })?;
+    // One transition per cut: the clip it touches there lets go of its
+    // own, so this one is what plays and removing it leaves a plain cut.
+    let neighbour = track.clips.iter().find(|n| {
+        n.id != id
+            && n.enabled
+            && match edge {
+                Edge::Start => n.end() == clip.start,
+                Edge::End => n.start == clip.end(),
+            }
+    });
+    if let Some(n) = neighbour {
+        plan.ops.extend(
+            update_clip(tl, n.id, |n| match edge {
+                Edge::Start => n.transition_out = None,
+                Edge::End => n.transition_in = None,
+            })?
+            .ops,
+        );
+    }
+    Ok(plan)
 }
 
 fn insert_new(
