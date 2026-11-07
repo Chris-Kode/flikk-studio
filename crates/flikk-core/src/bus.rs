@@ -7,7 +7,7 @@ use crate::error::{CoreError, Result};
 use crate::history::{History, HistoryEntry};
 use crate::ids::*;
 use crate::model::Project;
-use crate::ops::{Op, apply_all, invert_all};
+use crate::ops::{Op, Target, apply_all, invert_all};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -127,8 +127,8 @@ pub struct CommandBus {
     change_sets: Vec<ChangeSet>,
     /// Bumped by every applied change.
     version: u64,
-    /// Clips the user touched, with the version they touched them at.
-    user_touched: Vec<(u64, ClipId)>,
+    /// What the user changed, with the version they changed it at.
+    user_touched: Vec<(u64, Target)>,
     /// The chat open in the editor. The agent's change sets are stamped with
     /// it, and only its sets are shown.
     chat: Option<String>,
@@ -233,19 +233,8 @@ impl CommandBus {
         })?;
         set.state = ChangeSetState::Open;
         if set.draft.is_none() || set.base_version != self.version {
-            // The project changed since: replay the pending items on it,
-            // re-planning those whose ops no longer fit and leaving out
-            // those that can't be.
-            let mut draft = self.project.clone();
-            for item in set.pending_items() {
-                if apply_all(&mut draft, &item.ops).is_err()
-                    && let Ok(plan) = item.command.plan(&draft)
-                {
-                    let _ = apply_all(&mut draft, &plan.ops);
-                }
-            }
-            set.draft = Some(draft);
-            set.base_version = self.version;
+            // The project changed since: replay the pending items on it.
+            rebuild(set, &self.project, &self.user_touched, self.version);
         }
         Some((set.id, set.items.len()))
     }
@@ -394,18 +383,20 @@ impl CommandBus {
             .iter_mut()
             .find(|s| s.id == id && s.state == ChangeSetState::Open)
         {
-            set.state = if set.items.is_empty() {
-                ChangeSetState::Resolved
+            if set.pending_items().next().is_none() {
+                set.state = ChangeSetState::Resolved;
+                set.draft = None;
             } else {
-                ChangeSetState::Pending
-            };
+                set.state = ChangeSetState::Pending;
+            }
         }
     }
 
     /// Accept the given items (all pending ones if `None`) as one undo step.
-    /// Items touching clips the user edited since they were planned are marked
-    /// conflicted and not applied; others are re-planned if their ops no
-    /// longer fit (e.g. an earlier item in the set was rejected).
+    /// Items touching anything the user edited since they were planned, or a
+    /// locked track, are marked conflicted and not applied; others are
+    /// re-planned if their ops no longer fit (e.g. an earlier item in the
+    /// set was rejected).
     pub fn accept(
         &mut self,
         id: ChangeSetId,
@@ -429,41 +420,25 @@ impl CommandBus {
             if items.is_some_and(|ids| !ids.contains(&item.id)) {
                 continue;
             }
-            if item.ops.iter().filter_map(Op::clip).any(|c| {
-                user_touched
-                    .iter()
-                    .any(|(v, t)| *v > item.base_version && *t == c)
-            }) || crate::edit::locked_track(&scratch, &item.ops).is_some()
-            {
-                item.state = ItemState::Conflicted;
-                report.conflicted.push(item.id);
-                continue;
+            match replay(&mut scratch, item, user_touched) {
+                Some(ops) => {
+                    item.ops = ops.clone();
+                    item.state = ItemState::Accepted;
+                    report.accepted.push(item.id);
+                    all_ops.extend(ops);
+                }
+                None => {
+                    item.state = ItemState::Conflicted;
+                    report.conflicted.push(item.id);
+                }
             }
-            let ops = match apply_all(&mut scratch, &item.ops) {
-                Ok(()) => item.ops.clone(),
-                Err(_) => match item
-                    .command
-                    .plan(&scratch)
-                    .and_then(|p| apply_all(&mut scratch, &p.ops).map(|_| p.ops))
-                {
-                    Ok(ops) => ops,
-                    Err(_) => {
-                        item.state = ItemState::Conflicted;
-                        report.conflicted.push(item.id);
-                        continue;
-                    }
-                },
-            };
-            item.state = ItemState::Accepted;
-            report.accepted.push(item.id);
-            all_ops.extend(ops);
         }
         let (label, author) = (set.title.clone(), set.author.clone());
-        self.refresh_set(ix);
         if !all_ops.is_empty() {
             self.project = scratch;
             self.commit(label, author, all_ops, Some(id));
         }
+        self.refresh_set(ix);
         Ok(report)
     }
 
@@ -483,11 +458,19 @@ impl CommandBus {
         }
     }
 
+    /// After a review: resolve the set once nothing is left to review, or
+    /// rebuild its draft from what is still pending, so neither the agent nor
+    /// the preview keeps items that were rejected or already applied.
     fn refresh_set(&mut self, ix: usize) {
         let set = &mut self.change_sets[ix];
+        if set.state == ChangeSetState::Resolved {
+            return;
+        }
         if set.state != ChangeSetState::Open && set.pending_items().next().is_none() {
             set.state = ChangeSetState::Resolved;
             set.draft = None;
+        } else {
+            rebuild(set, &self.project, &self.user_touched, self.version);
         }
     }
 
@@ -499,7 +482,8 @@ impl CommandBus {
             self.history.undo.push(entry);
             return Err(e);
         }
-        self.bump(&entry.author, &entry.ops);
+        // Undo and redo are the user's edits, whoever made the entry.
+        self.bump(true, &entry.ops);
         let label = entry.label.clone();
         self.history.redo.push(entry);
         Ok(Some(label))
@@ -513,7 +497,7 @@ impl CommandBus {
             self.history.redo.push(entry);
             return Err(e);
         }
-        self.bump(&entry.author, &entry.ops);
+        self.bump(true, &entry.ops);
         let label = entry.label.clone();
         self.history.undo.push(entry);
         Ok(Some(label))
@@ -529,7 +513,7 @@ impl CommandBus {
         if ops.is_empty() {
             return;
         }
-        self.bump(&author, &ops);
+        self.bump(author.is_user(), &ops);
         self.history.push(HistoryEntry {
             label,
             author,
@@ -539,12 +523,66 @@ impl CommandBus {
         });
     }
 
-    fn bump(&mut self, author: &Author, ops: &[Op]) {
+    fn bump(&mut self, by_user: bool, ops: &[Op]) {
         self.version += 1;
-        if author.is_user() {
+        if by_user {
             let v = self.version;
-            self.user_touched
-                .extend(ops.iter().filter_map(Op::clip).map(|c| (v, c)));
+            self.user_touched.extend(
+                ops.iter()
+                    .flat_map(|op| {
+                        op.targets()
+                            .into_iter()
+                            .chain(op.clip_track().map(Target::TrackClips))
+                    })
+                    .map(|t| (v, t)),
+            );
         }
     }
+}
+
+/// Whether `ops` change anything the user changed after version `since`.
+fn touched_since(touched: &[(u64, Target)], since: u64, ops: &[Op]) -> bool {
+    ops.iter()
+        .flat_map(Op::targets)
+        .any(|t| touched.iter().any(|(v, u)| *v > since && *u == t))
+}
+
+/// Apply `item` to `project`, re-planning it if its ops no longer fit (e.g.
+/// an earlier item was rejected). The ops applied, or `None` when the item
+/// can't apply or would change something the user edited since it was
+/// planned, or a locked track; `project` is then unchanged.
+fn replay(project: &mut Project, item: &ChangeItem, touched: &[(u64, Target)]) -> Option<Vec<Op>> {
+    if touched_since(touched, item.base_version, &item.ops)
+        || crate::edit::locked_track(project, &item.ops).is_some()
+    {
+        return None;
+    }
+    if apply_all(project, &item.ops).is_ok() {
+        return Some(item.ops.clone());
+    }
+    let plan = item.command.plan(project).ok()?;
+    if touched_since(touched, item.base_version, &plan.ops) {
+        return None;
+    }
+    apply_all(project, &plan.ops).ok()?;
+    Some(plan.ops)
+}
+
+/// Rebuild `set`'s draft as `project` plus its pending items. Items that
+/// no longer apply are marked conflicted; the others keep the ops they now
+/// apply with, so the timeline draws what accepting would do.
+fn rebuild(set: &mut ChangeSet, project: &Project, touched: &[(u64, Target)], version: u64) {
+    let mut draft = project.clone();
+    for item in set
+        .items
+        .iter_mut()
+        .filter(|i| i.state == ItemState::Pending)
+    {
+        match replay(&mut draft, item, touched) {
+            Some(ops) => item.ops = ops,
+            None => item.state = ItemState::Conflicted,
+        }
+    }
+    set.draft = Some(draft);
+    set.base_version = version;
 }

@@ -106,6 +106,24 @@ pub enum Op {
     },
 }
 
+/// Something an op changes, for telling when a proposal meets an edit the
+/// user made after it was planned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Clip(ClipId),
+    /// A track's own properties, or the track itself.
+    Track(TrackId),
+    /// Which clips a track holds.
+    TrackClips(TrackId),
+    Marker(MarkerId),
+    Media(MediaId),
+    Fx(crate::fx::FxRef),
+    Bins,
+    Ducking,
+    Grade,
+    Sequence,
+}
+
 /// How an op shows on the timeline while pending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +154,59 @@ impl Op {
             Op::InsertClip { clip, .. } | Op::RemoveClip { clip, .. } => Some(clip.id),
             Op::UpdateClip { after, .. } => Some(after.id),
             _ => None,
+        }
+    }
+
+    /// The track whose clips this op adds, removes or changes.
+    pub fn clip_track(&self) -> Option<TrackId> {
+        match self {
+            Op::InsertClip { track, .. }
+            | Op::RemoveClip { track, .. }
+            | Op::UpdateClip { track, .. } => Some(*track),
+            _ => None,
+        }
+    }
+
+    /// What this op changes. A removed track takes its clips with it.
+    pub fn targets(&self) -> Vec<Target> {
+        match self {
+            Op::InsertClip { clip, .. } | Op::RemoveClip { clip, .. } => {
+                vec![Target::Clip(clip.id)]
+            }
+            Op::UpdateClip { after, .. } => vec![Target::Clip(after.id)],
+            Op::InsertMarker { marker } | Op::RemoveMarker { marker } => {
+                vec![Target::Marker(marker.id)]
+            }
+            Op::UpdateMarker { after, .. } => vec![Target::Marker(after.id)],
+            Op::InsertTrack { track, .. } => {
+                vec![Target::Track(track.id), Target::TrackClips(track.id)]
+            }
+            Op::RemoveTrack { track, .. } => {
+                [Target::Track(track.id), Target::TrackClips(track.id)]
+                    .into_iter()
+                    .chain(track.clips.iter().map(|c| Target::Clip(c.id)))
+                    .collect()
+            }
+            Op::UpdateTrack { track, .. } => vec![Target::Track(*track)],
+            Op::SetDucking { .. } => vec![Target::Ducking],
+            Op::SetTimelineGrade { .. } => vec![Target::Grade],
+            Op::SetSequence { .. } => vec![Target::Sequence],
+            Op::AddMedia { media } | Op::RemoveMedia { media } => vec![Target::Media(media.id)],
+            Op::UpdateMedia { after, .. } => vec![Target::Media(after.id)],
+            // Bins are set as a whole list, so any change meets any other.
+            Op::SetBins { .. } => vec![Target::Bins],
+            Op::SetFxAssets { before, after } => {
+                let find = |list: &[crate::fx::FxAsset], id: &crate::fx::FxRef| {
+                    list.iter().find(|a| a.id == *id).cloned()
+                };
+                let mut ids: Vec<_> = before.iter().chain(after).map(|a| a.id.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                ids.into_iter()
+                    .filter(|id| find(before, id) != find(after, id))
+                    .map(Target::Fx)
+                    .collect()
+            }
         }
     }
 
