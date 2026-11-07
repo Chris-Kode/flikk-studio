@@ -83,6 +83,35 @@ struct Outcome {
     text: String,
 }
 
+/// Where the agent is with the open chat's messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnStatus {
+    /// Nothing queued or under way: a message is taken.
+    Idle,
+    /// A message waits for the next pump to start its turn.
+    Queued,
+    /// A turn is under way.
+    Running,
+    /// The turn was cancelled; it ends on the next pump.
+    Stopping,
+}
+
+impl TurnStatus {
+    /// A message is queued or its turn under way, so another is refused.
+    pub fn is_busy(self) -> bool {
+        self != Self::Idle
+    }
+
+    /// A turn has started and not ended. The agent's open change set is
+    /// that turn's, and goes to review when it ends.
+    pub fn in_turn(self) -> bool {
+        matches!(self, Self::Running | Self::Stopping)
+    }
+}
+
+/// What the agent says when the backend lost a session it can't re-run.
+const SESSION_LOST: &str = "The agent's session was lost; send your message again";
+
 struct Queued {
     message: String,
     context: EditorContext,
@@ -108,16 +137,37 @@ struct Turn {
     running: Option<RunningTurn>,
     /// Off-thread tool jobs still running.
     jobs: usize,
-    /// Set when the backend reports the end of the turn.
-    finished: Option<Option<String>>,
-    cancelled: bool,
-    saw_text: bool,
+    phase: Phase,
+    /// Something came of the turn that running it again would repeat: text
+    /// shown, a tool call made (with the proposals, jobs and approvals it
+    /// led to) or one of the backend's own tools used.
+    acted: bool,
+    /// Tool calls the backend began and has no result for (see
+    /// [`BackendEvent::OpenCalls`]).
+    open_calls: usize,
     /// Tool groups the chat lists, fixed when it started (see
     /// `tools::groups`).
     groups: BTreeSet<ToolCategory>,
     usage: Usage,
     /// The backend's own tool calls still running: their key and call id.
     web_calls: HashMap<String, u64>,
+}
+
+/// Where a started turn is.
+enum Phase {
+    /// The backend is working on it.
+    Running,
+    /// The backend ended it, with an error if it failed. The turn ends
+    /// once its jobs have.
+    Finished(Option<String>),
+    /// Cancelled: it ends on the next pump.
+    Stopping,
+}
+
+impl Turn {
+    fn stopping(&self) -> bool {
+        matches!(self.phase, Phase::Stopping)
+    }
 }
 
 /// A finished job: who started it, in which turn and on which project, and
@@ -212,8 +262,14 @@ impl AgentHost {
         }
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.queued.is_some() || self.turn.is_some()
+    /// Whether a message is queued, its turn under way or being stopped.
+    pub fn status(&self) -> TurnStatus {
+        match (&self.turn, &self.queued) {
+            (Some(turn), _) if turn.stopping() => TurnStatus::Stopping,
+            (Some(_), _) => TurnStatus::Running,
+            (None, Some(_)) => TurnStatus::Queued,
+            (None, None) => TurnStatus::Idle,
+        }
     }
 
     /// Editor or Builder: a different prompt, tool set and backend session.
@@ -245,7 +301,7 @@ impl AgentHost {
 
     /// Queue a turn; it starts on the next [`pump`](Self::pump).
     pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {
-        if self.is_busy() {
+        if self.status().is_busy() {
             self.events.push(AgentEvent::Error {
                 message: "The agent is still working on the last message".into(),
             });
@@ -266,7 +322,7 @@ impl AgentHost {
     pub fn cancel(&mut self) {
         self.queued = None;
         if let Some(turn) = self.turn.as_mut() {
-            turn.cancelled = true;
+            turn.phase = Phase::Stopping;
             turn.stop.stop();
             if let Some(r) = &turn.running {
                 r.kill();
@@ -491,9 +547,9 @@ impl AgentHost {
             spec,
             running: Some(running),
             jobs: 0,
-            finished: None,
-            cancelled: false,
-            saw_text: false,
+            phase: Phase::Running,
+            acted: false,
+            open_calls: 0,
             usage: Usage::new(picked, groups.clone()),
             groups,
             web_calls: HashMap::new(),
@@ -519,6 +575,7 @@ impl AgentHost {
         let Some(running) = &turn.running else {
             return;
         };
+        let stopping = turn.stopping();
         for event in running.events.try_iter() {
             match event {
                 BackendEvent::Session(id) => {
@@ -531,8 +588,8 @@ impl AgentHost {
                     );
                 }
                 BackendEvent::TextDelta(text) => {
-                    turn.saw_text = true;
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         self.events.push(AgentEvent::TextDelta { text });
                     }
                 }
@@ -542,7 +599,8 @@ impl AgentHost {
                     args,
                     summary,
                 } => {
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         let call = self.next_call;
                         self.next_call += 1;
                         turn.web_calls.insert(key, call);
@@ -559,7 +617,8 @@ impl AgentHost {
                     summary,
                     ok,
                 } => {
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         let entry = ActivityEntry {
                             at: now(),
                             tool: tool.into(),
@@ -577,32 +636,42 @@ impl AgentHost {
                         });
                     }
                 }
+                BackendEvent::OpenCalls(n) => turn.open_calls = n,
                 BackendEvent::Finished { error } => {
-                    turn.finished = Some(error);
+                    if !stopping {
+                        turn.phase = Phase::Finished(error);
+                    }
                     break;
                 }
             }
         }
-        // Resume failed because the backend forgot the session: forget it
-        // too and run the turn again fresh.
-        let lost = matches!(&turn.finished, Some(Some(e)) if is_lost_session(e));
-        if lost && turn.spec.resume.is_some() && !turn.saw_text && !turn.cancelled {
-            session::store(
-                turn.project,
-                &turn.chat,
-                turn.backend,
-                role_of(&turn.author),
-                None,
-            );
+        // The backend forgot the session: forget it too. A turn nothing came
+        // of yet runs again fresh; one that already acted would repeat what
+        // it did, so it ends and the user sends the message again.
+        let lost = matches!(&turn.phase, Phase::Finished(Some(e)) if is_lost_session(e));
+        if !lost {
+            return;
+        }
+        session::store(
+            turn.project,
+            &turn.chat,
+            turn.backend,
+            role_of(&turn.author),
+            None,
+        );
+        if turn.acted {
+            turn.phase = Phase::Finished(Some(SESSION_LOST.into()));
+        } else if turn.spec.resume.is_some() {
             let mut spec = turn.spec.clone();
             spec.resume = None;
             match backend::start(backend::adapter(turn.backend), spec.clone()) {
                 Ok(r) => {
                     turn.spec = spec;
                     turn.running = Some(r);
-                    turn.finished = None;
+                    turn.phase = Phase::Running;
+                    turn.open_calls = 0;
                 }
-                Err(e) => turn.finished = Some(Some(e.to_string())),
+                Err(e) => turn.phase = Phase::Finished(Some(e.to_string())),
             }
         }
     }
@@ -611,20 +680,43 @@ impl AgentHost {
         let Some(turn) = self.turn.as_ref() else {
             return;
         };
-        let done = turn.cancelled || (turn.finished.is_some() && turn.jobs == 0);
+        let done = match turn.phase {
+            Phase::Running => false,
+            Phase::Finished(_) => turn.jobs == 0,
+            Phase::Stopping => true,
+        };
         if !done {
             return;
         }
         let turn = self.turn.take().unwrap();
+        // Killed (or crashed) with a tool call open, the backend's session
+        // holds a call without its result, which a resume can't continue
+        // from: the chat's next turn starts a new session. What the host
+        // still runs or holds for the turn covers calls the backend's
+        // last events, cut off by the kill, did not report.
+        let stopping = turn.stopping();
+        let held = self.held.values().any(|(o, _)| *o == Origin::Turn);
+        let pending = turn.jobs > 0 || held || !turn.web_calls.is_empty();
+        if turn.open_calls > 0 || (stopping && pending) {
+            session::store(
+                turn.project,
+                &turn.chat,
+                turn.backend,
+                role_of(&turn.author),
+                None,
+            );
+        }
         self.release_held(Origin::Turn);
-        if turn.cancelled {
-            if let Some(r) = &turn.running {
-                r.kill();
+        match &turn.phase {
+            Phase::Stopping => {
+                if let Some(r) = &turn.running {
+                    r.kill();
+                }
             }
-        } else if let Some(Some(error)) = &turn.finished {
-            self.events.push(AgentEvent::Error {
+            Phase::Finished(Some(error)) => self.events.push(AgentEvent::Error {
                 message: error.clone(),
-            });
+            }),
+            Phase::Finished(None) | Phase::Running => {}
         }
         close_open_sets(bus, &turn.author, turn.carried, &mut self.events);
         turn.usage
@@ -684,10 +776,11 @@ impl AgentHost {
                     ));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
-                    let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
+                    let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;
                     };
+                    turn.acted = true;
                     let via_run = tool == groups::RUN_TOOL;
                     let (tool, args) = groups::unwrap_run(tool, args);
                     turn.usage.calls.push((tool.clone(), via_run));
@@ -831,7 +924,7 @@ impl AgentHost {
             let turn_author = || {
                 self.turn
                     .as_ref()
-                    .filter(|t| live && !t.cancelled)
+                    .filter(|t| live && !t.stopping())
                     .map(|t| t.author.clone())
             };
             let done = match out {
@@ -872,7 +965,7 @@ impl AgentHost {
                         Origin::Turn => {
                             self.turn
                                 .as_ref()
-                                .filter(|t| live && !t.cancelled)
+                                .filter(|t| live && !t.stopping())
                                 .map(|turn| ToolCtx {
                                     bus: &mut *bus,
                                     services,

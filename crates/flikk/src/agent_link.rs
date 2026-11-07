@@ -16,6 +16,7 @@
 
 pub mod approve;
 
+use flikk_agent::host::TurnStatus;
 use flikk_agent::{AgentHost, PendingApproval};
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
 use flikk_core::bus::{AgentRole, CommandBus};
@@ -35,8 +36,9 @@ impl AgentLink {
         Self { host }
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.host.is_busy()
+    /// Whether a message is queued or its turn under way.
+    pub fn status(&self) -> TurnStatus {
+        self.host.status()
     }
 
     pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {

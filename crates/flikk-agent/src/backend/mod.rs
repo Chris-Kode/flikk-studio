@@ -77,6 +77,10 @@ pub enum BackendEvent {
         summary: String,
         ok: bool,
     },
+    /// How many tool calls, `flikk`'s included, the backend has begun and
+    /// not yet recorded a result for; sent when it changes. Killed while
+    /// one is open, the backend's session is left without that result.
+    OpenCalls(usize),
     /// The turn is over. `error` is set when it failed.
     Finished {
         error: Option<String>,

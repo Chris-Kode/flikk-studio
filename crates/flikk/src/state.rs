@@ -795,8 +795,9 @@ impl EditorState {
 
     // ------------------------------------------------------------------ agent
 
+    /// A message is queued or its turn under way: another is refused.
     pub fn agent_busy(&self) -> bool {
-        self.agent.is_busy()
+        self.agent.status().is_busy()
     }
 
     /// Send `text` as the user's message. Does nothing while the agent is

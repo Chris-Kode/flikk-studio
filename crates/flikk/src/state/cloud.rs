@@ -625,7 +625,8 @@ impl EditorState {
         let author = Author::Agent {
             role: self.settings.role,
         };
-        let turn = self.agent.is_busy();
+        // A queued message has no turn yet, so its set is not open.
+        let turn = self.agent.status().in_turn();
         let reopened = if turn {
             None
         } else {
