@@ -374,8 +374,11 @@ impl AgentHost {
             .memory
             .recipes
             .iter()
+            // The setting lists built-ins; the user's own recipes are on.
             .filter(|r| {
-                q.settings.enabled_recipes.is_empty() || q.settings.enabled_recipes.contains(&r.id)
+                !r.builtin
+                    || q.settings.enabled_recipes.is_empty()
+                    || q.settings.enabled_recipes.contains(&r.id)
             })
             .cloned()
             .collect();
