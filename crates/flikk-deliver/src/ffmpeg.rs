@@ -2,10 +2,12 @@
 //! escaping, and the no-overwrite file rules for outputs.
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use flikk_core::JobId;
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, Read};
+use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -159,20 +161,22 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<String> {
-    let mut child = command(ffmpeg())
-        .args([
-            "-hide_banner",
-            "-nostdin",
-            "-nostats",
-            "-progress",
-            "pipe:1",
-        ])
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("could not start {}", ffmpeg().display()))?;
+    let mut child = Process(
+        command(ffmpeg())
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-nostats",
+                "-progress",
+                "pipe:1",
+            ])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not start {}", ffmpeg().display()))?,
+    );
 
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
@@ -226,24 +230,23 @@ pub(crate) fn last_error(stderr: &str) -> String {
 
 /// `path` if free, else the first free `name (2).ext`, `name (3).ext`, …
 pub fn free_name(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
+    names(path).find(|p| !p.exists()).expect("unbounded")
+}
+
+/// `path`, then `name (2).ext`, `name (3).ext`, …
+fn names(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
-    (2..)
-        .map(|n| {
-            let name = match &ext {
-                Some(ext) => format!("{stem} ({n}).{ext}"),
-                None => format!("{stem} ({n})"),
-            };
-            path.with_file_name(name)
-        })
-        .find(|p| !p.exists())
-        .expect("unbounded")
+    std::iter::once(path.to_path_buf()).chain((2..).map(move |n| {
+        let name = match &ext {
+            Some(ext) => format!("{stem} ({n}).{ext}"),
+            None => format!("{stem} ({n})"),
+        };
+        path.with_file_name(name)
+    }))
 }
 
 /// Refuse to touch an existing output (PRD hard limit).
@@ -268,7 +271,7 @@ pub(crate) fn ensure_free(path: &Path) -> Result<()> {
 
 /// Hidden sibling of `out` with the same extension, so the muxer is chosen
 /// from it and the final rename stays on one filesystem.
-pub(crate) fn temp_path(out: &Path, tag: &str) -> PathBuf {
+fn temp_path(out: &Path, tag: &str) -> PathBuf {
     let stem = out
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -280,25 +283,127 @@ pub(crate) fn temp_path(out: &Path, tag: &str) -> PathBuf {
     out.with_file_name(name)
 }
 
-/// Move a finished temp file into place without ever replacing a file that
-/// appeared in the meantime.
-pub(crate) fn publish(tmp: &Path, out: &Path) -> Result<()> {
-    match std::fs::hard_link(tmp, out) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(tmp);
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(tmp);
-            bail!("{} appeared during the render; not replaced", out.display())
-        }
-        // Filesystems without hard links (FAT, exFAT, some network shares).
-        Err(_) => {
-            if out.exists() {
-                let _ = std::fs::remove_file(tmp);
-                bail!("{} appeared during the render; not replaced", out.display());
-            }
-            std::fs::rename(tmp, out).context("could not move the render into place")
+/// A hidden temp file beside an output, removed when dropped: after it was
+/// published, or when the work ends any other way (an error, a cancel, a
+/// panic), so no partial file stays in the user's folder.
+pub(crate) struct TempOutput(PathBuf);
+
+impl TempOutput {
+    pub(crate) fn new(out: &Path) -> Self {
+        Self(temp_path(out, &JobId::new().to_string()))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempOutput {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// A spawned ffmpeg, killed and reaped when dropped while still running (on
+/// an early return or a panic), so it never finishes a partial output on
+/// its own.
+pub(crate) struct Process(pub(crate) Child);
+
+impl std::ops::Deref for Process {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Process {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // Both are no-ops once it has been waited for.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// How many names [`publish`] tries before giving up.
+const PUBLISH_TRIES: usize = 1000;
+
+/// Move a finished temp file into place without ever replacing a file:
+/// when one appeared at `out` during the render, to the next free name
+/// (like [`free_name`]) instead. Returns the path written.
+pub(crate) fn publish(tmp: &TempOutput, out: &Path) -> Result<PathBuf> {
+    for target in names(out).take(PUBLISH_TRIES) {
+        if place(tmp.path(), &target).context("could not move the render into place")? {
+            return Ok(target);
         }
     }
+    bail!("could not find a free name for {}", out.display())
+}
+
+/// Move a finished temp file to exactly `out`, failing if a file appeared
+/// there in the meantime.
+pub(crate) fn publish_exact(tmp: &TempOutput, out: &Path) -> Result<()> {
+    if !place(tmp.path(), out).context("could not move the file into place")? {
+        bail!("{} appeared in the meantime; not replaced", out.display());
+    }
+    Ok(())
+}
+
+/// Move `tmp` to `target` unless a file is there; `false` if one is.
+fn place(tmp: &Path, target: &Path) -> io::Result<bool> {
+    match fs::hard_link(tmp, target) {
+        Ok(()) => {
+            let _ = fs::remove_file(tmp);
+            return Ok(true);
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        // Filesystems without hard links (FAT, exFAT, some network shares).
+        Err(_) => {}
+    }
+    // Claim the name with an exclusive create, then rename over the claim:
+    // only our own empty file is ever replaced.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    fs::rename(tmp, target).inspect_err(|_| {
+        if fs::metadata(target).is_ok_and(|m| m.len() == 0) {
+            let _ = fs::remove_file(target);
+        }
+    })?;
+    Ok(true)
+}
+
+/// Write `contents` to `path` through a temp file beside it, renamed into
+/// place once complete: a failure never leaves a partial file, and an
+/// existing file is replaced whole or not at all.
+pub(crate) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let write = || -> io::Result<()> {
+        // Through a link, like `fs::write`: replace what it points to.
+        let path = match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+            _ => path.to_path_buf(),
+        };
+        let tmp = TempOutput::new(&path);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp.path())?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(tmp.path(), &path)
+    };
+    write().with_context(|| format!("could not write {}", path.display()))
 }

@@ -5,7 +5,7 @@
 //! in, see [`letter`]) and builds the audio in the same process.
 
 use crate::Letterer;
-use crate::ffmpeg::{self, command};
+use crate::ffmpeg::{self, Process, command};
 use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::compose::{self, Pictures, Streams};
@@ -319,21 +319,24 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let mut child = command(ffmpeg::ffmpeg())
-        .arg("-hide_banner")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("could not start {}", ffmpeg::ffmpeg().display()))?;
+    let mut child = Process(
+        command(ffmpeg::ffmpeg())
+            .arg("-hide_banner")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not start {}", ffmpeg::ffmpeg().display()))?,
+    );
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stderr.read_to_end(&mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     });
-    let mut stdin = child.stdin.take().expect("piped");
+    // Stdin stays in `child` until the last frame, so a panic kills ffmpeg
+    // before it sees the end of its input and finishes a partial file.
     let total = graph.frames.max(1);
     let mut write_failed = false;
     for f in 0..total {
@@ -343,13 +346,17 @@ pub(crate) fn run(
             bail!("canceled");
         }
         let frame = frames.frame(f);
-        if stdin.write_all(&frame.rgba).is_err() {
+        if child
+            .stdin
+            .as_mut()
+            .is_none_or(|s| s.write_all(&frame.rgba).is_err())
+        {
             write_failed = true;
             break;
         }
         progress((f + 1) as f32 / total as f32);
     }
-    drop(stdin);
+    drop(child.stdin.take());
     let status = child.wait()?;
     let stderr = errors.join().unwrap_or_default();
     if !status.success() || write_failed {

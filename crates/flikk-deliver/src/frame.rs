@@ -3,7 +3,7 @@
 //! with captions burned in by the same graph.
 
 use crate::composed::{self, Frames};
-use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
+use crate::ffmpeg::{self, TempOutput, ensure_free, filter_script_args, publish_exact};
 use crate::graph::{self, GraphSpec};
 use crate::preset::RenderSettings;
 use crate::queue::{WorkDir, write_script};
@@ -11,7 +11,7 @@ use anyhow::Result;
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::services::Services;
-use flikk_core::{JobId, Time, TimeRange};
+use flikk_core::{Time, TimeRange};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -39,7 +39,8 @@ pub fn export_frame(
     let work = WorkDir::new()?;
     let g = graph::build(project, &spec, &work.0)?;
     let script = write_script(&work.0, "frame.txt", &g.script)?;
-    let tmp = temp_path(path, &JobId::new().to_string());
+    // Removed however the export ends, once published or not.
+    let tmp = TempOutput::new(path);
     let mut args: Vec<OsString> = vec!["-loglevel".into(), "error".into(), "-y".into()];
     if spec.piped {
         args.extend(composed::input_args(&spec));
@@ -60,17 +61,13 @@ pub fn export_frame(
         ]
         .map(OsString::from),
     );
-    args.push(tmp.clone().into());
+    args.push(tmp.path().into());
     let cancel = AtomicBool::new(false);
-    let result = if spec.piped {
+    if spec.piped {
         let mut frames = Frames::new(project, services, &spec);
-        composed::run(&args, &g, &mut frames, &|_| {}, &cancel)
+        composed::run(&args, &g, &mut frames, &|_| {}, &cancel)?;
     } else {
-        ffmpeg::run(&args, 0.0, &|_| {}, &cancel).map(|_| ())
-    };
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        ffmpeg::run(&args, 0.0, &|_| {}, &cancel)?;
     }
-    publish(&tmp, path)
+    publish_exact(&tmp, path)
 }

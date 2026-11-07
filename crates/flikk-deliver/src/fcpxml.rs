@@ -3,7 +3,7 @@
 //! audio tracks on negative lanes, captions as `caption` elements.
 
 use crate::otio::file_url;
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use flikk_core::model::{Clip, ClipContent, MediaKind, Project, Track, TrackKind};
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{MediaId, Rate, Time};
@@ -309,6 +309,5 @@ pub fn to_fcpxml(project: &Project) -> String {
 
 /// Write the timeline as `.fcpxml`.
 pub fn export_fcpxml(project: &Project, path: &Path) -> Result<()> {
-    std::fs::write(path, to_fcpxml(project))
-        .with_context(|| format!("could not write {}", path.display()))
+    crate::ffmpeg::write_atomic(path, to_fcpxml(project))
 }

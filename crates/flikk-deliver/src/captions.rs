@@ -6,7 +6,7 @@ mod motion;
 pub use motion::{Pin, Pose, WordLook, pin, pose_at, spoken, word_look, word_starts};
 
 use crate::lettering::{self, Letters};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use flikk_core::compose;
 use flikk_core::memory::{CaptionHighlight, CaptionPosition, CaptionStyle, Color, MotionKind};
 use flikk_core::model::{Clip, ClipContent, Project, Property, Track, TrackKind};
@@ -661,7 +661,7 @@ pub fn export_srt(
     path: &Path,
 ) -> Result<()> {
     let text = to_srt(&cues(project, track, styles));
-    std::fs::write(path, text).with_context(|| format!("could not write {}", path.display()))
+    crate::ffmpeg::write_atomic(path, text)
 }
 
 /// Write every caption track as one styled ASS file at sequence size.
@@ -669,5 +669,5 @@ pub fn export_ass(project: &Project, styles: &[CaptionStyle], path: &Path) -> Re
     let s = &project.timeline.settings;
     let all = TimeRange::new(Time::ZERO, project.timeline.duration());
     let text = to_ass(project, styles, s.width, s.height, all, false);
-    std::fs::write(path, text).with_context(|| format!("could not write {}", path.display()))
+    crate::ffmpeg::write_atomic(path, text)
 }

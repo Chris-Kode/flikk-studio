@@ -3,7 +3,7 @@
 //! never overwrite an existing file.
 
 use crate::composed::{self, Frames};
-use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
+use crate::ffmpeg::{self, TempOutput, ensure_free, filter_script_args, publish};
 use crate::graph::{self, GraphSpec, Loudnorm, Measured};
 use crate::hw::{self, Encoder, HwEncoder};
 use crate::preset::RenderSettings;
@@ -19,6 +19,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// Everything a render needs, owned so it can cross threads.
 #[derive(Clone, Debug)]
@@ -56,6 +57,8 @@ pub struct RenderJob {
     pub id: JobId,
     /// Preset name.
     pub label: String,
+    /// The file asked for; once done, the file written (the next free name
+    /// when one appeared at the asked path during the render).
     pub output: PathBuf,
     pub state: RenderState,
 }
@@ -154,6 +157,25 @@ impl RenderQueue {
         }
     }
 
+    /// Cancel every job and wait (a few seconds at most) for the running
+    /// one to stop and remove its partial file. For quitting: a render cut
+    /// off by the app's exit leaves its temp file in the output folder.
+    pub fn shutdown(&self) {
+        let ids: Vec<JobId> = self
+            .jobs()
+            .into_iter()
+            .filter(|j| !j.state.is_finished())
+            .map(|j| j.id)
+            .collect();
+        for id in ids {
+            self.cancel(id);
+        }
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while self.is_busy() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Snapshot of every job, oldest first.
     pub fn jobs(&self) -> Vec<RenderJob> {
         let entries = self.inner.entries();
@@ -176,10 +198,13 @@ impl RenderQueue {
         entries.retain(|e| !e.job.state.is_finished());
     }
 
-    fn set_state(&self, id: JobId, state: RenderState) {
+    fn set_state(&self, id: JobId, state: RenderState, output: Option<PathBuf>) {
         let mut entries = self.inner.entries();
         if let Some(e) = entries.iter_mut().find(|e| e.job.id == id) {
             e.job.state = state;
+            if let Some(output) = output {
+                e.job.output = output;
+            }
         }
     }
 
@@ -247,11 +272,10 @@ impl RenderQueue {
             };
             let (id, request, cancel) = next;
             let progress = |fraction: f32| self.set_progress(id, fraction);
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                render_blocking(&request, &progress, &cancel)
-            }));
+            let result = catch_unwind(AssertUnwindSafe(|| render(&request, &progress, &cancel)));
+            let written = result.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned();
             let state = match result {
-                Ok(Ok(())) => RenderState::Done,
+                Ok(Ok(_)) => RenderState::Done,
                 Ok(Err(_)) if cancel.load(Ordering::Relaxed) => RenderState::Canceled,
                 Ok(Err(e)) => RenderState::Failed {
                     message: format!("{e:#}"),
@@ -260,7 +284,7 @@ impl RenderQueue {
                     message: panic_message(payload.as_ref()),
                 },
             };
-            self.set_state(id, state);
+            self.set_state(id, state, written);
         }
     }
 }
@@ -303,12 +327,21 @@ const DEPTH_SHARE: f32 = 0.5;
 /// normalized.
 const LOUDNESS_SHARE: f32 = 0.2;
 
+/// How long [`RenderQueue::shutdown`] waits for the running job to stop.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
     request: &RenderRequest,
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
+    render(request, progress, cancel).map(|_| ())
+}
+
+/// [`render_blocking`], returning the path written: `request.output`, or
+/// the next free name when a file appeared there during the render.
+fn render(request: &RenderRequest, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<PathBuf> {
     let out = &request.output;
     ensure_free(out)?;
     let work = WorkDir::new()?;
@@ -381,7 +414,8 @@ pub fn render_blocking(
     spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
     composed::letter(&request.project, &mut spec, &request.services);
     let g = graph::build(&request.project, &spec, &work.0)?;
-    let tmp = temp_path(out, &JobId::new().to_string());
+    // Removed however the render ends, once published or not.
+    let tmp = TempOutput::new(out);
     let progress = |p: f32| progress(share + p * (1.0 - share));
     let attempts = attempts(settings, spec.video)?;
     let last = attempts.len() - 1;
@@ -392,14 +426,15 @@ pub fn render_blocking(
             &g,
             &work.0,
             hw.as_ref(),
-            &tmp,
+            tmp.path(),
             &progress,
             cancel,
         );
         match result {
             Ok(()) => return publish(&tmp, out),
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
+                // The next attempt starts from nothing.
+                let _ = std::fs::remove_file(tmp.path());
                 // Auto: a hardware encoder that fails hands over to software.
                 if i == last || cancel.load(Ordering::Relaxed) {
                     return Err(match hw {
