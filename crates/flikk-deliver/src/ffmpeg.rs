@@ -1,6 +1,7 @@
 //! Locating and running the `ffmpeg`/`ffprobe` binaries, filtergraph
 //! escaping, and the no-overwrite file rules for outputs.
 
+use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
 use std::ffi::OsStr;
@@ -229,8 +230,12 @@ pub(crate) fn last_error(stderr: &str) -> String {
 }
 
 /// `path` if free, else the first free `name (2).ext`, `name (3).ext`, …
+/// A name is free when no file is there and no queued or running render
+/// will write it.
 pub fn free_name(path: &Path) -> PathBuf {
-    names(path).find(|p| !p.exists()).expect("unbounded")
+    names(path)
+        .find(|p| !p.exists() && !claimed(p, None))
+        .expect("unbounded")
 }
 
 /// `path`, then `name (2).ext`, `name (3).ext`, …
@@ -336,9 +341,14 @@ const PUBLISH_TRIES: usize = 1000;
 
 /// Move a finished temp file into place without ever replacing a file:
 /// when one appeared at `out` during the render, to the next free name
-/// (like [`free_name`]) instead. Returns the path written.
-pub(crate) fn publish(tmp: &TempOutput, out: &Path) -> Result<PathBuf> {
+/// (like [`free_name`]) instead, skipping the outputs of jobs other than
+/// `job` still queued or running. Returns the path written.
+pub(crate) fn publish(tmp: &TempOutput, out: &Path, job: Option<JobId>) -> Result<PathBuf> {
+    let _claiming = claiming();
     for target in names(out).take(PUBLISH_TRIES) {
+        if claimed(&target, job) {
+            continue;
+        }
         if place(tmp.path(), &target).context("could not move the render into place")? {
             return Ok(target);
         }
@@ -347,8 +357,15 @@ pub(crate) fn publish(tmp: &TempOutput, out: &Path) -> Result<PathBuf> {
 }
 
 /// Move a finished temp file to exactly `out`, failing if a file appeared
-/// there in the meantime.
+/// there in the meantime or a queued or running render will write it.
 pub(crate) fn publish_exact(tmp: &TempOutput, out: &Path) -> Result<()> {
+    let _claiming = claiming();
+    if claimed(out, None) {
+        bail!(
+            "{} is the output of a queued render; not written",
+            out.display()
+        );
+    }
     if !place(tmp.path(), out).context("could not move the file into place")? {
         bail!("{} appeared in the meantime; not replaced", out.display());
     }
@@ -387,8 +404,16 @@ fn place(tmp: &Path, target: &Path) -> io::Result<bool> {
 
 /// Write `contents` to `path` through a temp file beside it, renamed into
 /// place once complete: a failure never leaves a partial file, and an
-/// existing file is replaced whole or not at all.
+/// existing file is replaced whole or not at all. Refuses the output of a
+/// queued or running render.
 pub(crate) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let _claiming = claiming();
+    if claimed(path, None) {
+        bail!(
+            "{} is the output of a queued render; not written",
+            path.display()
+        );
+    }
     let write = || -> io::Result<()> {
         // Through a link, like `fs::write`: replace what it points to.
         let path = match fs::symlink_metadata(path) {

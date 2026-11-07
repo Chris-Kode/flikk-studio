@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 /// Everything a render needs, owned so it can cross threads.
@@ -105,10 +105,44 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// Every queue alive, so the outputs of pending jobs are kept from every
+/// other output.
+static QUEUES: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
+
+/// Held while an output name is checked and then taken, by a job queued
+/// for it or a file published to it, so two never take the same name.
+static CLAIMING: Mutex<()> = Mutex::new(());
+
+pub(crate) fn claiming() -> MutexGuard<'static, ()> {
+    CLAIMING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether `path` is the output of a job still queued or running, other
+/// than `except`, in any queue. Never call it holding a queue's entries.
+pub(crate) fn claimed(path: &Path, except: Option<JobId>) -> bool {
+    let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+    queues.retain(|q| q.strong_count() > 0);
+    queues.iter().filter_map(Weak::upgrade).any(|inner| {
+        inner
+            .entries()
+            .iter()
+            .any(|e| Some(e.job.id) != except && !e.job.state.is_finished() && e.job.output == path)
+    })
+}
+
 /// Cheap to clone; all clones share one queue.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RenderQueue {
     inner: Arc<Inner>,
+}
+
+impl Default for RenderQueue {
+    fn default() -> Self {
+        let inner = Arc::new(Inner::default());
+        let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+        queues.push(Arc::downgrade(&inner));
+        Self { inner }
+    }
 }
 
 impl RenderQueue {
@@ -119,17 +153,15 @@ impl RenderQueue {
     /// Queue a render. Fails at once if the output exists or is already the
     /// target of a queued job.
     pub fn enqueue(&self, request: RenderRequest) -> Result<JobId> {
+        let claiming = claiming();
         ensure_free(&request.output)?;
-        let mut entries = self.inner.entries();
-        if entries
-            .iter()
-            .any(|e| !e.job.state.is_finished() && e.job.output == request.output)
-        {
+        if claimed(&request.output, None) {
             return Err(anyhow!(
                 "{} is already in the queue",
                 request.output.display()
             ));
         }
+        let mut entries = self.inner.entries();
         let id = JobId::new();
         entries.push(Entry {
             job: RenderJob {
@@ -142,6 +174,7 @@ impl RenderQueue {
             cancel: Arc::new(AtomicBool::new(false)),
         });
         drop(entries);
+        drop(claiming);
         self.ensure_worker();
         Ok(id)
     }
@@ -272,7 +305,9 @@ impl RenderQueue {
             };
             let (id, request, cancel) = next;
             let progress = |fraction: f32| self.set_progress(id, fraction);
-            let result = catch_unwind(AssertUnwindSafe(|| render(&request, &progress, &cancel)));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                render(&request, Some(id), &progress, &cancel)
+            }));
             let written = result.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned();
             let state = match result {
                 Ok(Ok(_)) => RenderState::Done,
@@ -336,12 +371,18 @@ pub fn render_blocking(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    render(request, progress, cancel).map(|_| ())
+    render(request, None, progress, cancel).map(|_| ())
 }
 
 /// [`render_blocking`], returning the path written: `request.output`, or
-/// the next free name when a file appeared there during the render.
-fn render(request: &RenderRequest, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<PathBuf> {
+/// the next name free of files and of other jobs' outputs when a file
+/// appeared there during the render. `job` is the queued job rendering.
+fn render(
+    request: &RenderRequest,
+    job: Option<JobId>,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     let out = &request.output;
     ensure_free(out)?;
     let work = WorkDir::new()?;
@@ -431,7 +472,7 @@ fn render(request: &RenderRequest, progress: &dyn Fn(f32), cancel: &AtomicBool) 
             cancel,
         );
         match result {
-            Ok(()) => return publish(&tmp, out),
+            Ok(()) => return publish(&tmp, out, job),
             Err(e) => {
                 // The next attempt starts from nothing.
                 let _ = std::fs::remove_file(tmp.path());
