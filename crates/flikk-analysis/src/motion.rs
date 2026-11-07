@@ -15,18 +15,26 @@
 //! Paths are kept by fingerprint in memory and under
 //! `paths::cache()/analysis/<fingerprint>.motion`, beside the analysis
 //! results: the cache's Clear in Settings → Storage leaves them.
+//!
+//! An item is measured by one thread at a time: one that wants it while
+//! another measures it waits for that. One that failed is not queued
+//! again for [`RETRY_AFTER`]; renders measure it again all the same.
 
 use flikk_core::ids::JobId;
 use flikk_core::jobs::JobQueue;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::paths;
+use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// Widest frame measured.
 const WIDTH: u32 = 320;
@@ -47,9 +55,25 @@ const MAX_TURN: f64 = 0.05;
 /// Least texture (the smaller eigenvalue of a block's structure tensor,
 /// per pixel) a block needs to be measured.
 const TEXTURE: f64 = 30.0;
+/// How long an item that failed is left before it is queued again.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How often a thread waiting for another's measuring looks at `cancel`.
+const WAIT_STEP: Duration = Duration::from_millis(100);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a panic measuring says, with its message when it carries one.
+fn stopped(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match detail {
+        Some(detail) => format!("measuring the camera path stopped unexpectedly: {detail}"),
+        None => "measuring the camera path stopped unexpectedly".into(),
+    }
 }
 
 /// The [`Stabilizer`] that measures on this machine.
@@ -63,7 +87,11 @@ struct Shared {
     paths: Mutex<HashMap<Fingerprint, Arc<CameraPath>>>,
     /// Looked for on disk and not there.
     absent: Mutex<HashSet<Fingerprint>>,
-    failed: Mutex<HashMap<Fingerprint, String>>,
+    /// Items being measured now, and their end announced.
+    measuring: Mutex<HashSet<Fingerprint>>,
+    measured: Condvar,
+    /// Items that failed: why, and when.
+    failed: Mutex<HashMap<Fingerprint, (String, Instant)>>,
     version: AtomicU64,
 }
 
@@ -74,6 +102,8 @@ impl LocalStabilizer {
                 media,
                 paths: Mutex::default(),
                 absent: Mutex::default(),
+                measuring: Mutex::default(),
+                measured: Condvar::new(),
                 failed: Mutex::default(),
                 version: AtomicU64::new(0),
             }),
@@ -103,14 +133,55 @@ impl Shared {
         }
     }
 
+    /// Whether `fp` failed less than [`RETRY_AFTER`] ago, and why.
+    fn failed_lately(&self, fp: &Fingerprint) -> Option<String> {
+        lock(&self.failed)
+            .get(fp)
+            .filter(|(_, at)| at.elapsed() < RETRY_AFTER)
+            .map(|(why, _)| why.clone())
+    }
+
+    /// Measure `item`, or take what another thread measuring it found,
+    /// calling `waiting` while it waits for that. When it failed lately,
+    /// measures it again if `again`, and fails with that error otherwise.
     fn measure(
         &self,
         item: &MediaItem,
         fp: &Fingerprint,
         progress: &dyn Fn(f32),
         cancel: &AtomicBool,
+        again: bool,
+        waiting: &dyn Fn(),
     ) -> ServiceResult<Arc<CameraPath>> {
-        match measure(self.media.as_ref(), item, progress, cancel) {
+        {
+            let mut measuring = lock(&self.measuring);
+            loop {
+                if let Some(path) = self.path(fp) {
+                    return Ok(path);
+                }
+                if !again && let Some(why) = self.failed_lately(fp) {
+                    return Err(ServiceError(why));
+                }
+                if measuring.insert(fp.clone()) {
+                    break;
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(ServiceError("cancelled".into()));
+                }
+                waiting();
+                measuring = self
+                    .measured
+                    .wait_timeout(measuring, WAIT_STEP)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        }
+        let _claim = Measuring(self, fp);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            measure(self.media.as_ref(), item, progress, cancel)
+        }))
+        .unwrap_or_else(|payload| Err(ServiceError(stopped(payload.as_ref()))));
+        match result {
             Ok(path) => {
                 if let Err(e) = store(fp, &path) {
                     eprintln!("flikk-analysis: could not keep the camera path: {e}");
@@ -124,11 +195,21 @@ impl Shared {
             }
             Err(e) => {
                 if !cancel.load(Ordering::Relaxed) {
-                    lock(&self.failed).insert(fp.clone(), e.0.clone());
+                    lock(&self.failed).insert(fp.clone(), (e.0.clone(), Instant::now()));
                 }
                 Err(e)
             }
         }
+    }
+}
+
+/// An item claimed in [`Shared::measuring`], let go when dropped.
+struct Measuring<'a>(&'a Shared, &'a Fingerprint);
+
+impl Drop for Measuring<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.measuring).remove(self.1);
+        self.0.measured.notify_all();
     }
 }
 
@@ -141,7 +222,7 @@ impl Stabilizer for LocalStabilizer {
         let fp = item.fingerprint.clone()?;
         if item.kind != MediaKind::Video
             || self.shared.path(&fp).is_some()
-            || lock(&self.shared.failed).contains_key(&fp)
+            || self.shared.failed_lately(&fp).is_some()
         {
             return None;
         }
@@ -158,9 +239,10 @@ impl Stabilizer for LocalStabilizer {
             format!("Stabilize {name}"),
             Some(item.id),
             move |job| {
+                // Nothing cancels a background job: what it measures is kept.
                 let never = AtomicBool::new(false);
                 shared
-                    .measure(&owned, &fp, &|p| job.set(p), &never)
+                    .measure(&owned, &fp, &|p| job.set(p), &never, false, &|| {})
                     .map(|_| ())
                     .map_err(|e| e.0)
             },
@@ -180,7 +262,20 @@ impl Stabilizer for LocalStabilizer {
         if let Some(path) = self.shared.path(&fp) {
             return Ok(path);
         }
-        self.shared.measure(item, &fp, progress, cancel)
+        // While the queue's job measures it, report how far that got.
+        let waiting = || {
+            let job = self
+                .queue
+                .jobs()
+                .into_iter()
+                .rev()
+                .find(|j| j.media == Some(item.id));
+            if let Some(JobState::Running { fraction }) = job.map(|j| j.state) {
+                progress(fraction);
+            }
+        };
+        self.shared
+            .measure(item, &fp, progress, cancel, true, &waiting)
     }
 
     fn jobs(&self) -> Vec<JobStatus> {
