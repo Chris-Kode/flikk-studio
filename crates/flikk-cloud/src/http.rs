@@ -122,6 +122,69 @@ pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
     })
 }
 
+/// What one look at a remote job came to.
+pub enum Look {
+    /// The provider's answer.
+    Answer(serde_json::Value),
+    /// Nothing to go by this time: no connection, a busy or failing
+    /// server, a garbled reply. Why, for when it lasts.
+    Again(String),
+    /// A refusal asking again won't change: a bad key, an unknown job.
+    Refused(Reply),
+}
+
+/// GET a job's status (or result) at `url`. A job that was taken may still
+/// be running, and charged for, so only a refusal that won't pass is
+/// [`Look::Refused`]; while `fresh` (just submitted) a 404 passes too, as
+/// a new job can take a moment to be found.
+pub fn look(url: &str, headers: &[(&str, &str)], fresh: bool) -> Look {
+    let reply = match get(url, headers) {
+        Ok(reply) => reply,
+        Err(e) => return Look::Again(e.to_string()),
+    };
+    if reply.ok() {
+        return match reply.json() {
+            Ok(json) => Look::Answer(json),
+            Err(e) => Look::Again(e.to_string()),
+        };
+    }
+    if passes(reply.status, fresh) {
+        Look::Again(format!("the provider answered {}", reply.status))
+    } else {
+        Look::Refused(reply)
+    }
+}
+
+/// Whether a refused look at a job may come right if asked again.
+fn passes(status: u16, fresh: bool) -> bool {
+    matches!(status, 408 | 425 | 429) || status >= 500 || (fresh && status == 404)
+}
+
+/// The wait before the next look at a job, after `failures` failed looks
+/// in a row: `poll`, doubling with each, at most a minute.
+pub fn backoff(poll: Duration, failures: u32) -> Duration {
+    poll.saturating_mul(1 << failures.min(5))
+        .min(Duration::from_secs(60))
+}
+
+/// Whether a job status no provider documented reads as the end of a job
+/// that wasn't made: "cancelled", "expired", "error"…
+pub fn ended(status: &str) -> bool {
+    let status = status.to_ascii_lowercase();
+    [
+        "fail",
+        "error",
+        "cancel",
+        "expire",
+        "timeout",
+        "timed_out",
+        "abort",
+        "reject",
+    ]
+    .iter()
+    .any(|word| status.contains(word))
+}
+
 /// A JSON POST; see [`with_retries`] for `server_errors`.
 pub fn post_json(
     url: &str,

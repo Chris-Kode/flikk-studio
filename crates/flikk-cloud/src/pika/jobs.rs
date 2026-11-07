@@ -15,8 +15,16 @@ const POLL: Duration = Duration::from_secs(3);
 /// The longest a job is followed, queue and all.
 const PATIENCE: Duration = Duration::from_secs(2 * 60 * 60);
 
+/// How long a new job may be unknown to its URL.
+const FRESH: Duration = Duration::from_secs(60);
+
+/// How long a status this code doesn't know is waited out.
+const STRANGE: Duration = Duration::from_secs(10 * 60);
+
 /// Submit `input` to the endpoint at `path` (after `/v1/media/`) and follow
-/// it until it is made; the job, with its `output`.
+/// it until it is made; the job, with its `output`. A look that fails for a
+/// while (no connection, a failing server) doesn't end it: the job goes on
+/// at Pika, and is paid for.
 pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> CloudResult<Value> {
     let headers = [("x-api-key", key)];
     task.check()?;
@@ -33,24 +41,56 @@ pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> Cloud
     task.unstoppable();
     let status_url = format!("{BASE}/v1/media/jobs/{id}");
     let started = Instant::now();
+    let mut failures = 0;
+    let mut last_failure = String::new();
+    let mut strange: Option<Instant> = None;
     loop {
         match job["status"].as_str() {
             Some("completed") => return Ok(job),
             Some("failed") => return Err(failed(&job)),
-            Some("running") => task.report(Stage::Running),
-            _ => task.report(Stage::Queued(None)),
+            Some("running") => {
+                strange = None;
+                task.report(Stage::Running);
+            }
+            Some("queued") => {
+                strange = None;
+                task.report(Stage::Queued(None));
+            }
+            // A status Pika didn't document: its end, or one waited out.
+            said => {
+                let said = said.unwrap_or("no status");
+                if http::ended(said) || job["error"].is_object() {
+                    return Err(failed(&job));
+                }
+                if strange.get_or_insert_with(Instant::now).elapsed() > STRANGE {
+                    return Err(CloudError::Failed(format!(
+                        "{NAME} answered {said} for ten minutes; job {id} stopped being followed"
+                    )));
+                }
+            }
         }
         if started.elapsed() > PATIENCE {
+            let lately = if failures == 0 {
+                String::new()
+            } else {
+                format!(" (lately: {last_failure})")
+            };
             return Err(CloudError::Failed(format!(
-                "{NAME} took over two hours; it stopped being followed"
+                "{NAME} took over two hours; job {id} stopped being followed{lately}"
             )));
         }
-        std::thread::sleep(POLL);
-        let reply = http::get(&status_url, &headers)?;
-        if !reply.ok() {
-            return Err(error(&reply));
+        std::thread::sleep(http::backoff(POLL, failures));
+        match http::look(&status_url, &headers, started.elapsed() < FRESH) {
+            http::Look::Answer(answer) => {
+                failures = 0;
+                job = answer;
+            }
+            http::Look::Again(why) => {
+                failures += 1;
+                last_failure = why;
+            }
+            http::Look::Refused(reply) => return Err(error(&reply)),
         }
-        job = reply.json()?;
     }
 }
 
@@ -60,6 +100,12 @@ fn failed(job: &Value) -> CloudError {
     let message = error["message"]
         .as_str()
         .filter(|m| !m.is_empty())
-        .map_or_else(|| format!("{NAME} could not make it"), str::to_owned);
+        .map_or_else(
+            || match job["status"].as_str() {
+                Some(said) if said != "failed" => format!("{NAME} ended the job as {said}"),
+                _ => format!("{NAME} could not make it"),
+            },
+            str::to_owned,
+        );
     failure(200, error["code"].as_str().unwrap_or_default(), message)
 }
