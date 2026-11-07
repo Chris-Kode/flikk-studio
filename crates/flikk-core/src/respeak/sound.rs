@@ -171,8 +171,7 @@ fn splice(
         out.iter_mut().for_each(|x| *x *= 0.99 / peak);
     }
 
-    let path = free_path(&crate::paths::generated(), &fix.text);
-    write_wav(&path, &out).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    let path = save(&crate::paths::generated(), &fix.text, &out)?;
     let info = GenerationInfo {
         prompt: fix.text.clone(),
         reading: Some(reading.clone()),
@@ -183,8 +182,14 @@ fn splice(
         "made_by": &info,
         "credits": take.cost,
     });
-    if let Ok(text) = serde_json::to_string_pretty(&json) {
-        let _ = std::fs::write(sidecar(&path), text);
+    // Beside the name claimed, never over another's.
+    if let Ok(text) = serde_json::to_string_pretty(&json)
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(sidecar(&path))
+    {
+        let _ = std::io::Write::write_all(&mut file, text.as_bytes());
     }
     Ok(cloud::media_item(
         &Generated {
@@ -334,26 +339,83 @@ fn decode(
     Ok(out)
 }
 
-/// `<dir>/fix-<a few words>.wav`, numbered past any file already there.
-fn free_path(dir: &Path, text: &str) -> PathBuf {
+/// `audio` written as `<dir>/fix-<a few words>.wav`, numbered past any
+/// file already there. The name is claimed only once the file is whole, and
+/// atomically, so fixes made at once, or another writer in `dir`, never
+/// share one; a failure leaves nothing behind.
+fn save(dir: &Path, text: &str, audio: &[f32]) -> Result<PathBuf, String> {
+    let base = base_name(text);
+    let fail = |e: std::io::Error| {
+        format!(
+            "could not write {}: {e}",
+            dir.join(format!("{base}.wav")).display()
+        )
+    };
+    std::fs::create_dir_all(dir).map_err(fail)?;
+    let part = write_part(dir, &base, audio).map_err(fail)?;
+    claim(&part, dir, &base).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        fail(e)
+    })
+}
+
+/// `fix-<a few words>`, or `fix` without any.
+fn base_name(text: &str) -> String {
     let words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .take(5)
         .map(str::to_lowercase)
         .collect();
-    let base = if words.is_empty() {
+    if words.is_empty() {
         "fix".to_owned()
     } else {
         format!("fix-{}", words.join("-"))
-    };
-    let mut path = dir.join(format!("{base}.wav"));
-    let mut n = 2;
-    while path.exists() {
-        path = dir.join(format!("{base}-{n}.wav"));
-        n += 1;
     }
-    path
+}
+
+/// Moves the finished `part` to the first free `<base>.wav`,
+/// `<base>-2.wav`, …: one with no file and no sidecar there. Linked in, so
+/// never over a file already there, whoever made it in the meantime.
+fn claim(part: &Path, dir: &Path, base: &str) -> std::io::Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let path = match n {
+            1 => dir.join(format!("{base}.wav")),
+            n => dir.join(format!("{base}-{n}.wav")),
+        };
+        n += 1;
+        if std::fs::symlink_metadata(sidecar(&path)).is_ok() {
+            continue;
+        }
+        match settle(part, &path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `from` moved to `to`, failing with `AlreadyExists` if anything is there.
+fn settle(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // A file system without links: the name reserved by creating it,
+        // then the file renamed over the reservation.
+        Err(_) => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            std::fs::rename(from, to).inspect_err(|_| {
+                let _ = std::fs::remove_file(to);
+            })
+        }
+    }
 }
 
 fn sidecar(path: &Path) -> PathBuf {
@@ -362,11 +424,10 @@ fn sidecar(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Mono 32-bit float WAV at [`RATE`], through a `.part` file.
-fn write_wav(path: &Path, audio: &[f32]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+/// Mono 32-bit float WAV at [`RATE`], as a `.part` file in `dir` of this
+/// write's own; removed again if it cannot be written whole.
+fn write_part(dir: &Path, base: &str, audio: &[f32]) -> std::io::Result<PathBuf> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let data = (audio.len() * 4) as u32;
     let mut bytes = Vec::with_capacity(44 + audio.len() * 4);
     bytes.extend_from_slice(b"RIFF");
@@ -384,7 +445,25 @@ fn write_wav(path: &Path, audio: &[f32]) -> std::io::Result<()> {
     for x in audio {
         bytes.extend_from_slice(&x.to_le_bytes());
     }
-    let part = path.with_extension("wav.part");
-    std::fs::write(&part, bytes)?;
-    std::fs::rename(&part, path)
+    loop {
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let part = dir.join(format!(".{base}.wav.{}-{seq}.part", std::process::id()));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        return match std::io::Write::write_all(&mut file, &bytes) {
+            Ok(()) => Ok(part),
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(&part);
+                Err(e)
+            }
+        };
+    }
 }

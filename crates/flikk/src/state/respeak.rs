@@ -6,6 +6,7 @@
 use super::cloud::Generating;
 use super::{ApprovalOutcome, EditorState};
 use crate::agent_link::approve;
+use flikk_core::bus::Author;
 use flikk_core::cloud::{CloudError, GenerationTask, Reading};
 use flikk_core::library::{self, SavedVoice, VoiceSpeaker};
 use flikk_core::respeak::{self, Fix};
@@ -46,13 +47,16 @@ impl EditorState {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
+        let owner = self.bus.project().id;
         self.generating.push(Generating {
             id,
+            project: owner,
             request: respeak::request(&fix, &reading),
             task: task.clone(),
             failed: None,
         });
         let services = self.services.clone();
+        let stopped = task.clone();
         let made = cx.background_executor().spawn({
             let fix = fix.clone();
             async move { respeak::make(&fix, &source, &reading, &services, &task) }
@@ -61,6 +65,18 @@ impl EditorState {
             let result = made.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
+                    // Its project was closed: the words go into its pool,
+                    // to cut in by hand.
+                    Ok(item) if this.bus.project().id != owner => {
+                        this.generating.retain(|g| g.id != id);
+                        this.keep_for(owner, item, Author::User);
+                    }
+                    // Stopped too late: what was made is paid for, so it
+                    // goes into the pool, but isn't cut in.
+                    Ok(item) if stopped.cancelled() => {
+                        this.generating.retain(|g| g.id != id);
+                        this.add_generated(item, cx);
+                    }
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
                         if let Some(media) = this.add_generated(item, cx) {
@@ -72,6 +88,8 @@ impl EditorState {
                             }
                         }
                     }
+                    // Stopped: it ends, without failing.
+                    Err(_) if stopped.cancelled() => this.generating.retain(|g| g.id != id),
                     Err(e) => {
                         if let Some(g) = this.generating.iter_mut().find(|g| g.id == id) {
                             g.failed = Some(CloudError::Failed(e));
@@ -95,7 +113,8 @@ impl EditorState {
     ) -> ApprovalOutcome {
         let approve::Respoken { item, fix, summary } = made;
         let name = approve::file_name(&item.path);
-        let Some(media) = self.add_generated(item, cx) else {
+        let author = self.agent_author();
+        let Some(media) = self.add_generated_as(item, author, cx) else {
             let e = self.status.clone().unwrap_or_default();
             self.agent.report_failure(
                 id,

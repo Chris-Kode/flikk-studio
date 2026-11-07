@@ -14,6 +14,7 @@
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use flikk_core::agent::Backend as BackendKind;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -21,7 +22,17 @@ use std::process::Command;
 pub struct Codex {
     text: TextJoin,
     last_error: Option<String>,
+    /// Tool call items begun and not completed, by item id.
+    open_calls: HashSet<String>,
 }
+
+/// Item types that are a tool call, whose output the thread records.
+const CALL_ITEMS: [&str; 4] = [
+    "mcp_tool_call",
+    "web_search",
+    "command_execution",
+    "file_change",
+];
 
 /// Codex's own folder (`CODEX_HOME`, else `~/.codex`), where its login is.
 pub fn codex_home() -> PathBuf {
@@ -189,6 +200,34 @@ impl Adapter for Codex {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
+        let mut out = self.parse_value(&v);
+        out.extend(self.track_calls(&v));
+        out
+    }
+
+    fn last_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
+}
+
+impl Codex {
+    /// Note the tool call items a line begins or completes; how many are
+    /// open if that changed.
+    fn track_calls(&mut self, v: &Value) -> Option<BackendEvent> {
+        let s = |p: &str| v.pointer(p).and_then(Value::as_str);
+        if !CALL_ITEMS.contains(&s("/item/type")?) {
+            return None;
+        }
+        let id = s("/item/id")?;
+        let changed = match s("/type")? {
+            "item.started" => self.open_calls.insert(id.to_owned()),
+            "item.completed" => self.open_calls.remove(id),
+            _ => false,
+        };
+        changed.then_some(BackendEvent::OpenCalls(self.open_calls.len()))
+    }
+
+    fn parse_value(&mut self, v: &Value) -> Vec<BackendEvent> {
         let s = |p: &str| v.pointer(p).and_then(Value::as_str);
         match s("/type") {
             Some("thread.started") => s("/thread_id")

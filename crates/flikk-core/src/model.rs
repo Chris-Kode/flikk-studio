@@ -8,10 +8,11 @@ use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
 use crate::mask::Mask;
-use crate::speed::Retime;
+use crate::speed::{MAX_SPEED, MIN_SPEED, Retime};
 use crate::stabilize::Stabilization;
 use crate::time::{Rate, Time, TimeRange};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +58,234 @@ impl Project {
                     .is_some_and(|m| m.kind != MediaKind::Audio)
             })
     }
+
+    /// Restore the invariants every edit relies on, for a project read from
+    /// a file (written by an older build, a crash, or by hand). Returns what
+    /// was repaired; a project that keeps them is left exactly as it is.
+    ///
+    /// Clips keep their content and their place in time. A clip on a track
+    /// whose kind does not take it (the rule every edit holds to, see
+    /// [`crate::edit`]) moves, at the same time, to the first track of its
+    /// kind that has room, made for it when needed. Then, on each track,
+    /// clips are sorted by start; a clip that overlaps an earlier one moves
+    /// to the first track of the same kind below it that has room, made for
+    /// it when needed (a copy of the track's settings named "V1 (2)"), so
+    /// no clip is lost or retimed. A clip of no length gets one frame, a
+    /// speed outside [`MIN_SPEED`]..[`MAX_SPEED`] the nearest one in it (1
+    /// when it is not a number above zero), fades fit inside their clip,
+    /// keyframes are sorted, transitions without a duration and on captions
+    /// go, repeated clip and track ids are renewed, and ducking of a track
+    /// that is not there is turned off.
+    pub fn normalize(&mut self) -> Vec<String> {
+        let mut fixed = Vec::new();
+        let frame = self.timeline.settings.rate.frame_duration().max(Time(1));
+        let mut track_ids = HashSet::new();
+        let mut clip_ids = HashSet::new();
+        for track in &mut self.timeline.tracks {
+            if !track_ids.insert(track.id) {
+                track.id = TrackId::new();
+                track_ids.insert(track.id);
+                fixed.push(format!("{}: repeated track id renewed", track.name));
+            }
+            for c in &mut track.clips {
+                if !clip_ids.insert(c.id) {
+                    c.id = ClipId::new();
+                    clip_ids.insert(c.id);
+                    fixed.push(format!("{}: repeated clip id renewed", track.name));
+                }
+                c.repair(frame, &track.name, &mut fixed);
+            }
+        }
+        // Before the overlap repair, which then has the last word: clips
+        // only move to room, but the tracks they land on may hold overlaps
+        // of their own.
+        self.rehome_clips(&mut fixed);
+        let mut names: HashSet<String> = self
+            .timeline
+            .tracks
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let mut tracks = Vec::with_capacity(self.timeline.tracks.len());
+        for mut track in std::mem::take(&mut self.timeline.tracks) {
+            let mut clips = std::mem::take(&mut track.clips);
+            clips.sort_by_key(|c| c.start);
+            // Lane 0 is the track itself; the others are made below it.
+            let mut lanes = vec![track];
+            for c in clips {
+                let lane = match lanes
+                    .iter()
+                    .position(|l| l.clips.last().is_none_or(|p| p.end() <= c.start))
+                {
+                    Some(i) => i,
+                    None => {
+                        let base = &lanes[0];
+                        let name = unused_name(
+                            |n| names.contains(n),
+                            |n| format!("{} ({n})", base.name),
+                            lanes.len() + 1,
+                        );
+                        names.insert(name.clone());
+                        let lane = Track {
+                            id: TrackId::new(),
+                            name,
+                            clips: Vec::new(),
+                            ..base.clone()
+                        };
+                        lanes.push(lane);
+                        lanes.len() - 1
+                    }
+                };
+                if lane > 0 {
+                    fixed.push(format!(
+                        "{}: clip {} overlapped another, moved to {}",
+                        lanes[0].name, c.id, lanes[lane].name
+                    ));
+                }
+                lanes[lane].clips.push(c);
+            }
+            tracks.extend(lanes);
+        }
+        self.timeline.tracks = tracks;
+        if let Some(d) = &self.timeline.ducking
+            && self.timeline.track(d.music_track).is_none()
+        {
+            self.timeline.ducking = None;
+            fixed.push("ducking of a missing track turned off".into());
+        }
+        if !self.timeline.markers.is_sorted_by_key(|m| m.range.start) {
+            self.timeline.markers.sort_by_key(|m| m.range.start);
+            fixed.push("markers sorted".into());
+        }
+        fixed
+    }
+
+    /// The kind repair of [`Project::normalize`]: every clip its track does
+    /// not take ([`crate::edit::fits_track`]) moves, keeping its id, times
+    /// and everything else, to the first track of its [`Self::home_kind`]
+    /// that it overlaps nothing on, else to a new track of that kind. Clips
+    /// move in track order, then by start, so the result is the same on
+    /// every read.
+    ///
+    /// Transitions live on their clip and move with it, as when a clip is
+    /// moved or removed by an edit: an edge left without a neighbour fades
+    /// to or from nothing ([`crate::fx::transitions`]).
+    fn rehome_clips(&mut self, fixed: &mut Vec<String>) {
+        let mut moves = Vec::new();
+        for t in &self.timeline.tracks {
+            let mut clips: Vec<&Clip> = t.clips.iter().collect();
+            clips.sort_by_key(|c| c.start);
+            for c in clips {
+                if crate::edit::fits_track(self, &c.content, t.kind) {
+                    continue;
+                }
+                // A clip that fits no kind at all (media missing from the
+                // pool) stays where it is: no track would make it valid,
+                // and dropping it would lose the user's work.
+                if let Some(kind) = self.home_kind(&c.content) {
+                    moves.push((t.id, c.id, kind));
+                }
+            }
+        }
+        // Track and clip ids are unique here, and tracks are only added.
+        let tracks = &mut self.timeline.tracks;
+        for (from, id, kind) in moves {
+            let Some(fi) = tracks.iter().position(|t| t.id == from) else {
+                continue;
+            };
+            let Some(ci) = tracks[fi].clips.iter().position(|c| c.id == id) else {
+                continue;
+            };
+            let from_name = tracks[fi].name.clone();
+            let clip = tracks[fi].clips.remove(ci);
+            let room = |t: &Track| {
+                t.kind == kind && !t.clips.iter().any(|c| c.range().overlaps(&clip.range()))
+            };
+            let ti = match tracks.iter().position(room) {
+                Some(i) => i,
+                None => {
+                    let (i, track) = new_track(tracks, kind);
+                    tracks.insert(i, track);
+                    i
+                }
+            };
+            let to = &mut tracks[ti];
+            fixed.push(format!(
+                "{from_name}: clip {id} does not go on a {kind:?} track, moved to {}",
+                to.name
+            ));
+            let at = to.clips.partition_point(|c| c.start <= clip.start);
+            to.clips.insert(at, clip);
+        }
+    }
+
+    /// The kind of track a clip goes to when its own does not take it: the
+    /// first kind it fits, footage before sound for media and overlays
+    /// before video for the rest. `None` when it fits no kind.
+    fn home_kind(&self, content: &ClipContent) -> Option<TrackKind> {
+        use TrackKind::*;
+        let order = match content {
+            ClipContent::Media { .. } => [Video, Audio, Overlay, Title, Caption],
+            _ => [Overlay, Title, Video, Caption, Audio],
+        };
+        order
+            .into_iter()
+            .find(|k| crate::edit::fits_track(self, content, *k))
+    }
+}
+
+/// A new, empty `kind` track for [`Project::rehome_clips`] and where it
+/// goes in `tracks`: below the last track of that kind with the first's
+/// settings, named "V1 (2)"; with no such track, a default one named "V1"
+/// where the timeline adds tracks of that kind.
+fn new_track(tracks: &[Track], kind: TrackKind) -> (usize, Track) {
+    let taken = |name: &str| tracks.iter().any(|t| t.name == name);
+    if let (Some(first), Some(last)) = (
+        tracks.iter().position(|t| t.kind == kind),
+        tracks.iter().rposition(|t| t.kind == kind),
+    ) {
+        let base = &tracks[first];
+        let name = unused_name(taken, |n| format!("{} ({n})", base.name), 2);
+        let track = Track {
+            id: TrackId::new(),
+            name,
+            clips: Vec::new(),
+            ..base.clone()
+        };
+        return (last + 1, track);
+    }
+    let prefix = match kind {
+        TrackKind::Video => "V",
+        TrackKind::Audio => "A",
+        TrackKind::Caption => "C",
+        TrackKind::Title => "T",
+        TrackKind::Overlay => "O",
+    };
+    let name = unused_name(taken, |n| format!("{prefix}{n}"), 1);
+    // Captions on top, sound at the bottom, other pictures above video.
+    let index = match kind {
+        TrackKind::Caption => 0,
+        TrackKind::Audio => tracks.len(),
+        _ => tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .or_else(|| tracks.iter().position(|t| t.kind == TrackKind::Audio))
+            .unwrap_or(tracks.len()),
+    };
+    (index, Track::new(kind, name))
+}
+
+/// `name(n)` for the first `n` from `from` up that is not `taken`.
+fn unused_name(
+    taken: impl Fn(&str) -> bool,
+    name: impl Fn(usize) -> String,
+    from: usize,
+) -> String {
+    let mut n = from;
+    while taken(&name(n)) {
+        n += 1;
+    }
+    name(n)
 }
 
 // ---------------------------------------------------------------- media pool
@@ -187,6 +416,20 @@ impl Timeline {
             .flat_map(|t| t.clips.iter().map(|c| c.end()))
             .max()
             .unwrap_or(Time::ZERO)
+    }
+
+    /// Whether an audio track is soloed, so only soloed ones are heard.
+    pub fn soloing(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.kind == TrackKind::Audio && t.mix.solo)
+    }
+
+    /// Whether `track` is heard: an audio track, not muted and, while any
+    /// is soloed ([`Self::soloing`]), soloed itself. The one mute and solo
+    /// rule for playback, render and the agent.
+    pub fn audible(&self, track: &Track) -> bool {
+        track.kind == TrackKind::Audio && !track.mix.mute && (track.mix.solo || !self.soloing())
     }
 
     /// Protected ranges that a cut over `range` would touch (PRD F4).
@@ -531,6 +774,96 @@ impl Clip {
         match &self.content {
             ClipContent::Media { media, .. } => Some(*media),
             _ => None,
+        }
+    }
+
+    /// [`Project::normalize`] for one clip; `frame` is the shortest clip.
+    fn repair(&mut self, frame: Time, track: &str, fixed: &mut Vec<String>) {
+        let id = self.id;
+        let mut note = |what: &str| fixed.push(format!("{track}: clip {id} {what}"));
+        if self.start < Time::ZERO {
+            self.start = Time::ZERO;
+            note("started before zero, moved to zero");
+        }
+        if self.duration <= Time::ZERO {
+            self.duration = frame;
+            note("had no length, given one frame");
+        }
+        let speed = |s: f64| {
+            if s.is_finite() && s > 0.0 {
+                s.clamp(MIN_SPEED, MAX_SPEED)
+            } else {
+                1.0
+            }
+        };
+        if speed(self.speed) != self.speed {
+            self.speed = speed(self.speed);
+            note("speed out of range, reset");
+        }
+        let keys = &mut self.retime.keys;
+        let bad_keys = keys.iter().any(|k| speed(k.speed) != k.speed)
+            || !keys.is_sorted_by_key(|k| k.at)
+            || keys
+                .iter()
+                .any(|k| k.at < Time::ZERO || k.at > self.duration);
+        if bad_keys {
+            for k in keys.iter_mut() {
+                k.speed = speed(k.speed);
+            }
+            keys.sort_by_key(|k| k.at);
+            self.settle_ramp();
+            note("speed ramp repaired");
+        }
+        let fades = &mut self.audio;
+        let (fade_in, fade_out) = (
+            fades.fade_in.clamp(Time::ZERO, self.duration),
+            fades.fade_out.clamp(Time::ZERO, self.duration),
+        );
+        if (fade_in, fade_out) != (fades.fade_in, fades.fade_out) {
+            (fades.fade_in, fades.fade_out) = (fade_in, fade_out);
+            note("fades longer than the clip, shortened");
+        }
+        let mut sorted = false;
+        if !self.keyframes.is_sorted_by_key(|k| k.at) {
+            self.keyframes.sort_by_key(|k| k.at);
+            sorted = true;
+        }
+        for m in &mut self.masks {
+            if !m.keyframes.is_sorted_by_key(|k| k.at) {
+                m.keyframes.sort_by_key(|k| k.at);
+                sorted = true;
+            }
+        }
+        let generator = match &mut self.content {
+            ClipContent::Generator { fx } => Some(fx),
+            _ => None,
+        };
+        let transitions = [&mut self.transition_in, &mut self.transition_out];
+        for fx in self
+            .effects
+            .iter_mut()
+            .chain(generator)
+            .chain(transitions.into_iter().flatten().map(|t| &mut t.fx))
+        {
+            if !fx.keyframes.is_sorted_by_key(|k| k.at) {
+                fx.keyframes.sort_by_key(|k| k.at);
+                sorted = true;
+            }
+        }
+        if sorted {
+            note("keyframes sorted");
+        }
+        for t in [&mut self.transition_in, &mut self.transition_out] {
+            if t.as_ref().is_some_and(|t| t.duration <= Time::ZERO) {
+                *t = None;
+                note("transition without a duration removed");
+            }
+        }
+        if matches!(self.content, ClipContent::Caption { .. })
+            && (self.transition_in.is_some() || self.transition_out.is_some())
+        {
+            (self.transition_in, self.transition_out) = (None, None);
+            note("caption with a transition, transition removed");
         }
     }
 }

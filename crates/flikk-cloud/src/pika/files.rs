@@ -4,12 +4,13 @@
 
 use super::{BASE, NAME, error};
 use crate::http;
-use flikk_core::cloud::{CloudError, CloudResult};
+use flikk_core::cloud::{CloudError, CloudResult, GenerationTask};
 use serde_json::json;
 use std::path::Path;
 
-/// A URL Pika can read `path` from.
-pub fn url(key: &str, path: &Path) -> CloudResult<String> {
+/// A URL Pika can read `path` from; [`CloudError::Cancelled`] when `task`
+/// is stopped while an upload waits to be tried again.
+pub fn url(key: &str, path: &Path, task: &GenerationTask) -> CloudResult<String> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let size = std::fs::metadata(path)
         .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?
@@ -20,6 +21,7 @@ pub fn url(key: &str, path: &Path) -> CloudResult<String> {
         &[("x-api-key", key)],
         &json!({ "content_type": mime, "size_bytes": size }),
         true,
+        Some(task),
     )?;
     if !reply.ok() {
         // Too big (413), or a type it won't take (415).
@@ -44,7 +46,7 @@ pub fn url(key: &str, path: &Path) -> CloudResult<String> {
     } else {
         signed
     };
-    let put = http::put_file(upload, path, &headers)?;
+    let put = http::put_file(upload, path, &headers, Some(task))?;
     if !put.ok() {
         return Err(CloudError::Failed(format!(
             "{NAME} could not take {name} ({})",

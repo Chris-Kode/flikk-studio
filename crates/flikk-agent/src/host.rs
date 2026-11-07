@@ -21,15 +21,16 @@
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::groups::{self, Usage};
-use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, ToolCtx};
+use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
 use crate::{prompt, recipes, session};
-use flikk_core::ChangeSetId;
 use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
 use flikk_core::bus::{AgentRole, Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::command::ToolCategory;
 use flikk_core::memory::{Recipe, SourceFact, StyleRule};
+use flikk_core::model::MediaItem;
 use flikk_core::services::Services;
+use flikk_core::{ChangeSetId, ProjectId};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ struct External {
     /// Editor context and settings of the latest turn, used for their calls.
     context: EditorContext,
     settings: AgentSettings,
+    /// Never stopped: a client stops its own calls.
+    stop: Stop,
 }
 
 /// A memory, deliver or generate request waiting for the user. Approving
@@ -66,7 +69,48 @@ pub struct PendingApproval {
     pub request: ApprovalRequest,
     /// Unix seconds.
     pub at: i64,
+    /// The project it was asked on.
+    pub project: ProjectId,
+    /// The chat whose turn asked; none for an external client.
+    pub chat: Option<String>,
 }
+
+/// What became of an approval whose call no longer waits, for the next
+/// turn of the chat that asked.
+struct Outcome {
+    project: ProjectId,
+    chat: String,
+    text: String,
+}
+
+/// Where the agent is with the open chat's messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnStatus {
+    /// Nothing queued or under way: a message is taken.
+    Idle,
+    /// A message waits for the next pump to start its turn.
+    Queued,
+    /// A turn is under way.
+    Running,
+    /// The turn was cancelled; it ends on the next pump.
+    Stopping,
+}
+
+impl TurnStatus {
+    /// A message is queued or its turn under way, so another is refused.
+    pub fn is_busy(self) -> bool {
+        self != Self::Idle
+    }
+
+    /// A turn has started and not ended. The agent's open change set is
+    /// that turn's, and goes to review when it ends.
+    pub fn in_turn(self) -> bool {
+        matches!(self, Self::Running | Self::Stopping)
+    }
+}
+
+/// What the agent says when the backend lost a session it can't re-run.
+const SESSION_LOST: &str = "The agent's session was lost; send your message again";
 
 struct Queued {
     message: String,
@@ -75,6 +119,10 @@ struct Queued {
 }
 
 struct Turn {
+    /// Numbers turns, so a job of an earlier one is told apart.
+    id: u64,
+    /// Stops what its jobs are doing when it is cancelled.
+    stop: Stop,
     author: Author,
     backend: Backend,
     project: flikk_core::ProjectId,
@@ -89,10 +137,14 @@ struct Turn {
     running: Option<RunningTurn>,
     /// Off-thread tool jobs still running.
     jobs: usize,
-    /// Set when the backend reports the end of the turn.
-    finished: Option<Option<String>>,
-    cancelled: bool,
-    saw_text: bool,
+    phase: Phase,
+    /// Something came of the turn that running it again would repeat: text
+    /// shown, a tool call made (with the proposals, jobs and approvals it
+    /// led to) or one of the backend's own tools used.
+    acted: bool,
+    /// Tool calls the backend began and has no result for (see
+    /// [`BackendEvent::OpenCalls`]).
+    open_calls: usize,
     /// Tool groups the chat lists, fixed when it started (see
     /// `tools::groups`).
     groups: BTreeSet<ToolCategory>,
@@ -101,8 +153,35 @@ struct Turn {
     web_calls: HashMap<String, u64>,
 }
 
-/// A finished job, with the call id its start was shown under.
-type JobResult = (Origin, Reply, String, Value, JobDone, u64);
+/// Where a started turn is.
+enum Phase {
+    /// The backend is working on it.
+    Running,
+    /// The backend ended it, with an error if it failed. The turn ends
+    /// once its jobs have.
+    Finished(Option<String>),
+    /// Cancelled: it ends on the next pump.
+    Stopping,
+}
+
+impl Turn {
+    fn stopping(&self) -> bool {
+        matches!(self.phase, Phase::Stopping)
+    }
+}
+
+/// A finished job: who started it, in which turn and on which project, and
+/// the call id its start was shown under.
+struct JobResult {
+    origin: Origin,
+    turn: Option<u64>,
+    project: ProjectId,
+    reply: Reply,
+    tool: String,
+    args: Value,
+    out: JobDone,
+    call: u64,
+}
 
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
@@ -121,12 +200,19 @@ pub struct AgentHost {
     /// stays open until the user decides, so the turn carries on with what
     /// came of it.
     held: HashMap<u64, (Origin, Reply)>,
+    /// Where each approval still to be reported was asked: its project, and
+    /// its chat (none for an external client).
+    asked: HashMap<u64, (ProjectId, Option<String>)>,
     /// What became of approval requests whose call was no longer waiting
-    /// (the turn ended), told to the agent on its next turn.
-    outcomes: Vec<String>,
+    /// (the turn ended), told to the agent on that chat's next turn.
+    outcomes: Vec<Outcome>,
     external: External,
     /// Id of the next call shown while it runs.
     next_call: u64,
+    next_turn: u64,
+    /// What jobs made for a project that was no longer open when they
+    /// finished, for the editor to keep for it.
+    orphans: Vec<(ProjectId, MediaItem)>,
 }
 
 impl Default for AgentHost {
@@ -151,9 +237,12 @@ impl AgentHost {
             approvals: Vec::new(),
             next_approval: 1,
             held: HashMap::new(),
+            asked: HashMap::new(),
             outcomes: Vec::new(),
             external: External::default(),
             next_call: 1,
+            next_turn: 1,
+            orphans: Vec::new(),
         }
     }
 
@@ -173,8 +262,14 @@ impl AgentHost {
         }
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.queued.is_some() || self.turn.is_some()
+    /// Whether a message is queued, its turn under way or being stopped.
+    pub fn status(&self) -> TurnStatus {
+        match (&self.turn, &self.queued) {
+            (Some(turn), _) if turn.stopping() => TurnStatus::Stopping,
+            (Some(_), _) => TurnStatus::Running,
+            (None, Some(_)) => TurnStatus::Queued,
+            (None, None) => TurnStatus::Idle,
+        }
     }
 
     /// Editor or Builder: a different prompt, tool set and backend session.
@@ -206,7 +301,7 @@ impl AgentHost {
 
     /// Queue a turn; it starts on the next [`pump`](Self::pump).
     pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {
-        if self.is_busy() {
+        if self.status().is_busy() {
             self.events.push(AgentEvent::Error {
                 message: "The agent is still working on the last message".into(),
             });
@@ -221,20 +316,54 @@ impl AgentHost {
         });
     }
 
-    /// Stop the turn: kill the subprocess. The partial change set is still
-    /// offered for review on the next pump.
+    /// Stop the turn: kill the subprocess and stop the generations and
+    /// waits its jobs started. The partial change set is still offered for
+    /// review on the next pump.
     pub fn cancel(&mut self) {
         self.queued = None;
         if let Some(turn) = self.turn.as_mut() {
-            turn.cancelled = true;
+            turn.phase = Phase::Stopping;
+            turn.stop.stop();
             if let Some(r) = &turn.running {
                 r.kill();
             }
         }
     }
 
-    pub fn pending_approvals(&self) -> &[PendingApproval] {
-        &self.approvals
+    /// What jobs made for projects that were closed before they finished,
+    /// with the project each belongs to.
+    pub fn take_orphans(&mut self) -> Vec<(ProjectId, MediaItem)> {
+        std::mem::take(&mut self.orphans)
+    }
+
+    /// The requests waiting for the user in the open chat, and those of
+    /// external clients.
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
+        self.approvals
+            .iter()
+            .filter(|a| a.chat.as_deref().is_none_or(|c| c == self.chat))
+            .cloned()
+            .collect()
+    }
+
+    /// The user opened another project: withdraw the requests `project`'s
+    /// turns left waiting. Its chats' agents are told on their next turn.
+    pub fn close_project(&mut self, project: ProjectId) {
+        let (gone, kept) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|a| a.project == project);
+        self.approvals = kept;
+        for approval in gone {
+            let PendingApproval { id, request, .. } = approval;
+            self.report_outcome(
+                id,
+                format!(
+                    "withdrawn: {} (the user opened another project before deciding)",
+                    request.summary
+                ),
+                true,
+            );
+        }
     }
 
     /// Remove a request once the user approved or denied it.
@@ -247,10 +376,30 @@ impl AgentHost {
     /// Style rule: …"`): as the result of the call that asked, which is
     /// still waiting, else at the start of its next turn.
     pub fn report_outcome(&mut self, id: u64, outcome: String, failed: bool) {
+        let asked = self.asked.remove(&id);
         match self.held.remove(&id) {
-            Some((_, reply)) if failed => reply.result(bridge::ToolResult::error(outcome)),
-            Some((_, reply)) => reply.result(bridge::ToolResult::text(outcome)),
-            None => self.outcomes.push(outcome),
+            Some((origin, reply)) => {
+                // An external client's quiet time starts from the answer.
+                if let Origin::External(_) = origin {
+                    self.external.last_call = Some(Instant::now());
+                }
+                reply.result(if failed {
+                    bridge::ToolResult::error(outcome)
+                } else {
+                    bridge::ToolResult::text(outcome)
+                });
+            }
+            // An external client's call that gave up waiting has nobody to
+            // tell; the editor's own agent never asked.
+            None => {
+                if let Some((project, Some(chat))) = asked {
+                    self.outcomes.push(Outcome {
+                        project,
+                        chat,
+                        text: outcome,
+                    });
+                }
+            }
         }
     }
 
@@ -290,8 +439,11 @@ impl AgentHost {
             .memory
             .recipes
             .iter()
+            // The setting lists built-ins; the user's own recipes are on.
             .filter(|r| {
-                q.settings.enabled_recipes.is_empty() || q.settings.enabled_recipes.contains(&r.id)
+                !r.builtin
+                    || q.settings.enabled_recipes.is_empty()
+                    || q.settings.enabled_recipes.contains(&r.id)
             })
             .cloned()
             .collect();
@@ -306,14 +458,24 @@ impl AgentHost {
             &self.memory.rules,
             recipe.as_deref(),
         );
-        if !self.outcomes.is_empty() {
-            let outcomes = std::mem::take(&mut self.outcomes).join("\n");
+        // What came of this chat's own requests, and no other's.
+        let (ours, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.outcomes)
+            .into_iter()
+            .partition(|o| o.project == project_id && o.chat == self.chat);
+        self.outcomes = others;
+        if !ours.is_empty() {
+            let outcomes: Vec<_> = ours.into_iter().map(|o| o.text).collect();
+            let outcomes = outcomes.join("\n");
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let images = tools::image::offered(&q.settings, services);
         let system_prompt = prompt::system_prompt(self.role, &q.settings, images);
         let backend = q.settings.backend;
         let resume = session::load(project.id, &self.chat, backend, self.role);
+        // A new session doesn't have the chat's earlier messages.
+        if resume.is_none() {
+            message = prompt::with_recap(message, &q.context.history);
+        }
         let picked = groups::pick(&text, project, &q.context, self.role);
         // A conversation keeps the list it started with, so its cached
         // prompt stays valid; a new one starts from this message's picks.
@@ -383,7 +545,11 @@ impl AgentHost {
             label: recipe.map_or_else(|| "Thinking".to_owned(), |r| format!("Running /{r}")),
             fraction: None,
         });
+        let id = self.next_turn;
+        self.next_turn += 1;
         self.turn = Some(Turn {
+            id,
+            stop: Stop::default(),
             author,
             backend,
             project: project_id,
@@ -394,9 +560,9 @@ impl AgentHost {
             spec,
             running: Some(running),
             jobs: 0,
-            finished: None,
-            cancelled: false,
-            saw_text: false,
+            phase: Phase::Running,
+            acted: false,
+            open_calls: 0,
             usage: Usage::new(picked, groups.clone()),
             groups,
             web_calls: HashMap::new(),
@@ -422,6 +588,7 @@ impl AgentHost {
         let Some(running) = &turn.running else {
             return;
         };
+        let stopping = turn.stopping();
         for event in running.events.try_iter() {
             match event {
                 BackendEvent::Session(id) => {
@@ -434,8 +601,8 @@ impl AgentHost {
                     );
                 }
                 BackendEvent::TextDelta(text) => {
-                    turn.saw_text = true;
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         self.events.push(AgentEvent::TextDelta { text });
                     }
                 }
@@ -445,7 +612,8 @@ impl AgentHost {
                     args,
                     summary,
                 } => {
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         let call = self.next_call;
                         self.next_call += 1;
                         turn.web_calls.insert(key, call);
@@ -462,7 +630,8 @@ impl AgentHost {
                     summary,
                     ok,
                 } => {
-                    if !turn.cancelled {
+                    turn.acted = true;
+                    if !stopping {
                         let entry = ActivityEntry {
                             at: now(),
                             tool: tool.into(),
@@ -480,32 +649,43 @@ impl AgentHost {
                         });
                     }
                 }
+                BackendEvent::OpenCalls(n) => turn.open_calls = n,
                 BackendEvent::Finished { error } => {
-                    turn.finished = Some(error);
+                    if !stopping {
+                        turn.phase = Phase::Finished(error);
+                    }
                     break;
                 }
             }
         }
-        // Resume failed because the backend forgot the session: forget it
-        // too and run the turn again fresh.
-        let lost = matches!(&turn.finished, Some(Some(e)) if is_lost_session(e));
-        if lost && turn.spec.resume.is_some() && !turn.saw_text && !turn.cancelled {
-            session::store(
-                turn.project,
-                &turn.chat,
-                turn.backend,
-                role_of(&turn.author),
-                None,
-            );
+        // The backend forgot the session: forget it too. A turn nothing came
+        // of yet runs again fresh; one that already acted would repeat what
+        // it did, so it ends and the user sends the message again.
+        let lost = matches!(&turn.phase, Phase::Finished(Some(e)) if is_lost_session(e));
+        if !lost {
+            return;
+        }
+        session::store(
+            turn.project,
+            &turn.chat,
+            turn.backend,
+            role_of(&turn.author),
+            None,
+        );
+        if turn.acted {
+            turn.phase = Phase::Finished(Some(SESSION_LOST.into()));
+        } else if turn.spec.resume.is_some() {
             let mut spec = turn.spec.clone();
             spec.resume = None;
+            spec.message = prompt::with_recap(spec.message, &turn.context.history);
             match backend::start(backend::adapter(turn.backend), spec.clone()) {
                 Ok(r) => {
                     turn.spec = spec;
                     turn.running = Some(r);
-                    turn.finished = None;
+                    turn.phase = Phase::Running;
+                    turn.open_calls = 0;
                 }
-                Err(e) => turn.finished = Some(Some(e.to_string())),
+                Err(e) => turn.phase = Phase::Finished(Some(e.to_string())),
             }
         }
     }
@@ -514,20 +694,43 @@ impl AgentHost {
         let Some(turn) = self.turn.as_ref() else {
             return;
         };
-        let done = turn.cancelled || (turn.finished.is_some() && turn.jobs == 0);
+        let done = match turn.phase {
+            Phase::Running => false,
+            Phase::Finished(_) => turn.jobs == 0,
+            Phase::Stopping => true,
+        };
         if !done {
             return;
         }
         let turn = self.turn.take().unwrap();
+        // Killed (or crashed) with a tool call open, the backend's session
+        // holds a call without its result, which a resume can't continue
+        // from: the chat's next turn starts a new session. What the host
+        // still runs or holds for the turn covers calls the backend's
+        // last events, cut off by the kill, did not report.
+        let stopping = turn.stopping();
+        let held = self.held.values().any(|(o, _)| *o == Origin::Turn);
+        let pending = turn.jobs > 0 || held || !turn.web_calls.is_empty();
+        if turn.open_calls > 0 || (stopping && pending) {
+            session::store(
+                turn.project,
+                &turn.chat,
+                turn.backend,
+                role_of(&turn.author),
+                None,
+            );
+        }
         self.release_held(Origin::Turn);
-        if turn.cancelled {
-            if let Some(r) = &turn.running {
-                r.kill();
+        match &turn.phase {
+            Phase::Stopping => {
+                if let Some(r) = &turn.running {
+                    r.kill();
+                }
             }
-        } else if let Some(Some(error)) = &turn.finished {
-            self.events.push(AgentEvent::Error {
+            Phase::Finished(Some(error)) => self.events.push(AgentEvent::Error {
                 message: error.clone(),
-            });
+            }),
+            Phase::Finished(None) | Phase::Running => {}
         }
         close_open_sets(bus, &turn.author, turn.carried, &mut self.events);
         turn.usage
@@ -587,10 +790,11 @@ impl AgentHost {
                     ));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
-                    let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
+                    let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
                         reply.result(bridge::ToolResult::error("No turn is running."));
                         continue;
                     };
+                    turn.acted = true;
                     let via_run = tool == groups::RUN_TOOL;
                     let (tool, args) = groups::unwrap_run(tool, args);
                     turn.usage.calls.push((tool.clone(), via_run));
@@ -603,7 +807,8 @@ impl AgentHost {
                             tools::image::offered(&turn.settings, services),
                             &args,
                         );
-                        self.finish_call(origin, reply, tool, args, done, None);
+                        let project = bus.project().id;
+                        self.finish_call(origin, project, reply, tool, args, done, None);
                         continue;
                     }
                     let mut ctx = ToolCtx {
@@ -615,14 +820,17 @@ impl AgentHost {
                         editor: &turn.context,
                         settings: &turn.settings,
                         memory: &self.memory,
+                        stop: &turn.stop,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
-                            self.finish_call(origin, reply, tool, args, *done, None)
+                            let project = bus.project().id;
+                            self.finish_call(origin, project, reply, tool, args, *done, None)
                         }
                         Step::Job(job) => {
                             turn.jobs += 1;
-                            self.spawn_job(origin, reply, tool, args, job);
+                            let started = (Some(turn.id), bus.project().id);
+                            self.spawn_job(origin, started, reply, tool, args, job);
                         }
                     }
                 }
@@ -639,14 +847,17 @@ impl AgentHost {
                         editor: &self.external.context,
                         settings: &self.external.settings,
                         memory: &self.memory,
+                        stop: &self.external.stop,
                     };
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
-                            self.finish_call(origin, reply, tool, args, *done, None)
+                            let project = bus.project().id;
+                            self.finish_call(origin, project, reply, tool, args, *done, None)
                         }
                         Step::Job(job) => {
                             self.external.jobs += 1;
-                            self.spawn_job(origin, reply, tool, args, job);
+                            let started = (None, bus.project().id);
+                            self.spawn_job(origin, started, reply, tool, args, job);
                         }
                     }
                 }
@@ -654,10 +865,12 @@ impl AgentHost {
         }
     }
 
-    /// Run `job` off-thread, shown in the chat while it runs.
+    /// Run `job` off-thread, shown in the chat while it runs. `from` is
+    /// the turn (for the editor's own calls) and project it started in.
     fn spawn_job(
         &mut self,
         origin: Origin,
+        from: (Option<u64>, ProjectId),
         reply: Reply,
         tool: String,
         args: Value,
@@ -670,26 +883,67 @@ impl AgentHost {
             entry: started(tool.clone(), args.clone(), String::new(), call),
         });
         let tx = self.jobs_tx.clone();
+        let (turn, project) = from;
         std::thread::spawn(move || {
-            let out = job();
-            let _ = tx.send((origin, reply, tool, args, out, call));
+            // A job that panics still answers its call and counts as done,
+            // so its turn or the external set doesn't wait on it forever.
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                .unwrap_or_else(|_| JobDone::Done(Done::error("The tool failed unexpectedly.")));
+            let _ = tx.send(JobResult {
+                origin,
+                turn,
+                project,
+                reply,
+                tool,
+                args,
+                out,
+                call,
+            });
         });
     }
 
     fn drain_jobs(&mut self, bus: &mut CommandBus, services: &Services) {
         let results: Vec<_> = self.jobs_rx.try_iter().collect();
-        for (origin, reply, tool, args, out, call) in results {
-            match origin {
+        for JobResult {
+            origin,
+            turn,
+            project,
+            reply,
+            tool,
+            args,
+            out,
+            call,
+        } in results
+        {
+            // A job of an earlier turn (cancelled, or ended) is not this
+            // one's: it neither counts here nor acts for it.
+            let live = match origin {
                 Origin::Turn => {
-                    if let Some(turn) = self.turn.as_mut() {
-                        turn.jobs = turn.jobs.saturating_sub(1);
+                    let live = self.turn.as_ref().is_some_and(|t| Some(t.id) == turn);
+                    if live && let Some(t) = self.turn.as_mut() {
+                        t.jobs = t.jobs.saturating_sub(1);
                     }
+                    live
                 }
                 Origin::External(_) => {
                     self.external.jobs = self.external.jobs.saturating_sub(1);
                     self.external.last_call = Some(Instant::now());
+                    true
                 }
+            };
+            // The project it started on was closed: what it made is kept
+            // for that project, and nothing touches the open one.
+            if bus.project().id != project {
+                let done = self.orphan(project, out);
+                self.finish_call(origin, project, reply, tool, args, done, Some(call));
+                continue;
             }
+            let turn_author = || {
+                self.turn
+                    .as_ref()
+                    .filter(|t| live && !t.stopping())
+                    .map(|t| t.author.clone())
+            };
             let done = match out {
                 JobDone::Done(done) => done,
                 JobDone::Generated {
@@ -698,11 +952,7 @@ impl AgentHost {
                     summary,
                 } => {
                     let author = match origin {
-                        Origin::Turn => self
-                            .turn
-                            .as_ref()
-                            .filter(|t| !t.cancelled)
-                            .map(|t| t.author.clone()),
+                        Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::generate::finish(
@@ -713,14 +963,16 @@ impl AgentHost {
                         &summary,
                     )
                 }
-                JobDone::Fetched { item, done } => tools::web::finish(bus, *item, *done),
+                JobDone::Fetched { item, done } => {
+                    let author = match origin {
+                        Origin::Turn => turn_author(),
+                        Origin::External(_) => Some(external_author()),
+                    };
+                    tools::web::finish(bus, author.as_ref(), *item, *done)
+                }
                 JobDone::Respoken { item, fix, summary } => {
                     let author = match origin {
-                        Origin::Turn => self
-                            .turn
-                            .as_ref()
-                            .filter(|t| !t.cancelled)
-                            .map(|t| t.author.clone()),
+                        Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::respeak::finish(bus, author.as_ref(), *item, &fix, &summary)
@@ -729,12 +981,14 @@ impl AgentHost {
                     commands,
                     reason,
                     excerpts,
+                    since,
+                    rebase,
                 } => {
                     let ctx = match origin {
                         Origin::Turn => {
                             self.turn
                                 .as_ref()
-                                .filter(|t| !t.cancelled)
+                                .filter(|t| live && !t.stopping())
                                 .map(|turn| ToolCtx {
                                     bus: &mut *bus,
                                     services,
@@ -744,6 +998,7 @@ impl AgentHost {
                                     editor: &turn.context,
                                     settings: &turn.settings,
                                     memory: &self.memory,
+                                    stop: &turn.stop,
                                 })
                         }
                         Origin::External(_) => Some(ToolCtx {
@@ -755,11 +1010,13 @@ impl AgentHost {
                             editor: &self.external.context,
                             settings: &self.external.settings,
                             memory: &self.memory,
+                            stop: &self.external.stop,
                         }),
                     };
                     match ctx {
                         Some(mut ctx) => {
-                            let mut done = tools::propose(&mut ctx, commands, &reason);
+                            let mut done =
+                                tools::propose_job(&mut ctx, commands, &reason, since, rebase);
                             if !done.result.is_error
                                 && let Some(bridge::Content::Text { text }) =
                                     done.result.content.first_mut()
@@ -774,28 +1031,59 @@ impl AgentHost {
                     }
                 }
             };
-            self.finish_call(origin, reply, tool, args, done, Some(call));
+            self.finish_call(origin, project, reply, tool, args, done, Some(call));
+        }
+    }
+
+    /// What a job came to when the project it started on is no longer
+    /// open: what it made is kept for that project, anything else dropped.
+    fn orphan(&mut self, project: ProjectId, out: JobDone) -> Done {
+        let kept = "Made it, but its project was closed meanwhile; it goes into that \
+                    project's media pool when it is opened again.";
+        match out {
+            JobDone::Done(done) => done,
+            JobDone::Generated { item, .. } | JobDone::Respoken { item, .. } => {
+                self.orphans.push((project, *item));
+                Done::text("Kept for its project", kept)
+            }
+            JobDone::Fetched { item, .. } => {
+                self.orphans.push((project, *item));
+                Done::text("Kept for its project", kept)
+            }
+            JobDone::Propose { .. } => {
+                Done::error("Its project was closed before the change could be proposed.")
+            }
         }
     }
 
     /// Offer the external set for review once its clients are gone or quiet.
     fn maybe_close_external(&mut self, bus: &mut CommandBus) {
+        // A call waiting on the user's approval is still under way.
+        let waiting = self
+            .held
+            .values()
+            .any(|(o, _)| matches!(o, Origin::External(_)));
         let ext = &mut self.external;
         let Some(last) = ext.last_call else {
             return;
         };
-        if ext.jobs > 0 || (!ext.connections.is_empty() && last.elapsed() < EXTERNAL_IDLE) {
+        if ext.jobs > 0
+            || waiting
+            || (!ext.connections.is_empty() && last.elapsed() < EXTERNAL_IDLE)
+        {
             return;
         }
         ext.last_call = None;
         close_open_sets(bus, &external_author(), None, &mut self.events);
     }
 
-    /// Answer a call and show it; `call` is the id its start was shown
-    /// under, if it was.
+    /// Answer a call made on `project` and show it; `call` is the id its
+    /// start was shown under, if it was.
+    #[allow(clippy::too_many_arguments)]
     fn finish_call(
         &mut self,
         origin: Origin,
+        project: ProjectId,
         reply: Reply,
         tool: String,
         args: Value,
@@ -813,10 +1101,21 @@ impl AgentHost {
             Some(request) => {
                 let id = self.next_approval;
                 self.next_approval += 1;
+                let chat = match origin {
+                    Origin::Turn => Some(
+                        self.turn
+                            .as_ref()
+                            .map_or_else(|| self.chat.clone(), |t| t.chat.clone()),
+                    ),
+                    Origin::External(_) => None,
+                };
+                self.asked.insert(id, (project, chat.clone()));
                 self.approvals.push(PendingApproval {
                     id,
                     request,
                     at: now(),
+                    project,
+                    chat,
                 });
                 self.held.insert(id, (origin, reply));
             }

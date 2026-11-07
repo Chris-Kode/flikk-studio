@@ -34,6 +34,9 @@ use std::time::{Duration, Instant};
 const AGENT_PUMP: Duration = Duration::from_millis(33);
 /// How often the model files are looked for on disk.
 const MODELS_POLL: Duration = Duration::from_secs(1);
+/// How often every media file is looked for on disk, so one that goes
+/// missing or comes back mid-session is noticed.
+const OFFLINE_POLL: Duration = Duration::from_secs(2);
 /// Key of the notice listing the models not downloaded.
 const MODELS_NOTICE: &str = "models-missing";
 /// How often subject mattes are looked for, so views draw them as they
@@ -50,11 +53,11 @@ pub struct EditorState {
     pub bus: CommandBus,
     /// The open project's file; `None` until first saved.
     pub file: Option<PathBuf>,
-    /// Bus version as last saved or opened; `None` when the project opened
-    /// with unsaved changes (recovered).
+    /// Undo position (see `undo_position`) as last saved or opened; `None` when
+    /// the project opened with unsaved changes (recovered).
     saved: Option<u64>,
-    /// Bus version of the last snapshot handed to the autosaver.
-    autosaved: Option<u64>,
+    /// What the autosaver was last told about the unsaved changes.
+    autosaved: Autosaved,
     pub services: Services,
     pub workspace: Workspace,
     pub playhead: Time,
@@ -67,6 +70,8 @@ pub struct EditorState {
     /// Every chat session of the project. The active one's messages are
     /// edited in `chat` and copied back on save.
     chats: persistence::Chats,
+    /// Keeps the change sets waiting for review saved beside the chats.
+    proposals: persistence::Proposals,
     /// Change set whose draft the viewer plays instead of the committed project.
     pub preview: Option<ChangeSetId>,
     /// Uncommitted edit the viewer shows while a control is dragged.
@@ -75,6 +80,11 @@ pub struct EditorState {
     pub live_version: u64,
     /// Last error or notice for the status line; cleared on the next action.
     pub status: Option<String>,
+    /// A sync by sound is being heard; the status bar shows it.
+    pub syncing: bool,
+    /// The agent's last error, for the chat; cleared by the user's next
+    /// message or another chat.
+    pub agent_error: Option<String>,
     // --- panels
     /// Pool item loaded in the viewer as source (double-click in the pool).
     /// The item playing on its own, or showing in the viewer.
@@ -85,6 +95,8 @@ pub struct EditorState {
     /// Caption styles, loudness and ducking defaults of the selected style
     /// profile; edit through [`EditorState::edit_presets`] so they are saved.
     pub presets: flikk_core::memory::Presets,
+    /// Counts reloads of `presets`, so an edit begun before one can tell.
+    pub presets_version: u64,
     /// Index into `presets.caption_styles` used for new captions.
     pub caption_style: usize,
     /// Unsaved caption style the viewer shows while a control is dragged,
@@ -114,6 +126,13 @@ pub struct EditorState {
     agent: AgentLink,
     _pump: Task<()>,
     // --- chat
+    /// The last message of `chat` is the one the agent is streaming into
+    /// now: text and tool calls may go on in it. Off once a turn ends, so
+    /// an external client's calls after it start their own message.
+    stream_open: bool,
+    /// The agent's question still waiting on an answer. Only its choices
+    /// can be picked. Never saved: a reopened chat owes no answer.
+    question: Option<OpenQuestion>,
     /// Requests the user settled since their last message, and what came of them.
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
@@ -138,6 +157,7 @@ pub struct EditorState {
     /// the notices were last brought up to date.
     models_seen: (Vec<bool>, u64),
     _models_poll: Task<()>,
+    _offline_poll: Task<()>,
     _subjects_poll: Task<()>,
     /// Models each backend's CLI offers: the list it gave last time until
     /// it answers again.
@@ -153,6 +173,13 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
+    /// What was made for a project closed before it was done, added to its
+    /// pool when it is opened again as the author with it.
+    kept: Vec<(
+        flikk_core::ProjectId,
+        flikk_core::model::MediaItem,
+        flikk_core::bus::Author,
+    )>,
     /// Generated items in the pool already looked at for analysis.
     generated_seen: HashSet<flikk_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
@@ -180,11 +207,12 @@ impl EditorState {
         flikk_models::restore_picks(
             &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
         );
-        let chats = persistence::load_chats(project.id);
-        let chat = active_messages(&chats);
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
-        let version = bus.version();
+        // Brings back the proposals left waiting for review too.
+        let chats = persistence::load_chats(&mut bus);
+        let chat = active_messages(&chats);
+        let position = undo_position(&bus);
         let pump = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGENT_PUMP).await;
@@ -197,6 +225,27 @@ impl EditorState {
             loop {
                 cx.background_executor().timer(MODELS_POLL).await;
                 if this.update(cx, |this, cx| this.poll_models(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let offline_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(OFFLINE_POLL).await;
+                let Ok(paths) = this.update(cx, |this, _| this.media_paths.clone()) else {
+                    break;
+                };
+                // Off the UI thread: an unplugged or network drive can be
+                // slow to answer.
+                let (paths, missing) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let missing = missing_media(&paths);
+                        (paths, missing)
+                    })
+                    .await;
+                let update = this.update(cx, |this, cx| this.recheck_offline(&paths, missing, cx));
+                if update.is_err() {
                     break;
                 }
             }
@@ -220,9 +269,8 @@ impl EditorState {
         let mut this = Self {
             bus,
             file,
-            saved: (!recovered).then_some(version),
-            // A recovered project's autosave already holds its changes.
-            autosaved: Some(version),
+            saved: (!recovered).then_some(position),
+            autosaved: Autosaved::opened(recovered, position),
             services: services(&cloud),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
@@ -232,13 +280,17 @@ impl EditorState {
             settings,
             chat,
             chats,
+            proposals: persistence::Proposals::default(),
             preview: None,
             live: None,
             live_version: 0,
             status: persistence::take_notice(),
+            syncing: false,
+            agent_error: None,
             source: None,
             source_marks: Default::default(),
             presets: flikk_core::memory::Presets::default(),
+            presets_version: 0,
             caption_style: 0,
             caption_live: None,
             lettering_styles: Vec::new(),
@@ -254,6 +306,8 @@ impl EditorState {
             clock: None,
             agent: AgentLink::new(),
             _pump: pump,
+            stream_open: false,
+            question: None,
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
             models_seen: (downloaded, 0),
@@ -263,6 +317,7 @@ impl EditorState {
             offline: HashSet::new(),
             media_paths: Vec::new(),
             _models_poll: models_poll,
+            _offline_poll: offline_poll,
             _subjects_poll: subjects_poll,
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
@@ -270,6 +325,7 @@ impl EditorState {
             providers: HashMap::new(),
             generating: Vec::new(),
             next_generation: 1,
+            kept: Vec::new(),
             generated_seen: HashSet::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
@@ -286,6 +342,14 @@ impl EditorState {
         this.load_agent_memory();
         this.load_presets();
         this.load_agent_models(cx);
+        // Quitting mid-render stops the renders and removes their part
+        // files, rather than leaving ffmpeg to finish a cut file.
+        cx.on_app_quit(|this, _| {
+            this.render_queue.shutdown();
+            this.proposals.sync(&this.bus);
+            async {}
+        })
+        .detach();
         this
     }
 
@@ -368,6 +432,7 @@ impl EditorState {
             playhead: self.playhead,
             in_out: self.in_out,
             selection: self.selection.clone(),
+            history: Vec::new(),
         }
     }
 
@@ -406,6 +471,15 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Drop both drag previews, e.g. when what they were dragged on is
+    /// replaced.
+    fn clear_live(&mut self) {
+        if self.live.take().is_some() {
+            self.live_version += 1;
+        }
+        self.caption_live = None;
+    }
+
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {
         self.preview = preview;
         cx.notify();
@@ -429,13 +503,19 @@ impl EditorState {
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        // An import undone takes its media out.
+        let before = self.bus.project().media.clone();
         let result = self.bus.undo();
         self.finish(result, cx);
+        self.cancel_left(&before);
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        // A removal redone takes its media out.
+        let before = self.bus.project().media.clone();
         let result = self.bus.redo();
         self.finish(result, cx);
+        self.cancel_left(&before);
     }
 
     pub fn accept(
@@ -455,6 +535,7 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.bus.reject(set, items);
+        self.proposals.sync(&self.bus);
         cx.notify();
     }
 
@@ -466,6 +547,7 @@ impl EditorState {
         if result.is_ok() {
             self.autosave();
             self.check_offline();
+            self.proposals.sync(&self.bus);
         }
         cx.notify();
         result.ok()
@@ -486,16 +568,25 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Select clips. A clip selection and a transition selection exclude
+    /// each other, whichever panel sets them.
     pub fn select_clips(&mut self, clips: Vec<flikk_core::ClipId>, cx: &mut Context<Self>) {
+        if !clips.is_empty() {
+            self.selected_transition = None;
+        }
         self.selection.clips = clips;
         cx.notify();
     }
 
+    /// Select a transition, which deselects the clips.
     pub fn select_transition(
         &mut self,
         transition: Option<(flikk_core::ClipId, flikk_core::command::Edge)>,
         cx: &mut Context<Self>,
     ) {
+        if transition.is_some() {
+            self.selection.clips.clear();
+        }
         self.selected_transition = transition;
         cx.notify();
     }
@@ -555,7 +646,13 @@ impl EditorState {
             "remove_media"
         };
         commands.extend(bins.map(|bins| Command::SetBins { bins }));
+        let project = self.bus.project();
+        let items: Vec<_> = media
+            .iter()
+            .filter_map(|m| project.media(*m).cloned())
+            .collect();
         if self.execute_batch(commands, label, cx).is_some() {
+            self.cancel_left(&items);
             self.selection.clips.retain(|c| !clips.contains(c));
             if self
                 .source
@@ -563,6 +660,33 @@ impl EditorState {
                 .is_some_and(|s| media.contains(&s.item().id))
             {
                 self.source = None;
+            }
+        }
+    }
+
+    /// Stop the background analysis and camera path measuring of those of
+    /// `items` that left the project, unless an item of the project or a
+    /// library sound still has the same file. One that comes back (an
+    /// undo) is asked for again as usual; renders measure for themselves.
+    fn cancel_left(&self, items: &[flikk_core::model::MediaItem]) {
+        let project = self.bus.project();
+        let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
+        let kept: HashSet<_> = project
+            .media
+            .iter()
+            .map(|m| &m.fingerprint)
+            .chain(sounds)
+            .flatten()
+            .collect();
+        let left = items
+            .iter()
+            .filter(|m| m.fingerprint.as_ref().is_some_and(|fp| !kept.contains(fp)));
+        for item in left {
+            if let Some(analysis) = &self.services.analysis {
+                analysis.cancel(item);
+            }
+            if let Some(stabilizer) = &self.services.stabilizer {
+                stabilizer.cancel(item);
             }
         }
     }
@@ -587,7 +711,9 @@ impl EditorState {
         if presets.caption_styles.is_empty() {
             presets.caption_styles = flikk_core::memory::Presets::default().caption_styles;
         }
+        self.clear_live();
         self.presets = presets;
+        self.presets_version += 1;
         self.caption_style = 0;
         self.sync_caption_style();
         self.refresh_lettering();
@@ -713,6 +839,14 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Stop showing an unsaved caption style.
+    pub fn hide_caption_style(&mut self, cx: &mut Context<Self>) {
+        if self.caption_live.take().is_some() {
+            self.refresh_lettering();
+            cx.notify();
+        }
+    }
+
     /// Change caption style `index` and save it.
     pub fn edit_caption_style(
         &mut self,
@@ -785,24 +919,27 @@ impl EditorState {
 
     // ------------------------------------------------------------------ agent
 
+    /// A message is queued or its turn under way: another is refused.
     pub fn agent_busy(&self) -> bool {
-        self.agent.is_busy()
+        self.agent.status().is_busy()
     }
 
+    /// Send `text` as the user's message. Does nothing while the agent is
+    /// busy: it would refuse the message, which must then not show, nor
+    /// clear the settled cards.
     pub fn send_chat(&mut self, text: String, cx: &mut Context<Self>) {
-        self.chat.push(ChatMessage {
-            role: ChatRole::User,
-            text: text.clone(),
-            choices: vec![],
-            change_set: None,
-            tools: vec![],
-            at: now(),
-        });
-        let context = self.context();
-        self.agent.send(text, context, &self.settings);
-        self.settled.clear();
-        self.save_chat();
-        cx.notify();
+        self.send_chat_with_context(text, None, cx);
+    }
+
+    /// The chat's messages so far as the agent is reminded of them when its
+    /// session is new: what the user and the agent wrote, without tool rows
+    /// and cards.
+    fn chat_history(&self) -> Vec<(ChatRole, String)> {
+        self.chat
+            .iter()
+            .filter(|m| m.change_set.is_none() && !m.text.trim().is_empty())
+            .map(|m| (m.role, m.text.clone()))
+            .collect()
     }
 
     fn save_chat(&mut self) {
@@ -824,6 +961,14 @@ impl EditorState {
             session.at = last.at;
         }
         session.messages = self.chat.clone();
+        // A call still running is saved as stopped: the running mark is not
+        // saved, and the call would not go on after a reopen.
+        for row in session.messages.iter_mut().flat_map(|m| m.tools.iter_mut()) {
+            if row.running.take().is_some() {
+                row.ok = false;
+                row.summary = "Stopped".into();
+            }
+        }
         persistence::save_chats(self.bus.project().id, &self.chats);
     }
 
@@ -856,10 +1001,16 @@ impl EditorState {
         &self.chats.active
     }
 
+    /// Chats can't be opened, started or deleted now: a turn is under way,
+    /// or requests in the open chat wait on the user.
+    pub fn chat_locked(&self) -> bool {
+        self.agent_busy() || !self.agent.pending_approvals().is_empty()
+    }
+
     /// Start a chat with a fresh agent conversation. An empty active chat
     /// is reused instead of piling up blank ones.
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
-        if self.agent_busy() || self.chat.is_empty() {
+        if self.chat_locked() || self.chat.is_empty() {
             return;
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -870,7 +1021,7 @@ impl EditorState {
     }
 
     pub fn switch_chat(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.agent_busy()
+        if self.chat_locked()
             || id == self.chats.active
             || !self.chats.sessions.iter().any(|s| s.id == id)
         {
@@ -883,9 +1034,7 @@ impl EditorState {
             .sessions
             .retain(|s| s.id == id || !s.messages.is_empty());
         self.chat = active_messages(&self.chats);
-        self.settled.clear();
-        self.focused_change = None;
-        self.preview = None;
+        self.reset_chat_view();
         self.agent.set_chat(id);
         self.bus.set_chat(id);
         persistence::save_chats(self.bus.project().id, &self.chats);
@@ -895,7 +1044,7 @@ impl EditorState {
     /// Delete a chat and forget its agent conversation. Deleting the active
     /// chat opens the most recent other one, or a new empty chat.
     pub fn delete_chat(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.agent_busy() {
+        if self.chat_locked() {
             return;
         }
         let project = self.bus.project().id;
@@ -913,6 +1062,7 @@ impl EditorState {
                         .sessions
                         .push(persistence::ChatSession::new(fresh.clone(), now()));
                     self.chat.clear();
+                    self.reset_chat_view();
                     self.chats.active = fresh.clone();
                     self.agent.set_chat(&fresh);
                     self.bus.set_chat(&fresh);
@@ -925,11 +1075,22 @@ impl EditorState {
         cx.notify();
     }
 
+    /// What showed for the chat that was open goes with it.
+    fn reset_chat_view(&mut self) {
+        self.settled.clear();
+        self.focused_change = None;
+        self.preview = None;
+        self.stream_open = false;
+        self.agent_error = None;
+        self.question = None;
+    }
+
     // --------------------------------------------------------------- projects
 
     /// Changes not saved to the project's file (or never saved at all).
+    /// Undoing back to the saved state makes it clean again.
     pub fn is_dirty(&self) -> bool {
-        self.saved != Some(self.bus.version())
+        self.saved != Some(undo_position(&self.bus))
     }
 
     /// Recently opened project files that still exist, newest first.
@@ -942,12 +1103,25 @@ impl EditorState {
 
     /// Hand unsaved changes to the autosaver, for crash recovery.
     fn autosave(&mut self) {
-        let version = self.bus.version();
-        if !self.is_dirty() || self.autosaved == Some(version) {
+        if !self.is_dirty() {
+            // Undone back to the saved state: what was kept is stale.
+            if matches!(self.autosaved, Autosaved::Kept(_)) {
+                persistence::discard(self.bus.project().id);
+                self.autosaved = Autosaved::Nothing;
+            }
             return;
         }
-        self.autosaved = Some(version);
+        let position = undo_position(&self.bus);
+        if self.autosaved.covers(position) {
+            return;
+        }
+        self.autosaved = Autosaved::Kept(position);
         persistence::autosave(self.bus.project(), self.file.as_deref());
+        if let Some(e) = persistence::autosave_failure() {
+            self.status = Some(format!(
+                "Unsaved changes could not be kept for recovery: {e}"
+            ));
+        }
     }
 
     /// Replace the open project with a new one saved at `path`, which names
@@ -994,10 +1168,11 @@ impl EditorState {
             self.bus.rename_project(&name);
         }
         let saved = persistence::save(&path, self.bus.project());
+        self.proposals.sync(&self.bus);
         if saved {
             self.file = Some(path);
-            self.saved = Some(self.bus.version());
-            self.autosaved = None;
+            self.saved = Some(undo_position(&self.bus));
+            self.autosaved = Autosaved::Nothing;
             self.status = None;
         } else {
             self.status = persistence::take_notice();
@@ -1007,28 +1182,35 @@ impl EditorState {
     }
 
     /// The user chose not to save: forget the unsaved changes kept for
-    /// crash recovery.
+    /// crash recovery, and keep them out of later autosaves (and the one
+    /// written on quit). Edits made after this are kept as usual.
     pub fn discard_changes(&mut self) {
         persistence::discard(self.bus.project().id);
-        self.autosaved = None;
+        self.autosaved = Autosaved::Discarded(undo_position(&self.bus));
     }
 
     /// Replace everything tied to the open project; engines stay. Undo
     /// history does not carry over.
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
+        let left = self.bus.project().media.clone();
         self.set_playing(false, cx);
         self.agent.cancel();
+        self.agent.close_project(self.bus.project().id);
         self.save_chat();
-        self.chats = persistence::load_chats(loaded.project.id);
-        self.chat = active_messages(&self.chats);
+        self.proposals.sync(&self.bus);
         self.bus = CommandBus::new(loaded.project);
+        self.proposals = persistence::Proposals::default();
+        self.chats = persistence::load_chats(&mut self.bus);
+        self.chat = active_messages(&self.chats);
+        // What the new project has too goes on.
+        self.cancel_left(&left);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.mark_generated_seen();
-        let version = self.bus.version();
+        let position = undo_position(&self.bus);
         self.file = loaded.file;
-        self.saved = (!loaded.recovered).then_some(version);
-        self.autosaved = Some(version);
+        self.saved = (!loaded.recovered).then_some(position);
+        self.autosaved = Autosaved::opened(loaded.recovered, position);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;
         self.in_out = None;
@@ -1036,13 +1218,15 @@ impl EditorState {
         self.selected_transition = None;
         self.source = None;
         self.preview = None;
+        self.clear_live();
         self.focused_change = None;
         self.editing_fx = None;
-        self.settled.clear();
+        self.reset_chat_view();
         self.status = persistence::take_notice();
         self.check_offline();
         self.load_agent_memory();
         self.load_presets();
+        self.add_kept(cx);
         cx.notify();
     }
 
@@ -1059,33 +1243,26 @@ impl EditorState {
         if paths == self.media_paths {
             return;
         }
-        self.offline = paths
-            .iter()
-            .filter(|(_, p)| !p.exists())
-            .map(|(id, _)| *id)
-            .collect();
+        self.offline = missing_media(&paths);
         self.media_paths = paths;
         self.offline_notice();
     }
 
-    /// Missing sources that came back, e.g. a drive plugged in again.
-    /// Whether any did.
-    fn recheck_offline(&mut self) -> bool {
-        let project = self.bus.project();
-        let back: Vec<_> = self
-            .offline
-            .iter()
-            .copied()
-            .filter(|id| project.media(*id).is_some_and(|m| m.path.exists()))
-            .collect();
-        if back.is_empty() {
-            return false;
+    /// Take the periodic look at `paths` on disk: sources that went
+    /// missing, or came back when a drive was plugged in again. A look
+    /// taken before the media list changed is dropped.
+    fn recheck_offline(
+        &mut self,
+        paths: &[(flikk_core::MediaId, PathBuf)],
+        missing: HashSet<flikk_core::MediaId>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths != self.media_paths.as_slice() || missing == self.offline {
+            return;
         }
-        for id in back {
-            self.offline.remove(&id);
-        }
+        self.offline = missing;
         self.offline_notice();
-        true
+        cx.notify();
     }
 
     fn offline_notice(&mut self) {
@@ -1139,6 +1316,13 @@ impl EditorState {
 
     fn pump_agent(&mut self, cx: &mut Context<Self>) {
         let events = self.agent.pump(&mut self.bus, &self.services);
+        // Proposals and closed sets; cheap while nothing changed.
+        self.proposals.sync(&self.bus);
+        // Its jobs ran with the user's leave, so they come in as its own.
+        for (project, item) in self.agent.take_orphans() {
+            let author = self.agent_author();
+            self.keep_for(project, item, author);
+        }
         // A job the agent was allowed may have added what a provider made.
         self.analyze_generated(cx);
         if events.is_empty() {
@@ -1148,7 +1332,8 @@ impl EditorState {
             match event {
                 AgentEvent::TextDelta { text } => match self.chat.last_mut() {
                     Some(m)
-                        if m.role == ChatRole::Agent
+                        if self.stream_open
+                            && m.role == ChatRole::Agent
                             && m.change_set.is_none()
                             && m.choices.is_empty()
                             && m.tools.is_empty() =>
@@ -1157,7 +1342,14 @@ impl EditorState {
                     }
                     _ => self.push_agent(text, vec![]),
                 },
-                AgentEvent::Question { text, choices } => self.push_agent(text, choices),
+                AgentEvent::Question { text, choices } => {
+                    self.push_agent(text, choices);
+                    // A later question in the turn replaces this one.
+                    self.question = Some(OpenQuestion {
+                        chat: self.chats.active.clone(),
+                        message: self.chat.len() - 1,
+                    });
+                }
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => {
                     self.tool_done(&entry, cx);
@@ -1170,10 +1362,14 @@ impl EditorState {
                 }
                 AgentEvent::TurnDone => {
                     self.stop_tools();
+                    self.stream_open = false;
                     self.save_chat()
                 }
                 AgentEvent::Progress { .. } => {}
-                AgentEvent::Error { message } => self.status = Some(message),
+                AgentEvent::Error { message } => {
+                    self.agent_error = Some(message.clone());
+                    self.status = Some(message);
+                }
             }
         }
         // Generated media the agent was allowed to make went into the pool.
@@ -1186,10 +1382,19 @@ impl EditorState {
     /// shows once.
     fn post_change_set(&mut self, change_set: ChangeSetId) {
         self.bus.close_change_set(change_set);
+        // The open question moves up by the rows removed before it.
+        if let Some(q) = &mut self.question {
+            let before = self.chat[..q.message.min(self.chat.len())]
+                .iter()
+                .filter(|m| m.change_set == Some(change_set))
+                .count();
+            q.message -= before;
+        }
         self.chat.retain(|m| m.change_set != Some(change_set));
     }
 
     fn push_agent(&mut self, text: String, choices: Vec<String>) {
+        self.stream_open = true;
         self.chat.push(ChatMessage {
             role: ChatRole::Agent,
             text,
@@ -1236,8 +1441,11 @@ impl EditorState {
     /// Calls in a row stack into one message; anything else in between
     /// starts a new stack.
     fn push_tool(&mut self, entry: ActivityEntry) {
+        let open = std::mem::replace(&mut self.stream_open, true);
         match self.chat.last_mut() {
-            Some(m) if m.role == ChatRole::Agent && !m.tools.is_empty() => m.tools.push(entry),
+            Some(m) if open && m.role == ChatRole::Agent && !m.tools.is_empty() => {
+                m.tools.push(entry)
+            }
             _ => self.chat.push(ChatMessage {
                 role: ChatRole::Agent,
                 text: String::new(),
@@ -1471,10 +1679,6 @@ impl EditorState {
     /// When a download ends or a model file appears or goes, bring the
     /// notices up to date.
     fn poll_models(&mut self, cx: &mut Context<Self>) {
-        // The same clock looks for offline sources coming back.
-        if self.recheck_offline() {
-            cx.notify();
-        }
         let seen = (
             self.model_tasks
                 .iter()
@@ -1669,6 +1873,8 @@ impl EditorState {
         self.playing = playing;
         if !playing {
             self.clock = None;
+            // A shuttle's speed ends with it, so the next play is real time.
+            self.play_speed = 1.0;
             cx.notify();
             return;
         }
@@ -1679,7 +1885,7 @@ impl EditorState {
         }
         if self.clock.is_none() {
             self.clock = Some(cx.spawn(async move |this, cx| {
-                let mut last = (Instant::now(), None::<Time>);
+                let mut last = Instant::now();
                 loop {
                     cx.background_executor().timer(PLAY_TICK).await;
                     let alive = this.update(cx, |this, cx| this.tick(&mut last, cx));
@@ -1693,31 +1899,40 @@ impl EditorState {
     }
 
     /// Advance the playhead by the wall time since the last tick. A seek in
-    /// between (the playhead moved elsewhere) restarts from the new position.
+    /// between (the playhead moved elsewhere) goes on from the new position.
     /// Returns false once playback stopped.
-    fn tick(&mut self, last: &mut (Instant, Option<Time>), cx: &mut Context<Self>) -> bool {
+    fn tick(&mut self, last: &mut Instant, cx: &mut Context<Self>) -> bool {
         if !self.playing {
             return false;
         }
         let now = Instant::now();
-        let elapsed = now.duration_since(last.0).as_secs_f64() * self.play_speed;
-        *last = (now, Some(self.playhead));
-        let Some(from) = last.1.filter(|_| elapsed != 0.0) else {
+        let elapsed = now.duration_since(*last).as_secs_f64() * self.play_speed;
+        *last = now;
+        if elapsed == 0.0 {
             return true;
-        };
+        }
         let end = self.display_project().timeline.duration();
-        let t = from + Time::from_secs_f64(elapsed);
+        let t = self.playhead + Time::from_secs_f64(elapsed);
         let done =
             (self.play_speed > 0.0 && t >= end) || (self.play_speed < 0.0 && t <= Time::ZERO);
         self.playhead = t.max(Time::ZERO).min(end);
-        last.1 = Some(self.playhead);
         if done {
             self.playing = false;
             self.clock = None;
+            self.play_speed = 1.0;
         }
         cx.notify();
         !done
     }
+}
+
+/// The media in `paths` whose file is not on disk.
+fn missing_media(paths: &[(flikk_core::MediaId, PathBuf)]) -> HashSet<flikk_core::MediaId> {
+    paths
+        .iter()
+        .filter(|(_, p)| !p.exists())
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 fn warning_text(warning: &Warning) -> String {
@@ -1732,6 +1947,45 @@ fn warning_text(warning: &Warning) -> String {
 
 /// Playback clock resolution.
 const PLAY_TICK: Duration = Duration::from_millis(16);
+
+/// Where the project is in its undo history: the version of the newest
+/// undo step, 0 before any. Unlike the bus version, which every undo bumps,
+/// it comes back to the same value when undo or redo returns to a state.
+fn undo_position(bus: &CommandBus) -> u64 {
+    bus.history().undo.last().map_or(0, |e| e.version)
+}
+
+/// What the autosaver was last told about the open project's unsaved
+/// changes, by undo position.
+#[derive(Clone, Copy)]
+enum Autosaved {
+    /// Nothing since the last save.
+    Nothing,
+    /// It holds the changes at this position.
+    Kept(u64),
+    /// The user threw away the changes at this position: they are not
+    /// autosaved again.
+    Discarded(u64),
+}
+
+impl Autosaved {
+    /// A recovered project's autosave already holds its changes.
+    fn opened(recovered: bool, position: u64) -> Self {
+        if recovered {
+            Self::Kept(position)
+        } else {
+            Self::Nothing
+        }
+    }
+
+    /// Nothing needs to be handed over while the project is at `position`.
+    fn covers(self, position: u64) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Kept(at) | Self::Discarded(at) => at == position,
+        }
+    }
+}
 
 /// The active session's messages as last saved.
 fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {
@@ -1767,7 +2021,7 @@ fn now() -> i64 {
 impl EditorState {
     /// Memory and deliver requests waiting for the user (PRD "Agent
     /// configuration": these categories need approval per call).
-    pub fn pending_approvals(&self) -> &[flikk_agent::PendingApproval] {
+    pub fn pending_approvals(&self) -> Vec<flikk_agent::PendingApproval> {
         self.agent.pending_approvals()
     }
 
@@ -1790,6 +2044,7 @@ impl EditorState {
             return;
         };
         let summary = pending.request.summary.clone();
+        let owner = self.bus.project().id;
         let mut settings = self.settings.clone();
         let started = approve::start(
             &pending.request,
@@ -1897,6 +2152,9 @@ impl EditorState {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
+                            Ok(made) if this.bus.project().id != owner => {
+                                this.keep_approved(id, owner, made.item, &summary)
+                            }
                             Ok(made) => this.place_respoken(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
@@ -1921,6 +2179,9 @@ impl EditorState {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
+                            Ok(made) if this.bus.project().id != owner => {
+                                this.keep_approved(id, owner, made.item, &summary)
+                            }
                             Ok(made) => this.place_generated(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
@@ -2005,9 +2266,28 @@ pub enum ApprovalOutcome {
 
 // ------------------------------------------------------------- chat stream
 
+/// A question the agent asked with `ask_user` that no message has answered
+/// yet.
+#[derive(Clone, Debug)]
+struct OpenQuestion {
+    /// The chat it was asked in.
+    chat: String,
+    /// Its message's index in that chat.
+    message: usize,
+}
+
 impl EditorState {
-    /// Send `text` as the user's message, like [`Self::send_chat`]; the agent
-    /// also reads `context` after it (the resolved `@` references), which
+    /// Index in `chat` of the agent's question still waiting on an answer:
+    /// only its choices can be picked.
+    pub fn open_question(&self) -> Option<usize> {
+        self.question
+            .as_ref()
+            .filter(|q| q.chat == self.chats.active && q.message < self.chat.len())
+            .map(|q| q.message)
+    }
+
+    /// Send `text` as the user's message, like [`Self::send_chat`] (nothing
+    /// while the agent is busy); the agent also reads `context` after it (the resolved `@` references), which
     /// the chat neither shows nor stores.
     pub fn send_chat_with_context(
         &mut self,
@@ -2015,6 +2295,10 @@ impl EditorState {
         context: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.agent_busy() {
+            return;
+        }
+        let history = self.chat_history();
         self.chat.push(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
@@ -2027,10 +2311,32 @@ impl EditorState {
             Some(context) => format!("{text}\n\n{context}"),
             None => text,
         };
-        let editor = self.context();
+        let editor = EditorContext {
+            history,
+            ..self.context()
+        };
         self.agent.send(message, editor, &self.settings);
-        self.settled.clear();
+        self.agent_error = None;
+        // Picked or typed, this message is the answer, and the question
+        // closes with it.
+        self.question = None;
+        self.clear_settled();
         self.save_chat();
         cx.notify();
+    }
+
+    /// The user's next message clears the requests they decided, except
+    /// those still being carried out: their card stays to show how they
+    /// end.
+    fn clear_settled(&mut self) {
+        let queue = &self.render_queue;
+        self.settled.retain(|(_, outcome)| match outcome {
+            ApprovalOutcome::Working => true,
+            ApprovalOutcome::Rendering { job, .. } => queue
+                .jobs()
+                .iter()
+                .any(|j| j.id == *job && !j.state.is_finished()),
+            _ => false,
+        });
     }
 }

@@ -1,17 +1,24 @@
 //! The HTTP client the providers share: one agent, a multipart upload that
 //! streams its file and reports progress, and retries while a server is
 //! busy or failing. What an error reply means is up to each provider.
+//!
+//! A request made for a generation takes its task as a stop: a wait before
+//! trying again ends when the user stops it, with
+//! [`CloudError::Cancelled`]. Requests nobody can stop take `None`.
 
-use flikk_core::cloud::CloudError;
+use flikk_core::cloud::{CloudError, GenerationTask};
 use std::io::{Chain, Cursor, Read};
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::http::Response;
 use ureq::{Agent, Body, SendBody};
 
 /// Waits after a busy or failed attempt, one per retry.
 const BACKOFF: [u64; 4] = [2, 4, 8, 16];
+
+/// Between looks at whether the user stopped a request, while it waits.
+const TICK: Duration = Duration::from_millis(100);
 
 /// Biggest reply read into memory: a long piece of music at a high bit rate.
 const MAX_REPLY: u64 = 512 << 20;
@@ -85,12 +92,49 @@ fn network(e: ureq::Error) -> CloudError {
     CloudError::Failed(format!("could not reach the provider: {e}"))
 }
 
+/// Whether `e` came before anything was sent: no address for the host, or
+/// no connection to it.
+fn unsent(e: &ureq::Error) -> bool {
+    use ureq::Timeout;
+    match e {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::ConnectProxyFailed(_)
+        | ureq::Error::Timeout(Timeout::Resolve | Timeout::Connect) => true,
+        ureq::Error::Io(e) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+        _ => false,
+    }
+}
+
+/// Sleep for `wait`, or until `stop` is cancelled; whether it was.
+fn pause(wait: Duration, stop: Option<&GenerationTask>) -> bool {
+    let Some(task) = stop else {
+        std::thread::sleep(wait);
+        return false;
+    };
+    let until = Instant::now() + wait;
+    loop {
+        if task.cancelled() {
+            return true;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(TICK));
+    }
+}
+
 /// Run `attempt` until it gets a reply that isn't busy (or a server error,
 /// with `server_errors`), or the retries run out; the last reply is
 /// returned either way. Requests that are charged for what they make leave
-/// out `server_errors`: the work may have been done and billed.
+/// out `server_errors`: the work may have been done and billed. Those are
+/// tried again only when they never reached the provider: a busy reply, or
+/// no connection. [`CloudError::Cancelled`] when `stop` is cancelled before
+/// a retry, which then isn't made.
 fn with_retries(
     server_errors: bool,
+    stop: Option<&GenerationTask>,
     mut attempt: impl FnMut() -> Result<Response<Body>, ureq::Error>,
 ) -> Result<Reply, CloudError> {
     let mut waits = BACKOFF.iter();
@@ -98,13 +142,15 @@ fn with_retries(
         let outcome = attempt().and_then(read);
         let wait = match &outcome {
             Ok(reply) if !reply.retryable(server_errors) => None,
-            Err(_) if !server_errors => None,
+            Err(e) if !server_errors && !unsent(e) => None,
             _ => waits.next(),
         };
         match (outcome, wait) {
             (outcome, Some(secs)) => {
                 drop(outcome);
-                std::thread::sleep(Duration::from_secs(*secs));
+                if pause(Duration::from_secs(*secs), stop) {
+                    return Err(CloudError::Cancelled);
+                }
             }
             (Ok(reply), None) => return Ok(reply),
             (Err(e), None) => return Err(network(e)),
@@ -113,7 +159,15 @@ fn with_retries(
 }
 
 pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
-    with_retries(true, || {
+    stoppable_get(url, headers, None)
+}
+
+fn stoppable_get(
+    url: &str,
+    headers: &[(&str, &str)],
+    stop: Option<&GenerationTask>,
+) -> Result<Reply, CloudError> {
+    with_retries(true, stop, || {
         let mut request = agent().get(url);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -122,15 +176,87 @@ pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
     })
 }
 
-/// A JSON POST; see [`with_retries`] for `server_errors`.
+/// What one look at a remote job came to.
+pub enum Look {
+    /// The provider's answer.
+    Answer(serde_json::Value),
+    /// Nothing to go by this time: no connection, a busy or failing
+    /// server, a garbled reply. Why, for when it lasts.
+    Again(String),
+    /// A refusal asking again won't change: a bad key, an unknown job.
+    Refused(Reply),
+    /// The stop it was given was cancelled while it waited to ask again.
+    Stopped,
+}
+
+/// GET a job's status (or result) at `url`. A job that was taken may still
+/// be running, and charged for, so only a refusal that won't pass is
+/// [`Look::Refused`]; while `fresh` (just submitted) a 404 passes too, as
+/// a new job can take a moment to be found.
+pub fn look(
+    url: &str,
+    headers: &[(&str, &str)],
+    fresh: bool,
+    stop: Option<&GenerationTask>,
+) -> Look {
+    let reply = match stoppable_get(url, headers, stop) {
+        Ok(reply) => reply,
+        Err(CloudError::Cancelled) => return Look::Stopped,
+        Err(e) => return Look::Again(e.to_string()),
+    };
+    if reply.ok() {
+        return match reply.json() {
+            Ok(json) => Look::Answer(json),
+            Err(e) => Look::Again(e.to_string()),
+        };
+    }
+    if passes(reply.status, fresh) {
+        Look::Again(format!("the provider answered {}", reply.status))
+    } else {
+        Look::Refused(reply)
+    }
+}
+
+/// Whether a refused look at a job may come right if asked again.
+fn passes(status: u16, fresh: bool) -> bool {
+    matches!(status, 408 | 425 | 429) || status >= 500 || (fresh && status == 404)
+}
+
+/// The wait before the next look at a job, after `failures` failed looks
+/// in a row: `poll`, doubling with each, at most a minute.
+pub fn backoff(poll: Duration, failures: u32) -> Duration {
+    poll.saturating_mul(1 << failures.min(5))
+        .min(Duration::from_secs(60))
+}
+
+/// Whether a job status no provider documented reads as the end of a job
+/// that wasn't made: "cancelled", "expired", "error"…
+pub fn ended(status: &str) -> bool {
+    let status = status.to_ascii_lowercase();
+    [
+        "fail",
+        "error",
+        "cancel",
+        "expire",
+        "timeout",
+        "timed_out",
+        "abort",
+        "reject",
+    ]
+    .iter()
+    .any(|word| status.contains(word))
+}
+
+/// A JSON POST; see [`with_retries`] for `server_errors` and `stop`.
 pub fn post_json(
     url: &str,
     headers: &[(&str, &str)],
     body: &serde_json::Value,
     server_errors: bool,
+    stop: Option<&GenerationTask>,
 ) -> Result<Reply, CloudError> {
     let bytes = serde_json::to_vec(body).map_err(|e| CloudError::Failed(e.to_string()))?;
-    with_retries(server_errors, || {
+    with_retries(server_errors, stop, || {
         let mut request = agent().post(url).header("content-type", "application/json");
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -140,7 +266,7 @@ pub fn post_json(
 }
 
 pub fn delete(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
-    with_retries(false, || {
+    with_retries(false, None, || {
         let mut request = agent().delete(url);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -151,7 +277,7 @@ pub fn delete(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> 
 
 /// A PUT with no body: asks a server to stop something.
 pub fn put(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
-    with_retries(true, || {
+    with_retries(true, None, || {
         let mut request = agent().put(url);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -163,15 +289,20 @@ pub fn put(url: &str, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
 /// A PUT of the file at `path` as the whole body, read as it is sent: an
 /// upload to a URL that was handed out for it, with the `headers` it was
 /// handed out with (its media type, at least). Its length is added when
-/// they don't carry it.
-pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Reply, CloudError> {
+/// they don't carry it. See [`with_retries`] for `stop`.
+pub fn put_file(
+    url: &str,
+    path: &Path,
+    headers: &[(&str, &str)],
+    stop: Option<&GenerationTask>,
+) -> Result<Reply, CloudError> {
     let size = std::fs::metadata(path)
         .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", path.display())))?
         .len();
     let sized = headers
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
-    with_retries(true, || {
+    with_retries(true, stop, || {
         let file = std::fs::File::open(path)?;
         let mut request = agent().put(url);
         for (name, value) in headers {
@@ -185,7 +316,11 @@ pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Repl
 }
 
 /// Fetch `url` into `path` (through a `.part` file), without holding it in
-/// memory; `progress` gets 0..1 when the server says how long it is.
+/// memory; `progress` gets 0..1 when the server says how long it is. A
+/// file already at `path` is left as it is, and the fetch fails. Only the
+/// network is tried again: a file that can't be written (a full disk)
+/// fails at once. It takes no stop: what it fetches is made and paid for,
+/// so it is kept even when the user stopped it too late.
 pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), CloudError> {
     let fail =
         |e: std::io::Error| CloudError::Failed(format!("could not write {}: {e}", path.display()));
@@ -208,7 +343,10 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
             let mut reader = response.into_body().into_reader();
-            let mut file = std::fs::File::create(&part)?;
+            let mut file = match std::fs::File::create(&part) {
+                Ok(file) => file,
+                Err(e) => return Ok(Err(fail(e))),
+            };
             let mut buf = vec![0; 1 << 16];
             let mut got = 0u64;
             loop {
@@ -216,14 +354,15 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
                 if n == 0 {
                     break;
                 }
-                std::io::Write::write_all(&mut file, &buf[..n])?;
+                if let Err(e) = std::io::Write::write_all(&mut file, &buf[..n]) {
+                    return Ok(Err(fail(e)));
+                }
                 got += n as u64;
                 if let Some(total) = total.filter(|t| *t > 0) {
                     progress((got as f32 / total as f32).min(1.0));
                 }
             }
-            file.sync_all()?;
-            Ok(Ok(()))
+            Ok(file.sync_all().map_err(fail))
         })();
         match (attempt, waits.next()) {
             (Ok(result), _) => break result,
@@ -232,7 +371,8 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
         }
     };
     match outcome {
-        Ok(()) => std::fs::rename(&part, path).map_err(fail),
+        // Never over a file already there.
+        Ok(()) => crate::settle(&part, path).map_err(fail),
         Err(e) => {
             let _ = std::fs::remove_file(&part);
             Err(e)
@@ -281,7 +421,7 @@ pub fn post_form(
     }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     let content_type = format!("multipart/form-data; boundary={boundary}");
-    with_retries(server_errors, || {
+    with_retries(server_errors, None, || {
         let mut request = agent().post(url).header("content-type", &content_type);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -374,7 +514,7 @@ pub fn post_file(
         .len();
     let total = head.len() as u64 + size + tail.len() as u64;
     let content_type = format!("multipart/form-data; boundary={boundary}");
-    with_retries(server_errors, || {
+    with_retries(server_errors, None, || {
         let file = std::fs::File::open(path)?;
         let mut body = Counted {
             inner: Cursor::new(head.clone().into_bytes())

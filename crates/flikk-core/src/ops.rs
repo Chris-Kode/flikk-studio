@@ -106,6 +106,24 @@ pub enum Op {
     },
 }
 
+/// Something an op changes, for telling when a proposal meets an edit the
+/// user made after it was planned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Clip(ClipId),
+    /// A track's own properties, or the track itself.
+    Track(TrackId),
+    /// Which clips a track holds.
+    TrackClips(TrackId),
+    Marker(MarkerId),
+    Media(MediaId),
+    Fx(crate::fx::FxRef),
+    Bins,
+    Ducking,
+    Grade,
+    Sequence,
+}
+
 /// How an op shows on the timeline while pending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +154,59 @@ impl Op {
             Op::InsertClip { clip, .. } | Op::RemoveClip { clip, .. } => Some(clip.id),
             Op::UpdateClip { after, .. } => Some(after.id),
             _ => None,
+        }
+    }
+
+    /// The track whose clips this op adds, removes or changes.
+    pub fn clip_track(&self) -> Option<TrackId> {
+        match self {
+            Op::InsertClip { track, .. }
+            | Op::RemoveClip { track, .. }
+            | Op::UpdateClip { track, .. } => Some(*track),
+            _ => None,
+        }
+    }
+
+    /// What this op changes. A removed track takes its clips with it.
+    pub fn targets(&self) -> Vec<Target> {
+        match self {
+            Op::InsertClip { clip, .. } | Op::RemoveClip { clip, .. } => {
+                vec![Target::Clip(clip.id)]
+            }
+            Op::UpdateClip { after, .. } => vec![Target::Clip(after.id)],
+            Op::InsertMarker { marker } | Op::RemoveMarker { marker } => {
+                vec![Target::Marker(marker.id)]
+            }
+            Op::UpdateMarker { after, .. } => vec![Target::Marker(after.id)],
+            Op::InsertTrack { track, .. } => {
+                vec![Target::Track(track.id), Target::TrackClips(track.id)]
+            }
+            Op::RemoveTrack { track, .. } => {
+                [Target::Track(track.id), Target::TrackClips(track.id)]
+                    .into_iter()
+                    .chain(track.clips.iter().map(|c| Target::Clip(c.id)))
+                    .collect()
+            }
+            Op::UpdateTrack { track, .. } => vec![Target::Track(*track)],
+            Op::SetDucking { .. } => vec![Target::Ducking],
+            Op::SetTimelineGrade { .. } => vec![Target::Grade],
+            Op::SetSequence { .. } => vec![Target::Sequence],
+            Op::AddMedia { media } | Op::RemoveMedia { media } => vec![Target::Media(media.id)],
+            Op::UpdateMedia { after, .. } => vec![Target::Media(after.id)],
+            // Bins are set as a whole list, so any change meets any other.
+            Op::SetBins { .. } => vec![Target::Bins],
+            Op::SetFxAssets { before, after } => {
+                let find = |list: &[crate::fx::FxAsset], id: &crate::fx::FxRef| {
+                    list.iter().find(|a| a.id == *id).cloned()
+                };
+                let mut ids: Vec<_> = before.iter().chain(after).map(|a| a.id.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                ids.into_iter()
+                    .filter(|id| find(before, id) != find(after, id))
+                    .map(Target::Fx)
+                    .collect()
+            }
         }
     }
 
@@ -204,6 +275,7 @@ impl Op {
         let timeline = &mut project.timeline;
         match self {
             Op::InsertClip { track, clip } => {
+                valid_clip(clip)?;
                 let t = track_mut(timeline, *track)?;
                 if t.clips
                     .iter()
@@ -228,6 +300,7 @@ impl Op {
                 before,
                 after,
             } => {
+                valid_clip(after)?;
                 let t = track_mut(timeline, *track)?;
                 let ix = t
                     .clips
@@ -351,6 +424,18 @@ impl Op {
     }
 }
 
+/// A clip the timeline can hold: one with a length and a speed. A clip of
+/// no length would pass every overlap check.
+fn valid_clip(clip: &Clip) -> Result<()> {
+    if clip.duration <= crate::time::Time::ZERO {
+        return Err(CoreError::Invalid("a clip needs a duration".into()));
+    }
+    if !(clip.speed.is_finite() && clip.speed > 0.0) {
+        return Err(CoreError::Invalid("a clip needs a speed above zero".into()));
+    }
+    Ok(())
+}
+
 fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
     timeline
         .tracks
@@ -361,13 +446,21 @@ fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
 
 /// Apply ops in order; on failure roll back the ones already applied, so the
 /// project is either fully changed or untouched.
+///
+/// The inverse of an applied op applies to any project that keeps the
+/// timeline's invariants ([`Project::normalize`]). Should one not, the
+/// rollback goes on with the rest and the error is returned, the project
+/// as far as it got: a broken invariant must not take the app down.
 pub fn apply_all(project: &mut Project, ops: &[Op]) -> Result<()> {
     for (i, op) in ops.iter().enumerate() {
         if let Err(e) = op.apply(project) {
             for done in ops[..i].iter().rev() {
-                done.invert()
-                    .apply(project)
-                    .expect("inverse of an applied op always applies");
+                if let Err(undo) = done.invert().apply(project) {
+                    eprintln!(
+                        "flikk-core: rollback of {:?} failed: {undo}",
+                        done.targets()
+                    );
+                }
             }
             return Err(e);
         }

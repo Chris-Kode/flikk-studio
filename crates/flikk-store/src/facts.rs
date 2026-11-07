@@ -1,5 +1,5 @@
 //! Source facts keyed by fingerprint (PRD F1) and their suspension when a
-//! file is replaced (F2).
+//! file is replaced (F2), lifted when that content is seen again.
 
 use crate::{Store, now, parse_uuid, sql_limit, tag, untag, uuid_text};
 use anyhow::Result;
@@ -105,11 +105,9 @@ impl Store {
 
     /// Remember that `path` had `fingerprint` (on import or probe).
     pub fn record_fingerprint(&self, path: &Path, fingerprint: &Fingerprint) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO media_fingerprints (path, fingerprint, seen_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (path, fingerprint) DO UPDATE SET seen_at = excluded.seen_at",
-            params![path_key(path), fingerprint.0, now()],
-        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        record_seen(&tx, &path_key(path), fingerprint)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -170,14 +168,30 @@ impl Store {
                 [id],
             )?;
         }
-        tx.execute(
-            "INSERT INTO media_fingerprints (path, fingerprint, seen_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (path, fingerprint) DO UPDATE SET seen_at = excluded.seen_at",
-            params![key, new_fingerprint.0, now()],
-        )?;
+        record_seen(&tx, &key, new_fingerprint)?;
         tx.commit()?;
         ids.iter().map(|id| Ok(FactId(parse_uuid(id)?))).collect()
     }
+}
+
+/// Records `fingerprint` as the latest one at `key`. `seen_at` stays unique
+/// per path, so two fingerprints seen in the same second never tie for
+/// latest. Facts on that content that were suspended apply again; they come
+/// back as proposed, since what they were before is not kept.
+fn record_seen(conn: &rusqlite::Connection, key: &str, fingerprint: &Fingerprint) -> Result<()> {
+    conn.execute(
+        "INSERT INTO media_fingerprints (path, fingerprint, seen_at)
+         VALUES (?1, ?2, max(?3, coalesce((SELECT max(seen_at) + 1 FROM media_fingerprints
+                                           WHERE path = ?1 AND fingerprint != ?2), ?3)))
+         ON CONFLICT (path, fingerprint) DO UPDATE SET seen_at = excluded.seen_at",
+        params![key, fingerprint.0, now()],
+    )?;
+    conn.execute(
+        "UPDATE source_facts SET status = 'proposed'
+         WHERE fingerprint = ?1 AND status = 'suspended'",
+        [&fingerprint.0],
+    )?;
+    Ok(())
 }
 
 fn path_key(path: &Path) -> String {

@@ -2,12 +2,14 @@
 //! queued, at most `limit` at a time, on threads of the queue's own that
 //! end once nothing is left to run, and report their progress as
 //! [`JobStatus`]. Work queued under a key that is already queued or
-//! running is that same job.
+//! running is that same job. A job can be cancelled by its key: one not
+//! started never runs, and one running sees [`JobProgress::cancelled`].
 
 use crate::ids::{JobId, MediaId};
 use crate::services::{JobState, JobStatus};
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// What a job does; `Err` says why it failed.
@@ -36,9 +38,9 @@ struct Shared<K> {
 }
 
 struct Queue<K> {
-    /// The keys of the jobs queued or running.
-    keys: Vec<(K, JobId)>,
-    waiting: VecDeque<(JobId, Work)>,
+    /// The keys of the jobs queued or running, and their cancel flags.
+    keys: Vec<(K, JobId, Arc<AtomicBool>)>,
+    waiting: VecDeque<(JobId, Arc<AtomicBool>, Work)>,
     /// Threads running jobs.
     threads: usize,
 }
@@ -48,18 +50,26 @@ struct Queue<K> {
 pub struct JobProgress {
     jobs: Arc<Mutex<Vec<JobStatus>>>,
     id: JobId,
+    cancel: Arc<AtomicBool>,
 }
 
 impl JobProgress {
-    /// 0..1 of the job done.
+    /// Whether the job was cancelled ([`JobQueue::cancel`]): it should
+    /// stop as soon as it can; what it returns then is not listed.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// 0..1 of the job done. Ignored once the job has finished or failed,
+    /// so a late report from a clone does not make it run again.
     pub fn set(&self, fraction: f32) {
-        set_state(
-            &self.jobs,
-            self.id,
-            JobState::Running {
+        if let Some(job) = lock(&self.jobs).iter_mut().find(|j| j.id == self.id)
+            && matches!(job.state, JobState::Queued | JobState::Running { .. })
+        {
+            job.state = JobState::Running {
                 fraction: fraction.clamp(0.0, 1.0),
-            },
-        );
+            };
+        }
     }
 }
 
@@ -109,7 +119,7 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
     ) -> JobId {
         let shared = &self.shared;
         let mut queue = lock(&shared.queue);
-        if let Some(&(_, id)) = queue.keys.iter().find(|(k, _)| *k == key) {
+        if let Some(&(_, id, _)) = queue.keys.iter().find(|(k, _, _)| *k == key) {
             return id;
         }
         let id = JobId::new();
@@ -119,8 +129,9 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
             media,
             state: JobState::Queued,
         });
-        queue.keys.push((key, id));
-        queue.waiting.push_back((id, Box::new(work)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        queue.keys.push((key, id, cancel.clone()));
+        queue.waiting.push_back((id, cancel, Box::new(work)));
         if queue.threads < shared.limit {
             queue.threads += 1;
             drop(queue);
@@ -151,6 +162,46 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         lock(&self.shared.jobs).clone()
     }
 
+    /// Why job `id` failed, if it has.
+    pub fn failed(&self, id: JobId) -> Option<String> {
+        lock(&self.shared.jobs)
+            .iter()
+            .find(|j| j.id == id)
+            .and_then(|j| match &j.state {
+                JobState::Failed { message } => Some(message.clone()),
+                _ => None,
+            })
+    }
+
+    /// Cancel the job under `key`, queued or running: it leaves
+    /// [`Self::jobs`] now, one queued never runs, and work pushed under
+    /// `key` after is a new job. Whether there was one.
+    pub fn cancel(&self, key: &K) -> bool {
+        self.cancel_where(|k| k == key) > 0
+    }
+
+    /// [`Self::cancel`] every job whose key `cancels` picks. How many there
+    /// were.
+    pub fn cancel_where(&self, mut cancels: impl FnMut(&K) -> bool) -> usize {
+        let mut queue = lock(&self.shared.queue);
+        let mut ids = Vec::new();
+        queue.keys.retain(|(k, id, cancel)| {
+            let picked = cancels(k);
+            if picked {
+                cancel.store(true, Ordering::Relaxed);
+                ids.push(*id);
+            }
+            !picked
+        });
+        if !ids.is_empty() {
+            queue
+                .waiting
+                .retain(|(waiting, _, _)| !ids.contains(waiting));
+            lock(&self.shared.jobs).retain(|j| !ids.contains(&j.id));
+        }
+        ids.len()
+    }
+
     /// Drop finished and failed jobs from [`Self::jobs`].
     pub fn clear_finished(&self) {
         lock(&self.shared.jobs)
@@ -169,8 +220,8 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
             if queue.threads == 0 {
                 // Nothing else would ever run them.
                 let message = format!("could not start {}: {e}", shared.name);
-                for (id, _) in std::mem::take(&mut queue.waiting) {
-                    queue.keys.retain(|(_, k)| *k != id);
+                for (id, _, _) in std::mem::take(&mut queue.waiting) {
+                    queue.keys.retain(|(_, k, _)| *k != id);
                     set_state(&shared.jobs, id, outcome(Err(message.clone())));
                 }
             }
@@ -191,18 +242,20 @@ impl<K: PartialEq> Shared<K> {
                 }
                 next
             };
-            let Some((id, work)) = next else {
+            let Some((id, cancel, work)) = next else {
                 return;
             };
             let progress = JobProgress {
                 jobs: self.jobs.clone(),
                 id,
+                cancel,
             };
             progress.set(0.0);
             let result = catch_unwind(AssertUnwindSafe(|| work(&progress)))
                 .unwrap_or_else(|_| Err(format!("{} stopped unexpectedly", self.name)));
             let mut queue = lock(&self.queue);
-            queue.keys.retain(|(_, k)| *k != id);
+            queue.keys.retain(|(_, k, _)| *k != id);
+            // A cancelled job left the list already.
             set_state(&self.jobs, id, outcome(result));
         }
     }

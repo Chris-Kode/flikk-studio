@@ -8,17 +8,27 @@ use flikk_core::{MediaId, Time};
 use gpui_kit::RenderImage;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub const THUMB_WIDTH: u32 = 128;
 const MAX_IN_FLIGHT: usize = 3;
 const MAX_CACHED: usize = 800;
+/// How long a failed tile waits before it is fetched again.
+const RETRY: Duration = Duration::from_secs(5);
 
 pub type Key = (MediaId, i64);
 
+enum Slot {
+    /// Queued or in flight.
+    Waiting,
+    Ready(Arc<RenderImage>),
+    /// The fetch failed then (media offline or still being read).
+    Failed(Instant),
+}
+
 #[derive(Default)]
 pub struct Thumbs {
-    /// `None` while queued or in flight, or after a failure.
-    images: HashMap<Key, Option<Arc<RenderImage>>>,
+    images: HashMap<Key, Slot>,
     order: VecDeque<Key>,
     queue: VecDeque<(Key, MediaItem, Time)>,
     in_flight: usize,
@@ -41,15 +51,24 @@ impl Thumbs {
     pub fn get(&mut self, item: &MediaItem, t: Time, step: Time) -> Option<Arc<RenderImage>> {
         let q = t.0.div_euclid(step.0.max(1)) * step.0.max(1);
         let key = (item.id, q);
-        if let Some(image) = self.images.get(&key) {
-            return image.clone();
+        match self.images.get(&key) {
+            Some(Slot::Ready(image)) => return Some(image.clone()),
+            Some(Slot::Waiting) => return None,
+            Some(Slot::Failed(at)) if at.elapsed() < RETRY => return None,
+            // Failed a while ago: queue it again, in the same cache place.
+            Some(Slot::Failed(_)) => {
+                self.images.insert(key, Slot::Waiting);
+                self.queue.push_back((key, item.clone(), Time(q)));
+                return None;
+            }
+            None => {}
         }
-        self.images.insert(key, None);
+        self.images.insert(key, Slot::Waiting);
         self.order.push_back(key);
         self.queue.push_back((key, item.clone(), Time(q)));
         while self.order.len() > MAX_CACHED {
             if let Some(old) = self.order.pop_front()
-                && let Some(Some(image)) = self.images.remove(&old)
+                && let Some(Slot::Ready(image)) = self.images.remove(&old)
             {
                 self.retired.push(image);
             }
@@ -64,7 +83,7 @@ impl Thumbs {
             let Some(req) = self.queue.pop_back() else {
                 break;
             };
-            if !self.images.contains_key(&req.0) {
+            if !matches!(self.images.get(&req.0), Some(Slot::Waiting)) {
                 continue;
             }
             self.in_flight += 1;
@@ -76,7 +95,10 @@ impl Thumbs {
     pub fn finish(&mut self, key: Key, image: Option<Arc<RenderImage>>) {
         self.in_flight = self.in_flight.saturating_sub(1);
         if let Some(slot) = self.images.get_mut(&key) {
-            *slot = image;
+            *slot = match image {
+                Some(image) => Slot::Ready(image),
+                None => Slot::Failed(Instant::now()),
+            };
         }
     }
 

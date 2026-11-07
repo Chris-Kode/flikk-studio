@@ -3,7 +3,7 @@
 //! cue. The model is always named: the API still defaults to v1.
 
 use super::{FORMATS, cost, write_audio};
-use flikk_core::cloud::{CloudError, CloudResult, GenerateRequest, MusicSection};
+use flikk_core::cloud::{CloudError, CloudResult, GenerateRequest, GenerationTask, MusicSection};
 use flikk_core::time::Time;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ pub fn run(
     model: &str,
     request: &GenerateRequest,
     stem: &Path,
+    task: &GenerationTask,
 ) -> CloudResult<(PathBuf, Option<u64>)> {
     let GenerateRequest::Music {
         prompt,
@@ -45,7 +46,7 @@ pub fn run(
             body["respect_sections_durations"] = json!(true);
         }
     }
-    let (reply, format) = FORMATS.post("/v1/music", &OUTPUT, key, &body)?;
+    let (reply, format) = FORMATS.post("/v1/music", &OUTPUT, key, &body, task)?;
     let path = write_audio(stem, format, &reply.body)?;
     Ok((path, cost(&reply)))
 }

@@ -118,8 +118,12 @@ impl InspectorPanel {
             .clone()
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| clip_name(clip, project));
-        if self.renaming.is_some_and(|id| id != clip.id) {
+        // Another clip was picked before the name field's blur committed it.
+        if let Some(old) = self.renaming.filter(|id| *id != clip.id) {
             self.renaming = None;
+            if let Some(command) = self.rename_command(old, cx) {
+                self.run_later(command, "rename_clip", cx);
+            }
         }
         let id = clip.id;
         let title: AnyElement = if self.renaming == Some(id) {
@@ -246,23 +250,28 @@ impl InspectorPanel {
         let Some(clip) = self.renaming.take() else {
             return;
         };
+        match self.rename_command(clip, cx) {
+            Some(command) => self.run(vec![command], "rename_clip", cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// The name field, as a rename of `clip`, if it changes its name.
+    fn rename_command(&self, clip: ClipId, cx: &App) -> Option<Command> {
         let typed = self.name_field.read(cx).value().trim().to_owned();
-        let Some((_, c)) = self.project(cx).timeline.clip(clip) else {
-            return;
-        };
+        let (_, c) = self.project(cx).timeline.clip(clip)?;
         let source = clip_name(c, self.project(cx));
         let name = (!typed.is_empty() && typed != source).then_some(typed);
-        if name != c.name {
-            self.run(vec![Command::RenameClip { clip, name }], "rename_clip", cx);
-        } else {
-            cx.notify();
-        }
+        (name != c.name).then_some(Command::RenameClip { clip, name })
     }
 
     /// The clip's rate with shortcuts, and whether changing it ripples
     /// later clips.
     fn speed_group(&mut self, clip: &Clip, cx: &mut Context<Self>) -> Div {
-        self.speed_clip = Some(clip.id);
+        // A rate being typed or scrubbed stays with the clip it began on.
+        if !self.speed_field.read(cx).is_editing() {
+            self.speed_clip = Some(clip.id);
+        }
         let speed = clip.speed;
         self.speed_field
             .update(cx, |f, cx| f.set_value(speed * 100., cx));
@@ -476,7 +485,8 @@ impl InspectorPanel {
             ClipContent::Caption { text, .. } | ClipContent::Title { text, .. } => text.clone(),
             _ => String::new(),
         };
-        // Another caption was picked before the field's blur committed it.
+        // Another caption was picked before the field's blur committed what
+        // was typed in it.
         if let Some(old) = self.text_clip.filter(|old| *old != clip.id)
             && let Some(typed) = self.typed_text(old, cx)
         {
@@ -486,12 +496,14 @@ impl InspectorPanel {
                     text: Some(typed),
                     range: None,
                 },
+                "edit_caption",
                 cx,
             );
         }
         let editing = self.text.read(cx).focus_handle(cx).is_focused(window);
         if self.text_clip != Some(clip.id) || (!editing && self.text.read(cx).value() != text) {
             self.text_clip = Some(clip.id);
+            self.text_typed = false;
             self.text.update(cx, |t, cx| t.set_value(text, window, cx));
         }
         let text_rows = if self.is_open("text") {
@@ -520,6 +532,7 @@ impl InspectorPanel {
             return;
         };
         if let Some(text) = self.typed_text(clip, cx) {
+            self.text_typed = false;
             self.run(
                 vec![Command::EditCaption {
                     clip,
@@ -532,18 +545,23 @@ impl InspectorPanel {
         }
     }
 
-    /// The text field, if it holds a change to `clip`'s text.
+    /// The text field, if it holds a change typed for `clip`'s text. Text
+    /// only loaded from the clip is no change, even if the clip changed
+    /// since (an undo).
     fn typed_text(&self, clip: ClipId, cx: &App) -> Option<String> {
+        if !self.text_typed {
+            return None;
+        }
         let text = self.text.read(cx).value().trim().to_owned();
         let current = clip_text(self.project(cx), clip)?;
         (!text.is_empty() && current != text).then_some(text)
     }
 
     /// Apply an edit after this render, for one the selection overtook.
-    fn run_later(&self, command: Command, cx: &mut Context<Self>) {
+    fn run_later(&self, command: Command, label: &'static str, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         cx.defer(move |cx| {
-            let _ = this.update(cx, |this, cx| this.run(vec![command], "edit_caption", cx));
+            let _ = this.update(cx, |this, cx| this.run(vec![command], label, cx));
         });
     }
 
@@ -558,19 +576,21 @@ impl InspectorPanel {
                             text: None,
                             range: Some(range),
                         },
+                        "edit_caption",
                         cx,
                     );
                 }
             }
         }
-        for (field, t) in [
-            (&self.start_field, clip.start),
-            (&self.end_field, clip.end()),
+        for (i, field, t) in [
+            (0, &self.start_field, clip.start),
+            (1, &self.end_field, clip.end()),
         ] {
             let shown = t.to_string();
             let editing = field.read(cx).focus_handle(cx).is_focused(window);
             if self.timing_clip != Some(clip.id) || (!editing && field.read(cx).value() != shown) {
                 field.update(cx, |f, cx| f.set_value(shown, window, cx));
+                self.timing_typed[i] = false;
             }
         }
         self.timing_clip = Some(clip.id);
@@ -599,7 +619,12 @@ impl InspectorPanel {
         let Some(clip) = self.timing_clip else {
             return;
         };
-        match self.typed_range(clip, edge, cx) {
+        let range = self.typed_range(clip, edge, cx);
+        self.timing_typed[match edge {
+            Edge::Start => 0,
+            Edge::End => 1,
+        }] = false;
+        match range {
             Some(range) => self.run(
                 vec![Command::EditCaption {
                     clip,
@@ -613,9 +638,16 @@ impl InspectorPanel {
         }
     }
 
-    /// `clip`'s range with the `edge` field applied, if that is a valid
-    /// change.
+    /// `clip`'s range with the `edge` field applied, if it was typed in and
+    /// that is a valid change.
     fn typed_range(&self, clip: ClipId, edge: Edge, cx: &App) -> Option<TimeRange> {
+        let typed_in = match edge {
+            Edge::Start => self.timing_typed[0],
+            Edge::End => self.timing_typed[1],
+        };
+        if !typed_in {
+            return None;
+        }
         let range = self.project(cx).timeline.clip(clip)?.1.range();
         let field = match edge {
             Edge::Start => &self.start_field,

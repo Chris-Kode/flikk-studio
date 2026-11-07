@@ -29,6 +29,10 @@ impl Aligner for Qwen3Aligner {
 
     fn align(&self, audio: &[f32], words: &mut [Word], progress: &dyn Fn(f32)) -> Result<()> {
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *loaded = None;
+        }
         if loaded.is_none() {
             *loaded = Some((
                 onnx::session(&FILE.locate()?, FILE.what)?,

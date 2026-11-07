@@ -4,7 +4,8 @@ use crate::bus::Author;
 use crate::command::{Command, Warning};
 use crate::ids::*;
 use crate::model::Project;
-use crate::ops::Op;
+use crate::ops::{Op, Target, TrackProps};
+use crate::subject::Fnv;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,8 +14,9 @@ pub enum ItemState {
     Pending,
     Accepted,
     Rejected,
-    /// The user edited something this item touches after it was proposed;
-    /// it was not applied (PRD AG6).
+    /// The user edited something this item touches after it was proposed,
+    /// or another proposal changed it while a job worked this one out; it
+    /// was not applied (PRD AG6).
     Conflicted,
 }
 
@@ -32,6 +34,15 @@ pub struct ChangeItem {
     /// after it conflict.
     #[serde(default)]
     pub base_version: u64,
+    /// Bus version of the undo entry that applied it, while it is in the
+    /// history: undoing that entry rejects the item, redoing it accepts it
+    /// again.
+    #[serde(default)]
+    pub accepted_at: Option<u64>,
+    /// When it was proposed, counted in the bus's proposals (not its
+    /// versions): a job's change worked out before it doesn't overwrite it.
+    #[serde(default)]
+    pub proposed_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +52,8 @@ pub enum ChangeSetState {
     Open,
     /// Complete, waiting for review.
     Pending,
-    /// Every item accepted, rejected or conflicted.
+    /// Every item accepted, rejected or conflicted. Undoing an accepted
+    /// item's entry rejects it; the set stays resolved.
     Resolved,
 }
 
@@ -62,6 +74,9 @@ pub struct ChangeSet {
     /// while it keeps working on the set.
     #[serde(skip)]
     pub draft: Option<Project>,
+    /// When it was resolved, counted by the bus, for keeping the latest.
+    #[serde(skip)]
+    pub(crate) resolved_at: u64,
 }
 
 impl ChangeSet {
@@ -78,4 +93,51 @@ impl ChangeSet {
         self.pending_items()
             .flat_map(|i| i.ops.iter().map(move |op| (i, op)))
     }
+}
+
+/// A hash of what `ops` change as `project` has it, stable across runs and
+/// builds. Kept with a saved proposal, it tells on load whether any of that
+/// changed since, e.g. in an older save of the project.
+pub fn targets_hash(project: &Project, ops: &[Op]) -> u64 {
+    let mut h = Fnv::default();
+    for target in ops.iter().flat_map(Op::targets) {
+        match target_value(project, &target) {
+            Some(bytes) => {
+                h.write(&[1]);
+                h.write(&(bytes.len() as u64).to_le_bytes());
+                h.write(&bytes);
+            }
+            None => h.write(&[0]),
+        }
+    }
+    h.0
+}
+
+/// `target` as `project` has it, serialized; `None` when it has none.
+fn target_value(project: &Project, target: &Target) -> Option<Vec<u8>> {
+    let timeline = &project.timeline;
+    let track = |id: &TrackId| timeline.tracks.iter().find(|t| t.id == *id);
+    let json = match target {
+        // With its track, so a clip moved to another track differs.
+        Target::Clip(id) => timeline.tracks.iter().find_map(|t| {
+            let clip = t.clips.iter().find(|c| c.id == *id)?;
+            Some(serde_json::to_vec(&(t.id, clip)))
+        })?,
+        Target::Track(id) => {
+            let t = track(id)?;
+            serde_json::to_vec(&(t.kind, TrackProps::of(t)))
+        }
+        Target::TrackClips(id) => {
+            let clips: Vec<ClipId> = track(id)?.clips.iter().map(|c| c.id).collect();
+            serde_json::to_vec(&clips)
+        }
+        Target::Marker(id) => serde_json::to_vec(timeline.markers.iter().find(|m| m.id == *id)?),
+        Target::Media(id) => serde_json::to_vec(project.media(*id)?),
+        Target::Fx(id) => serde_json::to_vec(project.fx.iter().find(|a| a.id == *id)?),
+        Target::Bins => serde_json::to_vec(&project.bins),
+        Target::Ducking => serde_json::to_vec(&timeline.ducking),
+        Target::Grade => serde_json::to_vec(&timeline.grade),
+        Target::Sequence => serde_json::to_vec(&timeline.settings),
+    };
+    json.ok()
 }

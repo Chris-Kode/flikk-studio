@@ -161,9 +161,17 @@ impl VideoForm {
             .unwrap_or_default()
     }
 
-    /// The start frame, when there is one.
+    /// The start frame, when there is one: the playhead's, or a picture
+    /// still in the pool.
     fn starts(&self, cx: &App) -> bool {
-        !Self::picked(&self.start, cx).is_empty()
+        match Self::picked(&self.start, cx).as_str() {
+            NONE => false,
+            PLAYHEAD => true,
+            id => {
+                let media = &self.state.read(cx).bus.project().media;
+                media.iter().any(|m| m.id.0.to_string() == id)
+            }
+        }
     }
 
     /// The pool items taken as references, each with its tag, in order.
@@ -331,6 +339,7 @@ impl VideoForm {
             .map(|(ix, (tag, item))| {
                 let id = item.id;
                 let insert: SharedString = tag.clone().into();
+                let remove = tag.clone();
                 h_flex()
                     .h(px(20.))
                     .pl(px(6.))
@@ -354,8 +363,9 @@ impl VideoForm {
                             .ghost()
                             .xsmall()
                             .icon(IconName::X)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.references.retain(|r| *r != id);
+                                form::drop_tag(&this.prompt, &remove, window, cx);
                                 cx.notify();
                             })),
                     )

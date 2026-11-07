@@ -159,8 +159,8 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail("the recording is not in the pool");
     };
     let services = ctx.services.clone();
+    let task = ctx.stop.task();
     let job: Job = Box::new(move || {
-        let task = flikk_core::cloud::GenerationTask::default();
         let summary = summary(&fix, &reading);
         match respeak::make(&fix, &source, &reading, &services, &task) {
             Ok(item) => JobDone::Respoken {
@@ -184,7 +184,7 @@ pub fn finish(
     fix: &Fix,
     summary: &str,
 ) -> Done {
-    let media = match super::generate::add_to_pool(bus, item) {
+    let media = match super::generate::add_to_pool(bus, item, author) {
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };

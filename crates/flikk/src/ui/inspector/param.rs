@@ -5,7 +5,8 @@
 
 use super::{InspectorPanel, label, row};
 use crate::ui::kit::{NumberField, NumberFieldEvent, NumberFieldState, ScrubLabel, h_flex};
-use flikk_core::TrackId;
+use flikk_core::command::Edge;
+use flikk_core::{ClipId, MaskId, TrackId};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -204,11 +205,23 @@ impl Key {
     }
 }
 
+/// What a field's value applies to: the selection it showed when an edit
+/// began, kept while the edit runs so a value typed or scrubbed for one
+/// clip never lands on the next one picked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Target {
+    pub clips: Vec<ClipId>,
+    pub transition: Option<(ClipId, Edge)>,
+    /// For a mask key, the mask at its index then.
+    pub mask: Option<MaskId>,
+}
+
 /// The field behind one key, kept across renders.
 pub struct Param {
     field: Entity<NumberFieldState>,
     factor: f32,
-    _subscription: Subscription,
+    target: Target,
+    _subscriptions: [Subscription; 2],
 }
 
 impl Param {
@@ -223,22 +236,31 @@ impl Param {
                 .decimals(spec.decimals)
                 .default_value((value * factor) as f64)
         });
-        let _subscription = cx.subscribe(
+        let events = cx.subscribe(
             &field,
-            move |this, _, ev: &NumberFieldEvent, cx| match *ev {
-                NumberFieldEvent::Change(v) => this.preview(key, v as f32 / factor, cx),
+            move |this, field, ev: &NumberFieldEvent, cx| match *ev {
+                NumberFieldEvent::Change(v) => {
+                    this.live_field = Some(field.entity_id());
+                    this.preview(key, v as f32 / factor, cx)
+                }
                 NumberFieldEvent::Commit(v) => this.commit(key, v as f32 / factor, cx),
             },
         );
+        let scrub = InspectorPanel::watch_scrub(&field, cx);
         Self {
             field,
             factor,
-            _subscription,
+            target: Target::default(),
+            _subscriptions: [events, scrub],
         }
     }
 
-    /// Follow the model; a scrub in progress keeps its value.
-    fn sync(&self, value: f32, cx: &mut App) {
+    /// Follow the model and the selection; an edit in progress keeps its
+    /// value and what it applies to.
+    fn sync(&mut self, value: f32, target: Target, cx: &mut App) {
+        if !self.field.read(cx).is_editing() {
+            self.target = target;
+        }
         let shown = (value * self.factor) as f64;
         self.field.update(cx, |f, cx| f.set_value(shown, cx));
     }
@@ -247,10 +269,21 @@ impl Param {
 impl InspectorPanel {
     /// The field for `key`, created on first use and synced to `value`.
     fn param(&mut self, key: Key, value: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.target_now(key, cx);
         self.params
             .entry(key)
             .or_insert_with(|| Param::new(key, value, window, cx))
-            .sync(value, cx);
+            .sync(value, target, cx);
+    }
+
+    /// What `key` applies to while it is being edited, else what it would
+    /// apply to now.
+    pub(super) fn target(&self, key: Key, cx: &App) -> Target {
+        self.params
+            .get(&key)
+            .filter(|p| p.field.read(cx).is_editing())
+            .map(|p| p.target.clone())
+            .unwrap_or_else(|| self.target_now(key, cx))
     }
 
     /// Double-click a label: back to the key's default.

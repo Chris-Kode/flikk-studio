@@ -27,6 +27,10 @@ impl Matter for Modnet {
         let input = Tensor::from_array((vec![1, 3, mh, mw], planes(picture, mw, mh)))
             .map_err(|e| anyhow!("{e}"))?;
         let mut graph = self.graph.lock().unwrap_or_else(|e| e.into_inner());
+        // Its files were deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            *graph = None;
+        }
         if graph.is_none() {
             *graph = Some(onnx::session(&GRAPH.locate()?, GRAPH.what)?);
         }

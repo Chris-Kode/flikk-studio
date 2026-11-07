@@ -35,7 +35,9 @@ pub use catalog::{ToolSpec, catalog};
 use crate::args::{Args, ToolError};
 use crate::bridge::ToolResult;
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
-use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission};
+use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission, Since};
+use flikk_core::changeset::{ChangeSetState, ItemState};
+use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
 use flikk_core::memory::{Recipe, SourceFact, StyleRule};
 use flikk_core::model::Project;
@@ -43,6 +45,58 @@ use flikk_core::services::Services;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Stops what a turn's jobs are doing when the turn is cancelled: every
+/// generation and long wait they started through it. Clones share it.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<Mutex<Stops>>);
+
+#[derive(Default)]
+struct Stops {
+    stopped: bool,
+    tasks: Vec<GenerationTask>,
+    flags: Vec<Arc<AtomicBool>>,
+}
+
+impl Stop {
+    fn stops(&self) -> std::sync::MutexGuard<'_, Stops> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A generation to follow and stop with the rest; stopped already if
+    /// they were.
+    pub fn task(&self) -> GenerationTask {
+        let task = GenerationTask::default();
+        let mut stops = self.stops();
+        if stops.stopped {
+            task.cancel();
+        }
+        stops.tasks.push(task.clone());
+        task
+    }
+
+    /// A flag set when they are stopped, for waits that take one.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        let mut stops = self.stops();
+        let flag = Arc::new(AtomicBool::new(stops.stopped));
+        stops.flags.push(flag.clone());
+        flag
+    }
+
+    /// Stop them all, and any started from now on.
+    pub fn stop(&self) {
+        let mut stops = self.stops();
+        stops.stopped = true;
+        for task in &stops.tasks {
+            task.cancel();
+        }
+        for flag in &stops.flags {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Long-term memory the host was given (the store owns it).
 #[derive(Clone, Debug, Default)]
@@ -65,6 +119,8 @@ pub struct ToolCtx<'a> {
     pub editor: &'a EditorContext,
     pub settings: &'a AgentSettings,
     pub memory: &'a Memory,
+    /// Stops the jobs the calls start, with their turn.
+    pub stop: &'a Stop,
 }
 
 impl ToolCtx<'_> {
@@ -74,6 +130,12 @@ impl ToolCtx<'_> {
 
     pub fn role(&self) -> AgentRole {
         self.role
+    }
+
+    /// Where [`Self::project`] is at: a job working on a snapshot of it
+    /// hands this back with its commands ([`JobDone::Propose`]).
+    pub fn version(&self) -> Since {
+        self.bus.view_since(&self.author)
     }
 }
 
@@ -126,6 +188,11 @@ impl Done {
     }
 }
 
+/// Remakes a job's commands on the project as it is when the job is done
+/// (see [`JobDone::Propose`]); `None` when what they change was edited
+/// since the snapshot.
+pub type Rebase = Box<dyn FnOnce(&Project) -> Option<Vec<Command>> + Send>;
+
 /// What a job hands back to the UI thread.
 pub enum JobDone {
     Done(Done),
@@ -134,6 +201,16 @@ pub enum JobDone {
         commands: Vec<Command>,
         reason: String,
         excerpts: Vec<String>,
+        /// [`ToolCtx::version`] when the job took its snapshot. The commands
+        /// set whole values worked out on it, so they conflict with the
+        /// user's edits, and the agent's other proposals, since to what they
+        /// change instead of undoing them.
+        since: Since,
+        /// For a change small enough to make again on the project as it is
+        /// now (one mask of a clip's list), keeping what changed meanwhile;
+        /// proposed then as a fresh change. If it gives `None`, `commands`
+        /// are proposed from `since`.
+        rebase: Option<Rebase>,
     },
     /// A file a provider made, to add to the pool and place on the UI
     /// thread.
@@ -359,10 +436,37 @@ pub const EXTERNAL_PREFIX: &str = "External agent: ";
 
 /// Propose `commands` in order as one tool call's worth of change items.
 pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done {
-    let opens_set =
-        !ctx.bus.change_sets().iter().any(|s| {
-            s.author == ctx.author && s.state == flikk_core::changeset::ChangeSetState::Open
-        });
+    propose_from(ctx, commands, reason, None)
+}
+
+/// Propose what a job worked out on a snapshot taken at `since`
+/// ([`JobDone::Propose`]): remade on the project as it is now if `rebase`
+/// can, else as planned then, so the edits and proposals made since to
+/// what it changes conflict with it rather than being overwritten.
+pub fn propose_job(
+    ctx: &mut ToolCtx,
+    commands: Vec<Command>,
+    reason: &str,
+    since: Since,
+    rebase: Option<Rebase>,
+) -> Done {
+    match rebase.and_then(|r| r(ctx.project())) {
+        Some(commands) => propose_from(ctx, commands, reason, None),
+        None => propose_from(ctx, commands, reason, Some(since)),
+    }
+}
+
+fn propose_from(
+    ctx: &mut ToolCtx,
+    commands: Vec<Command>,
+    reason: &str,
+    since: Option<Since>,
+) -> Done {
+    let opens_set = !ctx
+        .bus
+        .change_sets()
+        .iter()
+        .any(|s| s.author == ctx.author && s.state == ChangeSetState::Open);
     let reason = if ctx.external && opens_set {
         format!("{EXTERNAL_PREFIX}{reason}")
     } else {
@@ -370,25 +474,59 @@ pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done 
     };
     let reason = reason.as_str();
     let total = commands.len();
+    let names: Vec<String> = commands.iter().map(Command::name).collect();
+    let author = ctx.author.clone();
+    let outcomes = match since {
+        Some(v) => ctx.bus.execute_since(commands, author, reason, v),
+        None => {
+            let mut outcomes = Vec::new();
+            for command in commands {
+                let outcome = ctx.bus.execute(command, author.clone(), reason);
+                let failed = outcome.is_err();
+                outcomes.push(outcome);
+                if failed {
+                    break;
+                }
+            }
+            outcomes
+        }
+    };
+    let last_name = names
+        .get(outcomes.len().saturating_sub(1))
+        .cloned()
+        .unwrap_or_default();
     let mut proposed = 0;
+    let mut overwritten = 0;
     let mut warnings = Vec::new();
     let mut failure = None;
-    let mut last_name = String::new();
-    for command in commands {
-        last_name = command.name();
-        match ctx.bus.execute(command, ctx.author.clone(), reason) {
-            Ok(BusOutcome::Proposed { warnings: w, .. })
-            | Ok(BusOutcome::Applied { warnings: w }) => {
+    for outcome in outcomes {
+        match outcome {
+            Ok(BusOutcome::Proposed {
+                change_set,
+                item,
+                warnings: w,
+            }) => {
+                let conflicted = ctx
+                    .bus
+                    .change_set(change_set)
+                    .and_then(|s| s.item(item))
+                    .is_some_and(|i| i.state == ItemState::Conflicted);
+                if conflicted {
+                    overwritten += 1;
+                } else {
+                    proposed += 1;
+                    warnings.extend(w);
+                }
+            }
+            Ok(BusOutcome::Applied { warnings: w }) => {
                 proposed += 1;
                 warnings.extend(w);
             }
-            Err(e) => {
-                failure = Some(e.to_string());
-                break;
-            }
+            Err(e) => failure = Some(e.to_string()),
         }
     }
     let mut text = match (proposed, &failure) {
+        (0, None) if overwritten > 0 => "Nothing proposed.".to_owned(),
         (0, Some(e)) => format!("Nothing proposed: {e}"),
         (n, Some(e)) => format!(
             "Proposed {n} of {total} changes; then failed: {e}. The first {n} stay in the change set."
@@ -396,6 +534,11 @@ pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done 
         (1, None) => "Proposed 1 change in this turn's change set.".to_owned(),
         (n, None) => format!("Proposed {n} changes in this turn's change set."),
     };
+    if overwritten > 0 {
+        text.push_str(&format!(
+            "\n{overwritten} not proposed: another change to the same clip was proposed while this was worked out, and it would undo that one. Look again and ask again if still wanted."
+        ));
+    }
     for w in &warnings {
         match w {
             Warning::TouchesProtected { note, marker } => text.push_str(&format!(
@@ -412,7 +555,7 @@ pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done 
         format!("{proposed} × {last_name}: {reason}")
     };
     Done {
-        result: if proposed == 0 && failure.is_some() {
+        result: if proposed == 0 && (failure.is_some() || overwritten > 0) {
             ToolResult::error(text)
         } else {
             ToolResult::text(text)

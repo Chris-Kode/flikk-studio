@@ -16,7 +16,7 @@
 //! clips at once, or takes them away again.
 
 use super::edit::with_notes;
-use super::{Done, Job, JobDone, Step, ToolCtx, propose};
+use super::{Done, Job, JobDone, Rebase, Step, ToolCtx, propose};
 use crate::args::*;
 use flikk_core::Time;
 use flikk_core::command::Command;
@@ -466,6 +466,8 @@ pub fn set_mask(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, To
     }
     // In frame pixels: laid out where the clip is at `at` (or its middle).
     let t = clip.start + at.unwrap_or(Time(clip.duration.0 / 2));
+    let seen = clip.clone();
+    let since = ctx.version();
     let project = Arc::new(project.clone());
     let services = ctx.services.clone();
     let reason = reason.to_owned();
@@ -483,13 +485,50 @@ pub fn set_mask(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, To
             return JobDone::Done(Done::error("The clip is scaled to nothing there."));
         };
         state.shape = shape;
+        let mask = with_state(&mask, state, at, existing.is_none());
         JobDone::Propose {
-            commands: vec![finish(with_state(&mask, state, at, existing.is_none()))],
+            commands: vec![finish(mask.clone())],
             reason,
             excerpts: Vec::new(),
+            since,
+            rebase: Some(rebase_mask(&seen, existing, mask)),
         }
     });
     Ok(Step::Job(job))
+}
+
+/// A job's `mask`, worked out on `seen` (the clip as its snapshot had it,
+/// `existing` the index of the mask it changes), put among the clip's masks
+/// as they are when it is done: the others may have changed meanwhile. Not
+/// when the clip is gone, or that mask or anything else of the clip that
+/// placed it was changed since.
+fn rebase_mask(seen: &Clip, existing: Option<usize>, mask: Mask) -> Rebase {
+    let was = existing.map(|i| seen.masks[i].clone());
+    let mut seen = seen.clone();
+    seen.masks.clear();
+    Box::new(move |project: &Project| {
+        let (_, clip) = project.timeline.clip(seen.id)?;
+        let mut rest = clip.clone();
+        let mut masks = std::mem::take(&mut rest.masks);
+        if rest != seen {
+            return None;
+        }
+        match was {
+            Some(was) => {
+                let slot = masks.iter_mut().find(|m| m.id == was.id)?;
+                if *slot != was {
+                    return None;
+                }
+                *slot = mask;
+            }
+            None if masks.iter().any(|m| m.id == mask.id) => return None,
+            None => masks.push(mask),
+        }
+        Some(vec![Command::SetMasks {
+            clip: seen.id,
+            masks,
+        }])
+    })
 }
 
 /// The parts of a subject prompt `set_mask` was given; `None` leaves the
@@ -735,6 +774,7 @@ fn set_subject(
     }
     let (clip_id, masks) = (clip.id, clip.masks.clone());
     let clip = clip.clone();
+    let since = ctx.version();
     let project = Arc::new(project.clone());
     let services = ctx.services.clone();
     let reason = reason.to_owned();
@@ -781,6 +821,7 @@ fn set_subject(
         notes.push(
             "Check it with view_frame `masks: true`: what the masks cut away is tinted red.".into(),
         );
+        let rebase = rebase_mask(&clip, existing, mask.clone());
         let mut next = masks.clone();
         match existing {
             Some(i) => next[i] = mask,
@@ -793,6 +834,8 @@ fn set_subject(
             }],
             reason,
             excerpts: notes,
+            since,
+            rebase: Some(rebase),
         }
     });
     Ok(Step::Job(job))

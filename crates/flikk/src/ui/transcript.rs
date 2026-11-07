@@ -167,6 +167,10 @@ impl TranscriptPanel {
             return;
         }
         self.words_key = key;
+        // Indices go stale when the words are rebuilt: remember the selected
+        // words by clip and source time to find them again below.
+        let had_selection = self.selection().is_some();
+        let (anchor, head) = (self.word_key(self.anchor), self.word_key(self.head));
         self.state.update(cx, |s, _| s.sync_caption_style());
         let state = self.state.read(cx);
         (self.words, self.speakers) = match &state.services.analysis {
@@ -179,10 +183,31 @@ impl TranscriptPanel {
         } else {
             self.list.reset(self.paragraphs.len());
         }
-        let n = self.words.len();
-        self.anchor = self.anchor.filter(|&i| i < n);
-        self.head = self.head.filter(|&i| i < n);
+        self.anchor = anchor.and_then(|k| self.find_word(k));
+        self.head = head.and_then(|k| self.find_word(k));
+        // An end that is gone drops the whole selection, here and in state,
+        // so Delete and the chat never act on other words.
+        if self.anchor.is_none() || (head.is_some() && self.head.is_none()) {
+            self.anchor = None;
+            self.head = None;
+            if had_selection {
+                self.state.update(cx, |s, cx| s.select_words(None, cx));
+            }
+        }
+        self.pressed_in_selection = None;
         self.retyping = None;
+    }
+
+    /// What identifies word `i` across rebuilds: its clip and source time.
+    fn word_key(&self, i: Option<usize>) -> Option<(ClipId, TimeRange)> {
+        let w = self.words.get(i?)?;
+        Some((w.clip, w.source))
+    }
+
+    fn find_word(&self, (clip, source): (ClipId, TimeRange)) -> Option<usize> {
+        self.words
+            .iter()
+            .position(|w| w.clip == clip && w.source == source)
     }
 
     fn selection(&self) -> Option<(usize, usize)> {
@@ -210,7 +235,7 @@ impl TranscriptPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.retyping = None;
+        self.cancel_retype(window, cx);
         window.focus(&self.focus, cx);
         let inside = self.selection().is_some_and(|(a, b)| a <= i && i <= b);
         if inside && !ev.modifiers.shift && ev.click_count == 1 {
@@ -261,6 +286,9 @@ impl TranscriptPanel {
 
     /// Ripple-delete the selected words' timeline ranges as one undo step.
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        // An edit may have landed since the last draw: never cut by stale
+        // indices.
+        self.refresh_words(cx);
         let Some((a, b)) = self.selection() else {
             return;
         };

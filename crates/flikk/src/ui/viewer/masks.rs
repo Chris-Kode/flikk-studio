@@ -136,6 +136,8 @@ pub(super) struct MaskEditor {
     pub tinted: bool,
     /// The path being drawn with the pen, in picture uv.
     pen: Vec<[f32; 2]>,
+    /// The clip the pen's points were placed on.
+    pen_clip: Option<ClipId>,
     drag: Option<Drag>,
     pub hover: Option<Hover>,
 }
@@ -148,6 +150,7 @@ impl Default for MaskEditor {
             selected: None,
             tinted: true,
             pen: Vec::new(),
+            pen_clip: None,
             drag: None,
             hover: None,
         }
@@ -315,8 +318,25 @@ impl MaskEditor {
     /// Drop the pen's points, any drag and the subject preview.
     pub fn cancel(&mut self) {
         self.pen.clear();
+        self.pen_clip = None;
         self.drag = None;
         self.hover = None;
+    }
+
+    /// Drop the pen's path when the clip it was started on is gone.
+    pub fn forget_lost_pen(&mut self, project: &Project) {
+        let lost = self
+            .pen_clip
+            .is_some_and(|clip| project.timeline.clip(clip).is_none());
+        if lost {
+            self.pen.clear();
+            self.pen_clip = None;
+        }
+    }
+
+    /// Drop the drag in progress, committing nothing; whether there was one.
+    pub fn cancel_drag(&mut self) -> bool {
+        self.drag.take().is_some()
     }
 
     /// `clip`'s masks: as being dragged, else as in `project`.
@@ -402,7 +422,9 @@ impl MaskEditor {
         if let Some(h) = self.hover.as_ref().filter(|h| h.clip == shape.clip) {
             out.preview = h.outlines.iter().map(seq).collect();
         }
-        out.pen = self.pen.iter().map(|uv| to_seq(shape, *uv)).collect();
+        if self.pen_clip == Some(shape.clip) {
+            out.pen = self.pen.iter().map(|uv| to_seq(shape, *uv)).collect();
+        }
         out
     }
 
@@ -515,6 +537,12 @@ impl MaskEditor {
                 return Some(Vec::new());
             }
             Some(Tool::Pen) => {
+                // The path belongs to the clip it was started on: points
+                // placed on another clip don't carry over.
+                if self.pen_clip != Some(clip.id) {
+                    self.pen.clear();
+                    self.pen_clip = Some(clip.id);
+                }
                 let closes = self.pen.len() >= 3
                     && near(screen.to_screen(to_seq(shape, self.pen[0])), p, REACH);
                 if !closes {
@@ -525,6 +553,7 @@ impl MaskEditor {
                     points: std::mem::take(&mut self.pen),
                     smooth: !modifiers.alt,
                 });
+                self.pen_clip = None;
                 self.selected = Some(mask.id);
                 self.tool = None;
                 let mut next = masks.clone();

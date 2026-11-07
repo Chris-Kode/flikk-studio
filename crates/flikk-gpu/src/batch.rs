@@ -8,14 +8,14 @@
 //! a step are 16-bit float and are reused by later steps of the same batch.
 
 use crate::wrap::{self, Clock};
-use crate::{GpuFx, MID_FORMAT, OUT_FORMAT, composite, expect_kind, input_bindings};
+use crate::{Gpu, MID_FORMAT, OUT_FORMAT, composite, expect_kind, input_bindings};
 use flikk_core::fx::FxKind;
 use flikk_core::services::{
     Frame, FxBatch, FxCall, PendingFrame, PixelOrder, Placement, ServiceError, ServiceResult,
     Surface,
 };
 use std::num::NonZeroU64;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 /// Readback buffers kept for frames in flight.
 const MAX_READBACKS: usize = 4;
@@ -103,8 +103,8 @@ impl Converter {
     }
 }
 
-pub(crate) struct Batch<'a> {
-    fx: &'a GpuFx,
+pub(crate) struct Batch {
+    fx: Arc<Gpu>,
     /// Pictures by [`Surface`] index.
     surfaces: Vec<wgpu::Texture>,
     /// Scratch textures free for later steps (passes that used them run
@@ -135,8 +135,8 @@ enum Bind {
     View(wgpu::TextureView),
 }
 
-impl<'a> Batch<'a> {
-    pub(crate) fn new(fx: &'a GpuFx) -> Self {
+impl Batch {
+    pub(crate) fn new(fx: Arc<Gpu>) -> Self {
         Self {
             fx,
             surfaces: Vec::new(),
@@ -204,16 +204,17 @@ impl<'a> Batch<'a> {
         target: &wgpu::Texture,
     ) -> ServiceResult<()> {
         expect_kind(call.asset, kind)?;
-        let fx = self.fx;
-        let mut state = fx.lock();
-        let key = fx
-            .program(&mut state, call.asset)
-            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
+        let fx = self.fx.clone();
+        let (mut state, key) = fx.program(call.asset);
+        let key = key.map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?;
         let images = fx.images(&mut state, call);
         let Some(Ok(program)) = state.programs.get_mut(&key) else {
             return Err(ServiceError("program evicted mid-call".into()));
         };
-        let pipeline = fx.pipeline(program, target.format()).clone();
+        let pipeline = fx
+            .pipeline(program, target.format())
+            .map_err(|e| ServiceError(format!("{}: {e}", call.asset.name)))?
+            .clone();
         let layout = program.bind_layout.clone();
         let depth_binding = program.wrapped.depth;
         let clock = Clock::new(call, target.width(), target.height());
@@ -300,7 +301,7 @@ impl<'a> Batch<'a> {
         bytes[0..4].copy_from_slice(&mode.to_le_bytes());
         bytes[4..8].copy_from_slice(&t.to_le_bytes());
         let uniform = self.uniform(&bytes);
-        let fx = self.fx;
+        let fx = self.fx.clone();
         let converter = &fx.converter;
         self.passes.push(Pass {
             target: output.create_view(&Default::default()),
@@ -316,7 +317,7 @@ impl<'a> Batch<'a> {
     }
 }
 
-impl FxBatch for Batch<'_> {
+impl FxBatch for Batch {
     fn apply(&mut self, input: Surface, chain: &[FxCall<'_>]) -> ServiceResult<Surface> {
         self.chain(input, None, chain)
     }
@@ -421,7 +422,7 @@ impl FxBatch for Batch<'_> {
             clear,
             draw: None,
         });
-        let fx = self.fx;
+        let fx = self.fx.clone();
         let compositor = &fx.compositor;
         let count = pictures.len();
         for (i, (picture, size, placement)) in pictures.into_iter().enumerate() {
@@ -486,7 +487,7 @@ impl FxBatch for Batch<'_> {
             PixelOrder::Rgba => surface,
             PixelOrder::Bgra => self.convert(SWAP, surface, surface, 0.0)?,
         };
-        let fx = self.fx;
+        let fx = self.fx.clone();
         let texture = self.texture(surface)?.clone();
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
@@ -585,6 +586,7 @@ impl FxBatch for Batch<'_> {
         let index = fx.queue.submit([encoder.finish()]);
         let error = pollster::block_on(scope.pop());
         drop(state);
+        let lost = fx.is_lost();
         let pending = Pending {
             fx,
             readback: Some(readback),
@@ -599,20 +601,21 @@ impl FxBatch for Batch<'_> {
             row,
         };
         match error {
+            _ if lost => Err(crate::lost()),
             Some(e) => Err(ServiceError(format!("GPU error: {e}"))),
             None => Ok(Box::new(pending)),
         }
     }
 }
 
-impl Drop for Batch<'_> {
+impl Drop for Batch {
     /// Textures of a batch that was never finished go back to the pool.
     fn drop(&mut self) {
         if self.surfaces.is_empty() && self.spare.is_empty() {
             return;
         }
         let mut state = self.fx.lock();
-        GpuFx::give_back(
+        Gpu::give_back(
             &mut state,
             self.surfaces.drain(..).chain(self.spare.drain(..)),
         );
@@ -621,8 +624,8 @@ impl Drop for Batch<'_> {
 
 /// A submitted batch: its readback buffer, and its textures until the GPU
 /// is done with them.
-struct Pending<'a> {
-    fx: &'a GpuFx,
+struct Pending {
+    fx: Arc<Gpu>,
     /// Back to the pool on drop, unless a failed wait left it mapped.
     readback: Option<wgpu::Buffer>,
     textures: Vec<wgpu::Texture>,
@@ -633,7 +636,7 @@ struct Pending<'a> {
     row: u32,
 }
 
-impl PendingFrame for Pending<'_> {
+impl PendingFrame for Pending {
     fn wait(mut self: Box<Self>) -> ServiceResult<Frame> {
         let buffer = self
             .readback
@@ -644,13 +647,7 @@ impl PendingFrame for Pending<'_> {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.fx
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(self.index.clone()),
-                timeout: None,
-            })
-            .map_err(ServiceError::new)?;
+        self.fx.wait(self.index.clone())?;
         rx.recv()
             .map_err(ServiceError::new)?
             .map_err(ServiceError::new)?;
@@ -672,16 +669,85 @@ impl PendingFrame for Pending<'_> {
     }
 }
 
-impl Drop for Pending<'_> {
+impl Drop for Pending {
     /// Textures and the readback buffer go back to the pool; later
     /// submissions that reuse them run after this one.
     fn drop(&mut self) {
         let mut state = self.fx.lock();
-        GpuFx::give_back(&mut state, self.textures.drain(..));
+        Gpu::give_back(&mut state, self.textures.drain(..));
         if let Some(buffer) = self.readback.take()
             && state.readbacks.len() < MAX_READBACKS
         {
             state.readbacks.push(buffer);
         }
+    }
+}
+
+/// The batch handed out while the device is lost: every step fails, so the
+/// caller takes the CPU path.
+pub(crate) struct Lost(pub(crate) String);
+
+impl Lost {
+    fn err<T>(&self) -> ServiceResult<T> {
+        Err(ServiceError(self.0.clone()))
+    }
+}
+
+impl FxBatch for Lost {
+    fn upload(&mut self, _: &Frame) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn size(&self, _: Surface) -> (u32, u32) {
+        (0, 0)
+    }
+
+    fn apply(&mut self, _: Surface, _: &[FxCall<'_>]) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn transition(&mut self, _: Surface, _: Surface, _: &FxCall<'_>) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn generate(&mut self, _: &FxCall<'_>, _: u32, _: u32) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn composite(
+        &mut self,
+        _: u32,
+        _: u32,
+        _: [u8; 4],
+        _: &[(Surface, Placement)],
+    ) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn mask(&mut self, _: Surface, _: Surface) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn premultiply(&mut self, _: Surface) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn unpremultiply(&mut self, _: Surface) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn mix(&mut self, _: Surface, _: Surface, _: f32) -> ServiceResult<Surface> {
+        self.err()
+    }
+
+    fn submit<'p>(
+        self: Box<Self>,
+        _: Surface,
+        _: PixelOrder,
+    ) -> ServiceResult<Box<dyn PendingFrame + 'p>>
+    where
+        Self: 'p,
+    {
+        self.err()
     }
 }

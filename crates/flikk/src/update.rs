@@ -24,6 +24,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Files an update moved aside or had not finished writing.
 const OLD: &str = ".flikk-old";
 const NEW: &str = ".flikk-new";
+/// In the install while an update swaps its files in: which it replaces
+/// and which it adds, so a swap cut short can be undone.
+const JOURNAL: &str = "update.flikk-journal";
 
 /// A version newer than this one, with this platform's archive.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +67,11 @@ pub fn init() {
             let _busy = BUSY.lock();
             let _ = std::fs::remove_dir_all(flikk_core::paths::updates());
             if let Some(root) = exe.as_deref().and_then(install_root) {
-                sweep(&root);
+                // An update cut short (a crash, a failed undo) is undone
+                // first; the files moved aside are kept until it is.
+                if restore(&root) {
+                    sweep(&root);
+                }
             }
         });
 }
@@ -181,6 +188,9 @@ pub fn install(release: &Release, progress: &AtomicU32) -> Result<()> {
     let exe = exe().context("could not find Flikk's executable")?;
     let root = install_root(exe).context("Flikk is not running from an installed copy")?;
     writable(&root)?;
+    if !restore(&root) {
+        bail!("an earlier update could not be undone yet; restart Flikk and try again");
+    }
 
     let dir = flikk_core::paths::updates();
     let _ = std::fs::remove_dir_all(&dir);
@@ -301,31 +311,141 @@ fn single_dir(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Copy every file under `from` to the same place under `to`. Each file
-/// is written beside its target and renamed over it; on Windows, where a
-/// running executable or a loaded library can be renamed but not replaced,
-/// the target is moved aside first, and swept at the next launch.
+/// Copy every file under `from` to the same place under `to`, all or
+/// nothing. Every file is first written beside its target; then each
+/// target is moved aside and the new file renamed into place, with a
+/// journal of what changes. If any of that fails, what was swapped is put
+/// back; a swap cut short by a crash is put back at the next launch. The
+/// files moved aside are removed then too (a running executable or a
+/// loaded library can be renamed, but on Windows not replaced).
 fn lay_over(from: &Path, to: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let (src, dst) = (entry.path(), to.join(entry.file_name()));
-        if src.is_dir() {
-            std::fs::create_dir_all(&dst)?;
-            lay_over(&src, &dst)?;
-            continue;
+    let mut files = Vec::new();
+    list_files(from, Path::new(""), &mut files)?;
+    let mut made = Vec::new();
+    let staged = files.iter().try_for_each(|file| -> Result<()> {
+        let dst = to.join(file);
+        if let Some(dir) = dst.parent() {
+            create_dirs(dir, &mut made)?;
         }
+        // Left by an update that finished: what is moved aside now goes
+        // there.
+        let _ = std::fs::remove_file(suffixed(&dst, OLD));
         let new = suffixed(&dst, NEW);
-        std::fs::copy(&src, &new).with_context(|| format!("could not write {}", new.display()))?;
-        if cfg!(windows) && dst.exists() {
-            let old = suffixed(&dst, OLD);
-            let _ = std::fs::remove_file(&old);
-            std::fs::rename(&dst, &old)
-                .with_context(|| format!("could not replace {}", dst.display()))?;
+        std::fs::copy(from.join(file), &new)
+            .with_context(|| format!("could not write {}", new.display()))?;
+        Ok(())
+    });
+    let unstage = |made: &[PathBuf]| {
+        for file in &files {
+            let _ = std::fs::remove_file(suffixed(&to.join(file), NEW));
         }
-        std::fs::rename(&new, &dst)
-            .with_context(|| format!("could not replace {}", dst.display()))?;
+        for dir in made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    };
+    if let Err(e) = staged {
+        unstage(&made);
+        return Err(e);
+    }
+    let journal: String = files
+        .iter()
+        .map(|file| {
+            let kind = if to.join(file).exists() { "old" } else { "new" };
+            format!("{kind}\t{}\n", file.display())
+        })
+        .collect();
+    if let Err(e) = std::fs::write(to.join(JOURNAL), journal) {
+        unstage(&made);
+        return Err(e).context("could not start replacing Flikk's files");
+    }
+    for file in &files {
+        if let Err(e) = swap(&to.join(file)) {
+            let undone = restore(to);
+            unstage(&made);
+            return Err(e).context(if undone {
+                "the update was undone"
+            } else {
+                "the update could not be fully undone; restart Flikk to finish putting it back"
+            });
+        }
+    }
+    let _ = std::fs::remove_file(to.join(JOURNAL));
+    Ok(())
+}
+
+/// The files under `dir`, relative to its root, as `rel` within it.
+fn list_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let (path, rel) = (entry.path(), rel.join(entry.file_name()));
+        if path.is_dir() {
+            list_files(&path, &rel, out)?;
+        } else {
+            out.push(rel);
+        }
     }
     Ok(())
+}
+
+/// Create `dir` and its missing parents, noting each one made.
+fn create_dirs(dir: &Path, made: &mut Vec<PathBuf>) -> Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        create_dirs(parent, made)?;
+    }
+    std::fs::create_dir(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    made.push(dir.to_path_buf());
+    Ok(())
+}
+
+/// Put the staged `<dst>.flikk-new` in place, moving `dst` aside first.
+fn swap(dst: &Path) -> Result<()> {
+    if dst.exists() {
+        std::fs::rename(dst, suffixed(dst, OLD))
+            .with_context(|| format!("could not replace {}", dst.display()))?;
+    }
+    std::fs::rename(suffixed(dst, NEW), dst)
+        .with_context(|| format!("could not replace {}", dst.display()))
+}
+
+/// Undo the swap the journal in `root` describes, if there is one: put
+/// back each file moved aside and remove each file added. Whether nothing
+/// is left to undo.
+fn restore(root: &Path) -> bool {
+    let journal = root.join(JOURNAL);
+    let Ok(text) = std::fs::read_to_string(&journal) else {
+        return !journal.exists();
+    };
+    let mut undone = true;
+    for line in text.lines() {
+        let Some((kind, file)) = line.split_once('\t') else {
+            continue;
+        };
+        let dst = root.join(file);
+        let old = suffixed(&dst, OLD);
+        match kind {
+            "old" if old.exists() => {
+                // The update's file goes where staged files are swept.
+                if dst.exists() {
+                    let aside = suffixed(&dst, NEW);
+                    let _ = std::fs::remove_file(&aside);
+                    if std::fs::rename(&dst, &aside).is_err() {
+                        undone = false;
+                        continue;
+                    }
+                }
+                undone &= std::fs::rename(&old, &dst).is_ok();
+            }
+            "new" if dst.exists() => undone &= std::fs::remove_file(&dst).is_ok(),
+            _ => {}
+        }
+    }
+    if undone {
+        let _ = std::fs::remove_file(&journal);
+    }
+    undone
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {

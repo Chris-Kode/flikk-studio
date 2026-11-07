@@ -20,6 +20,7 @@ use flikk_core::fx::{self, FxAsset, FxInstance, ParamKind, ParamSpec, ParamValue
 use flikk_core::model::{ClipContent, Project};
 use flikk_core::{ClipId, EffectId, Time};
 use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::slider::SliderEvent;
 use gpui_kit::base::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -195,6 +196,8 @@ pub struct Control {
     /// One field for a number, two for a point.
     numbers: Vec<Entity<NumberFieldState>>,
     color: Option<Entity<ColorPickerState>>,
+    /// A slider of the colour picker is held: its moves show live.
+    color_held: bool,
     text: Option<Entity<TextareaState>>,
     /// Last model value shown; `None` resyncs on the next render.
     shown: Option<ParamValue>,
@@ -260,6 +263,23 @@ impl Control {
                 let state = cx.new(|cx| {
                     ColorPickerState::new(window, cx).default_value(to_hsla(value.as_list()))
                 });
+                // The picker reports a slider's release before the change
+                // it makes, so that change commits and the moves before it
+                // only show live.
+                let sliders = state.read(cx).sliders().clone();
+                for slider in [
+                    sliders.hue(),
+                    sliders.saturation(),
+                    sliders.lightness(),
+                    sliders.alpha(),
+                ] {
+                    let k = key.clone();
+                    subs.push(cx.subscribe(slider, move |this, _, ev: &SliderEvent, _| {
+                        if let Some(c) = this.fx_controls.get_mut(&k) {
+                            c.color_held = matches!(ev, SliderEvent::Change(_));
+                        }
+                    }));
+                }
                 let k = key.clone();
                 subs.push(
                     cx.subscribe(&state, move |this, _, ev: &ColorPickerEvent, cx| {
@@ -268,7 +288,8 @@ impl Control {
                         };
                         let rgb = c.to_rgb();
                         let v = [rgb.r, rgb.g, rgb.b, rgb.a].map(|c| c as f64).to_vec();
-                        this.set_fx_param(&k, ParamValue::List(v), false, cx);
+                        let held = this.fx_controls.get(&k).is_some_and(|c| c.color_held);
+                        this.set_fx_param(&k, ParamValue::List(v), held, cx);
                     }),
                 );
                 color = Some(state);
@@ -302,6 +323,7 @@ impl Control {
         Self {
             numbers,
             color,
+            color_held: false,
             text,
             shown: Some(value.clone()),
             _subscriptions: subs,
@@ -375,15 +397,19 @@ fn number(
     });
     let k = key.clone();
     subs.push(
-        cx.subscribe(&field, move |this, _, ev: &NumberFieldEvent, cx| {
+        cx.subscribe(&field, move |this, field, ev: &NumberFieldEvent, cx| {
             let (v, live) = match *ev {
                 NumberFieldEvent::Change(v) => (v, true),
                 NumberFieldEvent::Commit(v) => (v, false),
             };
+            if live {
+                this.live_field = Some(field.entity_id());
+            }
             let value = this.with_part(&k, part, v);
             this.set_fx_param(&k, value, live, cx);
         }),
     );
+    subs.push(InspectorPanel::watch_scrub(&field, cx));
     field
 }
 
@@ -427,6 +453,9 @@ impl InspectorPanel {
         cx: &mut Context<Self>,
     ) {
         let Some(target) = self.fx_target(&key.owner, cx) else {
+            if !live {
+                self.end_live(cx);
+            }
             return;
         };
         let command = target.set(&key.param, value);
@@ -435,7 +464,7 @@ impl InspectorPanel {
             return;
         }
         self.invalidate_control(key);
-        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+        self.end_live(cx);
         self.run(vec![command], "set_effect", cx);
     }
 

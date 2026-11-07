@@ -339,7 +339,8 @@ impl MediaPoolPanel {
     fn generation_action(&self, g: &Generating, cx: &mut Context<Self>) -> Button {
         let id = g.id;
         let running = g.failed.is_none();
-        if running && g.task.can_stop() {
+        // A stopped one keeps its Stop button, held down, until it ends.
+        if running && (g.task.can_stop() || g.stopping()) {
             Button::new(("generation-stop", id as usize))
                 .ghost()
                 .xsmall()
@@ -371,14 +372,15 @@ fn progress(g: &Generating) -> Progress {
     }
 }
 
-/// Where a running generation is: its place in the queue, or how much has
-/// come down.
+/// Where a running generation is: its place in the queue, how much has
+/// come down, or that its provider can't be reached just now.
 fn stage_label(stage: Stage) -> String {
     match stage {
         Stage::Queued(Some(ahead)) if ahead > 0 => format!("Queued · {ahead} ahead"),
         Stage::Queued(_) => "Queued".into(),
         Stage::Downloading(f) => format!("Downloading · {:.0} %", f * 100.),
         Stage::Starting | Stage::Running => "Generating".into(),
+        Stage::Reconnecting => "Reconnecting".into(),
     }
 }
 

@@ -3,7 +3,7 @@
 //! never overwrite an existing file.
 
 use crate::composed::{self, Frames};
-use crate::ffmpeg::{self, ensure_free, filter_script_args, publish, temp_path};
+use crate::ffmpeg::{self, TempOutput, ensure_free, filter_script_args, publish};
 use crate::graph::{self, GraphSpec, Loudnorm, Measured};
 use crate::hw::{self, Encoder, HwEncoder};
 use crate::preset::RenderSettings;
@@ -13,10 +13,14 @@ use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::paths;
 use flikk_core::services::Services;
+use std::any::Any;
+use std::cell::Cell;
 use std::ffi::OsString;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 /// Everything a render needs, owned so it can cross threads.
 #[derive(Clone, Debug)]
@@ -54,6 +58,8 @@ pub struct RenderJob {
     pub id: JobId,
     /// Preset name.
     pub label: String,
+    /// The file asked for; once done, the file written (the next free name
+    /// when one appeared at the asked path during the render).
     pub output: PathBuf,
     pub state: RenderState,
 }
@@ -70,10 +76,74 @@ struct Inner {
     worker: AtomicBool,
 }
 
+impl Inner {
+    /// The entries, even after a panic poisoned the lock: every write to
+    /// them is a single field store, so they are never left half-changed.
+    fn entries(&self) -> MutexGuard<'_, Vec<Entry>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Clears `worker` if the worker thread ends some way other than finding
+/// the queue empty, so the next `enqueue` starts a new one.
+struct WorkerGuard<'a>(&'a Inner);
+
+impl Drop for WorkerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.worker.store(false, Ordering::Release);
+    }
+}
+
+/// A panic's message, when it carries one.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match detail {
+        Some(detail) => format!("the render stopped unexpectedly: {detail}"),
+        None => "the render stopped unexpectedly".into(),
+    }
+}
+
+/// Every queue alive, so the outputs of pending jobs are kept from every
+/// other output.
+static QUEUES: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
+
+/// Held while an output name is checked and then taken, by a job queued
+/// for it or a file published to it, so two never take the same name.
+static CLAIMING: Mutex<()> = Mutex::new(());
+
+pub(crate) fn claiming() -> MutexGuard<'static, ()> {
+    CLAIMING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether `path` is the output of a job still queued or running, other
+/// than `except`, in any queue. Never call it holding a queue's entries.
+pub(crate) fn claimed(path: &Path, except: Option<JobId>) -> bool {
+    let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+    queues.retain(|q| q.strong_count() > 0);
+    queues.iter().filter_map(Weak::upgrade).any(|inner| {
+        inner
+            .entries()
+            .iter()
+            .any(|e| Some(e.job.id) != except && !e.job.state.is_finished() && e.job.output == path)
+    })
+}
+
 /// Cheap to clone; all clones share one queue.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RenderQueue {
     inner: Arc<Inner>,
+}
+
+impl Default for RenderQueue {
+    fn default() -> Self {
+        let inner = Arc::new(Inner::default());
+        let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+        queues.push(Arc::downgrade(&inner));
+        Self { inner }
+    }
 }
 
 impl RenderQueue {
@@ -84,17 +154,15 @@ impl RenderQueue {
     /// Queue a render. Fails at once if the output exists or is already the
     /// target of a queued job.
     pub fn enqueue(&self, request: RenderRequest) -> Result<JobId> {
+        let claiming = claiming();
         ensure_free(&request.output)?;
-        let mut entries = self.inner.entries.lock().expect("queue lock");
-        if entries
-            .iter()
-            .any(|e| !e.job.state.is_finished() && e.job.output == request.output)
-        {
+        if claimed(&request.output, None) {
             return Err(anyhow!(
                 "{} is already in the queue",
                 request.output.display()
             ));
         }
+        let mut entries = self.inner.entries();
         let id = JobId::new();
         entries.push(Entry {
             job: RenderJob {
@@ -107,12 +175,13 @@ impl RenderQueue {
             cancel: Arc::new(AtomicBool::new(false)),
         });
         drop(entries);
+        drop(claiming);
         self.ensure_worker();
         Ok(id)
     }
 
     pub fn cancel(&self, id: JobId) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         if let Some(e) = entries.iter_mut().find(|e| e.job.id == id) {
             e.cancel.store(true, Ordering::Relaxed);
             if e.job.state == RenderState::Queued {
@@ -122,9 +191,28 @@ impl RenderQueue {
         }
     }
 
+    /// Cancel every job and wait (a few seconds at most) for the running
+    /// one to stop and remove its partial file. For quitting: a render cut
+    /// off by the app's exit leaves its temp file in the output folder.
+    pub fn shutdown(&self) {
+        let ids: Vec<JobId> = self
+            .jobs()
+            .into_iter()
+            .filter(|j| !j.state.is_finished())
+            .map(|j| j.id)
+            .collect();
+        for id in ids {
+            self.cancel(id);
+        }
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while self.is_busy() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Snapshot of every job, oldest first.
     pub fn jobs(&self) -> Vec<RenderJob> {
-        let entries = self.inner.entries.lock().expect("queue lock");
+        let entries = self.inner.entries();
         entries.iter().map(|e| e.job.clone()).collect()
     }
 
@@ -134,20 +222,34 @@ impl RenderQueue {
 
     /// Forget one finished job.
     pub fn remove(&self, id: JobId) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         entries.retain(|e| e.job.id != id || !e.job.state.is_finished());
     }
 
     /// Forget finished jobs.
     pub fn clear_finished(&self) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+        let mut entries = self.inner.entries();
         entries.retain(|e| !e.job.state.is_finished());
     }
 
-    fn set_state(&self, id: JobId, state: RenderState) {
-        let mut entries = self.inner.entries.lock().expect("queue lock");
+    fn set_state(&self, id: JobId, state: RenderState, output: Option<PathBuf>) {
+        let mut entries = self.inner.entries();
         if let Some(e) = entries.iter_mut().find(|e| e.job.id == id) {
             e.job.state = state;
+            if let Some(output) = output {
+                e.job.output = output;
+            }
+        }
+    }
+
+    /// Progress only moves forward and stays within 0..1, whatever the
+    /// render's phases report.
+    fn set_progress(&self, id: JobId, fraction: f32) {
+        let mut entries = self.inner.entries();
+        if let Some(e) = entries.iter_mut().find(|e| e.job.id == id)
+            && let RenderState::Running { fraction: shown } = &mut e.job.state
+        {
+            *shown = shown.max(fraction.clamp(0.0, 1.0));
         }
     }
 
@@ -156,46 +258,69 @@ impl RenderQueue {
             return;
         }
         let queue = self.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("flikk-render".into())
-            .spawn(move || queue.work())
-            .expect("spawn render worker");
+            .spawn(move || queue.work());
+        if let Err(err) = spawned {
+            // Nothing will pick the waiting jobs up: fail them rather than
+            // leave them queued forever.
+            let mut entries = self.inner.entries();
+            for e in entries.iter_mut() {
+                if e.job.state == RenderState::Queued && e.request.take().is_some() {
+                    e.job.state = RenderState::Failed {
+                        message: format!("could not start rendering: {err}"),
+                    };
+                }
+            }
+            self.inner.worker.store(false, Ordering::Release);
+        }
     }
 
+    /// Run queued jobs until there are none. A job that panics fails, and
+    /// the next one runs.
     fn work(&self) {
+        let guard = WorkerGuard(&self.inner);
         loop {
             let next = {
-                let mut entries = self.inner.entries.lock().expect("queue lock");
+                let mut entries = self.inner.entries();
                 let next = entries
                     .iter_mut()
                     .find(|e| e.job.state == RenderState::Queued && e.request.is_some());
                 match next {
                     Some(e) => {
                         e.job.state = RenderState::Running { fraction: 0.0 };
-                        Some((
+                        (
                             e.job.id,
                             e.request.take().expect("queued"),
                             e.cancel.clone(),
-                        ))
+                        )
                     }
                     None => {
+                        // Cleared under the lock, so a job queued from now
+                        // on starts a new worker.
                         self.inner.worker.store(false, Ordering::Release);
-                        None
+                        std::mem::forget(guard);
+                        return;
                     }
                 }
             };
-            let Some((id, request, cancel)) = next else {
-                return;
-            };
-            let progress = |fraction: f32| self.set_state(id, RenderState::Running { fraction });
-            let state = match render_blocking(&request, &progress, &cancel) {
-                Ok(()) => RenderState::Done,
-                Err(_) if cancel.load(Ordering::Relaxed) => RenderState::Canceled,
-                Err(e) => RenderState::Failed {
+            let (id, request, cancel) = next;
+            let progress = |fraction: f32| self.set_progress(id, fraction);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                render(&request, Some(id), &progress, &cancel)
+            }));
+            let written = result.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned();
+            let state = match result {
+                Ok(Ok(_)) => RenderState::Done,
+                Ok(Err(_)) if cancel.load(Ordering::Relaxed) => RenderState::Canceled,
+                Ok(Err(e)) => RenderState::Failed {
                     message: format!("{e:#}"),
                 },
+                Err(payload) => RenderState::Failed {
+                    message: panic_message(payload.as_ref()),
+                },
             };
-            self.set_state(id, state);
+            self.set_state(id, state, written);
         }
     }
 }
@@ -234,6 +359,12 @@ const MOTION_SHARE: f32 = 0.2;
 /// The part of what is left spent making depth maps, when it has any to
 /// make.
 const DEPTH_SHARE: f32 = 0.5;
+/// The part of what is left spent measuring loudness, when it is
+/// normalized.
+const LOUDNESS_SHARE: f32 = 0.2;
+
+/// How long [`RenderQueue::shutdown`] waits for the running job to stop.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
 /// Render synchronously on the calling thread. `progress` gets 0..1.
 pub fn render_blocking(
@@ -241,6 +372,18 @@ pub fn render_blocking(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
+    render(request, None, progress, cancel).map(|_| ())
+}
+
+/// [`render_blocking`], returning the path written: `request.output`, or
+/// the next name free of files and of other jobs' outputs when a file
+/// appeared there during the render. `job` is the queued job rendering.
+fn render(
+    request: &RenderRequest,
+    job: Option<JobId>,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     let out = &request.output;
     ensure_free(out)?;
     let work = WorkDir::new()?;
@@ -298,7 +441,7 @@ pub fn render_blocking(
         args.extend(filter_script_args(&script));
         args.extend(["-map", "[aout]", "-f", "null", "-"].map(OsString::from));
         let from = share;
-        share += 0.2;
+        share += (1.0 - share) * LOUDNESS_SHARE;
         let stderr = ffmpeg::run(
             &args,
             g.seconds,
@@ -310,28 +453,49 @@ pub fn render_blocking(
         spec.loudnorm = Some(Loudnorm::Apply(target, measured));
     }
 
-    spec.piped = spec.video && composed::wanted(&request.project, spec.range, &request.services);
-    composed::letter(&request.project, &mut spec, &request.services);
+    let composite = composed::wanted(&request.project, spec.range, &request.services);
+    composed::route(&request.project, &mut spec, &request.services, composite);
     let g = graph::build(&request.project, &spec, &work.0)?;
-    let tmp = temp_path(out, &JobId::new().to_string());
+    // Removed however the render ends, once published or not.
+    let tmp = TempOutput::new(out);
     let progress = |p: f32| progress(share + p * (1.0 - share));
-    let attempts = attempts(settings, spec.video)?;
+    let attempts = attempts(settings, &spec, cancel)?;
     let last = attempts.len() - 1;
+    // How far the encode got, so a fallback carries on from there rather
+    // than start the bar over.
+    let reached = Cell::new(0.0f32);
     for (i, hw) in attempts.iter().enumerate() {
+        let from = reached.get();
+        let progress = |p: f32| {
+            let p = from + p.clamp(0.0, 1.0) * (1.0 - from);
+            reached.set(reached.get().max(p));
+            progress(p);
+        };
         let result = encode(
             request,
             &spec,
             &g,
             &work.0,
             hw.as_ref(),
-            &tmp,
+            tmp.path(),
             &progress,
             cancel,
         );
         match result {
-            Ok(()) => return publish(&tmp, out),
+            Ok(()) => {
+                // Software worked where the hardware before it failed: skip
+                // that hardware for this size from now on.
+                if i > 0 {
+                    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+                    for hw in attempts[..i].iter().flatten() {
+                        failed.push((hw.clone(), spec.width, spec.height));
+                    }
+                }
+                return publish(&tmp, out, job);
+            }
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
+                // The next attempt starts from nothing.
+                let _ = std::fs::remove_file(tmp.path());
                 // Auto: a hardware encoder that fails hands over to software.
                 if i == last || cancel.load(Ordering::Relaxed) {
                     return Err(match hw {
@@ -345,23 +509,40 @@ pub fn render_blocking(
     unreachable!("at least one attempt")
 }
 
-/// The encoders to try in turn: `None` is software.
-fn attempts(settings: &RenderSettings, video: bool) -> Result<Vec<Option<HwEncoder>>> {
-    let Some((codec, _)) = settings.hardware_codec().filter(|_| video) else {
+/// Hardware encoders that failed a render software then finished, with
+/// the size they failed at, for this session.
+static FAILED: Mutex<Vec<(HwEncoder, u32, u32)>> = Mutex::new(Vec::new());
+
+/// The encoders to try in turn: `None` is software. Waits for the
+/// hardware probe, unless `cancel` is set meanwhile.
+fn attempts(
+    settings: &RenderSettings,
+    spec: &GraphSpec,
+    cancel: &AtomicBool,
+) -> Result<Vec<Option<HwEncoder>>> {
+    let Some((codec, _)) = settings.hardware_codec().filter(|_| spec.video) else {
         return Ok(vec![None]);
     };
-    let best = || hw::probe().best(codec).cloned();
+    if settings.encoder == Encoder::Software {
+        return Ok(vec![None]);
+    }
+    let probe = hw::probe_until(cancel).ok_or_else(|| anyhow!("canceled"))?;
+    let best = probe.best(codec).cloned();
     Ok(match settings.encoder {
         Encoder::Software => vec![None],
         Encoder::Hardware => {
-            vec![Some(best().ok_or_else(|| {
+            vec![Some(best.ok_or_else(|| {
                 anyhow!("no hardware encoder for this format on this machine")
             })?)]
         }
-        Encoder::Auto => match best() {
-            Some(hw) => vec![Some(hw), None],
-            None => vec![None],
-        },
+        Encoder::Auto => {
+            let failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+            let size = (spec.width, spec.height);
+            match best.filter(|hw| !failed.iter().any(|(f, w, h)| f == hw && (*w, *h) == size)) {
+                Some(hw) => vec![Some(hw), None],
+                None => vec![None],
+            }
+        }
     })
 }
 

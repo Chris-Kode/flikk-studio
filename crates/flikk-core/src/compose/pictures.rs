@@ -4,7 +4,7 @@
 
 use crate::ids::{ClipId, MediaId};
 use crate::model::{MediaItem, MediaKind};
-use crate::services::{Frame, FrameStream, MediaService, ServiceResult};
+use crate::services::{Frame, FrameStream, MediaService, ServiceError, ServiceResult};
 use crate::time::{Rate, Time};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,11 @@ pub trait Pictures {
     }
     /// Called after each composed frame.
     fn finish(&mut self) {}
+    /// Why a source stopped giving frames partway, once: a render fails
+    /// with it rather than hold the last frame.
+    fn failure(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// One [`MediaService::frame`] per picture (cached by the media engine),
@@ -99,6 +104,8 @@ pub struct Streams {
     fallback: Time,
     open: HashMap<ClipId, Open>,
     used: HashSet<ClipId>,
+    /// The first read that failed since [`Pictures::failure`] was asked.
+    failed: Option<String>,
 }
 
 impl Streams {
@@ -111,6 +118,7 @@ impl Streams {
             fallback: rate.frame_duration(),
             open: HashMap::new(),
             used: HashSet::new(),
+            failed: None,
         }
     }
 }
@@ -165,7 +173,11 @@ impl Pictures for Streams {
                     o.position = Some(at);
                     o.frame = Some(f);
                 }
-                _ => o.ended = true,
+                Ok(None) => o.ended = true,
+                Err(e) => {
+                    o.ended = true;
+                    self.failed.get_or_insert(e.0);
+                }
             }
         }
         o.frame.clone()
@@ -174,6 +186,10 @@ impl Pictures for Streams {
     fn finish(&mut self) {
         let used = std::mem::take(&mut self.used);
         self.open.retain(|id, _| used.contains(id));
+    }
+
+    fn failure(&mut self) -> Option<String> {
+        self.failed.take()
     }
 }
 
@@ -210,6 +226,8 @@ pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
 /// ends, closing the stream, once this is dropped.
 struct ReadAhead {
     frames: mpsc::Receiver<ServiceResult<Option<(Time, Frame)>>>,
+    /// The error the stream ended with, given again on every later read.
+    failed: Option<String>,
 }
 
 impl ReadAhead {
@@ -228,12 +246,22 @@ impl ReadAhead {
         let _ = std::thread::Builder::new()
             .name("flikk-read-ahead".into())
             .spawn(read);
-        Self { frames }
+        Self {
+            frames,
+            failed: None,
+        }
     }
 }
 
 impl FrameStream for ReadAhead {
     fn next_frame(&mut self) -> ServiceResult<Option<(Time, Frame)>> {
-        self.frames.recv().unwrap_or(Ok(None))
+        if let Some(e) = &self.failed {
+            return Err(ServiceError(e.clone()));
+        }
+        let next = self.frames.recv().unwrap_or(Ok(None));
+        if let Err(e) = &next {
+            self.failed = Some(e.0.clone());
+        }
+        next
     }
 }

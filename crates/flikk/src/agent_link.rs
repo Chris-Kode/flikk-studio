@@ -16,6 +16,7 @@
 
 pub mod approve;
 
+use flikk_agent::host::TurnStatus;
 use flikk_agent::{AgentHost, PendingApproval};
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
 use flikk_core::bus::{AgentRole, CommandBus};
@@ -35,8 +36,9 @@ impl AgentLink {
         Self { host }
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.host.is_busy()
+    /// Whether a message is queued or its turn under way.
+    pub fn status(&self) -> TurnStatus {
+        self.host.status()
     }
 
     pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {
@@ -71,9 +73,20 @@ impl AgentLink {
         self.host.set_memory(rules, facts);
     }
 
-    /// Memory and deliver requests waiting for the user's approval.
-    pub fn pending_approvals(&self) -> &[PendingApproval] {
+    /// Requests waiting for the user's approval in the open chat.
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
         self.host.pending_approvals()
+    }
+
+    /// The user opened another project: withdraw the requests `project`
+    /// left waiting.
+    pub fn close_project(&mut self, project: flikk_core::ProjectId) {
+        self.host.close_project(project);
+    }
+
+    /// What the agent made for projects closed before it finished.
+    pub fn take_orphans(&mut self) -> Vec<(flikk_core::ProjectId, flikk_core::model::MediaItem)> {
+        self.host.take_orphans()
     }
 
     /// Take a request off the list once the user approved (and the caller

@@ -189,63 +189,36 @@ impl Store {
         p.map(|p| Ok(RuleId(parse_uuid(&p)?))).transpose()
     }
 
-    /// Insert or replace a rule in `profile`.
+    /// Insert or replace a rule in `profile`. Saving it approved retires the
+    /// rule it supersedes, as [`Store::set_rule_status`] does.
     pub fn save_rule(&self, profile: RuleId, rule: &StyleRule) -> Result<()> {
-        let (scope, scope_project) = scope_columns(&rule.scope);
-        let changed = self.conn.execute(
-            "INSERT INTO style_rules
-                 (id, profile_id, text, scope, scope_project, status, supersedes,
-                  created_at, evidence)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
-             WHERE EXISTS (SELECT 1 FROM style_profiles WHERE id = ?2)
-             ON CONFLICT (id) DO UPDATE SET profile_id = excluded.profile_id,
-                 text = excluded.text, scope = excluded.scope,
-                 scope_project = excluded.scope_project, status = excluded.status,
-                 supersedes = excluded.supersedes, evidence = excluded.evidence",
-            params![
-                uuid_text(&rule.id.0),
-                uuid_text(&profile.0),
-                rule.text,
-                scope,
-                scope_project,
-                tag(&rule.status)?,
-                rule.supersedes.map(|s| uuid_text(&s.0)),
-                rule.created_at,
-                serde_json::to_string(&rule.evidence)?,
-            ],
-        )?;
-        if changed == 0 {
-            bail!("unknown style profile {profile}");
-        }
-        self.touch_profile(profile)
+        let tx = self.conn.unchecked_transaction()?;
+        self.write_rule(profile, rule)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Insert several rules in one transaction.
     pub fn save_rules(&self, profile: RuleId, rules: &[StyleRule]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for rule in rules {
-            self.save_rule(profile, rule)?;
+            self.write_rule(profile, rule)?;
         }
         tx.commit()?;
         Ok(())
     }
 
     /// Approve, reject or re-propose. Approving a rule that supersedes another
-    /// rejects the superseded one.
+    /// rejects the superseded one; un-approving it brings that one back.
     pub fn set_rule_status(&self, id: RuleId, status: RuleStatus) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let key = uuid_text(&id.0);
+        let before = self.rule_status(&key)?;
         tx.execute(
             "UPDATE style_rules SET status = ?2 WHERE id = ?1",
             params![key, tag(&status)?],
         )?;
-        if status == RuleStatus::Approved {
-            tx.execute(
-                "UPDATE style_rules SET status = 'rejected'
-                 WHERE id = (SELECT supersedes FROM style_rules WHERE id = ?1)",
-                [&key],
-            )?;
-        }
+        self.follow_supersedes(&key, before, status)?;
         tx.execute(
             "UPDATE style_profiles SET updated_at = ?2
              WHERE id = (SELECT profile_id FROM style_rules WHERE id = ?1)",
@@ -267,6 +240,91 @@ impl Store {
             "DELETE FROM style_rules WHERE profile_id = ?1 AND scope = 'next_video'",
             [uuid_text(&profile.0)],
         )?)
+    }
+
+    /// [`Store::save_rule`] without its transaction.
+    fn write_rule(&self, profile: RuleId, rule: &StyleRule) -> Result<()> {
+        let (scope, scope_project) = scope_columns(&rule.scope);
+        let key = uuid_text(&rule.id.0);
+        let before = self.rule_status(&key)?;
+        let changed = self.conn.execute(
+            "INSERT INTO style_rules
+                 (id, profile_id, text, scope, scope_project, status, supersedes,
+                  created_at, evidence)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+             WHERE EXISTS (SELECT 1 FROM style_profiles WHERE id = ?2)
+             ON CONFLICT (id) DO UPDATE SET profile_id = excluded.profile_id,
+                 text = excluded.text, scope = excluded.scope,
+                 scope_project = excluded.scope_project, status = excluded.status,
+                 supersedes = excluded.supersedes, evidence = excluded.evidence",
+            params![
+                key,
+                uuid_text(&profile.0),
+                rule.text,
+                scope,
+                scope_project,
+                tag(&rule.status)?,
+                rule.supersedes.map(|s| uuid_text(&s.0)),
+                rule.created_at,
+                serde_json::to_string(&rule.evidence)?,
+            ],
+        )?;
+        if changed == 0 {
+            bail!("unknown style profile {profile}");
+        }
+        self.follow_supersedes(&key, before, rule.status)?;
+        self.touch_profile(profile)
+    }
+
+    fn rule_status(&self, key: &str) -> Result<Option<RuleStatus>> {
+        let status: Option<String> = self
+            .conn
+            .query_row("SELECT status FROM style_rules WHERE id = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        status.map(|s| untag(&s)).transpose()
+    }
+
+    /// Keeps the rule `key` supersedes in step with `key` moving from
+    /// `before` to `after`. Approving retires it and un-approving brings it
+    /// back, unless another approved rule still supersedes it. Only when `key`
+    /// covers its scope: a narrower rule leaves it in force elsewhere, and
+    /// `effective_rules` picks between the two.
+    fn follow_supersedes(
+        &self,
+        key: &str,
+        before: Option<RuleStatus>,
+        after: RuleStatus,
+    ) -> Result<()> {
+        // The rule `?1` supersedes, if `?1` covers its scope.
+        const SUPERSEDED: &str = "id = (SELECT n.supersedes FROM style_rules n
+                 WHERE n.id = ?1
+                   AND (n.scope = 'global'
+                        OR (n.scope = style_rules.scope
+                            AND n.scope_project IS style_rules.scope_project)))";
+        if after == RuleStatus::Approved {
+            self.conn.execute(
+                &format!("UPDATE style_rules SET status = 'rejected' WHERE {SUPERSEDED}"),
+                [key],
+            )?;
+        } else if before == Some(RuleStatus::Approved) {
+            self.conn.execute(
+                &format!(
+                    "UPDATE style_rules SET status = 'approved'
+                     WHERE status = 'rejected' AND {SUPERSEDED}
+                       AND NOT EXISTS (SELECT 1 FROM style_rules o
+                                       WHERE o.supersedes = style_rules.id
+                                         AND o.status = 'approved' AND o.id != ?1
+                                         AND (o.scope = 'global'
+                                              OR (o.scope = style_rules.scope
+                                                  AND o.scope_project
+                                                      IS style_rules.scope_project)))"
+                ),
+                [key],
+            )?;
+        }
+        Ok(())
     }
 
     fn touch_profile(&self, profile: RuleId) -> Result<()> {

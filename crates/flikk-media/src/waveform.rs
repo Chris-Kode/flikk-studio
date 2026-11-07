@@ -15,6 +15,8 @@ use std::sync::Arc;
 const PEAKS_PER_SECOND: u32 = 200;
 const DECODE_RATE: u32 = 16_000;
 const MAGIC: &[u8; 8] = b"FLKPEAK1";
+/// Peaks kept in memory at most: some 90 hours of audio.
+const KEPT_BYTES: usize = 64 << 20;
 
 /// Max absolute sample per 1/200 s, quantized to 0..=255.
 pub(crate) struct Peaks {
@@ -56,7 +58,7 @@ pub(crate) fn waveform(
 fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Arc<Peaks>> {
     let fingerprint = media.fingerprint_of(item)?;
     let key = (fingerprint.clone(), stream);
-    if let Some(p) = media.peaks.lock().unwrap().get(&key) {
+    if let Some(p) = crate::lock(&media.peaks).get(&key) {
         return Ok(p.clone());
     }
     let file = peak_path(&fingerprint, stream);
@@ -75,7 +77,15 @@ fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Ar
         }
     };
     let peaks = Arc::new(peaks);
-    media.peaks.lock().unwrap().insert(key, peaks.clone());
+    let mut kept = crate::lock(&media.peaks);
+    // Kept to a bound: peaks let go of are read back from their file.
+    let mut bytes: usize = kept.values().map(|p| p.values.len()).sum();
+    while bytes + peaks.values.len() > KEPT_BYTES
+        && let Some(other) = kept.keys().next().cloned()
+    {
+        bytes -= kept.remove(&other).map_or(0, |p| p.values.len());
+    }
+    kept.insert(key, peaks.clone());
     Ok(peaks)
 }
 

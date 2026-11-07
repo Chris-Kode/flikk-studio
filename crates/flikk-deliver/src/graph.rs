@@ -53,10 +53,11 @@ pub struct GraphSpec {
     pub loudnorm: Option<Loudnorm>,
     /// The picture arrives composited on input 0 (RGBA frames from
     /// `flikk_core::compose`, see [`crate::composed`]); the graph only burns
-    /// in captions and builds the audio.
+    /// in captions and builds the audio. Set with `lettered` by
+    /// [`crate::composed::route`].
     pub piped: bool,
     /// The piped frames already have captions and titles lettered on them
-    /// (see [`crate::composed::letter`]); the graph leaves them out.
+    /// (see [`crate::composed::route`]); the graph leaves them out.
     pub lettered: bool,
 }
 
@@ -512,19 +513,10 @@ impl Builder<'_> {
     fn audio(&mut self, work_dir: &Path) -> Result<String> {
         let sr = self.spec.sample_rate;
         let total = self.samples(self.spec.range.end).max(1);
-        let tracks: Vec<&Track> = self
-            .project
-            .timeline
-            .tracks
-            .iter()
-            .filter(|t| t.kind == TrackKind::Audio)
-            .collect();
-        let solo = tracks.iter().any(|t| t.mix.solo);
+        let project = self.project;
+        let tl = &project.timeline;
         let mut streams: Vec<(TrackId, String)> = Vec::new();
-        for track in tracks {
-            if track.mix.mute || (solo && !track.mix.solo) {
-                continue;
-            }
+        for track in tl.tracks.iter().filter(|t| tl.audible(t)) {
             if let Some(s) = self.audio_track(track, work_dir)? {
                 streams.push((track.id, s));
             }

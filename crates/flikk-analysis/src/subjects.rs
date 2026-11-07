@@ -16,8 +16,9 @@
 //! subject is tracked, and keep the last frames they encoded for the next
 //! clicks. A tracking job waits a moment before it starts, so a few quick
 //! clicks run one; a newer subject of the same mask (another click, a trim)
-//! cancels the older's job. A failed frame or job is not tried again until
-//! the model is downloaded anew.
+//! cancels the older's job, unless another mask waits on it too. A failed
+//! frame or job is tried again after [`RETRY_AFTER`], once the model is
+//! downloaded anew, or when a render waits on it.
 //!
 //! Person masks are its other half ([`crate::people`]): they share its
 //! media engine and its version, so views draw again as either makes
@@ -40,7 +41,9 @@ use flikk_core::subject::{Fnv, Matte, SubjectPrompt};
 use flikk_core::time::{Rate, Time};
 use flikk_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use flikk_models::{Model, Task as ModelTask};
+use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -63,6 +66,8 @@ const UNPACKED_KEPT: usize = 16;
 /// Islands and holes smaller than this many of the model's cells are
 /// specks: dropped, and filled.
 const SPECK: usize = 16;
+/// How long a failed frame or job waits before it is tried again.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A prompted frame: media, frame, prompt.
 type PromptKey = (Fingerprint, i64, u64);
@@ -95,10 +100,9 @@ struct Shared {
     tracks: Mutex<HashMap<TrackKey, Frames>>,
     /// Keys already looked for on disk.
     looked: Mutex<HashSet<u64>>,
-    /// The tracking job each mask has queued or running.
-    slots: Mutex<HashMap<MaskId, Slot>>,
-    /// Why a frame or a job failed, and whether the model was there then.
-    failed: Mutex<HashMap<u64, (String, bool)>>,
+    /// The tracking jobs queued or running, and the masks waiting on them.
+    slots: Mutex<Slots>,
+    failed: Mutex<HashMap<u64, Failure>>,
     unpacked: Mutex<VecDeque<(u64, Matte)>>,
     version: AtomicU64,
     /// How long the last tracked frame took, and on which model.
@@ -119,9 +123,76 @@ struct Prompted {
     previews: VecDeque<PromptKey>,
 }
 
-struct Slot {
+#[derive(Default)]
+struct Slots {
+    /// The job each mask waits on, one of `jobs`.
+    masks: HashMap<MaskId, TrackJob>,
+    /// The jobs queued or running, each with its cancel flag. Masks with
+    /// the same subject over the same frames share one.
+    jobs: HashMap<TrackJob, Arc<AtomicBool>>,
+}
+
+impl Slots {
+    /// `mask` waits on no job; its job is cancelled when no other mask
+    /// waits on it.
+    fn leave(&mut self, mask: MaskId) {
+        let Some(job) = self.masks.remove(&mask) else {
+            return;
+        };
+        if !self.masks.values().any(|j| *j == job)
+            && let Some(cancel) = self.jobs.remove(&job)
+        {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Frees a tracking job's slot however its work ends: done, failed,
+/// panicked, or dropped unrun (the queue had the same job already).
+struct Release {
+    shared: Arc<Shared>,
     job: TrackJob,
     cancel: Arc<AtomicBool>,
+    ran: bool,
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let mut slots = lock(&self.shared.slots);
+        if slots
+            .jobs
+            .get(&self.job)
+            .is_some_and(|c| Arc::ptr_eq(c, &self.cancel))
+        {
+            slots.jobs.remove(&self.job);
+            slots.masks.retain(|_, j| *j != self.job);
+        }
+        drop(slots);
+        // Unrun, it made nothing: the job it met draws again as it ends.
+        if self.ran {
+            self.shared.bump();
+        }
+    }
+}
+
+/// Why a frame or a job failed.
+struct Failure {
+    message: String,
+    /// Whether the model was there then.
+    model: bool,
+    at: Instant,
+}
+
+/// What stopped work that panicked: "`what` stopped unexpectedly: …".
+fn stopped(what: &str, payload: &(dyn Any + Send)) -> String {
+    let said = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match said {
+        Some(said) => format!("{what} stopped unexpectedly: {said}"),
+        None => format!("{what} stopped unexpectedly."),
+    }
 }
 
 fn runner(model: &'static Model) -> Option<Box<dyn Segmenter>> {
@@ -315,22 +386,34 @@ impl Shared {
         LocalSubjects::in_build() && ModelTask::Segmentation.model().is_downloaded()
     }
 
-    /// Why `id` failed, unless the model came since.
+    /// Why `id` failed, unless it is to be tried again: the model came
+    /// since, or [`RETRY_AFTER`] passed.
     fn failure(&self, id: u64) -> Option<String> {
         let mut failed = lock(&self.failed);
-        match failed.get(&id) {
-            Some((_, false)) if Self::model_here() => {
-                failed.remove(&id);
-                None
-            }
-            Some((message, _)) => Some(message.clone()),
-            None => None,
+        let f = failed.get(&id)?;
+        if (!f.model && Self::model_here()) || f.at.elapsed() >= RETRY_AFTER {
+            failed.remove(&id);
+            return None;
         }
+        Some(f.message.clone())
     }
 
     fn fail(&self, id: u64, message: String) {
-        lock(&self.failed).insert(id, (message, Self::model_here()));
+        let failure = Failure {
+            message,
+            model: Self::model_here(),
+            at: Instant::now(),
+        };
+        lock(&self.failed).insert(id, failure);
         self.bump();
+    }
+
+    /// Try `ids` again now, however lately they failed.
+    fn retry(&self, ids: impl IntoIterator<Item = u64>) {
+        let mut failed = lock(&self.failed);
+        for id in ids {
+            failed.remove(&id);
+        }
     }
 
     /// The prompted frame `key`, from memory or disk.
@@ -496,19 +579,29 @@ impl LocalSubjects {
                 model_prompt(prompt),
             );
             self.picks.clear_finished();
-            self.picks
-                .push(key.clone(), "Find subject", Some(item.id), move |_| match s
-                    .segment(model, &item, key.1, &prompt)
-                {
-                    Ok(m) => {
-                        s.keep_prompted(&key, Packed::pack(&m), true);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        s.fail(prompt_id(&key), e.0.clone());
-                        Err(e.0)
-                    }
-                });
+            let job =
+                self.picks
+                    .push(key.clone(), "Find subject", Some(item.id), move |_| {
+                        let made = catch_unwind(AssertUnwindSafe(|| {
+                            s.segment(model, &item, key.1, &prompt)
+                        }))
+                        .unwrap_or_else(|p| Err(ServiceError(stopped("Finding the subject", &*p))));
+                        match made {
+                            Ok(m) => {
+                                s.keep_prompted(&key, Packed::pack(&m), true);
+                                Ok(())
+                            }
+                            Err(e) => {
+                                s.fail(prompt_id(&key), e.0.clone());
+                                Err(e.0)
+                            }
+                        }
+                    });
+            // Failed unrun (no thread could start): kept, or it is asked
+            // for again on every frame.
+            if let Some(message) = self.picks.failed(job) {
+                shared.fail(id, message);
+            }
         }
         let Some(job) = plan.track.clone() else {
             return;
@@ -523,58 +616,60 @@ impl LocalSubjects {
         });
         let mut slots = lock(&shared.slots);
         if covered {
-            if slots.get(&subject.mask).is_some_and(|s| s.job.0 != key)
-                && let Some(old) = slots.remove(&subject.mask)
-            {
-                old.cancel.store(true, Ordering::SeqCst);
+            if slots.masks.get(&subject.mask).is_some_and(|j| j.0 != key) {
+                slots.leave(subject.mask);
             }
             return;
         }
-        if slots.get(&subject.mask).is_some_and(|s| s.job == job) {
+        if slots.masks.get(&subject.mask) != Some(&job) {
+            slots.leave(subject.mask);
+            slots.masks.insert(subject.mask, job.clone());
+        }
+        if slots.jobs.contains_key(&job) {
             return;
         }
-        if let Some(old) = slots.remove(&subject.mask) {
-            old.cancel.store(true, Ordering::SeqCst);
-        }
         let cancel = Arc::new(AtomicBool::new(false));
-        slots.insert(
-            subject.mask,
-            Slot {
-                job: job.clone(),
-                cancel: cancel.clone(),
-            },
-        );
+        slots.jobs.insert(job.clone(), cancel.clone());
+        // Unlocked first: a job the queue has already drops its work, and
+        // with it the release, at once.
         drop(slots);
         let prompts: Vec<(i64, Prompt)> = plan
             .prompts
             .iter()
             .map(|((_, f, _), p)| (*f, model_prompt(p)))
             .collect();
-        let (s, model, item, mask) = (
-            shared.clone(),
-            plan.model,
-            subject.item.clone(),
-            subject.mask,
-        );
+        let (model, item) = (plan.model, subject.item.clone());
+        let mut release = Release {
+            shared: shared.clone(),
+            job: job.clone(),
+            cancel,
+            ran: false,
+        };
         self.tracks.clear_finished();
-        self.tracks.push(
+        let id = self.tracks.push(
             job.clone(),
             "Track subject",
             Some(item.id),
             move |progress| {
-                let result = track(&s, model, &item, &job, &prompts, &cancel, progress);
-                let mut slots = lock(&s.slots);
-                if slots
-                    .get(&mask)
-                    .is_some_and(|slot| Arc::ptr_eq(&slot.cancel, &cancel))
-                {
-                    slots.remove(&mask);
-                }
-                drop(slots);
-                s.bump();
-                result
+                release.ran = true;
+                let (s, cancel) = (&release.shared, &release.cancel);
+                catch_unwind(AssertUnwindSafe(|| {
+                    track(s, model, &item, &job, &prompts, cancel, progress)
+                }))
+                .unwrap_or_else(|p| {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    let message = stopped("Tracking", &*p);
+                    s.fail(track_id(&job.0), message.clone());
+                    Err(message)
+                })
             },
         );
+        // Failed unrun (no thread could start): kept, as above.
+        if let Some(message) = self.tracks.failed(id) {
+            shared.fail(track_id(&key), message);
+        }
     }
 }
 
@@ -790,9 +885,13 @@ impl SubjectService for LocalSubjects {
         if let Some((key, lo, hi)) = &plan.track {
             frames = (hi - lo + 1) as usize;
             tracked = shared.tracked(key, |f| f.map_or(0, |f| f.frames.range(*lo..=*hi).count()));
-            tracking = lock(&shared.slots)
-                .get(&subject.mask)
-                .is_some_and(|s| s.job.0 == *key && !s.cancel.load(Ordering::SeqCst));
+            tracking = {
+                let slots = lock(&shared.slots);
+                slots
+                    .masks
+                    .get(&subject.mask)
+                    .is_some_and(|j| j.0 == *key && slots.jobs.contains_key(j))
+            };
             error = error.or_else(|| shared.failure(track_id(key)));
         }
         SubjectStatus {
@@ -815,6 +914,12 @@ impl SubjectService for LocalSubjects {
     ) -> ServiceResult<()> {
         self.available().map_err(ServiceError)?;
         let track = subject.subject.track && is_video(subject.item);
+        // A render tries what failed once more, however lately.
+        if let Some(plan) = plan(&subject) {
+            let prompts = plan.prompts.iter().map(|(k, _)| prompt_id(k));
+            let tracked = plan.track.iter().map(|(k, _, _)| track_id(k));
+            self.shared.retry(prompts.chain(tracked));
+        }
         loop {
             if let Some(plan) = plan(&subject) {
                 self.ensure(&subject, &plan);

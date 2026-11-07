@@ -2,7 +2,7 @@
 
 use super::analysis::timeline_words;
 use super::view::audio_segments;
-use super::{Done, Job, JobDone, Step, ToolCtx, propose};
+use super::{Done, Job, JobDone, Rebase, Step, ToolCtx, propose};
 use crate::args::*;
 use crate::bridge::Content;
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
@@ -1302,18 +1302,19 @@ fn normalize(ctx: &mut ToolCtx, args: &Args, reason: String) -> Result<Step, Too
         .unwrap_or(Presets::default().loudness_lufs);
     let wanted = clip_ids(p, &args.strings("clips")?)?;
     let range = args.range_or_all("range", p)?;
-    let all = if wanted.is_empty() {
-        audio_segments(p, range)
+    let range = if wanted.is_empty() {
+        range
     } else {
-        let whole = TimeRange::new(Time::ZERO, p.timeline.duration().max(Time(1)));
-        audio_segments(p, whole)
-            .into_iter()
-            .filter(|s| wanted.contains(&s.0))
-            .collect()
+        TimeRange::new(Time::ZERO, p.timeline.duration().max(Time(1)))
     };
+    let all: Vec<_> = audio_segments(p, range)
+        .into_iter()
+        .filter(|s| wanted.is_empty() || wanted.contains(&s.0))
+        .collect();
     if all.is_empty() {
         return Err(ToolError("No audio clips to normalize.".into()));
     }
+    let since = ctx.version();
     let job: Job = Box::new(move || {
         let mut commands = Vec::new();
         let mut excerpts = Vec::new();
@@ -1337,10 +1338,28 @@ fn normalize(ctx: &mut ToolCtx, args: &Args, reason: String) -> Result<Step, Too
                 excerpts.join("; ")
             )));
         }
+        // The gains are set on the clips as they are by then, so other
+        // changes to them are kept, as long as each still plays the sound
+        // measured and its gain is the one seen.
+        let gains = commands.clone();
+        let rebase: Rebase = Box::new(move |now: &flikk_core::model::Project| {
+            let segments = audio_segments(now, range);
+            let unchanged = |clip: &flikk_core::ClipId| {
+                let seen = all.iter().find(|s| s.0 == *clip);
+                let now = segments.iter().find(|s| s.0 == *clip);
+                matches!((seen, now), (Some(a), Some(b)) if (&a.2, a.3, a.4) == (&b.2, b.3, b.4))
+            };
+            gains
+                .iter()
+                .all(|c| matches!(c, Command::SetGain { clip, .. } if unchanged(clip)))
+                .then_some(gains)
+        });
         JobDone::Propose {
             commands,
             reason: format!("{reason} (target {target} LUFS)"),
             excerpts,
+            since,
+            rebase: Some(rebase),
         }
     });
     Ok(Step::Job(job))

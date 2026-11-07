@@ -159,6 +159,7 @@ pub fn add(key: &str, shared: &Voice, name: &str) -> CloudResult<Voice> {
         &[("xi-api-key", key)],
         &json!({ "new_name": name }),
         false,
+        None,
     )?;
     if !reply.ok() {
         return Err(error(&reply));

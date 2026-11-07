@@ -1,7 +1,8 @@
 //! fal's queue: a request is submitted, followed while it waits and runs,
 //! and its result read once it has one. A request can be cancelled until
 //! it is made; fal answers `ALREADY_COMPLETED` after that, and what was
-//! made is kept.
+//! made is kept. A cancel fal takes is a request: a running one may still
+//! be made, so it is followed until it stops or is made.
 
 use super::{NAME, auth, error, failure};
 use crate::http;
@@ -20,14 +21,37 @@ const TICK: Duration = Duration::from_millis(250);
 /// The longest a request is followed, queue and all.
 const PATIENCE: Duration = Duration::from_secs(2 * 60 * 60);
 
+/// How long a new request may be unknown to its status URL.
+const FRESH: Duration = Duration::from_secs(60);
+
+/// How long a status this code doesn't know is waited out.
+const STRANGE: Duration = Duration::from_secs(10 * 60);
+
+/// After a cancel fal couldn't be told of, before it is told again.
+const CANCEL_AGAIN: Duration = Duration::from_secs(15);
+
+/// How long a request fal said it would stop may stay queued.
+const STOPPING: Duration = Duration::from_secs(60);
+
+/// How long the result of a made request is asked for.
+const RESULT_PATIENCE: Duration = Duration::from_secs(10 * 60);
+
 /// Submit `input` to `endpoint` and follow it until it is made; its result.
-/// [`CloudError::Cancelled`] when `task` was cancelled in time.
+/// [`CloudError::Cancelled`] when `task` was cancelled in time. A look that
+/// fails for a while (no connection, a failing server) doesn't end it: the
+/// request goes on at fal, and is paid for.
 pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> CloudResult<Value> {
     let auth = auth(key);
     let headers = [("authorization", auth.as_str())];
     task.check()?;
     // Not retried on a server error: it may have been taken, and charged.
-    let reply = http::post_json(&format!("{QUEUE}/{endpoint}"), &headers, input, false)?;
+    let reply = http::post_json(
+        &format!("{QUEUE}/{endpoint}"),
+        &headers,
+        input,
+        false,
+        Some(task),
+    )?;
     if !reply.ok() {
         return Err(error(&reply));
     }
@@ -48,44 +72,142 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
     task.report(Stage::Queued(position(&submitted)));
 
     let started = Instant::now();
+    // When a stop may be asked of fal; none once fal said it would try.
+    let mut stop_from = Some(started);
+    // When fal said it would try to stop it.
+    let mut stopping: Option<Instant> = None;
+    let mut failures = 0;
+    let mut last_failure = String::new();
+    let mut strange: Option<Instant> = None;
     loop {
-        if wait(task) {
-            match cancel(&cancel_url, &headers)? {
+        if wait(task, http::backoff(POLL, failures), stop_from) {
+            match cancel(&cancel_url, &headers) {
                 Cancel::Stopped => return Err(CloudError::Cancelled),
                 Cancel::Made => break,
+                Cancel::Asked => {
+                    stopping = Some(Instant::now());
+                    stop_from = None;
+                }
+                Cancel::Unsent => stop_from = Some(Instant::now() + CANCEL_AGAIN),
             }
         }
         if started.elapsed() > PATIENCE {
-            let _ = cancel(&cancel_url, &headers);
+            cancel(&cancel_url, &headers);
+            if stopping.is_some() {
+                return Err(CloudError::Cancelled);
+            }
             return Err(CloudError::Failed(format!(
-                "{NAME} took over two hours, so it was stopped"
+                "{NAME} took over two hours, so it was stopped{}",
+                lately(&last_failure, failures)
             )));
         }
-        let reply = http::get(&status_url, &headers)?;
-        if !reply.ok() {
-            return Err(error(&reply));
+        // A stop while a look waits to ask again is acted on at once.
+        let stop = stop_from
+            .is_some_and(|at| Instant::now() >= at)
+            .then_some(task);
+        let status = match http::look(&status_url, &headers, started.elapsed() < FRESH, stop) {
+            http::Look::Answer(status) => status,
+            http::Look::Again(why) => {
+                failures += 1;
+                last_failure = why;
+                task.looked(failures);
+                continue;
+            }
+            http::Look::Stopped => continue,
+            // Gone, after fal said it would stop it: stopped.
+            http::Look::Refused(_) if stopping.is_some() => return Err(CloudError::Cancelled),
+            http::Look::Refused(reply) => return Err(error(&reply)),
+        };
+        failures = 0;
+        task.looked(failures);
+        let said = status["status"].as_str();
+        if !matches!(said, Some("IN_QUEUE" | "IN_PROGRESS" | "COMPLETED")) {
+            // A status fal didn't document: its end, or one waited out.
+            let message = status["error"].as_str();
+            if stopping.is_some() && (message.is_some() || said.is_some_and(http::ended)) {
+                return Err(CloudError::Cancelled);
+            }
+            if let Some(message) = message {
+                let kind = status["error_type"].as_str().unwrap_or_default();
+                return Err(failure(500, kind, message.to_owned()));
+            }
+            let said = said.unwrap_or("no status");
+            if http::ended(said) {
+                return Err(CloudError::Failed(format!(
+                    "{NAME} ended the request as {said}"
+                )));
+            }
+            let since = *strange.get_or_insert_with(Instant::now);
+            if stopping.is_some() && since.elapsed() > STOPPING {
+                return Err(CloudError::Cancelled);
+            }
+            if since.elapsed() > STRANGE {
+                cancel(&cancel_url, &headers);
+                return Err(CloudError::Failed(format!(
+                    "{NAME} answered {said} for ten minutes, so it was stopped (request {id})"
+                )));
+            }
+            continue;
         }
-        let status = reply.json()?;
-        match status["status"].as_str() {
-            Some("IN_QUEUE") => task.report(Stage::Queued(position(&status))),
+        strange = None;
+        match said {
+            Some("IN_QUEUE") => {
+                // Still waiting its turn, though fal said it would stop it.
+                if stopping.is_some_and(|at| at.elapsed() > STOPPING) {
+                    return Err(CloudError::Cancelled);
+                }
+                task.report(Stage::Queued(position(&status)));
+            }
+            // Running, even after a stop: what it makes is paid for, so
+            // it is followed and kept.
             Some("IN_PROGRESS") => task.report(Stage::Running),
-            Some("COMPLETED") => {
+            _ => {
                 // A request that failed is completed too, with its error.
                 if let Some(message) = status["error"].as_str() {
+                    if stopping.is_some() {
+                        return Err(CloudError::Cancelled);
+                    }
                     let kind = status["error_type"].as_str().unwrap_or_default();
                     return Err(failure(500, kind, message.to_owned()));
                 }
                 break;
             }
-            _ => {}
         }
     }
 
-    let reply = http::get(&response_url, &headers)?;
-    if !reply.ok() {
-        return Err(error(&reply));
+    // Made, and paid for: asked for again while it doesn't come, and no
+    // longer stopped.
+    task.unstoppable();
+    let made = Instant::now();
+    let mut failures = 0;
+    loop {
+        match http::look(&response_url, &headers, made.elapsed() < FRESH, None) {
+            http::Look::Answer(result) => {
+                task.looked(0);
+                return Ok(result);
+            }
+            http::Look::Refused(reply) => return Err(error(&reply)),
+            http::Look::Again(why) if made.elapsed() > RESULT_PATIENCE => {
+                return Err(CloudError::Failed(format!(
+                    "{NAME} made it but did not hand it over (request {id}): {why}"
+                )));
+            }
+            http::Look::Again(_) | http::Look::Stopped => {
+                failures += 1;
+                task.looked(failures);
+                std::thread::sleep(http::backoff(POLL, failures));
+            }
+        }
     }
-    reply.json()
+}
+
+/// What the last failed looks were, if the last looks failed.
+fn lately(why: &str, failures: u32) -> String {
+    if failures == 0 {
+        String::new()
+    } else {
+        format!(" (lately: {why})")
+    }
 }
 
 /// How many are ahead of it, when fal says.
@@ -95,32 +217,42 @@ fn position(json: &Value) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
-/// Sleep until the next poll; whether the user stopped it meanwhile.
-fn wait(task: &GenerationTask) -> bool {
-    let until = Instant::now() + POLL;
+/// Sleep for `pause`; whether the user stopped it meanwhile, once
+/// `stop_from` (none: not watched).
+fn wait(task: &GenerationTask, pause: Duration, stop_from: Option<Instant>) -> bool {
+    let stopped = || task.cancelled() && stop_from.is_some_and(|at| Instant::now() >= at);
+    let until = Instant::now() + pause;
     while Instant::now() < until {
-        if task.cancelled() {
+        if stopped() {
             return true;
         }
         std::thread::sleep(TICK);
     }
-    task.cancelled()
+    stopped()
 }
 
 enum Cancel {
     Stopped,
     /// Made before the cancel arrived: it is paid for, so it is kept.
     Made,
+    /// fal will try: a queued request is dropped, a running one may still
+    /// be made.
+    Asked,
+    /// fal couldn't be told, or wouldn't say; it goes on as it was.
+    Unsent,
 }
 
-fn cancel(url: &str, headers: &[(&str, &str)]) -> CloudResult<Cancel> {
-    let reply = http::put(url, headers)?;
+fn cancel(url: &str, headers: &[(&str, &str)]) -> Cancel {
+    let Ok(reply) = http::put(url, headers) else {
+        return Cancel::Unsent;
+    };
     let json: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-    if json["status"].as_str() == Some("ALREADY_COMPLETED") {
-        return Ok(Cancel::Made);
+    match json["status"].as_str() {
+        Some("ALREADY_COMPLETED") => Cancel::Made,
+        // Not one fal has: unknown, so nothing runs.
+        _ if reply.status == 404 => Cancel::Stopped,
+        // "CANCELLATION_REQUESTED", or nothing said: not stopped yet.
+        _ if reply.ok() => Cancel::Asked,
+        _ => Cancel::Unsent,
     }
-    if reply.ok() || reply.status == 404 {
-        return Ok(Cancel::Stopped);
-    }
-    Err(error(&reply))
 }

@@ -21,6 +21,7 @@ use gpui_kit::base::input::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 
 /// Parameter types offered per language (text is HTML-only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +95,19 @@ struct ParamDraft {
     /// The loaded spec and its fields as first shown: untouched fields keep
     /// the exact stored values instead of their rounded text.
     orig: Option<(ParamSpec, Vec<String>)>,
+    /// Its fields' subscriptions, dropped with it.
+    _subscriptions: Vec<Subscription>,
+}
+
+/// Unapplied edits of a program another one replaced, restored when it is
+/// opened again.
+struct Stash {
+    loaded: FxAsset,
+    name: String,
+    category: String,
+    description: String,
+    code: String,
+    params: Vec<ParamDraft>,
 }
 
 impl ParamDraft {
@@ -125,6 +139,10 @@ pub struct CodeEditorPanel {
     /// Structural or engine errors with their 1-based line, if known.
     errors: Vec<(Option<u32>, String)>,
     checking: bool,
+    /// Counts checks; only the latest one's result shows.
+    check_generation: u64,
+    /// Unapplied edits per program, kept while another is open.
+    stashed: HashMap<FxRef, Stash>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -159,6 +177,8 @@ impl CodeEditorPanel {
             params: Vec::new(),
             errors: Vec::new(),
             checking: false,
+            check_generation: 0,
+            stashed: HashMap::new(),
             _subscriptions,
         }
     }
@@ -191,7 +211,56 @@ impl CodeEditorPanel {
             .map(|p| self.draft(Some(p), window, cx))
             .collect();
         self.errors.clear();
+        self.cancel_check();
         self.loaded = Some(asset);
+    }
+
+    /// Keep the open program's unapplied edits, if any, for when it is
+    /// opened again. Edits of programs since removed are dropped.
+    fn stash(&mut self, cx: &App) {
+        let dirty = self.loaded.is_some() && self.build(cx).ok() != self.loaded;
+        let Some(loaded) = self.loaded.take() else {
+            return;
+        };
+        let project = self.state.read(cx).bus.project();
+        self.stashed.retain(|r, _| fx::asset(project, r).is_some());
+        if !dirty || fx::asset(project, &loaded.id).is_none() {
+            return;
+        }
+        let text = |f: &Entity<InputState>| f.read(cx).value().to_string();
+        let stash = Stash {
+            name: text(&self.name),
+            category: text(&self.category),
+            description: text(&self.description),
+            code: self.code.read(cx).value().to_string(),
+            params: std::mem::take(&mut self.params),
+            loaded,
+        };
+        self.stashed.insert(stash.loaded.id.clone(), stash);
+    }
+
+    /// Open `asset` with the edits stashed for it, else as stored.
+    fn open(&mut self, asset: FxAsset, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(stash) = self.stashed.remove(&asset.id) else {
+            self.load(asset, window, cx);
+            return;
+        };
+        self.load(stash.loaded, window, cx);
+        let set = |field: &Entity<InputState>, v: String, window: &mut Window, cx: &mut App| {
+            field.update(cx, |f, cx| f.set_value(v, window, cx));
+        };
+        set(&self.name, stash.name, window, cx);
+        set(&self.category, stash.category, window, cx);
+        set(&self.description, stash.description, window, cx);
+        self.code
+            .update(cx, |c, cx| c.set_value(stash.code, window, cx));
+        self.params = stash.params;
+    }
+
+    /// Forget a check under way: its result is for code no longer shown.
+    fn cancel_check(&mut self) {
+        self.check_generation += 1;
+        self.checking = false;
     }
 
     fn draft(
@@ -210,26 +279,32 @@ impl CodeEditorPanel {
             _ => String::new(),
         };
         let default = spec.map(|s| default_text(&s.default)).unwrap_or("0".into());
+        let mut subscriptions = Vec::new();
         let mut field = |value: String, placeholder: &'static str| {
             let f = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(placeholder)
                     .default_value(value)
             });
-            self._subscriptions
-                .push(cx.subscribe(&f, |_, _, _: &InputEvent, cx| cx.notify()));
+            subscriptions.push(cx.subscribe(&f, |_, _, _: &InputEvent, cx| cx.notify()));
             f
         };
+        let name = field(spec.map(|s| s.name.clone()).unwrap_or_default(), "name");
+        let min = field(min, "min");
+        let max = field(max, "max");
+        let default = field(default, "default");
+        let options = field(options, "a, b, c");
         let mut draft = ParamDraft {
-            name: field(spec.map(|s| s.name.clone()).unwrap_or_default(), "name"),
+            name,
             ty: spec.map_or(Type::Float, |s| Type::of(&s.kind)),
             label: spec.map(|s| s.label.clone()).unwrap_or_default(),
-            min: field(min, "min"),
-            max: field(max, "max"),
-            default: field(default, "default"),
-            options: field(options, "a, b, c"),
+            min,
+            max,
+            default,
+            options,
             on: spec.and_then(|s| s.default.as_bool()).unwrap_or(false),
             orig: None,
+            _subscriptions: subscriptions,
         };
         if let Some(spec) = spec {
             draft.orig = Some((spec.clone(), draft.texts(cx)));
@@ -333,6 +408,7 @@ impl CodeEditorPanel {
     }
 
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_check();
         let asset = match self.build(cx) {
             Ok(a) => a,
             Err(e) => {
@@ -372,6 +448,8 @@ impl CodeEditorPanel {
         } {
             return;
         }
+        self.check_generation += 1;
+        let generation = self.check_generation;
         self.checking = true;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
@@ -411,6 +489,9 @@ impl CodeEditorPanel {
         cx.spawn_in(window, async move |this, cx| {
             let errors = task.await;
             this.update_in(cx, |this, window, cx| {
+                if this.check_generation != generation {
+                    return;
+                }
                 this.checking = false;
                 this.show_errors(errors, window, cx);
             })
@@ -758,8 +839,10 @@ impl Render for CodeEditorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let stored = self.stored(cx);
         let Some(stored) = stored else {
-            // The program is gone (deleted, or its creation undone).
-            if self.loaded.take().is_some() {
+            // The program is gone (deleted, or its creation undone), or
+            // was closed.
+            if self.loaded.is_some() {
+                self.stash(cx);
                 let state = self.state.clone();
                 cx.defer(move |cx| state.update(cx, |s, cx| s.edit_fx(None, cx)));
             }
@@ -774,7 +857,10 @@ impl Render for CodeEditorPanel {
         // Another program was opened, or this one changed elsewhere (undo,
         // the agent) while untouched here.
         let switched = self.loaded.as_ref().map(|a| &a.id) != Some(&stored.id);
-        if switched || (!dirty && self.loaded.as_ref() != Some(&stored)) {
+        if switched {
+            self.stash(cx);
+            self.open(stored.clone(), window, cx);
+        } else if !dirty && self.loaded.as_ref() != Some(&stored) {
             self.load(stored.clone(), window, cx);
         }
         let readonly = matches!(stored.id, FxRef::Builtin(_));

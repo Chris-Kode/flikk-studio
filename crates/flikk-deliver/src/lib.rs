@@ -24,7 +24,7 @@ mod varispeed;
 pub use captions::{Cue, export_ass, export_srt};
 pub use fcpxml::export_fcpxml;
 pub use ffmpeg::free_name;
-pub use frame::export_frame;
+pub use frame::{export_frame, export_frame_until};
 pub use hw::Encoder;
 pub use lettering::Letterer;
 pub use otio::export_otio;

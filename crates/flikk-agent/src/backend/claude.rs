@@ -10,7 +10,7 @@
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use flikk_core::agent::Backend as BackendKind;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
 /// Claude Code's own tools for the web.
@@ -19,9 +19,15 @@ const WEB_TOOLS: &str = "WebSearch,WebFetch";
 #[derive(Default)]
 pub struct Claude {
     text: TextJoin,
-    streamed: bool,
+    /// Id of the message being streamed.
+    streaming: String,
+    /// Messages whose text came as deltas, by id; their whole message
+    /// doesn't show it again.
+    streamed: HashSet<String>,
     /// Web tool calls waiting for their result, by tool use id.
     web_calls: HashMap<String, (&'static str, Value)>,
+    /// Every tool use still waiting for its result, by id.
+    open_calls: HashSet<String>,
 }
 
 impl Claude {
@@ -66,6 +72,30 @@ impl Claude {
                 })
             })
             .collect()
+    }
+
+    /// Note the tool uses an `assistant` line begins and the results a
+    /// `user` line records; how many are open if that changed.
+    fn track_calls(&mut self, message: &Value, assistant: bool) -> Option<BackendEvent> {
+        let before = self.open_calls.len();
+        for block in content(message) {
+            let field = |k: &str| block.get(k).and_then(Value::as_str);
+            match (assistant, field("type")) {
+                (true, Some("tool_use")) => {
+                    if let Some(id) = field("id") {
+                        self.open_calls.insert(id.to_owned());
+                    }
+                }
+                (false, Some("tool_result")) => {
+                    if let Some(id) = field("tool_use_id") {
+                        self.open_calls.remove(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let after = self.open_calls.len();
+        (after != before).then_some(BackendEvent::OpenCalls(after))
     }
 }
 
@@ -186,10 +216,11 @@ impl Adapter for Claude {
             Some("stream_event") => match s("/event/type") {
                 Some("message_start") => {
                     self.text.new_message();
+                    self.streaming = s("/event/message/id").unwrap_or_default().to_owned();
                     vec![]
                 }
                 Some("content_block_delta") if s("/event/delta/type") == Some("text_delta") => {
-                    self.streamed = true;
+                    self.streamed.insert(self.streaming.clone());
                     s("/event/delta/text")
                         .and_then(|t| self.text.text(t))
                         .into_iter()
@@ -198,9 +229,11 @@ impl Adapter for Claude {
                 _ => vec![],
             },
             Some("assistant") => {
-                let started = self.web_calls_started(&v);
-                // Without partial messages (older CLIs), take whole messages.
-                if self.streamed {
+                let mut started = self.web_calls_started(&v);
+                started.extend(self.track_calls(&v, true));
+                // Without partial messages (older CLIs, or a message the
+                // CLI made itself), take whole messages.
+                if self.streamed.contains(s("/message/id").unwrap_or_default()) {
                     return started;
                 }
                 self.text.new_message();
@@ -212,7 +245,11 @@ impl Adapter for Claude {
                 out.extend(started);
                 out
             }
-            Some("user") => self.web_calls_finished(&v),
+            Some("user") => {
+                let mut finished = self.web_calls_finished(&v);
+                finished.extend(self.track_calls(&v, false));
+                finished
+            }
             Some("result") => {
                 let failed = v.get("is_error").and_then(Value::as_bool) == Some(true)
                     || s("/subtype").is_some_and(|st| st != "success");
@@ -233,7 +270,19 @@ impl Adapter for Claude {
                             .to_owned()
                     }
                 });
-                let mut out = Vec::new();
+                // Web calls the turn ended without a result for ended
+                // with it.
+                let mut out: Vec<_> = self
+                    .web_calls
+                    .drain()
+                    .map(|(id, (tool, args))| BackendEvent::Tool {
+                        key: Some(id),
+                        tool,
+                        summary: web_summary(&args),
+                        args,
+                        ok: error.is_none(),
+                    })
+                    .collect();
                 if let Some(id) = s("/session_id") {
                     out.push(BackendEvent::Session(id.to_owned()));
                 }

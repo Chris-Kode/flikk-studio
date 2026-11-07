@@ -19,6 +19,8 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// What an export button writes.
@@ -80,6 +82,10 @@ pub struct DeliverPanel {
     custom: [Entity<InputState>; 4],
     /// Sequence size the custom width and height were last filled from.
     sequence_size: (u32, u32),
+    /// Sample rate the format labels were last written with.
+    sample_rate: u32,
+    /// The output the user chose; without one it follows the project name
+    /// in the default folder. Each render writes the first free name from it.
     output: Option<PathBuf>,
     loudness: bool,
     burn_captions: bool,
@@ -88,6 +94,8 @@ pub struct DeliverPanel {
     /// For H.264 and HEVC; saved for the user.
     encoder: Encoder,
     polling: bool,
+    /// The running still export's cancel flag.
+    still: Option<Arc<AtomicBool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -124,26 +132,29 @@ impl DeliverPanel {
         let mut _subscriptions = vec![
             cx.observe_in(&state, window, |this: &mut Self, state, window, cx| {
                 let seq = &state.read(cx).bus.project().timeline.settings;
-                let size = (seq.width, seq.height);
+                let (size, rate) = ((seq.width, seq.height), seq.sample_rate);
                 if size != this.sequence_size {
                     this.sequence_size = size;
                     for (input, v) in this.custom.iter().zip([size.0, size.1]) {
                         input.update(cx, |i, cx| i.set_value(v.to_string(), window, cx));
                     }
                 }
+                if rate != this.sample_rate {
+                    this.sample_rate = rate;
+                    this.relabel_formats(window, cx);
+                }
                 cx.notify();
             }),
+            // By row, not label: the labels name the sample rate, which can
+            // change while the list shows.
             cx.subscribe(
                 &format_select,
-                |this, _, event: &SelectEvent<SharedString>, cx| {
-                    let SelectEvent::Confirm(label) = event;
-                    let seq = this.sequence(cx);
+                |this, select, _: &SelectEvent<SharedString>, cx| {
                     let card = this.card_of(this.preset);
-                    let picked = this.cards[card]
-                        .presets
-                        .iter()
-                        .copied()
-                        .find(|&ix| format_label(&this.presets[ix], &seq) == *label);
+                    let picked = select
+                        .read(cx)
+                        .selected_index()
+                        .and_then(|row| this.cards[card].presets.get(row).copied());
                     if let Some(ix) = picked {
                         this.select_preset(ix, cx);
                     }
@@ -175,12 +186,14 @@ impl DeliverPanel {
             format_select,
             custom,
             sequence_size: (seq.width, seq.height),
+            sample_rate: seq.sample_rate,
             output: None,
             loudness: false,
             burn_captions: true,
             whole_timeline: false,
             encoder: saved_encoder(),
             polling: false,
+            still: None,
             _subscriptions,
         }
     }
@@ -226,6 +239,21 @@ impl DeliverPanel {
         self.select_preset(members[0], cx);
     }
 
+    /// Write the chosen card's format labels anew, keeping the pick.
+    fn relabel_formats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self.sequence(cx);
+        let members = &self.cards[self.card_of(self.preset)].presets;
+        let formats = members
+            .iter()
+            .map(|&ix| format_label(&self.presets[ix], &seq))
+            .collect();
+        let row = members.iter().position(|&ix| ix == self.preset);
+        self.format_select.update(cx, |s, cx| {
+            s.set_items(formats, window, cx);
+            s.set_selected_index(row, window, cx);
+        });
+    }
+
     fn set_status(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         let message = message.into();
         self.state.update(cx, |s, cx| {
@@ -260,16 +288,18 @@ impl DeliverPanel {
         }
     }
 
-    /// The chosen output, or a free name in the default folder.
+    /// What Render writes next: the chosen output or the project's name in
+    /// the default folder, made free of files and of queued renders.
     fn output(&self, cx: &App) -> PathBuf {
-        self.output.clone().unwrap_or_else(|| {
+        let base = self.output.clone().unwrap_or_else(|| {
             let name = format!(
                 "{}.{}",
                 self.file_stem(cx),
                 self.presets[self.preset].extension()
             );
-            flikk_deliver::free_name(&default_dir().join(name))
-        })
+            default_dir().join(name)
+        });
+        free_output(&base, &self.queue)
     }
 
     fn settings(&self, cx: &App) -> Result<RenderSettings, String> {
@@ -344,17 +374,11 @@ impl DeliverPanel {
         };
         match self.queue.enqueue(request) {
             Ok(_) => {
-                // The next render gets a fresh name.
-                self.output = Some(flikk_deliver::free_name(&output));
+                // The next render gets a fresh name: the queue holds this one.
                 self.poll(cx);
                 cx.notify();
             }
-            Err(e) => {
-                if output.exists() {
-                    self.output = Some(flikk_deliver::free_name(&output));
-                }
-                self.set_status(format!("{e:#}"), cx);
-            }
+            Err(e) => self.set_status(format!("{e:#}"), cx),
         }
     }
 
@@ -406,6 +430,17 @@ impl DeliverPanel {
             if path.extension().is_none() {
                 path.set_extension(kind.extension());
             }
+            let cancel = Arc::new(AtomicBool::new(false));
+            if matches!(kind, Export::Still) {
+                let started = this.update(cx, |this, cx| {
+                    this.still = Some(cancel.clone());
+                    cx.notify();
+                });
+                if started.is_err() {
+                    return;
+                }
+            }
+            let flag = cancel.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -414,17 +449,35 @@ impl DeliverPanel {
                         Export::Ass => flikk_deliver::export_ass(&project, &styles, &path),
                         Export::Otio => flikk_deliver::export_otio(&project, &path),
                         Export::Fcpxml => flikk_deliver::export_fcpxml(&project, &path),
-                        Export::Still => flikk_deliver::export_frame(
-                            &project, playhead, &styles, &services, &path,
+                        Export::Still => flikk_deliver::export_frame_until(
+                            &project, playhead, &styles, &services, &path, &flag,
                         ),
                     }
                 })
                 .await;
-            if let Err(e) = result {
-                let _ = this.update(cx, |this, cx| this.set_status(format!("{e:#}"), cx));
-            }
+            let _ = this.update(cx, |this, cx| {
+                if this.still.as_ref().is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                    this.still = None;
+                    cx.notify();
+                }
+                // A canceled still clears quietly.
+                if let Err(e) = result
+                    && !cancel.load(Ordering::Relaxed)
+                {
+                    this.set_status(format!("{e:#}"), cx);
+                }
+            });
         })
         .detach();
+    }
+
+    /// Stop the running still export. Its button stays held down until the
+    /// frame being composed is done.
+    fn cancel_still(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.still {
+            cancel.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
     }
 
     fn set_encoder(&mut self, encoder: Encoder, cx: &mut Context<Self>) {
@@ -718,16 +771,32 @@ impl DeliverPanel {
         let rows: Vec<AnyElement> = Export::GROUPS
             .iter()
             .map(|&(label, kinds)| {
-                let buttons: Vec<Button> = kinds
+                let mut buttons: Vec<Button> = kinds
                     .iter()
                     .map(|&kind| {
+                        let still = matches!(kind, Export::Still);
                         Button::new(kind.label())
                             .small()
                             .label(kind.label())
-                            .when(matches!(kind, Export::Still), |b| b.icon(IconName::Frame))
+                            .when(still, |b| {
+                                b.icon(IconName::Frame).loading(self.still.is_some())
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.export(kind, cx)))
                     })
                     .collect();
+                if kinds.iter().any(|k| matches!(k, Export::Still))
+                    && let Some(cancel) = &self.still
+                {
+                    buttons.push(
+                        Button::new("still-cancel")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .tooltip("Cancel")
+                            .disabled(cancel.load(Ordering::Relaxed))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_still(cx))),
+                    );
+                }
                 h_flex()
                     .gap(px(10.))
                     .child(
@@ -1071,6 +1140,37 @@ fn khz(sample_rate: u32) -> String {
 /// A number with a typographic minus.
 fn minus(v: f32) -> String {
     v.to_string().replace('-', "\u{2212}")
+}
+
+/// `path` if free, else the first free `name (2).ext`, `name (3).ext`, …,
+/// like [`flikk_deliver::free_name`]; a render still in `queue` holds its
+/// output before the file exists.
+fn free_output(path: &Path, queue: &RenderQueue) -> PathBuf {
+    let queued: Vec<PathBuf> = queue
+        .jobs()
+        .into_iter()
+        .filter(|j| !j.state.is_finished())
+        .map(|j| j.output)
+        .collect();
+    let taken = |p: &Path| p.exists() || queued.iter().any(|q| q == p);
+    if !taken(path) {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    (2..)
+        .map(|n| {
+            let name = match &ext {
+                Some(ext) => format!("{stem} ({n}).{ext}"),
+                None => format!("{stem} ({n})"),
+            };
+            path.with_file_name(name)
+        })
+        .find(|p| !taken(p))
+        .expect("unbounded")
 }
 
 /// The output's folder, with the home folder as `~`.

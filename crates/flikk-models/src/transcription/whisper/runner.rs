@@ -34,6 +34,10 @@ impl Whisper {
 
     fn context(&self) -> Result<Arc<WhisperContext>> {
         let mut ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        // Its file was deleted: let go of it, and fail as if never there.
+        if !self.file.is_present() {
+            *ctx = None;
+        }
         if let Some(ctx) = &*ctx {
             return Ok(ctx.clone());
         }

@@ -240,9 +240,13 @@ impl Browser {
         if running_as_root() {
             cmd.arg("--no-sandbox");
         }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("starting {}", exe.display()))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(anyhow!(e).context(format!("starting {}", exe.display())));
+            }
+        };
         let port_file = profile.join("DevToolsActivePort");
         let deadline = Instant::now() + Duration::from_secs(20);
         let (port, path) = loop {
@@ -254,9 +258,16 @@ impl Browser {
                     break (port, path.trim().to_owned());
                 }
             }
-            if let Some(status) = child.try_wait()? {
+            let exited = match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some(anyhow!("{} exited at startup ({status})", exe.display())),
+                Err(e) => Some(anyhow!(e).context(format!("watching {}", exe.display()))),
+            };
+            if let Some(e) = exited {
+                let _ = child.kill();
+                let _ = child.wait();
                 let _ = std::fs::remove_dir_all(&profile);
-                bail!("{} exited at startup ({status})", exe.display());
+                return Err(e);
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
@@ -297,7 +308,8 @@ impl Drop for Browser {
     }
 }
 
-/// Remove profiles left by editors that exited without cleaning up.
+/// Remove profiles and half-written pages left by editors that exited
+/// without cleaning up.
 #[cfg(target_os = "linux")]
 fn sweep_profiles(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -305,15 +317,21 @@ fn sweep_profiles(dir: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("profile-"))
-            .and_then(|n| n.split('-').next())
-        else {
+        let Some((page, pid)) = name.to_str().and_then(|n| {
+            let (page, rest) = match n.strip_prefix("tmp-") {
+                Some(rest) => (true, rest),
+                None => (false, n.strip_prefix("profile-")?),
+            };
+            Some((page, rest.split('-').next()?))
+        }) else {
             continue;
         };
         if !Path::new("/proc").join(pid).exists() {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let _ = if page {
+                std::fs::remove_file(entry.path())
+            } else {
+                std::fs::remove_dir_all(entry.path())
+            };
         }
     }
 }

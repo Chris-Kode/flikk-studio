@@ -18,6 +18,9 @@ pub enum WelcomeEvent {
     Continue,
     /// Start a new project from these files and folders.
     Create(Vec<PathBuf>),
+    /// Another project is being started or opened: footage held from an
+    /// earlier `Create` (whose dialog was cancelled) must not go into it.
+    ForgetFootage,
 }
 
 /// A row of the list.
@@ -132,7 +135,9 @@ impl Welcome {
         let Some(r) = self.recent.get(ix) else {
             return;
         };
-        if r.missing {
+        cx.emit(WelcomeEvent::ForgetFootage);
+        // The list is read once; the file can have gone since.
+        if r.missing || !r.path.exists() {
             self.locate(ix, window, cx);
         } else if self.state.read(cx).file.as_ref() == Some(&r.path) {
             cx.emit(WelcomeEvent::Continue);
@@ -141,10 +146,11 @@ impl Welcome {
         }
     }
 
-    /// Find a project that moved: open the file picked instead and forget
-    /// where it was.
+    /// Find a project that moved: open the file picked instead and, once it
+    /// opened, forget where it was.
     fn locate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.recent[ix].path.clone();
+        cx.emit(WelcomeEvent::ForgetFootage);
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -158,8 +164,13 @@ impl Welcome {
                     return;
                 };
                 if let Some(path) = paths.into_iter().next() {
-                    crate::persistence::forget_recent(&old);
-                    let _ = cx.update(|window, cx| projects::open(&state, path, window, cx));
+                    let _ = cx.update(|window, cx| {
+                        projects::open(&state, path.clone(), window, cx);
+                        // Unsaved changes ask first: the entry then stays.
+                        if state.read(cx).file.as_ref() == Some(&path) {
+                            crate::persistence::forget_recent(&old);
+                        }
+                    });
                 }
             })
             .detach();
@@ -171,6 +182,7 @@ impl Welcome {
         if let [file] = paths.as_slice()
             && file.extension().is_some_and(|e| e == EXTENSION)
         {
+            cx.emit(WelcomeEvent::ForgetFootage);
             projects::open(&self.state, file.clone(), window, cx);
         } else if !paths.is_empty() {
             cx.emit(WelcomeEvent::Create(paths));
@@ -180,6 +192,9 @@ impl Welcome {
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.visible(cx);
+        // As the list shows it: rows can go without a search, as the
+        // recovered one does once its project is saved.
+        self.selected = self.selected.min(rows.len().saturating_sub(1));
         match ev.keystroke.key.as_str() {
             "down" if !rows.is_empty() => {
                 self.selected = (self.selected + 1).min(rows.len() - 1);
@@ -217,6 +232,7 @@ impl Welcome {
                 .child(div().flex_1())
                 .kbd(format!("{} N", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
+                    cx.emit(WelcomeEvent::ForgetFootage);
                     projects::new_project(&this.state, window, cx)
                 }))))
             .child(big(Button::new("welcome-open")
@@ -225,6 +241,7 @@ impl Welcome {
                 .child(div().flex_1())
                 .kbd(format!("{} O", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
+                    cx.emit(WelcomeEvent::ForgetFootage);
                     projects::open_dialog(&this.state, window, cx)
                 }))))
     }

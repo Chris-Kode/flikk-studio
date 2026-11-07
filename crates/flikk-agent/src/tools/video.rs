@@ -253,13 +253,13 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     }
     let services = ctx.services.clone();
     let project = (!grabs.is_empty()).then(|| ctx.project().clone());
+    let task = ctx.stop.task();
     let job: Job = Box::new(move || {
         if let Some(project) = &project
             && let Err(e) = grab_all(project, &services, &grabs)
         {
             return JobDone::Done(Done::error(e));
         }
-        let task = flikk_core::cloud::GenerationTask::default();
         match generation.generate(&request, &paths::generated(), &task) {
             Ok(made) => JobDone::Generated {
                 item: Box::new(flikk_core::cloud::media_item(

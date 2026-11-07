@@ -5,12 +5,12 @@
 //! next voiceover starts on it.
 
 use crate::state::EditorState;
-use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
+use crate::state::voices::{Listening, SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Badge, Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
-    PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab, Tabs, Textarea,
-    Tooltip, h_flex, v_flex,
+    Badge, Button, Checkbox, DialogExt as _, DialogId, DropdownMenu as _, EmptyState, Icon,
+    IconName, Input, PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab,
+    Tabs, Textarea, Tooltip, h_flex, v_flex,
 };
 use crate::ui::media_pool::form;
 use crate::ui::media_pool::import::is_audio;
@@ -23,7 +23,7 @@ use flikk_core::model::{MediaItem, MediaKind};
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -68,14 +68,35 @@ enum Scope {
     Shared,
 }
 
-/// What is on its way.
+/// What is being made on the account, one at a time: its result is
+/// delivered by the dialog, which stays open until then.
 #[derive(Clone, PartialEq, Eq)]
-enum Busy {
-    Searching,
+enum Op {
     Adding(String),
     Designing,
     Saving,
     Cloning,
+}
+
+/// Recordings cut for the provider to hear, removed once neither the
+/// dialog nor a task reading them holds them.
+#[derive(Default)]
+struct Scratch(Mutex<Vec<PathBuf>>);
+
+impl Scratch {
+    fn keep(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut scratch = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        scratch.extend(paths);
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let scratch = self.0.get_mut().unwrap_or_else(|e| e.into_inner());
+        for path in scratch.iter() {
+            discard_recording(path);
+        }
+    }
 }
 
 /// A filter of the shared library.
@@ -140,12 +161,20 @@ impl Filter {
 pub struct VoicesDialog {
     state: Entity<EditorState>,
     on_kept: Option<OnKept>,
+    /// The dialog this is the body of, which closes once a voice is kept,
+    /// whatever opened over it meanwhile.
+    dialog: Option<DialogId>,
     page: Page,
-    busy: Option<Busy>,
+    op: Option<Op>,
     error: Option<SharedString>,
     // Find
     scope: Scope,
     search: Entity<InputState>,
+    /// The latest search of the shared library asked for; the results of
+    /// earlier ones are dropped.
+    searches: u64,
+    /// The latest search is on its way.
+    searching: bool,
     query: VoiceQuery,
     shared: Vec<Voice>,
     shared_page: usize,
@@ -156,7 +185,10 @@ pub struct VoicesDialog {
     similar: Option<(PathBuf, String)>,
     selected: Option<String>,
     samples: HashMap<String, MediaItem>,
-    fetching: Option<String>,
+    fetching: HashSet<String>,
+    /// The sample last asked for, played when it arrives unless the user
+    /// played or stopped something since.
+    wanted: Option<(String, Listening)>,
     // Describe
     name: Entity<InputState>,
     description: Entity<TextareaState>,
@@ -170,18 +202,8 @@ pub struct VoicesDialog {
     files: Vec<PathBuf>,
     denoise: bool,
     consent: bool,
-    /// Recordings cut for the provider to hear, removed with the dialog.
-    scratch: Arc<Mutex<Vec<PathBuf>>>,
+    scratch: Arc<Scratch>,
     _subscriptions: Vec<Subscription>,
-}
-
-impl Drop for VoicesDialog {
-    fn drop(&mut self) {
-        let scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        for path in scratch.iter() {
-            discard_recording(path);
-        }
-    }
 }
 
 impl VoicesDialog {
@@ -227,11 +249,14 @@ impl VoicesDialog {
         let mut this = Self {
             state,
             on_kept,
+            dialog: None,
             page: Page::Find,
-            busy: None,
+            op: None,
             error: None,
             scope: Scope::Account,
             search,
+            searches: 0,
+            searching: false,
             query: VoiceQuery::default(),
             shared: Vec::new(),
             shared_page: 0,
@@ -240,7 +265,8 @@ impl VoicesDialog {
             similar: None,
             selected: None,
             samples: HashMap::new(),
-            fetching: None,
+            fetching: HashSet::new(),
+            wanted: None,
             name,
             description,
             sample_text,
@@ -291,32 +317,34 @@ impl VoicesDialog {
 
     /// Remove `paths` with the dialog, those that are recordings.
     fn keep_scratch(&self, paths: impl IntoIterator<Item = PathBuf>) {
-        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        scratch.extend(paths);
+        self.scratch.keep(paths);
     }
 
     fn fail(&mut self, e: impl ToString, cx: &mut Context<Self>) {
-        self.busy = None;
         self.error = Some(e.to_string().into());
         cx.notify();
     }
 
-    /// Run `work` off the UI thread as `busy`, then `done` with its result.
+    /// Run `work` off the UI thread as `op`, then `done` with its result.
+    /// Nothing starts while another operation runs.
     fn run<T: Send + 'static>(
         &mut self,
-        busy: Busy,
+        op: Op,
         work: impl FnOnce() -> Result<T, String> + Send + 'static,
         done: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.busy = Some(busy);
+        if self.op.is_some() {
+            return;
+        }
+        self.op = Some(op);
         self.error = None;
         let task = cx.background_executor().spawn(async move { work() });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.busy = None;
+                this.op = None;
                 match result {
                     Ok(value) => done(this, value, window, cx),
                     Err(e) => this.fail(e, cx),
@@ -330,7 +358,9 @@ impl VoicesDialog {
 
     /// Close, and hand `voice` on.
     fn kept(&mut self, voice: Voice, window: &mut Window, cx: &mut Context<Self>) {
-        window.close_dialog(cx);
+        if let Some(id) = self.dialog {
+            window.close_dialog_id(id, cx);
+        }
         if let Some(on_kept) = self.on_kept.clone() {
             on_kept(&voice, window, cx);
         }
@@ -367,13 +397,22 @@ impl VoicesDialog {
         self.shown(cx).into_iter().find(|v| v.id == *id)
     }
 
+    /// Search the shared library: page 0 starts a new search, a later page
+    /// goes on with the current one.
     fn search_shared(&mut self, page: usize, cx: &mut Context<Self>) {
+        if page > 0 && self.searching {
+            return;
+        }
         let Some(generation) = self.state.read(cx).generation() else {
             return;
         };
         let mut query = self.query.clone();
         query.text = self.search.read(cx).value().trim().to_owned();
-        self.busy = Some(Busy::Searching);
+        if page == 0 {
+            self.searches += 1;
+        }
+        let asked = self.searches;
+        self.searching = true;
         self.error = None;
         self.searched = true;
         let task = cx
@@ -382,7 +421,10 @@ impl VoicesDialog {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = None;
+                if this.searches != asked {
+                    return;
+                }
+                this.searching = false;
                 match result {
                     Ok(found) => {
                         if page == 0 {
@@ -409,11 +451,16 @@ impl VoicesDialog {
         let Some(generation) = self.state.read(cx).generation() else {
             return;
         };
-        self.busy = Some(Busy::Searching);
+        self.searches += 1;
+        let asked = self.searches;
+        self.searching = true;
         self.error = None;
         self.searched = true;
         self.more = false;
+        let scratch = self.scratch.clone();
         let task = cx.background_executor().spawn(async move {
+            // The recording stays until the clip is cut.
+            let _scratch = scratch;
             let clip = recording_clip(&recording)?;
             let found = generation.similar_voices(&clip).map_err(|e| e.to_string());
             discard_recording(&clip);
@@ -422,7 +469,10 @@ impl VoicesDialog {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = None;
+                if this.searches != asked {
+                    return;
+                }
+                this.searching = false;
                 match result {
                     Ok(voices) => this.shared = voices,
                     Err(e) => this.fail(e, cx),
@@ -437,7 +487,7 @@ impl VoicesDialog {
     fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
         self.scope = scope;
         self.selected = None;
-        if scope == Scope::Shared && self.shared.is_empty() && self.busy.is_none() {
+        if scope == Scope::Shared && self.shared.is_empty() && !self.searching {
             self.search_shared(0, cx);
         }
         cx.notify();
@@ -476,7 +526,7 @@ impl VoicesDialog {
         };
         let shared = voice.clone();
         self.run(
-            Busy::Adding(voice.id.clone()),
+            Op::Adding(voice.id.clone()),
             move || {
                 let added = generation
                     .add_voice(&shared, &shared.name)
@@ -509,7 +559,11 @@ impl VoicesDialog {
             return;
         };
         let id = voice.id.clone();
-        self.fetching = Some(id.clone());
+        self.wanted = Some((id.clone(), state.listening()));
+        // On its way already: it plays when it comes, as now asked.
+        if !self.fetching.insert(id.clone()) {
+            return;
+        }
         self.error = None;
         let fetch = cx.background_executor().spawn(async move {
             let path = generation.voice_sample(&voice)?;
@@ -518,10 +572,16 @@ impl VoicesDialog {
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| {
-                this.fetching = None;
+                this.fetching.remove(&id);
                 match result {
                     Ok(item) => {
-                        this.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+                        if let Some((_, then)) = this.wanted.take_if(|(last, _)| *last == id) {
+                            this.state.update(cx, |s, cx| {
+                                if s.still_listening(&then) {
+                                    s.toggle_source(&item, cx);
+                                }
+                            });
+                        }
                         this.samples.insert(id, item);
                     }
                     Err(e) => this.error = Some(e.to_string().into()),
@@ -534,7 +594,7 @@ impl VoicesDialog {
     }
 
     fn sample_button(&self, voice: &Voice, cx: &mut Context<Self>) -> AnyElement {
-        if self.fetching.as_ref() == Some(&voice.id) {
+        if self.fetching.contains(&voice.id) {
             return spinner_box().into_any_element();
         }
         let id = SharedString::from(format!("sample-{}", voice.id));
@@ -557,7 +617,7 @@ impl VoicesDialog {
 
     fn voice_row(&self, voice: &Voice, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.selected.as_ref() == Some(&voice.id);
-        let adding = self.busy == Some(Busy::Adding(voice.id.clone()));
+        let adding = self.op == Some(Op::Adding(voice.id.clone()));
         let id = voice.id.clone();
         let picked = voice.clone();
         let taken = voice.clone();
@@ -574,10 +634,10 @@ impl VoicesDialog {
             .small()
             .label(if voice.shared() { "Add" } else { "Use" })
             .loading(adding)
-            .disabled(self.busy.is_some() && !adding)
+            .disabled(self.op.is_some() && !adding)
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                if this.busy.is_none() {
+                if this.op.is_none() {
                     this.take(taken.clone(), window, cx);
                 }
             }));
@@ -627,7 +687,7 @@ impl VoicesDialog {
             .child(action)
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.selected = Some(id.clone());
-                if ev.click_count() >= 2 && this.busy.is_none() {
+                if ev.click_count() >= 2 && this.op.is_none() {
                     this.take(picked.clone(), window, cx);
                 }
                 cx.notify();
@@ -687,11 +747,11 @@ impl VoicesDialog {
         let voices = self.shown(cx);
         let state = self.state.read(cx);
         let loading = match self.scope {
-            Scope::Account => state.account_voices.loading,
-            Scope::Shared => self.busy == Some(Busy::Searching),
+            Scope::Account => state.account_voices.loading(),
+            Scope::Shared => self.searching,
         };
         let load_error = match self.scope {
-            Scope::Account => state.account_voices.error.clone(),
+            Scope::Account => state.account_voices.error(),
             Scope::Shared => None,
         };
         let scope = Segmented::new("voice-scope")
@@ -834,8 +894,9 @@ impl VoicesDialog {
             return;
         };
         let asked = design.clone();
+        let then = state.listening();
         self.run(
-            Busy::Designing,
+            Op::Designing,
             move || {
                 let designed = generation.design_voice(&asked).map_err(|e| e.to_string())?;
                 Ok(designed
@@ -851,8 +912,14 @@ impl VoicesDialog {
                 this.previews = previews;
                 this.picked = Some(0);
                 this.designed = Some(design);
+                // The first take plays unless the user played or stopped
+                // something meanwhile.
                 if let Some((_, item)) = this.previews.first() {
-                    this.state.update(cx, |s, cx| s.toggle_source(item, cx));
+                    this.state.update(cx, |s, cx| {
+                        if s.still_listening(&then) {
+                            s.toggle_source(item, cx);
+                        }
+                    });
                 }
             },
             window,
@@ -873,7 +940,7 @@ impl VoicesDialog {
         };
         let asked = design.clone();
         self.run(
-            Busy::Saving,
+            Op::Saving,
             move || {
                 generation
                     .save_voice(&asked, &preview, &name)
@@ -898,7 +965,7 @@ impl VoicesDialog {
         let chars = self.description.read(cx).value().trim().chars().count();
         let (min, max) = DESIGN_DESCRIPTION;
         let current = self.designed_now(cx);
-        let idle = self.busy.is_none();
+        let idle = self.op.is_none();
         let previews: Vec<AnyElement> =
             self.previews
                 .iter()
@@ -952,7 +1019,7 @@ impl VoicesDialog {
                     .child(
                         Button::new("design-voice")
                             .label("Generate")
-                            .loading(self.busy == Some(Busy::Designing))
+                            .loading(self.op == Some(Op::Designing))
                             .disabled(!idle || chars < min)
                             .on_click(cx.listener(|this, _, window, cx| this.design(window, cx))),
                     ),
@@ -1005,7 +1072,7 @@ impl VoicesDialog {
         let made = name.clone();
         let scratch = self.scratch.clone();
         self.run(
-            Busy::Cloning,
+            Op::Cloning,
             move || {
                 // A video, or a format the provider may not take, goes as
                 // its sound.
@@ -1016,8 +1083,7 @@ impl VoicesDialog {
                             Ok(p.clone())
                         } else {
                             let cut = recording(p, &[], SPEAKER_LIMIT, &made)?;
-                            let mut scratch = scratch.lock().unwrap_or_else(|e| e.into_inner());
-                            scratch.push(cut.clone());
+                            scratch.keep([cut.clone()]);
                             Ok(cut)
                         }
                     })
@@ -1157,7 +1223,7 @@ impl VoicesDialog {
 
     /// The footer's button: its label, and whether it can be pressed.
     fn primary(&self, cx: &App) -> (&'static str, bool) {
-        let idle = self.busy.is_none();
+        let idle = self.op.is_none();
         match self.page {
             Page::Find => {
                 let voice = self.selected_voice(cx);
@@ -1183,9 +1249,10 @@ impl VoicesDialog {
         }
     }
 
-    /// Saving or making what the footer button asked for.
+    /// Adding, designing, saving or making a voice: the dialog stays open
+    /// to deliver it.
     fn working(&self) -> bool {
-        matches!(self.busy, Some(Busy::Saving | Busy::Cloning))
+        self.op.is_some()
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1219,6 +1286,10 @@ impl Render for VoicesDialog {
             .child(Tab::new("Describe"))
             .child(Tab::new("From audio"))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                // The footer stays on the operation running.
+                if this.op.is_some() {
+                    return;
+                }
                 this.page = match ix {
                     0 => Page::Find,
                     1 => Page::Describe,
@@ -1301,7 +1372,8 @@ pub fn open(
     cx: &mut App,
 ) {
     let dialog = cx.new(|cx| VoicesDialog::new(state, start, on_kept, window, cx));
-    window.open_dialog(cx, move |d, _, cx| {
+    let body = dialog.clone();
+    let id = window.open_dialog_id(cx, move |d, _, cx| {
         let submit = dialog.clone();
         let (label, ready) = dialog.read(cx).primary(cx);
         let working = dialog.read(cx).working();
@@ -1315,4 +1387,5 @@ pub fn open(
             .confirm_disabled(!ready)
             .working(working)
     });
+    body.update(cx, |this, _| this.dialog = Some(id));
 }

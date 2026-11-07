@@ -10,8 +10,8 @@ use crate::ui::caption_style::{CaptionStylePanel, Target};
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, DropdownMenu as _, IconName, Indicator, Kbd, Panel, PanelHeader, PanelTabs,
-    PopupMenuItem, Progress, ScrollableElement as _, Segmented, h_flex, h_resizable,
+    Button, DialogExt as _, DropdownMenu as _, IconName, Indicator, Kbd, Panel, PanelHeader,
+    PanelTabs, PopupMenuItem, Progress, ScrollableElement as _, Segmented, h_flex, h_resizable,
     resizable_panel, v_resizable,
 };
 use crate::ui::{
@@ -118,8 +118,9 @@ pub struct Flikk {
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
-    /// Footage dropped on the welcome page, imported once its new project
-    /// is open.
+    /// Footage dropped on the welcome page, imported once the New project
+    /// it started is open. Any other way of leaving the page, or of
+    /// starting or opening a project, clears it.
     footage: Option<Vec<PathBuf>>,
     _observe: Subscription,
     _welcome: Option<Subscription>,
@@ -145,11 +146,33 @@ impl Flikk {
         let _welcome = welcome.as_ref().map(|(page, _)| {
             cx.subscribe_in(page, window, |this, _, ev: &WelcomeEvent, window, cx| {
                 match ev {
-                    WelcomeEvent::Continue => this.welcome = None,
-                    WelcomeEvent::Create(paths) => {
-                        this.footage = Some(paths.clone());
-                        projects::new_project(&this.state, window, cx);
+                    WelcomeEvent::Continue => {
+                        this.welcome = None;
+                        this.footage = None;
                     }
+                    WelcomeEvent::Create(paths) => {
+                        // Another dialog is up: New project won't open.
+                        if !window.has_active_dialog(cx) {
+                            this.footage = Some(paths.clone());
+                            // One folder names the project.
+                            let name = match paths.as_slice() {
+                                [folder] if folder.is_dir() => {
+                                    folder.file_name().map(|n| n.to_string_lossy().into_owned())
+                                }
+                                _ => None,
+                            };
+                            let (flikk, paths) = (cx.entity().downgrade(), paths.clone());
+                            let on_cancel = move |cx: &mut App| {
+                                let _ = flikk.update(cx, |this, _| {
+                                    if this.footage.as_ref() == Some(&paths) {
+                                        this.footage = None;
+                                    }
+                                });
+                            };
+                            projects::new_project_named(&this.state, name, on_cancel, window, cx);
+                        }
+                    }
+                    WelcomeEvent::ForgetFootage => this.footage = None,
                 }
                 cx.notify();
             })
@@ -196,19 +219,14 @@ impl Flikk {
     }
 
     /// Leave the welcome page once another project is open, importing the
-    /// footage it was started from.
+    /// footage it was started from. Footage is only still held here when
+    /// that project came from the New project dialog it opened, which
+    /// already named it after a dropped folder.
     fn state_changed(&mut self, cx: &mut Context<Self>) {
         let project = self.state.read(cx).bus.project().id;
         if self.welcome.as_ref().is_some_and(|(_, at)| *at != project) {
             self.welcome = None;
             if let Some(paths) = self.footage.take() {
-                if let [folder] = paths.as_slice()
-                    && folder.is_dir()
-                    && let Some(name) = folder.file_name()
-                {
-                    let name = name.to_string_lossy().into_owned();
-                    self.state.update(cx, |s, _| s.bus.rename_project(&name));
-                }
                 self.media_pool
                     .update(cx, |pool, cx| pool.import(paths, None, cx));
             }
@@ -258,11 +276,19 @@ impl Flikk {
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| this.moving = false),
                     )
+                    // A release off the bar ends the press too, or a later
+                    // drag over the bar would move the window.
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.moving = false),
+                    )
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
                         if this.moving && e.pressed_button == Some(MouseButton::Left) {
-                            this.moving = false;
                             window.start_window_move();
                         }
+                        // Released where no event reached the bar (outside
+                        // the window): the press is over all the same.
+                        this.moving = false;
                     }))
             })
             .map(|bar| {
@@ -714,6 +740,7 @@ impl Flikk {
             ),
         };
         let status = s.status.clone();
+        let syncing = s.syncing;
         if rendering.is_some() {
             self.poll_render(cx);
         }
@@ -736,6 +763,9 @@ impl Flikk {
             .text_size(px(11.))
             .text_color(t::T3)
             .whitespace_nowrap()
+            .when(syncing, |bar| {
+                bar.child(div().text_color(t::T2).child("Syncing…"))
+            })
             .children(status.map(|s| div().min_w_0().truncate().text_color(t::T2).child(s)))
             .children(rendering.map(|(output, fraction)| {
                 let name = output
@@ -887,9 +917,14 @@ impl Render for Flikk {
                 }),
             )
             .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+                // A fresh New project, not the one dropped footage opened.
+                if !window.has_active_dialog(cx) {
+                    this.footage = None;
+                }
                 projects::new_project(&this.state, window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
+                this.footage = None;
                 projects::open_dialog(&this.state, window, cx)
             }))
             .on_action(cx.listener(|this, _: &SaveProject, window, cx| {

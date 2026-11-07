@@ -31,14 +31,15 @@ pub fn run(
         _ => "audio/flac",
     };
     // The upload is most of the wait that can be measured; the rest is
-    // the provider listening.
+    // the provider listening. Billed by the minute heard: a server error
+    // may come after the work, so it isn't sent again.
     let reply = http::post_file(
         &format!("{API}/v1/speech-to-text"),
         &[("xi-api-key", key)],
         &fields,
         ("file", request.audio, mime),
         &|f| progress(f * 0.9),
-        true,
+        false,
     )?;
     if !reply.ok() {
         return Err(error(&reply));

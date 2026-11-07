@@ -8,6 +8,7 @@ use flikk_core::model::SequenceSettings;
 use flikk_store::project_file::{EXTENSION, sanitize};
 use gpui_kit::*;
 use std::path::PathBuf;
+use std::rc::{Rc, Weak};
 
 actions!(
     flikk,
@@ -45,9 +46,40 @@ enum Then {
     Restart,
 }
 
+/// The "Save changes?" question or a save's file prompt, while one is up:
+/// it lasts as long as something holds its token. Another waits for it to
+/// end rather than ask twice or save twice.
+struct Settling(Weak<()>);
+
+impl Global for Settling {}
+
+fn settling(cx: &App) -> bool {
+    cx.try_global::<Settling>()
+        .is_some_and(|s| s.0.strong_count() > 0)
+}
+
+/// Mark a question or save under way until the token is dropped.
+fn begin_settling(cx: &mut App) -> Rc<()> {
+    let token = Rc::new(());
+    cx.set_global(Settling(Rc::downgrade(&token)));
+    token
+}
+
 /// Ask for the new project's name, folder and sequence.
 pub fn new_project(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
-    crate::ui::project_settings::open_new(state, window, cx);
+    crate::ui::project_settings::open_new(state, None, None, window, cx);
+}
+
+/// New project with its name filled in as `name`; `on_cancel` runs when
+/// the dialog closes without Create.
+pub fn new_project_named(
+    state: &Entity<EditorState>,
+    name: Option<String>,
+    on_cancel: impl FnOnce(&mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    crate::ui::project_settings::open_new(state, name, Some(Box::new(on_cancel)), window, cx);
 }
 
 /// Change the open project's sequence.
@@ -97,14 +129,23 @@ pub fn open(state: &Entity<EditorState>, path: PathBuf, window: &mut Window, cx:
 
 /// Save to the project's file; a project never saved asks where.
 pub fn save(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
-    save_then(state, None, window, cx);
+    if settling(cx) {
+        return;
+    }
+    let token = begin_settling(cx);
+    save_then(state, None, token, window, cx);
 }
 
 /// Save to a new file, which the project continues in.
 pub fn save_as(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+    if settling(cx) {
+        return;
+    }
+    let token = begin_settling(cx);
     let target = state.clone();
     ask_path(state, window, cx, move |path, _, cx| {
         target.update(cx, |s, cx| s.save_project(path, cx));
+        drop(token);
     });
 }
 
@@ -129,21 +170,28 @@ pub fn should_close(state: &Entity<EditorState>, window: &mut Window, cx: &mut A
     false
 }
 
-/// Save, then (when it saved) do `then`.
-fn save_then(state: &Entity<EditorState>, then: Option<Then>, window: &mut Window, cx: &mut App) {
+/// Save, then (when it saved) do `then`. `token` marks the save under way
+/// until it ends.
+fn save_then(
+    state: &Entity<EditorState>,
+    then: Option<Then>,
+    token: Rc<()>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if let Some(path) = state.read(cx).file.clone() {
-        if state.update(cx, |s, cx| s.save_project(path, cx))
-            && let Some(then) = then
-        {
+        let saved = state.update(cx, |s, cx| s.save_project(path, cx));
+        drop(token);
+        if saved && let Some(then) = then {
             run(state, then, window, cx);
         }
         return;
     }
     let target = state.clone();
     ask_path(state, window, cx, move |path, window, cx| {
-        if target.update(cx, |s, cx| s.save_project(path, cx))
-            && let Some(then) = then
-        {
+        let saved = target.update(cx, |s, cx| s.save_project(path, cx));
+        drop(token);
+        if saved && let Some(then) = then {
             run(&target, then, window, cx);
         }
     });
@@ -181,20 +229,25 @@ fn ask_path(
     .detach();
 }
 
-/// Do `then` once unsaved changes are saved or let go, asking first.
+/// Do `then` once unsaved changes are saved or let go, asking first. The
+/// question opens over any other dialog; while it or its save is under way,
+/// another ask does nothing.
 fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut App) {
     if !state.read(cx).is_dirty() {
         run(state, then, window, cx);
         return;
     }
-    if window.has_active_dialog(cx) {
+    if settling(cx) {
         return;
     }
+    // The dialog holds the token until it closes; Save hands it on.
+    let token = begin_settling(cx);
     let name = state.read(cx).bus.project().name.clone();
     let state = state.clone();
     window.open_confirm(cx, move |dialog, _, _| {
         let (save_state, discard_state) = (state.clone(), state.clone());
         let (save_then_do, discard_then_do) = (then.clone(), then.clone());
+        let token = token.clone();
         dialog
             .title(format!("Save changes to “{name}”?"))
             .secondary("Don't save", move |window, cx| {
@@ -203,7 +256,8 @@ fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut
                 true
             })
             .confirm("Save", move |window, cx| {
-                save_then(&save_state, Some(save_then_do.clone()), window, cx);
+                let token = token.clone();
+                save_then(&save_state, Some(save_then_do.clone()), token, window, cx);
                 true
             })
     });

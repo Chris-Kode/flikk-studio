@@ -6,7 +6,7 @@
 //! rack focus. Depth masks are `set_mask`'s `depth` shape.
 
 use super::fx::param_value;
-use super::{Done, Job, JobDone, Step, ToolCtx, propose};
+use super::{Done, Job, JobDone, Rebase, Step, ToolCtx, propose};
 use crate::args::*;
 use flikk_core::command::Command;
 use flikk_core::depth;
@@ -15,7 +15,6 @@ use flikk_core::model::{Clip, Project};
 use flikk_core::{EffectId, Time, TimeRange};
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub const TOOLS: [&str; 2] = ["add_depth_effect", "set_depth_focus"];
 
@@ -177,9 +176,10 @@ fn focus(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .to_source(at)
         .ok_or_else(|| ToolError("the clip shows no source there".into()))?;
     let clip = Arc::new(clip.clone());
+    let since = ctx.version();
+    let cancel = ctx.stop.flag();
     let job: Job = Box::new(move || {
         let frame = TimeRange::new(source, source + Time(1));
-        let cancel = AtomicBool::new(false);
         if let Err(e) = service.complete(&item, frame, &|_| {}, &cancel) {
             return JobDone::Done(Done::error(format!("Could not make the depth map: {e}")));
         }
@@ -190,12 +190,26 @@ fn focus(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         let Some(command) = depth::focus_command(&clip, effect, at, distance, key) else {
             return JobDone::Done(Done::error("the effect is gone"));
         };
+        // The focus is set on the clip as it is by then, so other changes
+        // to it are kept, as long as the effect and the frame are the ones
+        // measured.
+        let seen = clip.effects.iter().find(|e| e.id == effect).cloned();
+        let rebase: Rebase = Box::new(move |project: &Project| {
+            let (_, now) = project.timeline.clip(clip.id)?;
+            let same = now.effects.iter().find(|e| e.id == effect) == seen.as_ref()
+                && now.to_source(at) == Some(source);
+            same.then(|| depth::focus_command(now, effect, at, distance, key))
+                .flatten()
+                .map(|c| vec![c])
+        });
         JobDone::Propose {
             commands: vec![command],
             reason,
             excerpts: vec![format!(
                 "Focus {distance:.3} (distance at the point: 0 nearest, 1 farthest)"
             )],
+            since,
+            rebase: Some(rebase),
         }
     });
     Ok(Step::Job(job))

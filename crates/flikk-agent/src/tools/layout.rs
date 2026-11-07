@@ -330,6 +330,7 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
             .map_or(MARGIN, |m| m as f32)
             .max(0.0),
     };
+    let since = ctx.version();
     let project = Arc::new(project.clone());
     let services = ctx.services.clone();
     let (align, fit, reason) = (align.to_owned(), fit.to_owned(), reason.to_owned());
@@ -352,6 +353,8 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
                 commands,
                 reason,
                 excerpts: Vec::new(),
+                since,
+                rebase: None,
             };
         }
         let id = ids[0];
@@ -375,6 +378,8 @@ pub fn place(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Step, ToolE
             commands,
             reason,
             excerpts: Vec::new(),
+            since,
+            rebase: None,
         }
     });
     Ok(Step::Job(job))
@@ -389,6 +394,7 @@ fn pin_to(
     points: [[f32; 2]; 4],
     reason: &str,
 ) -> Result<Step, ToolError> {
+    let since = ctx.version();
     let project = Arc::new(ctx.project().clone());
     let services = ctx.services.clone();
     let reason = reason.to_owned();
@@ -431,6 +437,8 @@ fn pin_to(
             commands,
             reason,
             excerpts: Vec::new(),
+            since,
+            rebase: None,
         }
     });
     Ok(Step::Job(job))
@@ -590,6 +598,7 @@ pub fn transform_group(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<S
         return fail("`scale` multiplies the group's size and is above 0");
     }
     let rotation = args.opt_f64("rotation")?.map_or(0.0, |v| v as f32);
+    let since = ctx.version();
     let project = Arc::new(project.clone());
     let services = ctx.services.clone();
     let reason = reason.to_owned();
@@ -614,6 +623,8 @@ pub fn transform_group(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<S
             commands,
             reason,
             excerpts: Vec::new(),
+            since,
+            rebase: None,
         }
     });
     Ok(Step::Job(job))

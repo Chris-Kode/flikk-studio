@@ -29,6 +29,12 @@ pub struct ProviderStatus {
     /// store.
     pub key: Option<KeySource>,
     pub check: Check,
+    /// Bumped by each set or removal of its key: a key read or saved
+    /// before then is dropped.
+    keyed: u64,
+    /// Bumped by each check, set or removal of its key: an older check's
+    /// answer is dropped.
+    checked: u64,
 }
 
 impl ProviderStatus {
@@ -77,11 +83,22 @@ impl Check {
 #[derive(Clone, Debug)]
 pub struct Generating {
     pub id: u64,
+    /// The project it is made for.
+    pub project: flikk_core::ProjectId,
     pub request: GenerateRequest,
     /// Where it is, and how to stop it.
     pub task: GenerationTask,
     /// Why it failed; `None` while it runs.
     pub failed: Option<CloudError>,
+}
+
+impl Generating {
+    /// Stopped by the user and not over yet: its row stays until the
+    /// provider says. What the provider made by then is kept, as it is paid
+    /// for.
+    pub fn stopping(&self) -> bool {
+        self.failed.is_none() && self.task.cancelled()
+    }
 }
 
 /// How often a running generation's row is redrawn with where it is.
@@ -92,6 +109,10 @@ impl EditorState {
     /// wait, or ask the user), then bring the notices up to date.
     pub(super) fn load_keys(&mut self, cx: &mut Context<Self>) {
         let cloud = self.cloud.clone();
+        // A key set or removed while they are read is newer.
+        let asked: Vec<u64> = (flikk_cloud::PROVIDERS.iter())
+            .map(|p| self.provider_status(p).keyed)
+            .collect();
         let read = cx.background_executor().spawn(async move {
             flikk_cloud::PROVIDERS
                 .iter()
@@ -101,8 +122,11 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let found = read.await;
             let _ = this.update(cx, |this, cx| {
-                for (id, source) in found {
-                    this.providers.entry(id).or_default().key = Some(source);
+                for ((id, source), keyed) in found.into_iter().zip(asked) {
+                    let status = this.providers.entry(id).or_default();
+                    if status.keyed == keyed {
+                        status.key = Some(source);
+                    }
                 }
                 this.refresh_model_notices();
                 cx.notify();
@@ -136,6 +160,9 @@ impl EditorState {
     }
 
     fn read_account(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        let status = self.providers.entry(provider.id).or_default();
+        status.checked += 1;
+        let checked = status.checked;
         let cloud = self.cloud.clone();
         let check = cx
             .background_executor()
@@ -143,8 +170,11 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let result = check.await;
             let _ = this.update(cx, |this, cx| {
-                this.providers.entry(provider.id).or_default().check = Check::from_account(result);
-                cx.notify();
+                let status = this.providers.entry(provider.id).or_default();
+                if status.checked == checked {
+                    status.check = Check::from_account(result);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -159,6 +189,7 @@ impl EditorState {
         key: String,
         cx: &mut Context<Self>,
     ) {
+        let keyed = self.rekey(provider);
         self.providers.entry(provider.id).or_default().check = Check::Checking;
         let cloud = self.cloud.clone();
         let saved = cx.background_executor().spawn(async move {
@@ -169,6 +200,13 @@ impl EditorState {
             let result = saved.await;
             let _ = this.update(cx, |this, cx| {
                 let status = this.providers.entry(provider.id).or_default();
+                // Set or removed again since.
+                if status.keyed != keyed {
+                    return;
+                }
+                // This checked the new key; one asked for meanwhile may have
+                // read the old one.
+                status.checked += 1;
                 match result {
                     Ok((source, account)) => {
                         status.key = Some(source);
@@ -190,8 +228,7 @@ impl EditorState {
                         }
                     }
                 }
-                this.refresh_model_notices();
-                cx.notify();
+                this.key_changed(provider, cx);
             });
         })
         .detach();
@@ -199,6 +236,7 @@ impl EditorState {
     }
 
     pub fn remove_api_key(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        let keyed = self.rekey(provider);
         let cloud = self.cloud.clone();
         let removed = cx.background_executor().spawn(async move {
             let result = cloud.keys().remove(provider);
@@ -207,21 +245,41 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let (source, result) = removed.await;
             let _ = this.update(cx, |this, cx| {
-                this.providers.insert(
-                    provider.id,
-                    ProviderStatus {
-                        key: Some(source),
-                        check: match result {
-                            Ok(()) => Check::Unchecked,
-                            Err(e) => Check::store_failed(e),
-                        },
-                    },
-                );
-                this.refresh_model_notices();
-                cx.notify();
+                let status = this.providers.entry(provider.id).or_default();
+                // Set again since.
+                if status.keyed != keyed {
+                    return;
+                }
+                // A check asked for meanwhile may have read the old key.
+                status.checked += 1;
+                status.key = Some(source);
+                status.check = match result {
+                    Ok(()) => Check::Unchecked,
+                    Err(e) => Check::store_failed(e),
+                };
+                this.key_changed(provider, cx);
             });
         })
         .detach();
+    }
+
+    /// A set or removal of `provider`'s key starts: keys read and checks
+    /// asked for before it are dropped. Its count.
+    fn rekey(&mut self, provider: &'static Provider) -> u64 {
+        let status = self.providers.entry(provider.id).or_default();
+        status.keyed += 1;
+        status.checked += 1;
+        status.keyed
+    }
+
+    /// `provider`'s key was set or removed: the notices, and the account's
+    /// voices when it does voiceovers.
+    fn key_changed(&mut self, provider: &'static Provider, cx: &mut Context<Self>) {
+        if self.voice_provider().as_deref() == Some(provider.id) {
+            self.invalidate_voices(cx);
+        }
+        self.refresh_model_notices();
+        cx.notify();
     }
 
     /// Have `provider` do `capability` on its default model, or this
@@ -256,9 +314,14 @@ impl EditorState {
         if settings.choice(capability) == choice {
             return;
         }
+        let voices = self.voice_provider();
         settings.set(capability, choice);
         persistence::with_store(|s| s.save_cloud_settings(&settings));
         self.cloud.set_settings(settings);
+        // The voices listed are another provider's.
+        if self.voice_provider() != voices {
+            self.invalidate_voices(cx);
+        }
         self.configure_analysis();
         self.refresh_model_notices();
         cx.notify();
@@ -345,8 +408,10 @@ impl EditorState {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
+        let owner = self.bus.project().id;
         self.generating.push(Generating {
             id,
+            project: owner,
             request: request.clone(),
             task: task.clone(),
             failed: None,
@@ -354,6 +419,7 @@ impl EditorState {
         let (cloud, services) = (self.cloud.clone(), self.services.clone());
         let project = (!grabs.is_empty()).then(|| self.bus.project().clone());
         let following = task.clone();
+        let stopped = task.clone();
         let made = cx.background_executor().spawn(async move {
             use flikk_core::cloud::GenerationService as _;
             if let Some(project) = &project {
@@ -370,8 +436,14 @@ impl EditorState {
                 match result {
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
-                        this.add_generated(item, cx);
+                        if this.bus.project().id == owner {
+                            this.add_generated(item, cx);
+                        } else {
+                            this.keep_for(owner, item, Author::User);
+                        }
                     }
+                    // Stopped: however the provider ended it, it didn't fail.
+                    Err(_) if stopped.cancelled() => this.generating.retain(|g| g.id != id),
                     Err(CloudError::Cancelled) => this.generating.retain(|g| g.id != id),
                     Err(e) => {
                         if let Some(g) = this.generating.iter_mut().find(|g| g.id == id) {
@@ -409,10 +481,13 @@ impl EditorState {
 
     /// Ask the provider to stop generation `id`; its row goes when it has.
     pub fn stop_generation(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(g) = self.generating.iter().find(|g| g.id == id) {
+        let Some(g) = self.generating.iter().find(|g| g.id == id) else {
+            return;
+        };
+        if !g.stopping() {
             g.task.cancel();
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// The voice that last read a voiceover.
@@ -453,13 +528,25 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Add `item`, which a provider made, to the pool's Generated bin as
-    /// one undo step, and to the drafts waiting for review so a proposal
-    /// can place it, then analyze it ([`Self::analyze_generated`]). Its id
-    /// when added.
+    /// Add `item`, which a provider made at the user's request, to the
+    /// pool's Generated bin as one undo step, and to the drafts waiting for
+    /// review so a proposal can place it, then analyze it
+    /// ([`Self::analyze_generated`]). Its id when added.
     pub(crate) fn add_generated(
         &mut self,
         item: MediaItem,
+        cx: &mut Context<Self>,
+    ) -> Option<MediaId> {
+        self.add_generated_as(item, Author::User, cx)
+    }
+
+    /// [`Self::add_generated`] as `author`: the agent's for what it asked
+    /// for and the user approved, applied at once (the approval was the
+    /// permission), so its own proposals to place it don't conflict.
+    pub(crate) fn add_generated_as(
+        &mut self,
+        item: MediaItem,
+        author: Author,
         cx: &mut Context<Self>,
     ) -> Option<MediaId> {
         let id = item.id;
@@ -472,10 +559,69 @@ impl EditorState {
         };
         let bin = flikk_core::cloud::generated_bin(&item);
         let commands = flikk_core::cloud::pool_commands(self.bus.project(), item, bin);
-        let result = self.bus.execute_shared(commands, label);
+        let result = self.bus.execute_shared_as(commands, label, author);
         self.finish(result, cx)?;
         self.analyze_generated(cx);
         Some(id)
+    }
+
+    /// Keep `item`, made for `project` after it was closed, for when it is
+    /// opened again, when it is added as `author`.
+    pub(super) fn keep_for(
+        &mut self,
+        project: flikk_core::ProjectId,
+        item: MediaItem,
+        author: Author,
+    ) {
+        self.kept.push((project, item, author));
+    }
+
+    /// The agent, as what it asked for is added.
+    pub(super) fn agent_author(&self) -> Author {
+        Author::Agent {
+            role: self.settings.role,
+        }
+    }
+
+    /// Add what was made for the project just opened while it was closed.
+    pub(super) fn add_kept(&mut self, cx: &mut Context<Self>) {
+        let open = self.bus.project().id;
+        let (ours, others) = std::mem::take(&mut self.kept)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(p, _, _)| *p == open);
+        self.kept = others;
+        let n = ours
+            .into_iter()
+            .filter_map(|(_, item, author)| self.add_generated_as(item, author, cx))
+            .count();
+        if n > 0 {
+            self.status = Some(match n {
+                1 => "Added 1 item made while the project was closed".into(),
+                n => format!("Added {n} items made while the project was closed"),
+            });
+        }
+    }
+
+    /// An approved generation finished after its project was closed: keep
+    /// what it made for that project, and tell the agent.
+    pub(super) fn keep_approved(
+        &mut self,
+        id: u64,
+        project: flikk_core::ProjectId,
+        item: MediaItem,
+        summary: &str,
+    ) -> ApprovalOutcome {
+        let name = approve::file_name(&item.path);
+        let author = self.agent_author();
+        self.keep_for(project, item, author);
+        self.agent.report_outcome(
+            id,
+            format!(
+                "approved: {summary}; made {name}, but its project was closed meanwhile; it \
+                 goes into that project's media pool when it is opened again"
+            ),
+        );
+        ApprovalOutcome::Done(name)
     }
 
     /// Take what is in the pool now as looked at: a project just opened
@@ -535,7 +681,8 @@ impl EditorState {
         } = made;
         let name = approve::file_name(&item.path);
         let bin = flikk_core::cloud::generated_bin(&item);
-        let Some(media) = self.add_generated(item, cx) else {
+        let author = self.agent_author();
+        let Some(media) = self.add_generated_as(item, author, cx) else {
             let e = self.status.clone().unwrap_or_default();
             self.agent.report_failure(
                 id,
@@ -571,7 +718,8 @@ impl EditorState {
         let author = Author::Agent {
             role: self.settings.role,
         };
-        let turn = self.agent.is_busy();
+        // A queued message has no turn yet, so its set is not open.
+        let turn = self.agent.status().in_turn();
         let reopened = if turn {
             None
         } else {

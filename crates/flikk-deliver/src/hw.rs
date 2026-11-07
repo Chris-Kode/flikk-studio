@@ -4,7 +4,7 @@
 //! at the preset's CRF.
 //!
 //! The probe runs once per session on a background thread ([`warm_up`]);
-//! the render worker waits for it ([`probe`]), the UI only peeks
+//! the render worker waits for it ([`probe_until`]), the UI only peeks
 //! ([`probed`]).
 
 use crate::ffmpeg::{self, command};
@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::io::Read as _;
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Which encoder a render uses for H.264 and HEVC; the other codecs are
@@ -222,20 +223,32 @@ impl Probe {
 }
 
 static PROBE: OnceLock<Probe> = OnceLock::new();
+/// Set once [`warm_up`] has started the probe thread.
+static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Start probing on a background thread, if not done already.
-pub fn warm_up() {
-    if PROBE.get().is_some() {
-        return;
+/// Start probing on a background thread, if not started already. False
+/// when no thread could be started.
+pub fn warm_up() -> bool {
+    if PROBE.get().is_some() || STARTED.swap(true, Ordering::AcqRel) {
+        return true;
     }
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("flikk-hw-probe".into())
         .spawn(|| {
-            probe();
-        });
+            // A probe that panics finds nothing, so waiters never hang.
+            if std::panic::catch_unwind(probe).is_err() {
+                let _ = PROBE.set(Probe::default());
+            }
+        })
+        .is_ok();
+    if !spawned {
+        STARTED.store(false, Ordering::Release);
+    }
+    spawned
 }
 
-/// The probe's result, without waiting.
+/// The probe's result, without waiting: `None` until it is done (not
+/// started, or still probing).
 pub fn probed() -> Option<&'static Probe> {
     PROBE.get()
 }
@@ -244,6 +257,23 @@ pub fn probed() -> Option<&'static Probe> {
 /// only.
 pub fn probe() -> &'static Probe {
     PROBE.get_or_init(run_probe)
+}
+
+/// [`probe`], probing on the background thread so the wait can stop:
+/// `None` once `cancel` is set.
+pub fn probe_until(cancel: &AtomicBool) -> Option<&'static Probe> {
+    if !warm_up() {
+        return Some(probe());
+    }
+    loop {
+        if let Some(found) = PROBE.get() {
+            return Some(found);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn run_probe() -> Probe {

@@ -187,10 +187,9 @@ pub fn topmost_video_clip(tl: &Timeline, t: Time) -> Option<(&Track, &Clip)> {
 /// Media clips heard at `t`: audio tracks that are not muted and, if any
 /// track is soloed, only soloed ones.
 pub fn audible_clips_at(tl: &Timeline, t: Time) -> Vec<(&Track, &Clip)> {
-    let audio = || tl.tracks.iter().filter(|tr| tr.kind == TrackKind::Audio);
-    let solo = audio().any(|tr| tr.mix.solo);
-    audio()
-        .filter(|tr| !tr.mix.mute && (!solo || tr.mix.solo))
+    tl.tracks
+        .iter()
+        .filter(|tr| tl.audible(tr))
         .filter_map(|tr| tr.clip_at(t).map(|c| (tr, c)))
         .filter(|(_, c)| c.enabled && c.media().is_some())
         .collect()

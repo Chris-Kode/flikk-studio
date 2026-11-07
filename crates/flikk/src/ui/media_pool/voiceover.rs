@@ -8,6 +8,7 @@
 
 use super::{MediaPoolPanel, form, listen_button, play_button};
 use crate::state::EditorState;
+use crate::state::voices::Listening;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
@@ -21,7 +22,7 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const EMOTIONS: [&str; 11] = [
     "[happy]",
@@ -93,12 +94,19 @@ pub struct VoiceoverForm {
     picker: Entity<SelectState<VoiceRow>>,
     /// The voice to pick once they are in.
     wanted: Option<String>,
+    /// A voice the user picked while they loaded, to keep then.
+    picked: Option<Voice>,
     loading: bool,
     /// Samples heard so far, by voice id.
     samples: HashMap<String, MediaItem>,
-    /// Voice whose sample is on its way.
-    fetching: Option<String>,
-    error: Option<SharedString>,
+    /// Voices whose sample is on its way.
+    fetching: HashSet<String>,
+    /// The voice last asked to hear, and what the player was doing then.
+    wanted_sample: Option<(String, Listening)>,
+    /// Why the voices didn't load.
+    load_error: Option<SharedString>,
+    /// Why the last sample didn't come.
+    sample_error: Option<SharedString>,
     script: Entity<TextareaState>,
     stability: Entity<SliderState>,
     similarity: Entity<SliderState>,
@@ -151,6 +159,9 @@ impl VoiceoverForm {
                 window,
                 |this, _, ev: &SelectEvent<VoiceRow>, window, cx| {
                     let SelectEvent::Confirm(id) = ev;
+                    if this.loading {
+                        this.picked = this.voices.iter().find(|v| v.id == *id).cloned();
+                    }
                     this.apply_saved_reading(&id.clone(), window, cx);
                 },
             ),
@@ -178,10 +189,13 @@ impl VoiceoverForm {
             voices: Vec::new(),
             picker,
             wanted,
+            picked: None,
             loading: true,
             samples: HashMap::new(),
-            fetching: None,
-            error: None,
+            fetching: HashSet::new(),
+            wanted_sample: None,
+            load_error: None,
+            sample_error: None,
             script,
             stability,
             similarity,
@@ -196,14 +210,25 @@ impl VoiceoverForm {
         cx: &mut Context<Self>,
     ) {
         self.loading = false;
+        let picked = self.picked.take();
         match result {
             Ok(mut voices) => {
                 voices.sort_by_key(|v| !v.mine());
+                // Keep a voice picked meanwhile: one missing from the list
+                // still reads if it is the user's own (newer than the
+                // list) or shared (added to the account when it reads).
+                let picked = picked
+                    .filter(|p| voices.iter().any(|v| v.id == p.id) || p.mine() || p.shared());
+                if let Some(p) = &picked
+                    && !voices.iter().any(|v| v.id == p.id)
+                {
+                    voices.insert(0, p.clone());
+                }
                 self.voices = voices;
-                let wanted = self.wanted.clone();
+                let wanted = picked.map(|p| p.id).or(self.wanted.clone());
                 self.show_voices(wanted, window, cx);
             }
-            Err(e) => self.error = Some(e.to_string().into()),
+            Err(e) => self.load_error = Some(e.to_string().into()),
         }
         cx.notify();
     }
@@ -227,8 +252,10 @@ impl VoiceoverForm {
         if !self.voices.iter().any(|v| v.id == voice.id) {
             self.voices.insert(0, voice.clone());
         }
-        self.loading = false;
-        self.error = None;
+        if self.loading {
+            self.picked = Some(voice.clone());
+        }
+        self.load_error = None;
         self.show_voices(Some(voice.id.clone()), window, cx);
         self.apply_saved_reading(&voice.id, window, cx);
         cx.notify();
@@ -313,7 +340,8 @@ impl VoiceoverForm {
         true
     }
 
-    /// Fetch the sample of `voice`, then play it.
+    /// Fetch the sample of `voice`, then play it if it is still the one
+    /// last asked to hear and nothing was played or stopped meanwhile.
     fn fetch_sample(&mut self, voice: Voice, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let (generation, media) = (
@@ -324,8 +352,13 @@ impl VoiceoverForm {
             return;
         };
         let id = voice.id.clone();
-        self.fetching = Some(id.clone());
-        self.error = None;
+        self.wanted_sample = Some((id.clone(), state.listening()));
+        // On its way already: it plays when it comes, as now asked.
+        if !self.fetching.insert(id.clone()) {
+            cx.notify();
+            return;
+        }
+        self.sample_error = None;
         let fetch = cx.background_executor().spawn(async move {
             let path = generation.voice_sample(&voice)?;
             Ok::<_, cloud::CloudError>(cloud::sample_item(path, media.as_deref()))
@@ -333,13 +366,23 @@ impl VoiceoverForm {
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| {
-                this.fetching = None;
+                this.fetching.remove(&id);
+                let then = this
+                    .wanted_sample
+                    .take_if(|(last, _)| *last == id)
+                    .map(|(_, then)| then);
                 match result {
                     Ok(item) => {
-                        this.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+                        if let Some(then) = then {
+                            this.state.update(cx, |s, cx| {
+                                if s.still_listening(&then) {
+                                    s.toggle_source(&item, cx);
+                                }
+                            });
+                        }
                         this.samples.insert(id, item);
                     }
-                    Err(e) => this.error = Some(e.to_string().into()),
+                    Err(e) => this.sample_error = Some(e.to_string().into()),
                 }
                 cx.notify();
             });
@@ -368,7 +411,7 @@ impl VoiceoverForm {
     fn sample_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let voice = self.voice(cx).cloned();
         let id = voice.as_ref().map(|v| &v.id);
-        if id.is_some() && id == self.fetching.as_ref() {
+        if id.is_some_and(|id| self.fetching.contains(id)) {
             return div()
                 .flex()
                 .flex_none()
@@ -457,7 +500,10 @@ impl Render for VoiceoverForm {
                             ),
                     ),
             ))
-            .when_some(self.error.clone(), |el, error| {
+            .when_some(self.load_error.clone(), |el, error| {
+                el.child(form::problem(error))
+            })
+            .when_some(self.sample_error.clone(), |el, error| {
                 el.child(form::problem(error))
             })
             .child(

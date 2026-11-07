@@ -7,7 +7,7 @@ use crate::bridge::{self, BridgeRequest, BridgeResponse, ToolResult};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -17,7 +17,35 @@ const INSTRUCTIONS: &str = "Tools of the Flikk project that is open. Times are t
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
 type Out = Arc<Mutex<io::Stdout>>;
-type Waiting = Arc<Mutex<HashMap<u64, (Value, Kind)>>>;
+type Waiting = Arc<Mutex<Pending>>;
+
+/// The requests sent on one connection that the editor hasn't answered.
+#[derive(Default)]
+struct Pending {
+    calls: HashMap<u64, (Value, Kind)>,
+    /// The editor closed it: nothing more will be answered, and nothing
+    /// more may be sent.
+    closed: bool,
+}
+
+/// One connection to the editor, and what it owes.
+struct Editor {
+    stream: TcpStream,
+    waiting: Waiting,
+}
+
+impl Editor {
+    fn closed(&self) -> bool {
+        self.waiting.lock().unwrap().closed
+    }
+}
+
+/// Its reader stops too, and answers whatever is still waiting.
+impl Drop for Editor {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -57,10 +85,9 @@ pub fn run() -> anyhow::Result<()> {
         .filter(|a| !a.is_empty())
         .map(|addr| (addr, std::env::var(bridge::ENV_TOKEN).unwrap_or_default()));
     let out: Out = Arc::new(Mutex::new(io::stdout()));
-    let waiting: Waiting = Arc::default();
 
     // Connect lazily so `initialize` works even if the editor is slow.
-    let mut editor: Option<TcpStream> = None;
+    let mut editor: Option<Editor> = None;
     let mut next_id: u64 = 1;
 
     for line in io::stdin().lock().lines() {
@@ -99,6 +126,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             "ping" => reply(&out, id, json!({})),
             "tools/list" | "tools/call" => {
+                // An editor that closed (or restarted) is connected again.
+                if editor.as_ref().is_some_and(Editor::closed) {
+                    editor = None;
+                }
                 if editor.is_none() {
                     let found = fixed
                         .clone()
@@ -115,7 +146,7 @@ pub fn run() -> anyhow::Result<()> {
                         );
                         continue;
                     };
-                    match connect(&addr, &token, out.clone(), waiting.clone()) {
+                    match connect(&addr, &token, out.clone()) {
                         Ok(stream) => editor = Some(stream),
                         Err(e) => {
                             reply_error(&out, id, -32603, &format!("editor not reachable: {e}"));
@@ -144,19 +175,31 @@ pub fn run() -> anyhow::Result<()> {
                 } else {
                     Kind::Call
                 };
-                waiting
-                    .lock()
-                    .unwrap()
-                    .insert(bridge_id, (id.clone(), kind));
                 let line = serde_json::to_string(&request)?;
-                let stream = editor.as_mut().unwrap();
+                let link = editor.as_mut().unwrap();
+                {
+                    // Under the lock the reader closes it with: a request
+                    // is either answered by the reader or never sent.
+                    let mut pending = link.waiting.lock().unwrap();
+                    if pending.closed {
+                        drop(pending);
+                        editor = None;
+                        reply_error(&out, id, -32603, "lost the connection to the editor");
+                        continue;
+                    }
+                    pending.calls.insert(bridge_id, (id.clone(), kind));
+                }
+                let stream = &mut link.stream;
                 if writeln!(stream, "{line}")
                     .and_then(|_| stream.flush())
                     .is_err()
                 {
-                    waiting.lock().unwrap().remove(&bridge_id);
+                    // Unless the reader already answered it.
+                    let unanswered = link.waiting.lock().unwrap().calls.remove(&bridge_id);
                     editor = None;
-                    reply_error(&out, id, -32603, "lost the connection to the editor");
+                    if unanswered.is_some() {
+                        reply_error(&out, id, -32603, "lost the connection to the editor");
+                    }
                 }
             }
             _ => reply_error(&out, id, -32601, "method not found"),
@@ -167,9 +210,11 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Connect and start the thread that turns editor answers into JSON-RPC
 /// responses.
-fn connect(addr: &str, token: &str, out: Out, waiting: Waiting) -> io::Result<TcpStream> {
+fn connect(addr: &str, token: &str, out: Out) -> io::Result<Editor> {
     let stream = bridge::connect(addr, token)?;
     let read_half = stream.try_clone()?;
+    let waiting: Waiting = Arc::default();
+    let pending = waiting.clone();
     thread::spawn(move || {
         for line in BufReader::new(read_half).lines() {
             let Ok(line) = line else { break };
@@ -180,12 +225,19 @@ fn connect(addr: &str, token: &str, out: Out, waiting: Waiting) -> io::Result<Tc
                 BridgeResponse::Tools { id, tools } => (id, json!({ "tools": tools })),
                 BridgeResponse::Result { id, result } => (id, json!(result)),
             };
-            if let Some((rpc_id, _)) = waiting.lock().unwrap().remove(&bridge_id) {
+            let answered = pending.lock().unwrap().calls.remove(&bridge_id);
+            if let Some((rpc_id, _)) = answered {
                 reply(&out, rpc_id, result);
             }
         }
-        // The editor went away: fail whatever is still waiting.
-        for (_, (rpc_id, kind)) in waiting.lock().unwrap().drain() {
+        // The editor went away: fail whatever is still waiting, and have
+        // the next request connect again.
+        let lost = {
+            let mut pending = pending.lock().unwrap();
+            pending.closed = true;
+            std::mem::take(&mut pending.calls)
+        };
+        for (_, (rpc_id, kind)) in lost {
             match kind {
                 Kind::List => reply_error(&out, rpc_id, -32603, "the editor closed"),
                 Kind::Call => reply(
@@ -196,5 +248,5 @@ fn connect(addr: &str, token: &str, out: Out, waiting: Waiting) -> io::Result<Tc
             }
         }
     });
-    Ok(stream)
+    Ok(Editor { stream, waiting })
 }

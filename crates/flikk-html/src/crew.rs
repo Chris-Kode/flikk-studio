@@ -6,12 +6,16 @@ use crate::worker::{self, Request};
 use crate::{HtmlEngine, Key, document, key};
 use flikk_core::services::{Frame, FxCall, HtmlCrew, HtmlService, ServiceResult};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// More only fight over the CPU: every browser runs every frame's scripts.
 const BROWSERS: usize = 3;
+/// Frames just in front of the one asked for that are kept: they may be
+/// other clips of the same output frame, asked for in another order.
+const REORDER: usize = 8;
 
 type Answer = Receiver<ServiceResult<Frame>>;
 
@@ -20,6 +24,8 @@ pub struct Crew {
     engine: Arc<HtmlEngine>,
     requests: Vec<Sender<Request>>,
     threads: Vec<JoinHandle<()>>,
+    /// Set on drop, so the workers skip the frames still queued for them.
+    stop: Arc<AtomicBool>,
     coming: Mutex<Coming>,
 }
 
@@ -35,12 +41,14 @@ impl Crew {
     pub fn new(engine: Arc<HtmlEngine>) -> Option<Self> {
         let mut requests = Vec::new();
         let mut threads = Vec::new();
+        let stop = Arc::new(AtomicBool::new(false));
         for _ in 0..BROWSERS {
             let (tx, rx) = mpsc::channel();
             let exe = engine.browser().to_path_buf();
+            let stop = stop.clone();
             let thread = std::thread::Builder::new()
                 .name("flikk-html-crew".into())
-                .spawn(move || worker::run(exe, rx))
+                .spawn(move || worker::run(exe, rx, stop))
                 .ok()?;
             requests.push(tx);
             threads.push(thread);
@@ -49,16 +57,19 @@ impl Crew {
             engine,
             requests,
             threads,
+            stop,
             coming: Mutex::default(),
         })
     }
 
-    /// The answer for `key`; frames in front of it will not be asked for.
+    /// The answer for `key`; frames well in front of it will not be asked
+    /// for.
     fn answer(&self, key: &Key) -> Option<Answer> {
         let mut coming = self.coming.lock().unwrap_or_else(|e| e.into_inner());
         let at = coming.frames.iter().position(|(k, _)| k == key)?;
-        coming.frames.drain(..at);
-        coming.frames.pop_front().map(|(_, answer)| answer)
+        let answer = coming.frames.remove(at).map(|(_, answer)| answer);
+        coming.frames.drain(..at.saturating_sub(REORDER));
+        answer
     }
 }
 
@@ -69,9 +80,13 @@ impl HtmlService for Crew {
 
     fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame> {
         let job = document::prepare(call);
-        match self.answer(&key(&job, call, width, height)) {
+        let key = key(&job, call, width, height);
+        match self.answer(&key) {
             Some(answer) => match answer.recv() {
-                Ok(Ok(frame)) => Ok(frame),
+                Ok(Ok(frame)) => {
+                    self.engine.remember(key, frame.clone());
+                    Ok(frame)
+                }
                 // One more try, in the engine's own browser.
                 _ => self.engine.frame(call, width, height),
             },
@@ -111,7 +126,9 @@ impl HtmlCrew for Crew {
 
 impl Drop for Crew {
     fn drop(&mut self) {
-        // Closing the channels ends the workers, which kill the browsers.
+        // Closing the channels ends the workers, which kill the browsers,
+        // after the frame each is on (a canceled render waits for no more).
+        self.stop.store(true, Ordering::Relaxed);
         self.requests.clear();
         for thread in self.threads.drain(..) {
             let _ = thread.join();

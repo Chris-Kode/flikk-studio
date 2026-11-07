@@ -274,6 +274,11 @@ fn listen(ui: Entity<GradeUi>, b: Bounds<Pixels>, hitbox: Hitbox, window: &mut W
             return;
         }
         moved.update(cx, |ui, cx| {
+            // The release was missed: the drag ends uncommitted.
+            if ev.pressed_button != Some(MouseButton::Left) {
+                ui.cancel_drag(cx);
+                return;
+            }
             let Some(d) = ui.curve_drag.as_mut() else {
                 return;
             };

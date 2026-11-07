@@ -8,11 +8,13 @@ use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 // --------------------------------------------------------------- frame cache
 
@@ -93,7 +95,7 @@ pub(crate) fn still(
         max_width,
         tone.map(str::to_string),
     );
-    if let Some(frame) = media.frames.lock().unwrap().get(&key) {
+    if let Some(frame) = crate::lock(&media.frames).get(&key) {
         return Ok(frame);
     }
     // FFmpeg returns the first frame at or after the seek point; aim half a
@@ -116,7 +118,7 @@ pub(crate) fn still(
             path.display()
         ))
     })?;
-    media.frames.lock().unwrap().put(key, frame.clone());
+    crate::lock(&media.frames).put(key, frame.clone());
     Ok(frame)
 }
 
@@ -264,6 +266,7 @@ pub(crate) fn playback(
     let fd = rate.frame_duration();
     let first = from.max(Time::ZERO).floor_to_frame(rate);
     let (path, tone) = video_source(media, item)?;
+    let hwaccel = !crate::lock(&media.software_only).contains(&path);
     let mut stream = FfmpegFrames {
         ffmpeg: media.ffmpeg(),
         path,
@@ -271,10 +274,12 @@ pub(crate) fn playback(
         rate,
         first,
         max_width,
-        hwaccel: true,
+        hwaccel,
+        software_only: media.software_only.clone(),
+        unproven: false,
         frame_duration: fd,
         produced: 0,
-        process: None,
+        state: State::Ended,
     };
     stream.spawn()?;
     Ok(Box::new(stream))
@@ -299,9 +304,23 @@ struct FfmpegFrames {
     first: Time,
     max_width: u32,
     hwaccel: bool,
+    /// Files hardware decoding failed on, shared with [`FfmpegMedia`].
+    software_only: Arc<Mutex<HashSet<PathBuf>>>,
+    /// A hardware run ended cleanly without a frame and this software run
+    /// replaced it: if software finds a frame, hardware was at fault.
+    unproven: bool,
     frame_duration: Time,
+    /// Frames read from the current process.
     produced: i64,
-    process: Option<Process<BufReader<ChildStdout>>>,
+    state: State,
+}
+
+/// Where a playback stream is: decoding, at the end of the media, or
+/// stopped by an error that every later read reports again.
+enum State {
+    Running(Process<BufReader<ChildStdout>>),
+    Ended,
+    Failed(String),
 }
 
 impl FfmpegFrames {
@@ -324,42 +343,60 @@ impl FfmpegFrames {
             .arg(&self.path)
             .args(["-map", "0:v:0", "-vf", &filters]);
         pam_output(&mut cmd);
-        self.process = Some(Process::spawn(cmd, |out| {
+        self.state = State::Running(Process::spawn(cmd, |out| {
             BufReader::with_capacity(1 << 20, out)
         })?);
         Ok(())
+    }
+
+    fn software_only(&self) {
+        crate::lock(&self.software_only).insert(self.path.clone());
+    }
+
+    fn fail(&mut self, message: String) -> ServiceError {
+        let message = format!("playback {}: {message}", self.path.display());
+        self.state = State::Failed(message.clone());
+        ServiceError(message)
     }
 }
 
 impl FrameStream for FfmpegFrames {
     fn next_frame(&mut self) -> ServiceResult<Option<(Time, Frame)>> {
-        let Some(process) = self.process.as_mut() else {
-            return Ok(None);
-        };
-        let frame = match read_pam(&mut process.stdout) {
-            Ok(Some(frame)) => frame,
-            result => {
-                let failure = process.finish();
-                self.process = None;
-                if let Some(message) = failure {
-                    // Hardware decode refused before the first frame: retry in software.
-                    if self.hwaccel && self.produced == 0 {
-                        self.hwaccel = false;
-                        self.spawn()?;
-                        return self.next_frame();
+        loop {
+            let process = match &mut self.state {
+                State::Running(process) => process,
+                State::Ended => return Ok(None),
+                State::Failed(message) => return Err(ServiceError(message.clone())),
+            };
+            let failure = match read_pam(&mut process.stdout) {
+                Ok(Some(frame)) => {
+                    if std::mem::take(&mut self.unproven) {
+                        self.software_only();
                     }
-                    return Err(ServiceError(format!(
-                        "playback {}: {message}",
-                        self.path.display()
-                    )));
+                    let t = self.first + Time(self.frame_duration.0 * self.produced);
+                    self.produced += 1;
+                    return Ok(Some((t, frame)));
                 }
-                result.map_err(|e| err("playback", e))?;
-                return Ok(None);
+                Ok(None) => process.finish(),
+                Err(e) => Some(process.abort().unwrap_or_else(|| e.to_string())),
+            };
+            self.state = State::Ended;
+            match failure {
+                None if !self.hwaccel || self.produced > 0 => return Ok(None),
+                Some(message) if !self.hwaccel => return Err(self.fail(message)),
+                // Hardware decoding gave nothing: maybe the end of the media,
+                // maybe a decoder that drops every frame. Software tells.
+                None => self.unproven = true,
+                Some(_) => self.software_only(),
             }
-        };
-        let t = self.first + Time(self.frame_duration.0 * self.produced);
-        self.produced += 1;
-        Ok(Some((t, frame)))
+            // Once, in software, from the frame hardware decoding stopped at.
+            self.hwaccel = false;
+            self.first = self.first + Time(self.frame_duration.0 * self.produced);
+            self.produced = 0;
+            if let Err(e) = self.spawn() {
+                return Err(self.fail(e.0));
+            }
+        }
     }
 }
 
@@ -452,12 +489,16 @@ impl PcmStream for FfmpegPcm {
 
 // ------------------------------------------------------------------- process
 
+/// How long a child may take to exit once its stdout has ended.
+const EXIT_GRACE: Duration = Duration::from_secs(60);
+
 /// A child whose stdout is read by the owner and whose stderr is drained by a
 /// thread; killed on drop.
 pub(crate) struct Process<R> {
     child: Child,
     pub stdout: R,
     stderr: Arc<Mutex<Vec<u8>>>,
+    drain: Option<JoinHandle<()>>,
 }
 
 impl<R> Process<R> {
@@ -469,39 +510,88 @@ impl<R> Process<R> {
             .map_err(|e| err("ffmpeg", e))?;
         let stdout = wrap(child.stdout.take().expect("piped stdout"));
         let stderr = Arc::new(Mutex::new(Vec::new()));
-        if let Some(pipe) = child.stderr.take() {
-            drain(pipe, stderr.clone());
-        }
+        let drain = child.stderr.take().map(|pipe| drain(pipe, stderr.clone()));
         Ok(Self {
             child,
             stdout,
             stderr,
+            drain,
         })
     }
 
-    /// Wait for exit after stdout ended; the error message if it failed.
+    /// Wait for exit after stdout ended; the error message if it failed. A
+    /// child that is still running [`EXIT_GRACE`] later is killed.
     pub fn finish(&mut self) -> Option<String> {
-        match self.child.wait() {
-            Ok(status) if status.success() => None,
-            Ok(_) => {
-                // Let the drain thread catch up with the last lines.
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                Some(stderr_tail(&self.stderr.lock().unwrap()))
+        let deadline = Instant::now() + EXIT_GRACE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) if status.success() => return None,
+                Ok(Some(_)) => return Some(self.stderr_tail()),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) => {
+                    self.kill();
+                    return Some(format!(
+                        "still running {}s after its output ended",
+                        EXIT_GRACE.as_secs()
+                    ));
+                }
+                Err(e) => {
+                    self.kill();
+                    return Some(e.to_string());
+                }
             }
-            Err(e) => Some(e.to_string()),
         }
+    }
+
+    /// Stop the child before its stdout ended, as after a read error, so it
+    /// can't stay blocked on a full pipe. The error message if it failed on
+    /// its own or wrote an error before it was stopped.
+    pub fn abort(&mut self) -> Option<String> {
+        if let Ok(Some(status)) = self.child.try_wait() {
+            return (!status.success()).then(|| self.stderr_tail());
+        }
+        self.kill();
+        let tail = self.stderr_tail();
+        let empty = self
+            .stderr
+            .lock()
+            .unwrap()
+            .iter()
+            .all(u8::is_ascii_whitespace);
+        (!empty).then_some(tail)
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// The last stderr line, once the drain thread has read what the exited
+    /// child left in the pipe.
+    fn stderr_tail(&mut self) -> String {
+        if let Some(drain) = self.drain.take() {
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while !drain.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if drain.is_finished() {
+                let _ = drain.join();
+            }
+        }
+        stderr_tail(&self.stderr.lock().unwrap())
     }
 }
 
 impl<R> Drop for Process<R> {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.kill();
     }
 }
 
 /// Keep the last 8 KiB of stderr so FFmpeg never blocks on a full pipe.
-fn drain(mut pipe: ChildStderr, into: Arc<Mutex<Vec<u8>>>) {
+fn drain(mut pipe: ChildStderr, into: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while let Ok(n) = pipe.read(&mut buf) {
@@ -513,7 +603,7 @@ fn drain(mut pipe: ChildStderr, into: Arc<Mutex<Vec<u8>>>) {
             let excess = log.len().saturating_sub(8192);
             log.drain(..excess);
         }
-    });
+    })
 }
 
 /// `Command` isn't `Clone`; rebuild it from its program and arguments.

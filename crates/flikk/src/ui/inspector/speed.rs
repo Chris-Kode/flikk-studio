@@ -337,6 +337,12 @@ fn listen(ramp: Entity<SpeedRamp>, b: Bounds<Pixels>, hitbox: Hitbox, window: &m
             return;
         }
         moved.update(cx, |r, cx| {
+            // The release was missed: the drag ends uncommitted.
+            if ev.pressed_button != Some(MouseButton::Left) {
+                r.drag = None;
+                cx.notify();
+                return;
+            }
             let Some(d) = r.drag.as_mut() else {
                 return;
             };

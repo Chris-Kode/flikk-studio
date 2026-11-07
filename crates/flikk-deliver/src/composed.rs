@@ -1,11 +1,12 @@
 //! Renders through the compositor: every output frame is composed by
-//! [`flikk_core::compose::program`] at render size and piped into FFmpeg as
+//! [`flikk_core::compose::render_program`] at render size (failing the
+//! render when a clip cannot be drawn) and piped into FFmpeg as
 //! raw RGBA, where the graph ([`GraphSpec::piped`]) burns in captions and
 //! titles (so the compositor leaves them out, unless FFmpeg cannot burn them
-//! in, see [`letter`]) and builds the audio in the same process.
+//! in, see [`route`]) and builds the audio in the same process.
 
 use crate::Letterer;
-use crate::ffmpeg::{self, command};
+use crate::ffmpeg::{self, Process, command};
 use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::compose::{self, Pictures, Streams};
@@ -184,15 +185,18 @@ pub(crate) fn wanted(project: &Project, range: TimeRange, services: &Services) -
     services.media.is_some() && compose::needs_compositor(project, range)
 }
 
-/// Pipe `spec` through the compositor to letter its captions and titles
-/// there, when FFmpeg has no `ass` filter to burn them in with.
-pub(crate) fn letter(project: &Project, spec: &mut GraphSpec, services: &Services) {
+/// Set how `spec`'s picture is made, once its other fields are final:
+/// piped through the compositor when `composite` asks for it, or to letter
+/// its captions and titles there when FFmpeg has no `ass` filter to burn
+/// them in with. Both flags are set here together, so no caller can leave
+/// one stale.
+pub(crate) fn route(project: &Project, spec: &mut GraphSpec, services: &Services, composite: bool) {
     spec.lettered = spec.video
         && spec.burn_captions
         && services.media.is_some()
         && graph::has_text(project, spec.range)
         && !ffmpeg::has_ass();
-    spec.piped |= spec.lettered;
+    spec.piped = spec.video && (composite || spec.lettered);
 }
 
 /// Source pictures for a render: decoded in step with the frames from the
@@ -213,6 +217,10 @@ impl Pictures for Originals {
 
     fn finish(&mut self) {
         self.0.finish();
+    }
+
+    fn failure(&mut self) -> Option<String> {
+        self.0.failure()
     }
 }
 
@@ -277,17 +285,19 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Output frame `f` (from the range start).
-    pub(crate) fn frame(&mut self, f: i64) -> Frame {
+    /// Output frame `f` (from the range start). Fails when a clip in it
+    /// could not be drawn, rather than render without it.
+    pub(crate) fn frame(&mut self, f: i64) -> Result<Frame> {
         self.tell(f);
         let t = self.time(f);
-        compose::program(
+        compose::render_program(
             self.project,
             t,
             (self.spec.width, self.spec.height),
             &self.services,
             &mut self.pictures,
         )
+        .map_err(|e| anyhow!(e))
     }
 }
 
@@ -319,21 +329,24 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let mut child = command(ffmpeg::ffmpeg())
-        .arg("-hide_banner")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("could not start {}", ffmpeg::ffmpeg().display()))?;
+    let mut child = Process(
+        command(ffmpeg::ffmpeg())
+            .arg("-hide_banner")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not start {}", ffmpeg::ffmpeg().display()))?,
+    );
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stderr.read_to_end(&mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     });
-    let mut stdin = child.stdin.take().expect("piped");
+    // Stdin stays in `child` until the last frame, so a panic kills ffmpeg
+    // before it sees the end of its input and finishes a partial file.
     let total = graph.frames.max(1);
     let mut write_failed = false;
     for f in 0..total {
@@ -342,14 +355,25 @@ pub(crate) fn run(
             let _ = child.wait();
             bail!("canceled");
         }
-        let frame = frames.frame(f);
-        if stdin.write_all(&frame.rgba).is_err() {
+        let frame = match frames.frame(f) {
+            Ok(frame) => frame,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        if child
+            .stdin
+            .as_mut()
+            .is_none_or(|s| s.write_all(&frame.rgba).is_err())
+        {
             write_failed = true;
             break;
         }
         progress((f + 1) as f32 / total as f32);
     }
-    drop(stdin);
+    drop(child.stdin.take());
     let status = child.wait()?;
     let stderr = errors.join().unwrap_or_default();
     if !status.success() || write_failed {

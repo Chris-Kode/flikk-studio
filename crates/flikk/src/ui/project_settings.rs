@@ -25,11 +25,16 @@ const PREVIEW: (f32, f32) = (196., 132.);
 /// Side of the box a format's outline is drawn in.
 const GLYPH: f32 = 20.;
 
+/// Runs once, when a New project dialog closes without Create.
+pub type OnCancel = Box<dyn FnOnce(&mut App)>;
+
 /// A new project's name and folder.
 struct Place {
     name: Entity<InputState>,
     dir: PathBuf,
     _name: Subscription,
+    /// Runs if the dialog closes without Create.
+    on_cancel: Option<OnCancel>,
 }
 
 /// The form inside both dialogs.
@@ -355,8 +360,17 @@ impl Render for ProjectForm {
 }
 
 /// New project: name, folder and sequence; Create settles the open
-/// project's unsaved changes, then makes and saves the new one.
-pub fn open_new(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+/// project's unsaved changes, then makes and saves the new one. The name
+/// starts as `name`, or "Untitled", numbered on when the folder already has
+/// a project by that name. `on_cancel` runs when the dialog closes without
+/// Create; it doesn't run when no dialog opens.
+pub fn open_new(
+    state: &Entity<EditorState>,
+    name: Option<String>,
+    on_cancel: Option<OnCancel>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if window.has_active_dialog(cx) {
         return;
     }
@@ -367,20 +381,30 @@ pub fn open_new(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) 
         .and_then(|f| f.parent())
         .map(PathBuf::from)
         .unwrap_or_else(crate::ui::deliver::default_dir);
-    let name = untitled(&dir);
+    let name = free_name(&dir, name.as_deref().unwrap_or("Untitled"));
     let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
     input.update(cx, |i, cx| {
         i.focus(window, cx);
         i.select_all(window, cx);
     });
-    let form = cx.new(|cx| ProjectForm {
-        state: state.clone(),
-        place: Some(Place {
-            _name: cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()),
-            name: input,
-            dir,
-        }),
-        settings: SequenceSettings::default(),
+    let form = cx.new(|cx| {
+        // The dialog holds the form, so the form goes when the dialog does.
+        cx.on_release(|this: &mut ProjectForm, cx| {
+            if let Some(on_cancel) = this.place.as_mut().and_then(|p| p.on_cancel.take()) {
+                on_cancel(cx);
+            }
+        })
+        .detach();
+        ProjectForm {
+            state: state.clone(),
+            place: Some(Place {
+                _name: cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()),
+                name: input,
+                dir,
+                on_cancel,
+            }),
+            settings: SequenceSettings::default(),
+        }
     });
     let state = state.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
@@ -398,6 +422,11 @@ pub fn open_new(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) 
                     return false;
                 };
                 let (state, settings) = (state.clone(), f.settings.clone());
+                form.update(cx, |f, _| {
+                    if let Some(place) = &mut f.place {
+                        place.on_cancel = None;
+                    }
+                });
                 window.defer(cx, move |window, cx| {
                     projects::create(&state, path, settings, window, cx)
                 });
@@ -414,6 +443,7 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
         return;
     }
     let settings = state.read(cx).bus.project().timeline.settings.clone();
+    let opened = settings.clone();
     let form = cx.new(|_| ProjectForm {
         state: state.clone(),
         place: None,
@@ -421,7 +451,7 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
     });
     let state = state.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
-        let (form, state) = (form.clone(), state.clone());
+        let (form, state, opened) = (form.clone(), state.clone(), opened.clone());
         let ready = form.read(cx).ready(cx);
         dialog
             .title("Project settings")
@@ -429,9 +459,21 @@ pub fn open_settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut 
             .pt(px(16.))
             .child(form.clone())
             .confirm("Apply", move |_, cx| {
-                let after = form.read(cx).settings.clone();
+                let picked = form.read(cx).settings.clone();
                 state.update(cx, |s, cx| {
                     let before = s.bus.project().timeline.settings.clone();
+                    // Only what was changed in the form: the rest keeps
+                    // changes made elsewhere while it was open.
+                    let mut after = before.clone();
+                    if (picked.width, picked.height) != (opened.width, opened.height) {
+                        (after.width, after.height) = (picked.width, picked.height);
+                    }
+                    if picked.rate != opened.rate {
+                        after.rate = picked.rate;
+                    }
+                    if picked.sample_rate != opened.sample_rate {
+                        after.sample_rate = picked.sample_rate;
+                    }
                     let mut commands = Vec::new();
                     if (before.width, before.height) != (after.width, after.height) {
                         commands.push(Command::SetFormat {
@@ -469,14 +511,14 @@ fn settings_note() -> impl IntoElement {
         .child("Project settings")
 }
 
-/// "Untitled", or "Untitled 2" and on when `dir` already has one.
-fn untitled(dir: &Path) -> String {
+/// `base`, or "`base` 2" and on when `dir` already has one.
+fn free_name(dir: &Path, base: &str) -> String {
     (1..)
         .map(|n| match n {
-            1 => "Untitled".to_owned(),
-            n => format!("Untitled {n}"),
+            1 => base.to_owned(),
+            n => format!("{base} {n}"),
         })
-        .find(|name| !dir.join(format!("{name}.{EXTENSION}")).exists())
+        .find(|name| !dir.join(format!("{}.{EXTENSION}", sanitize(name))).exists())
         .unwrap_or_default()
 }
 

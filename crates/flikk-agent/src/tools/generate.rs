@@ -175,8 +175,8 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         return fail(unavailable(&request));
     }
     let media = ctx.services.media.clone();
+    let task = ctx.stop.task();
     let job: Job = Box::new(move || {
-        let task = cloud::GenerationTask::default();
         match generation.generate(&request, &flikk_core::paths::generated(), &task) {
             Ok(made) => JobDone::Generated {
                 item: Box::new(flikk_core::cloud::media_item(&made, media.as_deref())),
@@ -231,7 +231,7 @@ pub fn finish(
         _ => String::new(),
     };
     let bin = cloud::generated_bin(&item);
-    let media = match add_to_pool(bus, item) {
+    let media = match add_to_pool(bus, item, author) {
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };
@@ -254,10 +254,16 @@ pub fn finish(
     done
 }
 
-/// Add `item` to the pool's bin for what it is as the user's edit (it is
-/// paid for: rejecting a placement keeps it), and to the drafts waiting for
-/// review so a proposal can use it.
-pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, String> {
+/// Add `item` to the pool's bin for what it is, at once (it is paid for:
+/// rejecting a placement keeps it), and to the drafts waiting for review so
+/// a proposal can use it. As `author`'s change, so it is no edit of the
+/// user's that the agent's proposals would conflict with; the user's when
+/// the turn is gone.
+pub fn add_to_pool(
+    bus: &mut CommandBus,
+    item: MediaItem,
+    author: Option<&Author>,
+) -> Result<MediaId, String> {
     let id = item.id;
     let bin = cloud::generated_bin(&item);
     let label = match item.kind {
@@ -266,7 +272,8 @@ pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, Str
         _ => "Generate audio",
     };
     let commands = cloud::pool_commands(bus.project(), item, bin);
-    bus.execute_shared(commands, label)
+    let author = author.cloned().unwrap_or(Author::User);
+    bus.execute_shared_as(commands, label, author)
         .map(|_| id)
         .map_err(|e| e.to_string())
 }

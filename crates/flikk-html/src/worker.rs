@@ -10,9 +10,10 @@ use flikk_core::services::{Frame, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const CLOCK: &str = include_str!("clock.js");
 /// GSAP 3.15.0 and its motion-graphics plugins, as published on npm, under
@@ -53,6 +54,13 @@ const GSAP: &str = concat!(
 const TABS: usize = 4;
 const CALL: Duration = Duration::from_secs(10);
 const LOAD: Duration = Duration::from_secs(15);
+/// How long a browser that failed to start is left before it is started
+/// again; requests meanwhile fail with its error.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// The last launch that failed, shared by every worker of the process:
+/// executable, error, when.
+static FAILED_LAUNCH: Mutex<Option<(PathBuf, String, Instant)>> = Mutex::new(None);
 
 pub enum Request {
     Frame {
@@ -89,7 +97,9 @@ struct Worker {
     front: Option<String>,
 }
 
-pub fn run(exe: PathBuf, requests: Receiver<Request>) {
+/// Run requests until the channel closes, or until `stop` is set: then
+/// those still waiting are dropped unanswered.
+pub fn run(exe: PathBuf, requests: Receiver<Request>, stop: Arc<AtomicBool>) {
     let mut worker = Worker {
         exe,
         browser: None,
@@ -98,6 +108,9 @@ pub fn run(exe: PathBuf, requests: Receiver<Request>) {
         front: None,
     };
     for request in requests {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         match request {
             Request::Frame {
                 job,
@@ -306,10 +319,34 @@ impl Worker {
     }
 }
 
-/// The browser's connection, launching it on first use.
+/// The browser's connection, launching it on first use. A launch that
+/// failed less than [`RETRY_AFTER`] ago is not tried again: its error is
+/// returned instead.
 fn cdp<'a>(browser: &'a mut Option<Browser>, exe: &Path) -> Result<&'a mut Cdp> {
     if browser.is_none() {
-        *browser = Some(Browser::launch(exe)?);
+        let failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, error, _)) = failed
+            .as_ref()
+            .filter(|(path, _, at)| path == exe && at.elapsed() < RETRY_AFTER)
+        {
+            bail!("{error}");
+        }
+        drop(failed);
+        let launched = Browser::launch(exe);
+        let mut failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+        match launched {
+            Ok(b) => {
+                if failed.as_ref().is_some_and(|(path, ..)| path == exe) {
+                    *failed = None;
+                }
+                *browser = Some(b);
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                *failed = Some((exe.to_owned(), error.clone(), Instant::now()));
+                bail!("{error}");
+            }
+        }
     }
     Ok(&mut browser.as_mut().expect("launched").cdp)
 }
@@ -396,9 +433,7 @@ fn load(cdp: &mut Cdp, tab: &mut Tab, job: &Prepared) -> Result<()> {
     let dir = flikk_core::paths::cache().join("html");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{:016x}.html", job.doc_key));
-    if !path.is_file() {
-        std::fs::write(&path, &job.doc).context("writing the page")?;
-    }
+    write_page(&path, job.doc.as_bytes()).context("writing the page")?;
     let s = Some(tab.session.as_str());
     cdp.call(
         s,
@@ -425,6 +460,30 @@ fn load(cdp: &mut Cdp, tab: &mut Tab, job: &Prepared) -> Result<()> {
     }
     tab.doc = job.doc_key;
     Ok(())
+}
+
+/// Make `path` hold `doc`, unless it does already. Written to a file of its
+/// own and renamed into place, so other workers loading the same document,
+/// and later sessions after a crash, never see a partial page.
+fn write_page(path: &Path, doc: &[u8]) -> std::io::Result<()> {
+    let holds = |path: &Path| std::fs::read(path).is_ok_and(|bytes| bytes == doc);
+    if holds(path) {
+        return Ok(());
+    }
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = path.with_file_name(format!("tmp-{}-{n}-{name}", std::process::id()));
+    let written = std::fs::write(&temp, doc).and_then(|()| std::fs::rename(&temp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        // Another worker may have put the same page in place meanwhile
+        // (Windows refuses to replace a file that is open).
+        if holds(path) {
+            return Ok(());
+        }
+    }
+    written
 }
 
 /// `__flikk.frame(state)`: "ok", or "reload" when JS state cannot go back.

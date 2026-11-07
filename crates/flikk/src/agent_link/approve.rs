@@ -149,8 +149,8 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
             let services = inputs.services.clone();
             let project = request.grabs_frames().then(|| inputs.project.clone());
             Ok(Started::Generate(Box::new(move || {
-                let item =
-                    image::make(&request, project.as_ref(), &services).map_err(|e| anyhow!(e.0))?;
+                let item = image::make(&request, project.as_ref(), &services, &Default::default())
+                    .map_err(|e| anyhow!(e.0))?;
                 Ok(Generated {
                     item,
                     placement: None,
@@ -265,16 +265,13 @@ fn save_rule(args: &Value, project: &Project, settings: &mut AgentSettings) -> R
         id: RuleId::new(),
         text: str_arg(args, "text")?.to_owned(),
         scope,
-        status: RuleStatus::Proposed,
+        status: RuleStatus::Approved,
         supersedes,
         created_at: flikk_store::now(),
         evidence: strings(args.get("evidence")),
     };
-    // Approving through the store also retires the rule it supersedes.
-    store(|s| {
-        s.save_rule(profile, &rule)?;
-        s.set_rule_status(rule.id, RuleStatus::Approved)
-    })?;
+    // Saving it approved also retires the rule it supersedes, in one write.
+    store(|s| s.save_rule(profile, &rule))?;
     Ok(Started::Done("Saved".into()))
 }
 

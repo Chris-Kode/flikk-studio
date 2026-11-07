@@ -630,8 +630,7 @@ impl TimelinePanel {
         match hit {
             Hit::Ruler => {
                 self.drag = Some(Drag::Scrub);
-                self.state
-                    .update(cx, |s, cx| s.seek(at.floor_to_frame(rate), cx));
+                self.scrub_to(at.floor_to_frame(rate), cx);
             }
             Hit::Lane { .. } => {
                 let additive = ev.modifiers.shift || ev.modifiers.secondary();
@@ -826,14 +825,25 @@ impl TimelinePanel {
 
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         self.set_alt(ev.modifiers.alt, cx);
-        if self.drag.is_some() {
-            if ev.dragging() {
-                self.drag_to(ev.position, cx);
-            }
-            return;
+        // A drop hint outlives a drag that ended elsewhere or was cancelled.
+        if self.drop.is_some() && !cx.has_active_drag() {
+            self.drop = None;
+            self.snap = None;
+            cx.notify();
         }
         let inside = self.bounds.get().contains(&ev.position);
         let hover = inside.then_some(ev.position);
+        if self.drag.is_some() {
+            // Kept current so the cursor and hints are right when it ends.
+            self.hover = hover;
+            if ev.dragging() {
+                self.drag_to(ev.position, cx);
+            } else {
+                // The button came up where we didn't see it.
+                self.mouse_up(cx);
+            }
+            return;
+        }
         let item = if inside {
             self.overlay_at(ev.position, cx)
         } else {
@@ -910,6 +920,18 @@ impl TimelinePanel {
         }
     }
 
+    /// Move the playhead for a ruler scrub. The scrub owns the playhead, so
+    /// playback stops for it and stays stopped after, like the frame and cut
+    /// steps.
+    fn scrub_to(&self, t: Time, cx: &mut App) {
+        self.state.update(cx, |s, cx| {
+            if s.playing {
+                s.set_playing(false, cx);
+            }
+            s.seek(t, cx);
+        });
+    }
+
     fn drag_to(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(p);
         let at = self.viewport.time(x);
@@ -923,7 +945,7 @@ impl TimelinePanel {
                 let t = self
                     .snap_time(at.max(Time::ZERO), &[], cx)
                     .floor_to_frame(rate);
-                self.state.update(cx, |s, cx| s.seek(t, cx));
+                self.scrub_to(t, cx);
             }
             Some(Drag::Move {
                 clips,
@@ -992,7 +1014,7 @@ impl TimelinePanel {
                 clip, edge, ripple, ..
             }) => {
                 let Some((track, c)) = project.timeline.clip(clip) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let edge_t = match edge {
                     Edge::Start => c.start,
@@ -1035,7 +1057,7 @@ impl TimelinePanel {
             Some(Drag::Roll { left, right, .. }) => {
                 let tl = &project.timeline;
                 let (Some((_, l)), Some((_, r))) = (tl.clip(left), tl.clip(right)) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let target = self.snap_time(at, &[left, right], cx);
                 let mut delta = floor_to(target - l.end(), frame);
@@ -1052,15 +1074,19 @@ impl TimelinePanel {
             }
             Some(Drag::Slip { clip, grab, .. }) => {
                 let Some((_, c)) = project.timeline.clip(clip) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
-                let (Some(before), after) = handles(&project, c) else {
-                    return;
+                // Without media there is no source to slip: it stays put
+                // until the button is up.
+                let delta = match handles(&project, c) {
+                    (Some(before), after) => {
+                        // Dragging right shows earlier source: the in point moves left.
+                        let delta = floor_to(grab - at, frame);
+                        let hi = after.map_or(i64::MAX, |a| a.0);
+                        Time(delta.0.clamp(-before.0, hi))
+                    }
+                    (None, _) => Time::ZERO,
                 };
-                // Dragging right shows earlier source: the in point moves left.
-                let delta = floor_to(grab - at, frame);
-                let hi = after.map_or(i64::MAX, |a| a.0);
-                let delta = Time(delta.0.clamp(-before.0, hi));
                 self.drag = Some(Drag::Slip { clip, grab, delta });
             }
             Some(Drag::Marquee {
@@ -1081,7 +1107,7 @@ impl TimelinePanel {
                     fx::placed(track).into_iter().find(|p| p.owner == owner)
                 });
                 let Some(placed) = placed else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let target = self.snap_time(at, &[], cx);
                 let duration = floor_to(placed.duration_at(target), frame);
@@ -1096,6 +1122,13 @@ impl TimelinePanel {
             }
             None => {}
         }
+        cx.notify();
+    }
+
+    /// Drop the drag without applying it (its clip went away).
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        self.drag = None;
+        self.snap = None;
         cx.notify();
     }
 
@@ -1570,10 +1603,20 @@ impl TimelinePanel {
                     .background_executor()
                     .spawn(async move { silence::detect(analysis.as_ref(), &item, min) })
                     .await;
+                let failed = found.is_none();
                 let _ = this.update(cx, |this, cx| {
                     this.silences.insert(min, id, found);
                     cx.notify();
                 });
+                if failed {
+                    // Render again once it may be asked for again.
+                    cx.background_executor().timer(silence::RETRY).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.silence_open {
+                            cx.notify();
+                        }
+                    });
+                }
             })
             .detach();
         }
@@ -1596,10 +1639,6 @@ impl TimelinePanel {
         let overlay: Vec<OverlayItem> =
             overlay::collect(&project.timeline, state.bus.chat_change_sets());
         let tl = &project.timeline;
-        let any_solo = tl
-            .tracks
-            .iter()
-            .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
         let rate = tl.settings.rate;
 
         let mut marquee = None;
@@ -1774,7 +1813,7 @@ impl TimelinePanel {
                     .collect();
                 let audio = track.kind == TrackKind::Audio;
                 let hidden = !audio && track.mix.mute;
-                let silent = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+                let silent = audio && !tl.audible(track);
                 let fade = if hidden {
                     0.3
                 } else if silent {
@@ -1962,6 +2001,9 @@ impl TimelinePanel {
                 let entity = entity.clone();
                 move |open, _, cx| {
                     entity.update(cx, |this, cx| {
+                        if *open && !this.silence_open {
+                            this.silences.retry_failed();
+                        }
                         this.silence_open = *open;
                         cx.notify();
                     })
@@ -2105,23 +2147,19 @@ impl TimelinePanel {
             .playhead
             .timecode(state.bus.project().timeline.settings.rate);
         let tl = &state.bus.project().timeline;
-        let any_solo = tl
-            .tracks
-            .iter()
-            .any(|t| t.kind == TrackKind::Audio && t.mix.solo);
         let rows: Vec<_> = self
             .rows(tl)
             .into_iter()
-            .zip(tl.tracks.iter().cloned())
+            .zip(tl.tracks.iter().map(|t| (t.clone(), tl.audible(t))))
             .zip(track_codes(tl))
             .collect();
         let panel = cx.entity();
-        let children = rows.into_iter().map(|((row, track), code)| {
+        let children = rows.into_iter().map(|((row, (track, heard)), code)| {
             let id = track.id;
             let locked = track.locked;
             let panel = panel.clone();
             let audio = track.kind == TrackKind::Audio;
-            let muted = audio && (track.mix.mute || (any_solo && !track.mix.solo));
+            let muted = audio && !heard;
             let hidden = !audio && track.mix.mute;
             let key = |name: &str| SharedString::from(format!("{name}-{}", track.id));
             let name = if track.name == code {
@@ -2623,6 +2661,7 @@ fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
     let found = this.silences.timeline_silences(project, min, pad);
     let total: f64 = found.iter().map(|r| r.duration().as_secs_f64()).sum();
     let loading = this.silences.is_loading();
+    let failed = this.silences.has_failed();
     let row = |label: &'static str, slider: &Entity<SliderState>, value: String| {
         h_flex()
             .gap(px(8.))
@@ -2644,6 +2683,8 @@ fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
             .text_color(t::T2)
             .child(Spinner::new().size(px(11.)))
             .child("Analyzing…")
+    } else if found.is_empty() && failed {
+        h_flex().text_color(t::T3).child("Analysis failed")
     } else if found.is_empty() {
         h_flex().text_color(t::T3).child("Nothing found")
     } else {
@@ -2696,6 +2737,7 @@ impl Render for TimelinePanel {
             let _ = window.drop_image(image);
         }
         self.alt = window.modifiers().alt;
+        self.close_stale_popup(window, cx);
         let bounds = self.bounds.get();
         let duration = self.state.read(cx).bus.project().timeline.duration();
         if !self.fitted && bounds.size.width > px(0.) && duration > Time::ZERO {
@@ -2737,6 +2779,18 @@ impl Render for TimelinePanel {
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
                         e.update(cx, |this, cx| this.mouse_up(cx));
+                    }
+                });
+                // Leaving the window sends no last move.
+                let e = entity.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        e.update(cx, |this, cx| {
+                            let hovered = this.hovered_item.take().is_some();
+                            if this.hover.take().is_some() || hovered {
+                                cx.notify();
+                            }
+                        });
                     }
                 });
                 if first_paint {
@@ -2782,7 +2836,11 @@ impl Render for TimelinePanel {
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.set_alt(ev.modifiers.alt, cx)
             }))
+            // The tool stays put while a drag runs: the drag was made with it.
             .on_action(cx.listener(|this, _: &TrimTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = if this.tool == Tool::Trim {
                     Tool::Select
                 } else {
@@ -2800,10 +2858,16 @@ impl Render for TimelinePanel {
             .on_action(cx.listener(|this, _: &NudgeRightMore, _, cx| this.nudge(10, cx)))
             .on_action(cx.listener(|this, _: &ToggleEnabled, _, cx| this.toggle_enabled(cx)))
             .on_action(cx.listener(|this, _: &SelectTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = Tool::Select;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &BladeTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = if this.tool == Tool::Blade {
                     Tool::Select
                 } else {

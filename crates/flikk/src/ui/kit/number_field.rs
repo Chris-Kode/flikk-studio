@@ -113,6 +113,12 @@ impl NumberFieldState {
         self.scrub.is_some_and(|s| s.moved)
     }
 
+    /// A scrub or typed text not yet entered is under way: what it will
+    /// commit was started on what the field showed before.
+    pub fn is_editing(&self) -> bool {
+        self.edited || self.scrub.is_some()
+    }
+
     /// Follow the model, except while the user scrubs. A field being typed
     /// in keeps its text until Enter or blur.
     pub fn set_value(&mut self, value: f64, cx: &mut Context<Self>) {
@@ -163,6 +169,9 @@ impl NumberFieldState {
     }
 
     fn begin_scrub(&mut self, x: Pixels) {
+        // A scrub takes over from text typed and not entered, which would
+        // otherwise commit over it on the next blur.
+        self.edited = false;
         self.scrub = Some(Scrub {
             from: self.value,
             x,

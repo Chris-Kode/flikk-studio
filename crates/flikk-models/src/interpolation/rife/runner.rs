@@ -48,6 +48,10 @@ impl Interpolator for Rife {
             ("dynamic_dim_3", mw as i64),
         ];
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // Its file was deleted: let go of it, and fail as if never there.
+        if !super::MODEL.is_downloaded() {
+            sessions.forget();
+        }
         let rgba = sessions.run(&FILE.locate()?, FILE.what, &sizes, |session| {
             let shape = [1usize, 6, mh as usize, mw as usize];
             let input =

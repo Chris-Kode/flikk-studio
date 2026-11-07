@@ -28,7 +28,7 @@ pub mod tooltip;
 
 pub use button::Button;
 pub use color::ColorField;
-pub use dialog::DialogExt;
+pub use dialog::{DialogExt, DialogId};
 pub use gpui_kit::base::{h_flex, v_flex};
 pub use icon::{Icon, IconName};
 pub use kbd::Kbd;

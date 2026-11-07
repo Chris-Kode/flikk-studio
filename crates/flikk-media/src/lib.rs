@@ -27,10 +27,10 @@ use flikk_core::services::{
     ServiceError, ServiceResult,
 };
 use flikk_core::time::{Time, TimeRange};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// [`MediaService`] backed by the `ffmpeg` and `ffprobe` binaries.
 pub struct FfmpegMedia {
@@ -40,6 +40,8 @@ pub struct FfmpegMedia {
     peaks: Mutex<HashMap<(Fingerprint, u32), Arc<waveform::Peaks>>>,
     /// How this FFmpeg maps HDR to SDR, found on first use.
     tone_method: OnceLock<hdr::Method>,
+    /// Files hardware decoding failed on: playback decodes them in software.
+    software_only: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FfmpegMedia {
@@ -76,6 +78,7 @@ impl FfmpegMedia {
             frames: Mutex::new(FrameCache::default()),
             peaks: Mutex::new(HashMap::new()),
             tone_method: OnceLock::new(),
+            software_only: Arc::default(),
         })
     }
 
@@ -91,14 +94,25 @@ impl FfmpegMedia {
         let Some(mapping) = mapping else {
             return Ok(None);
         };
-        let method = *self.tone_method.get_or_init(|| {
-            let out = command(&self.ffmpeg)
-                .args(["-hide_banner", "-filters"])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            hdr::Method::from_filters(&out)
-        });
+        let method = match self.tone_method.get() {
+            Some(method) => *method,
+            None => {
+                let listing = command(&self.ffmpeg)
+                    .args(["-hide_banner", "-filters"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+                match listing {
+                    Some(listing) => *self
+                        .tone_method
+                        .get_or_init(|| hdr::Method::from_filters(&listing)),
+                    // FFmpeg did not answer: the fallback this time, and
+                    // asked again next time.
+                    None => hdr::Method::from_filters(""),
+                }
+            }
+        };
         mapping
             .filters(method)
             .map(Some)
@@ -203,6 +217,12 @@ fn stderr_tail(stderr: &[u8]) -> String {
         .unwrap_or("unknown error")
         .trim()
         .to_string()
+}
+
+/// `m` locked, even after a panic while it was held: what the caches hold
+/// is still sound, so one panic does not break every later call.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn err(context: &str, e: impl std::fmt::Display) -> ServiceError {

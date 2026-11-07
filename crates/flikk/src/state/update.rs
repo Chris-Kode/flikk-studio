@@ -55,7 +55,10 @@ impl EditorState {
     fn offer_update(&mut self, release: Release, cx: &mut Context<Self>) {
         match &self.updater {
             Updater::Installing(..) | Updater::Ready(_) => return,
-            Updater::Available(shown) | Updater::Failed(shown, _) if *shown == release => return,
+            Updater::Available(shown) if *shown == release => return,
+            // The failed release came back with `installable` worked out
+            // afresh; the failure and what it offers stay until a newer one.
+            Updater::Failed(shown, _) if shown.version == release.version => return,
             _ => {}
         }
         self.updater = Updater::Available(release);

@@ -16,8 +16,8 @@
 //! Each frame is eased toward the one before it where they barely differ
 //! (most where they agree, not at all past [`MOTION`]), which stops the
 //! flicker a per-frame model gives on still edges without dragging moving
-//! ones. A failed media is not tried again until the model is downloaded
-//! anew.
+//! ones. A failed media is tried again once the model is downloaded anew,
+//! after [`RETRY_AFTER`], or when a render waits for it.
 
 mod store;
 
@@ -31,7 +31,9 @@ use flikk_core::services::{
 use flikk_core::time::{Rate, Time};
 use flikk_models::matting::Matter;
 use flikk_models::{Model, Task as ModelTask};
+use std::any::Any;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -52,6 +54,8 @@ const SHORT_SIDE: u32 = 512;
 /// A change in coverage from one frame to the next past which a pixel
 /// moved, and is not eased.
 const MOTION: f32 = 0.25;
+/// How long after a media failed views leave it before trying again.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A media on a model.
 type MediaKey = (Fingerprint, &'static str);
@@ -75,6 +79,13 @@ struct Request {
     hi: i64,
     /// Newer requests are served first.
     touched: u64,
+}
+
+/// Why a media failed, whether the model was there then, and when.
+struct Failure {
+    message: String,
+    model: bool,
+    at: Instant,
 }
 
 /// The person masks' [`SubjectService`](flikk_core::services::SubjectService)
@@ -103,8 +114,8 @@ struct State {
     clock: u64,
     /// The chunk the worker is on.
     busy: Option<ChunkKey>,
-    /// Why a media failed, and whether the model was there then.
-    failed: HashMap<MediaKey, (String, bool)>,
+    /// Media that failed.
+    failed: HashMap<MediaKey, Failure>,
     unpacked: VecDeque<((ChunkKey, usize), PersonMatte)>,
     /// How long the latest frame took, on which model.
     seconds_per_frame: Option<(&'static str, f32)>,
@@ -288,11 +299,11 @@ impl State {
     /// Why `media` failed, unless the model came since.
     fn failure(&mut self, media: &MediaKey) -> Option<String> {
         match self.failed.get(media) {
-            Some((_, false)) if model_here() => {
+            Some(f) if !f.model && model_here() => {
                 self.failed.remove(media);
                 None
             }
-            Some((message, _)) => Some(message.clone()),
+            Some(f) => Some(f.message.clone()),
             None => None,
         }
     }
@@ -313,6 +324,13 @@ impl State {
                 continue;
             };
             let media = (fp.clone(), model.id);
+            if self
+                .failed
+                .get(&media)
+                .is_some_and(|f| f.at.elapsed() >= RETRY_AFTER)
+            {
+                self.failed.remove(&media);
+            }
             if self.failure(&media).is_some() {
                 self.requests.remove(&want);
                 continue;
@@ -471,8 +489,22 @@ impl LocalPeople {
         static RENDERS: AtomicU64 = AtomicU64::new(0);
         let want = Want::Render(RENDERS.fetch_add(1, Ordering::SeqCst));
         let (lo, hi) = frames(&person);
-        self.request(&mut lock(&self.shared.state), want, person.item, lo, hi);
+        {
+            let mut state = lock(&self.shared.state);
+            // Tried again, rather than failing on an earlier error.
+            if let Some(fp) = person.item.fingerprint.clone() {
+                state.failed.remove(&(fp, ModelTask::Matting.model().id));
+            }
+            self.request(&mut state, want, person.item, lo, hi);
+        }
         let result = loop {
+            {
+                // A worker gone is started again.
+                let mut state = lock(&self.shared.state);
+                if !state.worker {
+                    self.request(&mut state, want, person.item, lo, hi);
+                }
+            }
             let status = self.status(person);
             if let Some(e) = status.error {
                 break Err(ServiceError(e));
@@ -492,9 +524,34 @@ impl LocalPeople {
     }
 }
 
+/// Marks the worker gone when its thread ends, however it ends, so the
+/// next request starts another.
+struct Running<'a>(&'a Shared);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.state);
+        state.worker = false;
+        state.busy = None;
+    }
+}
+
+/// A panic's message, when it carries one.
+fn stopped(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match detail {
+        Some(detail) => format!("Finding the person stopped unexpectedly: {detail}"),
+        None => "Finding the person stopped unexpectedly.".into(),
+    }
+}
+
 /// The worker: makes the chunk the newest request wants, one at a time,
-/// for good.
+/// for good. A chunk that panics fails its media.
 fn work(shared: &Shared) {
+    let _running = Running(shared);
     let mut matter: Option<(&'static str, Box<dyn Matter>)> = None;
     loop {
         let job = {
@@ -508,18 +565,30 @@ fn work(shared: &Shared) {
                 state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
             }
         };
-        if matter.as_ref().is_none_or(|(id, _)| *id != job.model.id) {
-            matter = runner(job.model).map(|r| (job.model.id, r));
-        }
-        let result = match &matter {
-            Some((_, m)) => make(shared, m.as_ref(), &job),
-            None => Err("Person masks are not in this build.".into()),
-        };
+        let made = catch_unwind(AssertUnwindSafe(|| {
+            if matter.as_ref().is_none_or(|(id, _)| *id != job.model.id) {
+                matter = runner(job.model).map(|r| (job.model.id, r));
+            }
+            match &matter {
+                Some((_, m)) => make(shared, m.as_ref(), &job),
+                None => Err("Person masks are not in this build.".into()),
+            }
+        }));
+        let result = made.unwrap_or_else(|payload| {
+            // The runner may be left broken: made again.
+            matter = None;
+            Err(stopped(payload.as_ref()))
+        });
         let mut state = lock(&shared.state);
         state.busy = None;
-        if let Err(e) = result {
+        if let Err(message) = result {
             let media = (job.key.0.clone(), job.key.1);
-            state.failed.insert(media, (e, model_here()));
+            let failure = Failure {
+                message,
+                model: model_here(),
+                at: Instant::now(),
+            };
+            state.failed.insert(media, failure);
         }
         drop(state);
         shared.version.fetch_add(1, Ordering::SeqCst);
@@ -564,7 +633,10 @@ fn make(shared: &Shared, matter: &dyn Matter, job: &Job) -> Result<(), String> {
         state.seconds_per_frame = Some((model, begun.elapsed().as_secs_f32()));
         match state.chunks.get_mut(&job.key) {
             Some(frames) if frames.len() == i => frames.push(packed),
-            _ => state.keep(job.key.clone(), vec![packed]),
+            None if i == 0 => state.keep(job.key.clone(), vec![packed]),
+            // The frames before it are not there: the chunk is taken up
+            // again from where it stands.
+            _ => return Ok(()),
         }
         let whole = i + 1 == job.len;
         if whole {

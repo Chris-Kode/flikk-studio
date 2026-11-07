@@ -183,9 +183,23 @@ pub struct AnalysisConfig {
     pub speech: Option<Arc<dyn SpeechService>>,
 }
 
+/// How much of what [`AnalysisService::analyze`] would make an item's
+/// cached results hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Coverage {
+    /// Not analyzed.
+    #[default]
+    None,
+    /// Some steps are missing; analyzing runs only those.
+    Partial,
+    /// Everything; only [`AnalysisService::analyze_again`] runs anything.
+    Full,
+}
+
 pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
-    /// item; a no-op if cached for its fingerprint.
+    /// item; a no-op if its cached result covers the steps configured now,
+    /// else only the missing ones run.
     fn analyze(&self, item: &MediaItem) -> JobId;
     /// Queue what is heard in a library sound: sounds, music, beats and
     /// sound vectors, on this machine. No speech, so it spends no
@@ -200,9 +214,22 @@ pub trait AnalysisService: Send + Sync {
     fn analyze_again(&self, item: &MediaItem) -> JobId {
         self.analyze(item)
     }
+    /// Stop analyzing `item`'s file, queued or running, keeping nothing of
+    /// it: as if it had not been asked for, so asking again starts afresh.
+    /// For media that left the project.
+    fn cancel(&self, _item: &MediaItem) {}
     fn jobs(&self) -> Vec<JobStatus>;
     /// Cached results, if analysis has run.
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>>;
+    /// How much of the steps configured now `item`'s cached results cover.
+    /// Cheap enough to ask while drawing. A service that does not track
+    /// steps takes any result for a whole one.
+    fn coverage(&self, item: &MediaItem) -> Coverage {
+        match item.fingerprint.as_ref().and_then(|fp| self.analysis(fp)) {
+            Some(_) => Coverage::Full,
+            None => Coverage::None,
+        }
+    }
     /// Gaps without speech longer than `min`, in source time (PRD E4).
     fn silences(&self, item: &MediaItem, min: Time) -> ServiceResult<Vec<TimeRange>>;
     fn loudness(&self, path: &Path, range: Option<TimeRange>) -> ServiceResult<Loudness>;

@@ -1,6 +1,6 @@
 //! Video scopes for the Color workspace: luma waveform, RGB parade,
-//! vectorscope (with the skin-tone line) and histogram of the frame at the
-//! playhead. The frame is the topmost visible media clip's, graded with its
+//! vectorscope (with the skin-tone line) and histogram of the frame the
+//! viewer shows (the program at the playhead, or an open source). The frame is the topmost visible media clip's, graded with its
 //! clip grade and then the timeline grade through `flikk_core::grade`, so the
 //! scopes read exactly what the viewer shows and the export renders. They
 //! are drawn off the UI thread; the latest request wins, and playback
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 const FRAME_WIDTH: u32 = 480;
 /// Least time between two refreshes during playback.
 const PLAYING_EVERY: Duration = Duration::from_millis(200);
+/// How long a failed frame waits before it is asked for again.
+const RETRY: Duration = Duration::from_secs(2);
 /// Height of a scope's title row, and the gap between scopes.
 const TITLE: f32 = 22.;
 const GAP: f32 = 8.;
@@ -80,7 +82,7 @@ pub struct ScopesPanel {
     zoom: bool,
     scopes: Option<Scopes>,
     requested: Option<Request>,
-    generation: u64,
+    /// A frame is being read; one at a time, so the latest request wins.
     busy: bool,
     last: Option<Instant>,
     timer: bool,
@@ -100,7 +102,6 @@ impl ScopesPanel {
             zoom: false,
             scopes: None,
             requested: None,
-            generation: 0,
             busy: false,
             last: None,
             timer: false,
@@ -117,11 +118,11 @@ impl ScopesPanel {
     }
 
     /// The topmost visible media clip at the playhead, as the viewer shows
-    /// it (a dragged control included).
+    /// it (a dragged control included); an open source in its place.
     fn current(&self, cx: &App) -> Option<Request> {
         let state = self.state.read(cx);
-        let project: &Project = state.display_project();
-        let t = state.playhead;
+        let project: &Project = state.monitor_project();
+        let t = state.monitor_time();
         project
             .timeline
             .tracks
@@ -166,7 +167,7 @@ impl ScopesPanel {
             return;
         };
         // During playback, refresh a few times a second.
-        if self.state.read(cx).playing
+        if self.state.read(cx).monitor_playing()
             && let Some(wait) = self
                 .last
                 .map(|l| PLAYING_EVERY.saturating_sub(l.elapsed()))
@@ -186,10 +187,9 @@ impl ScopesPanel {
             return;
         }
         self.requested = Some(request.clone());
-        self.generation += 1;
         self.busy = true;
         self.last = Some(Instant::now());
-        let generation = self.generation;
+        let asked = request.clone();
         cx.spawn(async move |this, cx| {
             let scopes = cx
                 .background_executor()
@@ -201,14 +201,24 @@ impl ScopesPanel {
                     draw(&frame, request.zoom)
                 })
                 .await;
+            let failed = scopes.is_none();
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                if this.generation == generation {
-                    this.show(scopes);
-                }
+                this.show(scopes);
                 // A newer request may be waiting.
                 cx.notify();
             });
+            if failed {
+                // The media may be offline or still being read: ask again
+                // later if the same frame is still wanted.
+                cx.background_executor().timer(RETRY).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.requested.as_ref() == Some(&asked) {
+                        this.requested = None;
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
     }
@@ -359,7 +369,10 @@ impl Render for ScopesPanel {
         self.request(cx);
         let (playhead, rate) = {
             let state = self.state.read(cx);
-            (state.playhead, state.bus.project().timeline.settings.rate)
+            (
+                state.monitor_time(),
+                state.monitor_project().timeline.settings.rate,
+            )
         };
         let mode = self.mode;
         let tabs = Segmented::new("scope-mode")

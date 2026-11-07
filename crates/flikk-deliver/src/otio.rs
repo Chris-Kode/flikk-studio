@@ -2,7 +2,7 @@
 //! Timeline.1, Stack.1, Track.1, Clip.2, Gap.1, ExternalReference.1,
 //! Marker.2, TimeRange.1, RationalTime.1.
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use flikk_core::model::{ClipContent, MarkerKind, Project, TrackKind};
 use flikk_core::{Rate, Time};
 use serde_json::{Value, json};
@@ -182,5 +182,5 @@ pub fn to_otio(project: &Project) -> Value {
 /// Write the timeline as `.otio` JSON.
 pub fn export_otio(project: &Project, path: &Path) -> Result<()> {
     let text = serde_json::to_string_pretty(&to_otio(project))?;
-    std::fs::write(path, text).with_context(|| format!("could not write {}", path.display()))
+    crate::ffmpeg::write_atomic(path, text)
 }

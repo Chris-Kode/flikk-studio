@@ -1050,10 +1050,12 @@ impl Render for LibraryPanel {
             .filter(|(_, e)| !e.is_empty())
             .collect();
         let sections: Vec<Section> = shown.iter().map(|(s, _)| *s).collect();
-        if self.page.is_some_and(|p| !sections.contains(&p)) {
-            self.page = None;
+        // A search that empties the page shows every section and keeps the
+        // page for when it is cleared; a page emptied otherwise goes.
+        let page = self.page.filter(|p| sections.contains(p));
+        if query.is_empty() {
+            self.page = page;
         }
-        let page = self.page;
         let tabs = self.tabs(&sections, cx);
         let empty = shown.is_empty();
         let body: Vec<Div> = shown

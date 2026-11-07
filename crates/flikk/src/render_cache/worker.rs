@@ -62,11 +62,17 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(project: Arc<Project>, services: Services, plan: Arc<Plan>, from: i64) -> Self {
+    /// `None` when the thread could not be started.
+    pub fn start(
+        project: Arc<Project>,
+        services: Services,
+        plan: Arc<Plan>,
+        from: i64,
+    ) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let (s, d) = (stop.clone(), done.clone());
-        let _ = thread::Builder::new()
+        thread::Builder::new()
             .name("flikk-render-cache".into())
             .spawn(move || {
                 // Make optical-flow frames in place, as renders do, so no
@@ -77,8 +83,9 @@ impl Worker {
                 }
                 run(&project, &services, &plan, from, &s);
                 d.store(true, Ordering::Relaxed);
-            });
-        Self { stop, done }
+            })
+            .ok()?;
+        Some(Self { stop, done })
     }
 
     /// Everything it could render is on disk (or it gave up).

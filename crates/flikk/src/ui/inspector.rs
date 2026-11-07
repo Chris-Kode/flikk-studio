@@ -33,33 +33,39 @@ use flikk_core::agent::Workspace;
 use flikk_core::analysis::Loudness;
 use flikk_core::command::{Command, Edge};
 use flikk_core::model::{Clip, ClipContent, Ducking, Project, Property, Track};
-use flikk_core::{ClipId, Time};
+use flikk_core::{ClipId, Time, TimeRange};
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use param::{Key, Param};
+use param::{Key, Param, Target};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 pub struct InspectorPanel {
     state: Entity<EditorState>,
     params: HashMap<Key, Param>,
     /// Clip whose grade "paste" applies to the selection.
     copied_grade: Option<ClipId>,
-    /// Integrated loudness and true peak per clip, before clip gain.
-    loudness: HashMap<ClipId, Loudness>,
+    /// Integrated loudness and true peak per clip, before clip gain, with
+    /// the source span measured: a trim or a new source makes it stale.
+    loudness: HashMap<ClipId, (PathBuf, TimeRange, Loudness)>,
     measuring: bool,
     lufs_target: Entity<NumberFieldState>,
     peak_target: Entity<NumberFieldState>,
     picture_tab: PictureTab,
     /// Groups folded to their header, by key.
     collapsed: HashSet<&'static str>,
-    /// Caption or title text, and the clip it was loaded from.
+    /// Caption or title text, the clip it was loaded from, and whether it
+    /// was typed in since.
     text: Entity<TextareaState>,
     text_clip: Option<ClipId>,
-    /// Caption or title start and end, and the clip they show.
+    text_typed: bool,
+    /// Caption or title start and end, the clip they show, and whether
+    /// each was typed in since.
     start_field: Entity<InputState>,
     end_field: Entity<InputState>,
     timing_clip: Option<ClipId>,
+    timing_typed: [bool; 2],
     /// Style of the selected caption's track.
     caption_style: Entity<CaptionStylePanel>,
     /// FX parameter controls, by owner and parameter.
@@ -75,6 +81,8 @@ pub struct InspectorPanel {
     speed_field: Entity<NumberFieldState>,
     speed_clip: Option<ClipId>,
     speed_ripple: bool,
+    /// The number field whose scrub the viewer shows uncommitted.
+    live_field: Option<EntityId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,17 +141,23 @@ impl InspectorPanel {
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe(&text, move |this, _, ev: &InputEvent, cx| {
-                if commit(ev) {
+                if matches!(ev, InputEvent::Change) {
+                    this.text_typed = true;
+                } else if commit(ev) {
                     this.commit_text(cx);
                 }
             }),
             cx.subscribe(&start_field, move |this, _, ev: &InputEvent, cx| {
-                if commit(ev) {
+                if matches!(ev, InputEvent::Change) {
+                    this.timing_typed[0] = true;
+                } else if commit(ev) {
                     this.commit_timing(Edge::Start, cx);
                 }
             }),
             cx.subscribe(&end_field, move |this, _, ev: &InputEvent, cx| {
-                if commit(ev) {
+                if matches!(ev, InputEvent::Change) {
+                    this.timing_typed[1] = true;
+                } else if commit(ev) {
                     this.commit_timing(Edge::End, cx);
                 }
             }),
@@ -177,9 +191,11 @@ impl InspectorPanel {
             collapsed: HashSet::from(["crop", "pin"]),
             text,
             text_clip: None,
+            text_typed: false,
             start_field,
             end_field,
             timing_clip: None,
+            timing_typed: [false; 2],
             caption_style,
             fx_controls: HashMap::new(),
             collapsed_fx: HashSet::new(),
@@ -189,6 +205,7 @@ impl InspectorPanel {
             speed_field,
             speed_clip: None,
             speed_ripple: false,
+            live_field: None,
             _subscriptions,
         }
     }
@@ -222,24 +239,82 @@ impl InspectorPanel {
         });
     }
 
-    /// Apply a field's new model value.
+    /// Apply a field's new model value, to what it showed when its edit
+    /// began.
     fn commit(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.show_live(&[], cx));
-        let (commands, label) = self.commands(key, v, cx);
+        self.end_live(cx);
+        let target = self.target(key, cx);
+        let (commands, label) = self.commands(key, v, &target, cx);
         self.run(commands, label, cx);
     }
 
     /// Show a value in the viewer while its label is scrubbed.
     fn preview(&mut self, key: Key, v: f32, cx: &mut Context<Self>) {
-        let (commands, _) = self.commands(key, v, cx);
+        let target = self.target(key, cx);
+        let (commands, _) = self.commands(key, v, &target, cx);
         self.state.update(cx, |s, cx| s.show_live(&commands, cx));
     }
 
-    /// The commands that set `key` to `v` on the selection.
-    fn commands(&self, key: Key, v: f32, cx: &App) -> (Vec<Command>, &'static str) {
-        let none = (Vec::new(), "edit");
-        let clips = self.selected_clips(cx);
+    /// Stop showing an uncommitted value in the viewer.
+    fn end_live(&mut self, cx: &mut Context<Self>) {
+        self.live_field = None;
+        self.state.update(cx, |s, cx| s.show_live(&[], cx));
+    }
+
+    /// Ends `field`'s preview when its scrub ends: one released on its
+    /// start value commits nothing, which would leave the preview showing.
+    fn watch_scrub(field: &Entity<NumberFieldState>, cx: &mut Context<Self>) -> Subscription {
+        cx.observe(field, |this, field, cx| {
+            if this.live_field == Some(field.entity_id()) && !field.read(cx).is_editing() {
+                this.end_live(cx);
+            }
+        })
+    }
+
+    /// What `key` would apply to now: the selection, and for a mask key
+    /// the mask at its index.
+    fn target_now(&self, key: Key, cx: &App) -> Target {
         let state = self.state.read(cx);
+        let tl = &state.bus.project().timeline;
+        let clips: Vec<ClipId> = (state.selection.clips.iter())
+            .copied()
+            .filter(|id| tl.clip(*id).is_some())
+            .collect();
+        let mask = match key {
+            Key::Mask(i, _) => clips
+                .first()
+                .and_then(|id| tl.clip(*id))
+                .and_then(|(_, c)| c.masks.get(i))
+                .map(|m| m.id),
+            _ => None,
+        };
+        Target {
+            clips,
+            transition: state.selected_transition,
+            mask,
+        }
+    }
+
+    /// The commands that set `key` to `v` on `target`.
+    fn commands(
+        &self,
+        key: Key,
+        v: f32,
+        target: &Target,
+        cx: &App,
+    ) -> (Vec<Command>, &'static str) {
+        let none = (Vec::new(), "edit");
+        let state = self.state.read(cx);
+        let clips: Vec<Clip> = (target.clips.iter())
+            .filter_map(|id| {
+                state
+                    .bus
+                    .project()
+                    .timeline
+                    .clip(*id)
+                    .map(|(_, c)| c.clone())
+            })
+            .collect();
         let playhead = state.playhead;
         let tl = &state.bus.project().timeline;
         let mut commands = Vec::new();
@@ -279,13 +354,18 @@ impl InspectorPanel {
                     });
                 }
             }
-            Key::Mask(i, field) => {
+            Key::Mask(_, field) => {
                 let Some(clip) = clips.first() else {
                     return none;
                 };
-                let Some(mask) = clip.masks.get(i) else {
+                // By the mask it showed: one removed or moved since keeps
+                // the value off another.
+                let Some(i) =
+                    (target.mask).and_then(|id| clip.masks.iter().position(|m| m.id == id))
+                else {
                     return none;
                 };
+                let mask = &clip.masks[i];
                 let at = clip_time(clip, playhead);
                 let mut now = mask.state_at(at);
                 field.set(&mut now, v);
@@ -298,7 +378,7 @@ impl InspectorPanel {
                 label = "set_masks";
             }
             Key::TransitionDuration => {
-                let Some((clip, edge)) = state.selected_transition else {
+                let Some((clip, edge)) = target.transition else {
                     return none;
                 };
                 let Some((_, c)) = tl.clip(clip) else {
