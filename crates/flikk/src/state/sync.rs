@@ -23,6 +23,10 @@ impl EditorState {
 
     /// Move the followers among `clips` to the reference by their sound.
     pub fn sync_clips(&mut self, clips: Vec<ClipId>, mute_camera: bool, cx: &mut Context<Self>) {
+        // One sync at a time: a second would apply over the first.
+        if self.syncing {
+            return;
+        }
         let recordings = self.sync_recordings(&clips);
         let Some(media) = self.services.media.clone() else {
             return;
@@ -35,7 +39,8 @@ impl EditorState {
         let Some(sources) = sources.filter(|s| s.len() >= 2) else {
             return;
         };
-        self.status = Some("Syncing…".into());
+        let opened = project.id;
+        self.syncing = true;
         cx.notify();
         let task = cx
             .background_executor()
@@ -43,6 +48,9 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let measured = task.await;
             let _ = this.update(cx, |this, cx| {
+                if !this.end_sync(opened, cx) {
+                    return;
+                }
                 let synced = measured.map(|results| {
                     sync::clips_command(this.bus.project(), &recordings, results, mute_camera)
                 });
@@ -55,6 +63,9 @@ impl EditorState {
     /// Lay the pool items `media` on the timeline from the playhead, in
     /// sync by their sound, each on a track of its own.
     pub fn sync_media(&mut self, media: Vec<MediaId>, mute_camera: bool, cx: &mut Context<Self>) {
+        if self.syncing {
+            return;
+        }
         let Some(service) = self.services.media.clone() else {
             return;
         };
@@ -66,7 +77,8 @@ impl EditorState {
             return;
         };
         let at = self.playhead;
-        self.status = Some("Syncing…".into());
+        let opened = project.id;
+        self.syncing = true;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             sync::measure_group(service.as_ref(), &sources[0], &sources[1..])
@@ -74,6 +86,9 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let measured = task.await;
             let _ = this.update(cx, |this, cx| {
+                if !this.end_sync(opened, cx) {
+                    return;
+                }
                 let synced = measured.map(|results| {
                     sync::place_command(this.bus.project(), &order, at, results, mute_camera)
                 });
@@ -81,6 +96,14 @@ impl EditorState {
             });
         })
         .detach();
+    }
+
+    /// The sync begun in project `opened` is heard. Whether to apply it: not
+    /// once another project is open.
+    fn end_sync(&mut self, opened: flikk_core::ProjectId, cx: &mut Context<Self>) -> bool {
+        self.syncing = false;
+        cx.notify();
+        self.bus.project().id == opened
     }
 
     fn finish_sync(&mut self, synced: Result<Synced, String>, label: &str, cx: &mut Context<Self>) {

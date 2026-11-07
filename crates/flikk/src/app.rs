@@ -276,11 +276,19 @@ impl Flikk {
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| this.moving = false),
                     )
+                    // A release off the bar ends the press too, or a later
+                    // drag over the bar would move the window.
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.moving = false),
+                    )
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
                         if this.moving && e.pressed_button == Some(MouseButton::Left) {
-                            this.moving = false;
                             window.start_window_move();
                         }
+                        // Released where no event reached the bar (outside
+                        // the window): the press is over all the same.
+                        this.moving = false;
                     }))
             })
             .map(|bar| {
@@ -732,6 +740,7 @@ impl Flikk {
             ),
         };
         let status = s.status.clone();
+        let syncing = s.syncing;
         if rendering.is_some() {
             self.poll_render(cx);
         }
@@ -754,6 +763,9 @@ impl Flikk {
             .text_size(px(11.))
             .text_color(t::T3)
             .whitespace_nowrap()
+            .when(syncing, |bar| {
+                bar.child(div().text_color(t::T2).child("Syncing…"))
+            })
             .children(status.map(|s| div().min_w_0().truncate().text_color(t::T2).child(s)))
             .children(rendering.map(|(output, fraction)| {
                 let name = output

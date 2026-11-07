@@ -20,6 +20,7 @@ use crate::ui::kit::{
 };
 use composer::{Composer, ComposerEvent};
 use flikk_core::agent::ChatRole;
+use flikk_core::changeset::ChangeSetState;
 use flikk_core::{ChangeItemId, ChangeSetId};
 use gpui_kit::base::{TextView, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -161,9 +162,14 @@ impl ChatPanel {
         self.signature = sig;
         let switched = chat != self.chat;
         self.chat = chat;
-        if switched {
+        let n = self.list.item_count();
+        // The open stacks are kept by message index, which a removed
+        // message shifts.
+        if switched || count < n {
             self.tools_open.clear();
             self.tool_open.clear();
+        }
+        if switched {
             self.shown.clear();
         }
         // A new message of the user's ends the settled cards, however it
@@ -172,7 +178,13 @@ impl ChatPanel {
             self.shown.clear();
         }
         self.user_messages = users;
-        let n = self.list.item_count();
+        // Forget the review state of cards no longer up.
+        let shown = &self.shown;
+        let bus = &self.state.read(cx).bus;
+        self.reviews.retain(|id, _| {
+            bus.change_set(*id)
+                .is_some_and(|set| set.state != ChangeSetState::Resolved || shown.contains(id))
+        });
         if switched || count < n {
             self.list.reset(count);
             self.scroll_to_end(cx);
@@ -232,6 +244,7 @@ impl ChatPanel {
     fn render_sessions(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = self.state.read(cx);
         let active = s.active_chat().to_owned();
+        let locked = s.chat_locked();
         let sessions = s.chat_sessions();
         let rows = sessions.into_iter().enumerate().map(|(ix, (id, title))| {
             let current = id == active;
@@ -257,7 +270,6 @@ impl ChatPanel {
                 .pr(px(3.))
                 .gap(px(8.))
                 .rounded(t::RADIUS)
-                .cursor_pointer()
                 .map(|el| {
                     if current {
                         el.bg(t::alpha(t::AC, 0.1)).child(
@@ -270,12 +282,17 @@ impl ChatPanel {
                                 .rounded_l(t::RADIUS)
                                 .bg(t::AC),
                         )
+                    } else if locked {
+                        // Another chat can't open until the turn and its
+                        // requests are done.
+                        el.text_color(t::T3)
                     } else {
                         el.text_color(t::T2)
+                            .cursor_pointer()
                             .hover(|el| el.bg(t::HV).text_color(t::T1))
+                            .on_click(open)
                     }
                 })
-                .on_click(open)
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(
                     div()
@@ -288,6 +305,7 @@ impl ChatPanel {
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Delete chat")
+                                .disabled(locked)
                                 .on_click(delete),
                         ),
                 )
@@ -308,7 +326,6 @@ impl ChatPanel {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = self.state.read(cx);
         let empty = s.chat.is_empty();
-        let busy = s.agent_busy();
         let backend = s.settings.backend.label();
         let title = s
             .chat_sessions()
@@ -338,7 +355,7 @@ impl ChatPanel {
                     .ghost()
                     .small()
                     .tooltip("New chat")
-                    .disabled(empty || busy)
+                    .disabled(empty || s.chat_locked())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sessions_open = false;
                         this.state.update(cx, |s, cx| s.new_chat(cx))
@@ -514,7 +531,7 @@ impl ChatPanel {
         let approvals = self.render_approvals(cx);
         let state = self.state.read(cx);
         let busy = state.agent_busy();
-        let status = state.status.clone();
+        let status = state.agent_error.clone();
         v_flex()
             .flex_none()
             .gap(px(6.))
@@ -568,7 +585,16 @@ impl Render for ChatPanel {
             .child(self.render_header(cx))
             .map(|el| {
                 if self.sessions_open {
-                    el.child(self.render_sessions(cx))
+                    // Requests waiting on the user stay in sight.
+                    let approvals = self.render_approvals(cx);
+                    el.child(self.render_sessions(cx)).child(
+                        v_flex()
+                            .flex_none()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .pb(px(10.))
+                            .children(approvals),
+                    )
                 } else {
                     el.child(self.render_thread(cx))
                         .child(self.render_footer(cx))
