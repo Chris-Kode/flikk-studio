@@ -1,6 +1,7 @@
 //! Thin wrappers around the `ffmpeg` binary: audio extraction, scene and
 //! silence detection, EBU R128 loudness. Each run reports progress from
-//! `-progress pipe:2` against the known duration.
+//! `-progress pipe:2` against the known duration, and those that take a
+//! `cancel` stop, killing ffmpeg, once it says so.
 
 use anyhow::{Context, Result, bail};
 use flikk_core::analysis::Loudness;
@@ -9,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 
 /// Sample rate the sound models hear.
 #[cfg(feature = "sounds")]
@@ -23,6 +25,15 @@ pub fn binary() -> PathBuf {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+/// A `cancel` for runs nothing stops.
+fn never() -> bool {
+    false
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// What a run printed besides progress and its exit.
@@ -59,12 +70,12 @@ impl Drop for Process {
 /// Kills the process when dropped while armed: inside the scope that reads
 /// it, since the scope only ends once the stderr reader does, and that only
 /// at ffmpeg's exit.
-struct Stop<'a>(Option<&'a mut Child>);
+struct Stop<'a>(Option<&'a Mutex<Process>>);
 
 impl Drop for Stop<'_> {
     fn drop(&mut self) {
         if let Some(child) = self.0.take() {
-            let _ = child.kill();
+            let _ = lock(child).kill();
         }
     }
 }
@@ -72,11 +83,14 @@ impl Drop for Stop<'_> {
 /// Run ffmpeg with `args`, feeding stdout to `stdout` and calling `progress`
 /// with 0..1 when `duration` is known. When `stdout` fails or panics,
 /// ffmpeg is killed rather than left to decode the rest, and its error is
-/// the run's.
+/// the run's. `cancel` is asked at each progress line ffmpeg prints (about
+/// twice a second); once it says so, ffmpeg is killed and the run fails as
+/// cancelled, whatever was read.
 fn run(
     args: &[OsString],
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
     stdout: impl FnOnce(&mut dyn Read) -> Result<()>,
 ) -> Result<Output> {
     let bin = binary();
@@ -99,14 +113,23 @@ fn run(
     let mut out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
     let total = duration.map(|d| d.as_secs_f64()).filter(|d| *d > 0.0);
+    // Shared with the stderr reader, which kills it when cancelled.
+    let child = Mutex::new(child);
 
     let (read, log) = std::thread::scope(|s| {
         // Armed before the reader thread starts, so that a failure to
         // start it kills ffmpeg too.
-        let mut stop = Stop(Some(&mut child));
+        let mut stop = Stop(Some(&child));
+        let child = &child;
         let log = s.spawn(move || {
             let mut log = Vec::new();
+            let mut killed = false;
             for line in BufReader::new(err).lines().map_while(|l| l.ok()) {
+                if !killed && cancel() {
+                    // Its pipes close, and both readers end.
+                    let _ = lock(child).kill();
+                    killed = true;
+                }
                 if let Some(us) = line.strip_prefix("out_time_us=") {
                     if let (Some(total), Ok(us)) = (total, us.trim().parse::<f64>()) {
                         progress((us / 1e6 / total).clamp(0.0, 1.0) as f32);
@@ -126,7 +149,12 @@ fn run(
         drop(stop);
         (read, log.join().unwrap_or_default())
     });
-    let status = child.wait();
+    let status = lock(&child).wait();
+    // Killed for it, or a reader that stopped for it: what was read is cut
+    // short.
+    if cancel() {
+        bail!("cancelled");
+    }
     // A reader that stopped early killed ffmpeg: its own error says why.
     read?;
     if !status?.success() {
@@ -177,9 +205,11 @@ pub fn extract_audio(
     n: u32,
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<f32>> {
     let mut bytes = Vec::new();
-    run(&pcm(path, n, SAMPLE_RATE, None), duration, progress, |r| {
+    let args = pcm(path, n, SAMPLE_RATE, None);
+    run(&args, duration, progress, cancel, |r| {
         r.read_to_end(&mut bytes)?;
         Ok(())
     })?;
@@ -194,6 +224,7 @@ pub fn extract_audio(
 /// The `n`th audio stream as lossless mono FLAC in `out`, at its own rate
 /// up to `max_rate`, for a provider to hear: nothing lost, and about half
 /// the size of the same samples as WAV.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_flac(
     path: &Path,
     n: u32,
@@ -202,6 +233,7 @@ pub fn encode_flac(
     out: &Path,
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<()> {
     let mut args = strs(["-v", "error", "-y"]);
     args.extend(input(path));
@@ -217,14 +249,15 @@ pub fn encode_flac(
     }
     args.extend(strs(["-c:a", "flac", "-compression_level", "5"]));
     args.push(out.as_os_str().to_owned());
-    run(&args, duration, progress, discard)?;
+    run(&args, duration, progress, cancel, discard)?;
     Ok(())
 }
 
 /// The `n`th audio stream as mono `f32` at `rate`, over the source range
 /// `range` when given, handed to `sink` about a second at a time so that a
-/// long file never sits in memory.
+/// long file never sits in memory. `cancel` is also asked between reads.
 #[cfg(feature = "sounds")]
+#[allow(clippy::too_many_arguments)]
 pub fn stream_audio(
     path: &Path,
     n: u32,
@@ -232,14 +265,19 @@ pub fn stream_audio(
     range: Option<TimeRange>,
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
     sink: &mut dyn FnMut(&[f32]) -> Result<()>,
 ) -> Result<()> {
     let duration = range.map(|r| r.duration()).or(duration);
-    run(&pcm(path, n, rate, range), duration, progress, |r| {
+    let args = pcm(path, n, rate, range);
+    run(&args, duration, progress, cancel, |r| {
         let mut buf = vec![0u8; rate as usize * 4];
         let mut filled = 0;
         let mut samples = Vec::with_capacity(rate as usize);
         loop {
+            if cancel() {
+                bail!("cancelled");
+            }
             let read = r.read(&mut buf[filled..])?;
             filled += read;
             let whole = filled / 4 * 4;
@@ -302,7 +340,7 @@ pub fn cut_speech(path: &Path, spans: &[TimeRange], limit: Time, out: &Path) -> 
         if flac { "flac" } else { "pcm_s16le" }.into(),
     ]));
     args.push(out.as_os_str().to_owned());
-    run(&args, None, &|_| {}, discard)?;
+    run(&args, None, &|_| {}, &never, discard)?;
     Ok(())
 }
 
@@ -339,6 +377,7 @@ pub fn shot_changes(
     threshold: f32,
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<Time>> {
     let mut args = strs(["-v", "info"]);
     args.extend(input(path));
@@ -354,7 +393,7 @@ pub fn shot_changes(
         "null".into(),
         "-".into(),
     ]));
-    let out = run(&args, duration, progress, discard)?;
+    let out = run(&args, duration, progress, cancel, discard)?;
     let mut times: Vec<Time> = out
         .log
         .iter()
@@ -375,6 +414,7 @@ pub fn silences(
     min: Time,
     duration: Option<Time>,
     progress: &(dyn Fn(f32) + Sync),
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<TimeRange>> {
     let mut args = strs(["-v", "info"]);
     args.extend(input(path));
@@ -390,7 +430,7 @@ pub fn silences(
         "null".into(),
         "-".into(),
     ]));
-    let out = run(&args, duration, progress, discard)?;
+    let out = run(&args, duration, progress, cancel, discard)?;
     let end = duration
         .or_else(|| out.log.iter().find_map(|l| parse_duration(l)))
         .unwrap_or(Time::ZERO);
@@ -434,7 +474,7 @@ pub fn loudness(path: &Path, range: Option<TimeRange>) -> Result<Loudness> {
         "null",
         "-",
     ]));
-    let out = run(&args, None, &|_| {}, discard)?;
+    let out = run(&args, None, &|_| {}, &never, discard)?;
     let summary = out
         .log
         .iter()

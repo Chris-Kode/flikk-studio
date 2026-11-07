@@ -22,7 +22,8 @@
 //! failed is not queued again for [`RETRY_AFTER`]; renders measure it
 //! again all the same. A background job stops, kept as not measured,
 //! when its item is asked for under another fingerprint (the file
-//! changed) or the stabilizer is dropped (the window closed).
+//! changed), is cancelled (it left the project) or the stabilizer is
+//! dropped (the window closed).
 
 use flikk_core::ids::{JobId, MediaId};
 use flikk_core::jobs::JobQueue;
@@ -309,6 +310,19 @@ impl Stabilizer for LocalStabilizer {
         let cancelled = || cancel.load(Ordering::Relaxed);
         self.shared
             .measure(item, &fp, progress, &cancelled, true, &waiting)
+    }
+
+    fn cancel(&self, item: &MediaItem) {
+        let mut wanted = lock(&self.shared.wanted);
+        // What it was queued under, and what it is under now.
+        let queued = wanted.remove(&item.id);
+        let fps = queued.into_iter().chain(item.fingerprint.clone());
+        for fp in fps {
+            // Unless another item has that fingerprint too.
+            if !wanted.values().any(|f| *f == fp) {
+                self.queue.cancel(&fp);
+            }
+        }
     }
 
     fn jobs(&self) -> Vec<JobStatus> {

@@ -57,7 +57,7 @@ impl SoundModels {
     /// of the same stream, for the edges of short sounds; `hearing` and
     /// `beating` report the two halves' progress. The tagger is required;
     /// without the sound search model or the beat tracker the pass goes on,
-    /// noting why. `pass` leaves either out.
+    /// noting why. `pass` leaves either out. Fails once `cancel` says so.
     #[allow(clippy::too_many_arguments)]
     pub fn hear(
         &self,
@@ -68,6 +68,7 @@ impl SoundModels {
         pass: Pass,
         hearing: &(dyn Fn(f32) + Sync),
         beating: &(dyn Fn(f32) + Sync),
+        cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Heard> {
         let mut problems = Vec::new();
         let (tagged, searched) = (self.tagger.windows(), self.search.windows());
@@ -113,6 +114,7 @@ impl SoundModels {
             None,
             duration,
             hearing,
+            cancel,
             &mut |samples| {
                 total += samples.len();
                 tags.push(samples, &mut pending_tags);
@@ -132,13 +134,16 @@ impl SoundModels {
         let all: i64 = music.iter().map(|m| m.range.duration().0).sum();
         let mut done = 0;
         for m in music.iter_mut().filter(|_| pass.beats) {
+            if cancel() {
+                anyhow::bail!("cancelled");
+            }
             beating(done as f32 / all.max(1) as f32);
             done += m.range.duration().0;
             let stretch = TimeRange::new(
                 (m.range.start - MUSIC_MARGIN).max(Time::ZERO),
                 (m.range.end + MUSIC_MARGIN).min(end),
             );
-            match self.beats_of(path, stream, stretch) {
+            match self.beats_of(path, stream, stretch, cancel) {
                 Ok((beats, downbeats)) => {
                     // The tracker carries the beat on a little past where
                     // the music is.
@@ -170,9 +175,11 @@ impl SoundModels {
         path: &Path,
         stream: u32,
         stretch: TimeRange,
+        cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<(Vec<Time>, Vec<Time>)> {
         let (beats, downbeats) = self.beats.track(&mut |sink| {
-            ffmpeg::stream_audio(path, stream, SOUND_RATE, Some(stretch), None, &|_| {}, sink)
+            let range = Some(stretch);
+            ffmpeg::stream_audio(path, stream, SOUND_RATE, range, None, &|_| {}, cancel, sink)
         })?;
         let shift = |t: Vec<Time>| t.into_iter().map(|t| t + stretch.start).collect();
         Ok((shift(beats), shift(downbeats)))

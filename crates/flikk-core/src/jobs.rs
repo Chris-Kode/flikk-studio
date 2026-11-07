@@ -176,15 +176,29 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
     /// [`Self::jobs`] now, one queued never runs, and work pushed under
     /// `key` after is a new job. Whether there was one.
     pub fn cancel(&self, key: &K) -> bool {
+        self.cancel_where(|k| k == key) > 0
+    }
+
+    /// [`Self::cancel`] every job whose key `cancels` picks. How many there
+    /// were.
+    pub fn cancel_where(&self, mut cancels: impl FnMut(&K) -> bool) -> usize {
         let mut queue = lock(&self.shared.queue);
-        let Some(i) = queue.keys.iter().position(|(k, _, _)| k == key) else {
-            return false;
-        };
-        let (_, id, cancel) = queue.keys.remove(i);
-        cancel.store(true, Ordering::Relaxed);
-        queue.waiting.retain(|(waiting, _, _)| *waiting != id);
-        lock(&self.shared.jobs).retain(|j| j.id != id);
-        true
+        let mut ids = Vec::new();
+        queue.keys.retain(|(k, id, cancel)| {
+            let picked = cancels(k);
+            if picked {
+                cancel.store(true, Ordering::Relaxed);
+                ids.push(*id);
+            }
+            !picked
+        });
+        if !ids.is_empty() {
+            queue
+                .waiting
+                .retain(|(waiting, _, _)| !ids.contains(waiting));
+            lock(&self.shared.jobs).retain(|j| !ids.contains(&j.id));
+        }
+        ids.len()
     }
 
     /// Drop finished and failed jobs from [`Self::jobs`].

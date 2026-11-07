@@ -638,6 +638,10 @@ pub trait Stabilizer: Send + Sync {
         progress: &dyn Fn(f32),
         cancel: &AtomicBool,
     ) -> ServiceResult<Arc<CameraPath>>;
+    /// Stop measuring `item`'s path in the background, queued or running,
+    /// kept as not measured, so asking again starts afresh. For media that
+    /// left the project; [`Stabilizer::complete`] is not stopped by it.
+    fn cancel(&self, _item: &MediaItem) {}
     /// Measuring jobs, as the job queue lists them.
     fn jobs(&self) -> Vec<JobStatus>;
     /// Counts paths measured, so views know to draw again.

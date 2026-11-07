@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// `script`'s words with where each is said in the file at `path`.
 pub(crate) fn time(shared: &Shared, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
-    let audio = ffmpeg::extract_audio(path, 0, None, &|_| {})
+    let audio = ffmpeg::extract_audio(path, 0, None, &|_| {}, &|| false)
         .map_err(|e| ServiceError(format!("{e:#}")))?;
     if audio.is_empty() {
         return Err(ServiceError("The take has no sound.".into()));

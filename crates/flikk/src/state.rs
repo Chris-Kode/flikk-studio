@@ -451,13 +451,19 @@ impl EditorState {
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        // An import undone takes its media out.
+        let before = self.bus.project().media.clone();
         let result = self.bus.undo();
         self.finish(result, cx);
+        self.cancel_left(&before);
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        // A removal redone takes its media out.
+        let before = self.bus.project().media.clone();
         let result = self.bus.redo();
         self.finish(result, cx);
+        self.cancel_left(&before);
     }
 
     pub fn accept(
@@ -586,7 +592,13 @@ impl EditorState {
             "remove_media"
         };
         commands.extend(bins.map(|bins| Command::SetBins { bins }));
+        let project = self.bus.project();
+        let items: Vec<_> = media
+            .iter()
+            .filter_map(|m| project.media(*m).cloned())
+            .collect();
         if self.execute_batch(commands, label, cx).is_some() {
+            self.cancel_left(&items);
             self.selection.clips.retain(|c| !clips.contains(c));
             if self
                 .source
@@ -594,6 +606,33 @@ impl EditorState {
                 .is_some_and(|s| media.contains(&s.item().id))
             {
                 self.source = None;
+            }
+        }
+    }
+
+    /// Stop the background analysis and camera path measuring of those of
+    /// `items` that left the project, unless an item of the project or a
+    /// library sound still has the same file. One that comes back (an
+    /// undo) is asked for again as usual; renders measure for themselves.
+    fn cancel_left(&self, items: &[flikk_core::model::MediaItem]) {
+        let project = self.bus.project();
+        let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
+        let kept: HashSet<_> = project
+            .media
+            .iter()
+            .map(|m| &m.fingerprint)
+            .chain(sounds)
+            .flatten()
+            .collect();
+        let left = items
+            .iter()
+            .filter(|m| m.fingerprint.as_ref().is_some_and(|fp| !kept.contains(fp)));
+        for item in left {
+            if let Some(analysis) = &self.services.analysis {
+                analysis.cancel(item);
+            }
+            if let Some(stabilizer) = &self.services.stabilizer {
+                stabilizer.cancel(item);
             }
         }
     }
@@ -1079,6 +1118,7 @@ impl EditorState {
     /// Replace everything tied to the open project; engines stay. Undo
     /// history does not carry over.
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
+        let left = self.bus.project().media.clone();
         self.set_playing(false, cx);
         self.agent.cancel();
         self.agent.close_project(self.bus.project().id);
@@ -1086,6 +1126,8 @@ impl EditorState {
         self.chats = persistence::load_chats(loaded.project.id);
         self.chat = active_messages(&self.chats);
         self.bus = CommandBus::new(loaded.project);
+        // What the new project has too goes on.
+        self.cancel_left(&left);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.mark_generated_seen();

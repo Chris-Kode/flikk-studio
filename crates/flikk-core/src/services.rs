@@ -214,6 +214,10 @@ pub trait AnalysisService: Send + Sync {
     fn analyze_again(&self, item: &MediaItem) -> JobId {
         self.analyze(item)
     }
+    /// Stop analyzing `item`'s file, queued or running, keeping nothing of
+    /// it: as if it had not been asked for, so asking again starts afresh.
+    /// For media that left the project.
+    fn cancel(&self, _item: &MediaItem) {}
     fn jobs(&self) -> Vec<JobStatus>;
     /// Cached results, if analysis has run.
     fn analysis(&self, fingerprint: &Fingerprint) -> Option<Arc<Analysis>>;

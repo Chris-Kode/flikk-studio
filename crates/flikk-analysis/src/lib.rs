@@ -14,6 +14,11 @@
 //! those parts (speech, the sound pass, shot changes) and adds them to it.
 //! Results of another [`ANALYSIS_VERSION`] are not read.
 //!
+//! [`AnalysisService::cancel`] stops an item's jobs: one queued never runs,
+//! and one running stops at its next ffmpeg progress line or read, or
+//! before its next model step, keeping nothing (neither in memory nor on
+//! disk, nor as a failure), as if it had not been asked for.
+//!
 //! With a provider set for transcription ([`AnalysisConfig::speech`]) the
 //! speech steps are its: the item's audio goes to it as lossless FLAC and
 //! comes back as words with their times and voices, kept as it aligned
@@ -81,6 +86,9 @@ pub use subjects::LocalSubjects;
 /// Items analyzed at once. Each already keeps several cores busy, and the
 /// large models a lot of memory.
 const JOBS_AT_ONCE: usize = 1;
+
+/// What a cancelled job returns; it is not listed.
+const CANCELLED: &str = "cancelled";
 
 /// Highest sample rate of the audio a provider hears; above it, the audio
 /// is resampled. Speech has nothing up there.
@@ -396,6 +404,13 @@ impl AnalysisService for LocalAnalysis {
         *lock(&self.shared.wanted) = [None, None];
     }
 
+    fn cancel(&self, item: &MediaItem) {
+        // Every job for its file: each set of steps, again or not.
+        if let Some(fp) = &item.fingerprint {
+            self.queue.cancel_where(|(f, _, _)| f == fp);
+        }
+    }
+
     fn jobs(&self) -> Vec<JobStatus> {
         self.queue.jobs()
     }
@@ -432,7 +447,7 @@ impl AnalysisService for LocalAnalysis {
             return Ok(vad::complement(&[], duration.unwrap_or(Time::ZERO), min));
         }
         let stream = choose_stream(&self.shared, item, &AnalyzeOptions::default());
-        match ffmpeg::silences(&item.path, stream, min, duration, &|_| {}) {
+        match ffmpeg::silences(&item.path, stream, min, duration, &|_| {}, &|| false) {
             Err(e) if ffmpeg::is_missing_stream(&e) => {
                 Ok(vad::complement(&[], duration.unwrap_or(Time::ZERO), min))
             }
@@ -543,6 +558,11 @@ enum Step {
 }
 
 impl Progress {
+    /// Whether the job was cancelled: it stops, keeping nothing.
+    fn cancelled(&self) -> bool {
+        self.job.cancelled()
+    }
+
     /// Callback for `step` reporting its own 0..1; it does nothing for a
     /// step the job doesn't run.
     fn step(&self, step: Step) -> impl Fn(f32) + Send + Sync + 'static {
@@ -688,7 +708,8 @@ struct Failed {
 /// (or a stand-in: the energy VAD's speech, one speaker for all) and the
 /// rest goes on; such a result is kept in memory for this session, without
 /// the failed part among its steps, but only complete ones are written to
-/// disk.
+/// disk. Cancelled, it stops at the next step and keeps nothing: what a
+/// step that was cut short made is not a result.
 fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     let item = &task.item;
     let fp = &task.fingerprint;
@@ -770,6 +791,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     // This build cannot transcribe: keep the rest for this session, but
     // leave the disk cache for a build that can.
     let mut unpersisted = false;
+    let cancel = || job.cancelled();
 
     if audio_wanted {
         let audio = match ffmpeg::extract_audio(
@@ -777,6 +799,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
             stream,
             duration,
             &progress.step(Step::Audio),
+            &cancel,
         ) {
             Ok(audio) => Some(audio),
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => None,
@@ -787,6 +810,9 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                 None
             }
         };
+        if cancel() {
+            return Err(CANCELLED.into());
+        }
         if let Some(audio) = audio {
             let before = problems.len();
             let (levels, sound) = align::measure(&audio);
@@ -816,12 +842,18 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                     }
                 }
             } else if plan.speech {
+                if cancel() {
+                    return Err(CANCELLED.into());
+                }
                 let Voice { speech, stretches } =
                     listen(shared, &audio, &progress).unwrap_or_else(|e| {
                         problems.push(format!("voice activity: {e:#}"));
                         Voice::energy(&audio)
                     });
                 analysis.speech = speech;
+                if cancel() {
+                    return Err(CANCELLED.into());
+                }
                 if let Some(script) = script {
                     let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
                     let mut t = written(task, stream, script);
@@ -854,6 +886,9 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                         stretches.as_deref(),
                         &progress,
                     );
+                    if cancel() {
+                        return Err(CANCELLED.into());
+                    }
                     match transcript {
                         Ok(Some(mut t)) => {
                             // Edges measured on the audio only where the
@@ -870,10 +905,17 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                                     problems.push(format!("word alignment: {e:#}"));
                                 }
                             }
+                            if cancel() {
+                                return Err(CANCELLED.into());
+                            }
                             // After the aligner, so that a hole is where no
                             // word is.
-                            if let Err(e) = fill_holes(shared, &audio, &analysis.speech, &mut t) {
+                            let speech = &analysis.speech;
+                            if let Err(e) = fill_holes(shared, &audio, speech, &mut t, &cancel) {
                                 problems.push(format!("transcript: {e:#}"));
+                            }
+                            if cancel() {
+                                return Err(CANCELLED.into());
                             }
                             // After the aligner, so each word is heard
                             // where it is.
@@ -890,6 +932,9 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                         Err(e) => problems.push(format!("transcript: {e:#}")),
                     }
                 }
+            }
+            if cancel() {
+                return Err(CANCELLED.into());
             }
             failed.speech = problems.len() > before;
             drop(audio);
@@ -911,11 +956,15 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     }
 
     if video_wanted {
+        if cancel() {
+            return Err(CANCELLED.into());
+        }
         match ffmpeg::shot_changes(
             &item.path,
             shared.options.scene_threshold,
             duration,
             &progress.step(Step::Shots),
+            &cancel,
         ) {
             Ok(shots) => analysis.shot_changes = shots,
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => {}
@@ -926,6 +975,11 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         }
     }
 
+    // A step cut short failed for it: nothing here is kept, so asking
+    // again runs it all as if this job had not been.
+    if cancel() {
+        return Err(CANCELLED.into());
+    }
     analysis.version = ANALYSIS_VERSION;
     let mut covered = plan.covered(&have, &failed);
     if unpersisted {
@@ -1104,8 +1158,12 @@ fn transcribe_online(
         &upload,
         duration,
         &|f| step(f * 0.1),
+        &|| progress.cancelled(),
     )
     .and_then(|()| {
+        if progress.cancelled() {
+            anyhow::bail!(CANCELLED);
+        }
         let request = SpeechRequest {
             audio: &upload,
             language,
@@ -1210,6 +1268,7 @@ fn hear(
             pass,
             &progress.step(Step::Sounds),
             &progress.step(Step::Beats),
+            &|| progress.cancelled(),
         )
         .map_err(|e| (None, e))?;
     analysis.sounds = heard.sounds;
@@ -1642,13 +1701,15 @@ impl<'a> Shortened<'a> {
 /// Hear again, on its own, the `speech` no word of `transcript` was heard
 /// in, and add the words found there, aligned. Whisper now and then gives
 /// one sentence a segment that runs on over seconds of speech it skips, or
-/// takes the short last phrase of a stretch for silence.
+/// takes the short last phrase of a stretch for silence. Stops between
+/// holes once `cancel` says so.
 #[cfg(feature = "whisper")]
 fn fill_holes(
     shared: &Shared,
     audio: &[f32],
     speech: &[TimeRange],
     transcript: &mut Transcript,
+    cancel: &dyn Fn() -> bool,
 ) -> anyhow::Result<()> {
     let holes = vad::holes(speech, &transcript.words);
     if holes.is_empty() {
@@ -1659,6 +1720,9 @@ fn fill_holes(
     let language = Some(transcript.language.as_str()).filter(|l| *l != "und");
     let transcriber = shared.transcriber.get();
     for hole in holes {
+        if cancel() {
+            anyhow::bail!(CANCELLED);
+        }
         // The hole's audio alone: the aligner looks for words seconds
         // around where they are said, and around a hole is speech already
         // heard, where it would put the few words found.
@@ -1692,6 +1756,7 @@ fn fill_holes(
     _audio: &[f32],
     _speech: &[TimeRange],
     _transcript: &mut Transcript,
+    _cancel: &dyn Fn() -> bool,
 ) -> anyhow::Result<()> {
     Ok(())
 }
