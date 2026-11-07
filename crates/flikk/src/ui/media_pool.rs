@@ -2031,7 +2031,11 @@ impl Render for MediaPoolPanel {
                 this.import(paths.paths().to_vec(), this.bin, cx)
             }));
         let project = self.state.read(cx).bus.project();
-        let generating = self.state.read(cx).generating.clone();
+        // Rows of a project closed while they ran show with that project.
+        let generating: Vec<_> = (self.state.read(cx).generating.iter())
+            .filter(|g| g.project == project.id)
+            .cloned()
+            .collect();
         if project.media.is_empty() && project.bins.is_empty() && generating.is_empty() {
             return root.child(self.empty(cx));
         }

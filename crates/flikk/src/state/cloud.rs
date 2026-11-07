@@ -77,6 +77,8 @@ impl Check {
 #[derive(Clone, Debug)]
 pub struct Generating {
     pub id: u64,
+    /// The project it is made for.
+    pub project: flikk_core::ProjectId,
     pub request: GenerateRequest,
     /// Where it is, and how to stop it.
     pub task: GenerationTask,
@@ -345,8 +347,10 @@ impl EditorState {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
+        let owner = self.bus.project().id;
         self.generating.push(Generating {
             id,
+            project: owner,
             request: request.clone(),
             task: task.clone(),
             failed: None,
@@ -370,7 +374,11 @@ impl EditorState {
                 match result {
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
-                        this.add_generated(item, cx);
+                        if this.bus.project().id == owner {
+                            this.add_generated(item, cx);
+                        } else {
+                            this.keep_for(owner, item);
+                        }
                     }
                     Err(CloudError::Cancelled) => this.generating.retain(|g| g.id != id),
                     Err(e) => {
@@ -476,6 +484,52 @@ impl EditorState {
         self.finish(result, cx)?;
         self.analyze_generated(cx);
         Some(id)
+    }
+
+    /// Keep `item`, made for `project` after it was closed, for when it is
+    /// opened again.
+    pub(super) fn keep_for(&mut self, project: flikk_core::ProjectId, item: MediaItem) {
+        self.kept.push((project, item));
+    }
+
+    /// Add what was made for the project just opened while it was closed.
+    pub(super) fn add_kept(&mut self, cx: &mut Context<Self>) {
+        let open = self.bus.project().id;
+        let (ours, others) = std::mem::take(&mut self.kept)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(p, _)| *p == open);
+        self.kept = others;
+        let n = ours
+            .into_iter()
+            .filter_map(|(_, item)| self.add_generated(item, cx))
+            .count();
+        if n > 0 {
+            self.status = Some(match n {
+                1 => "Added 1 item made while the project was closed".into(),
+                n => format!("Added {n} items made while the project was closed"),
+            });
+        }
+    }
+
+    /// An approved generation finished after its project was closed: keep
+    /// what it made for that project, and tell the agent.
+    pub(super) fn keep_approved(
+        &mut self,
+        id: u64,
+        project: flikk_core::ProjectId,
+        item: MediaItem,
+        summary: &str,
+    ) -> ApprovalOutcome {
+        let name = approve::file_name(&item.path);
+        self.keep_for(project, item);
+        self.agent.report_outcome(
+            id,
+            format!(
+                "approved: {summary}; made {name}, but its project was closed meanwhile; it \
+                 goes into that project's media pool when it is opened again"
+            ),
+        );
+        ApprovalOutcome::Done(name)
     }
 
     /// Take what is in the pool now as looked at: a project just opened

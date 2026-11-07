@@ -82,6 +82,11 @@ impl AgentLink {
         self.host.close_project(project);
     }
 
+    /// What the agent made for projects closed before it finished.
+    pub fn take_orphans(&mut self) -> Vec<(flikk_core::ProjectId, flikk_core::model::MediaItem)> {
+        self.host.take_orphans()
+    }
+
     /// Take a request off the list once the user approved (and the caller
     /// performed it) or denied it.
     pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {

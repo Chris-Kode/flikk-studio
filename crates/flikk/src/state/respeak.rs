@@ -46,8 +46,10 @@ impl EditorState {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
+        let owner = self.bus.project().id;
         self.generating.push(Generating {
             id,
+            project: owner,
             request: respeak::request(&fix, &reading),
             task: task.clone(),
             failed: None,
@@ -61,6 +63,12 @@ impl EditorState {
             let result = made.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
+                    // Its project was closed: the words go into its pool,
+                    // to cut in by hand.
+                    Ok(item) if this.bus.project().id != owner => {
+                        this.generating.retain(|g| g.id != id);
+                        this.keep_for(owner, item);
+                    }
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
                         if let Some(media) = this.add_generated(item, cx) {

@@ -153,6 +153,9 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
+    /// What was made for a project closed before it was done, added to its
+    /// pool when it is opened again.
+    kept: Vec<(flikk_core::ProjectId, flikk_core::model::MediaItem)>,
     /// Generated items in the pool already looked at for analysis.
     generated_seen: HashSet<flikk_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
@@ -270,6 +273,7 @@ impl EditorState {
             providers: HashMap::new(),
             generating: Vec::new(),
             next_generation: 1,
+            kept: Vec::new(),
             generated_seen: HashSet::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
@@ -1044,6 +1048,7 @@ impl EditorState {
         self.check_offline();
         self.load_agent_memory();
         self.load_presets();
+        self.add_kept(cx);
         cx.notify();
     }
 
@@ -1140,6 +1145,9 @@ impl EditorState {
 
     fn pump_agent(&mut self, cx: &mut Context<Self>) {
         let events = self.agent.pump(&mut self.bus, &self.services);
+        for (project, item) in self.agent.take_orphans() {
+            self.keep_for(project, item);
+        }
         // A job the agent was allowed may have added what a provider made.
         self.analyze_generated(cx);
         if events.is_empty() {
@@ -1791,6 +1799,7 @@ impl EditorState {
             return;
         };
         let summary = pending.request.summary.clone();
+        let owner = self.bus.project().id;
         let mut settings = self.settings.clone();
         let started = approve::start(
             &pending.request,
@@ -1898,6 +1907,9 @@ impl EditorState {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
+                            Ok(made) if this.bus.project().id != owner => {
+                                this.keep_approved(id, owner, made.item, &summary)
+                            }
                             Ok(made) => this.place_respoken(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
@@ -1922,6 +1934,9 @@ impl EditorState {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
                         let outcome = match result {
+                            Ok(made) if this.bus.project().id != owner => {
+                                this.keep_approved(id, owner, made.item, &summary)
+                            }
                             Ok(made) => this.place_generated(id, made, cx),
                             Err(e) => {
                                 this.agent.report_failure(
