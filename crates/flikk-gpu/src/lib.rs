@@ -15,6 +15,8 @@
 //! their code, kind and parameter layout (compile errors too, so a broken
 //! shader is not recompiled every frame); Image parameters are cached by
 //! path and modification time; textures and buffers are pooled by size.
+//! All of these belong to one device ([`Gpu`]): when wgpu reports it lost,
+//! the next batch opens a new one with empty caches (see [`GpuFx::gpu`]).
 //! Layer compositing for the program frame lives in [`composite`].
 
 mod batch;
@@ -31,8 +33,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use wrap::Wrapped;
 
 /// Pixel format of uploads, of the last pass and of readbacks.
@@ -46,6 +49,9 @@ const MAX_POOLED: usize = 32;
 /// Stack of the thread programs compile on. naga's GLSL front end recurses
 /// deeply (past the 512 KiB of GPUI's background threads in debug builds).
 const COMPILE_STACK: usize = 16 << 20;
+/// Least time between two tries at reopening a lost device, so a GPU gone
+/// for good does not cost a full init every frame.
+const REOPEN_EVERY: Duration = Duration::from_secs(3);
 
 const VERTEX_WGSL: &str = r#"
 @vertex
@@ -57,6 +63,19 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 /// The wgpu engine. Cheap to share behind an `Arc`.
 pub struct GpuFx {
+    slot: Mutex<Slot>,
+}
+
+struct Slot {
+    /// `None` once the device was lost and could not be reopened yet.
+    gpu: Option<Arc<Gpu>>,
+    /// The last time a device was opened (or tried).
+    tried: Instant,
+}
+
+/// One wgpu device and everything made on it. A batch keeps the `Gpu` it
+/// started on, so its textures never reach a newer device's pool.
+struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     vertex: wgpu::ShaderModule,
@@ -67,6 +86,8 @@ pub struct GpuFx {
     max_size: u32,
     compositor: composite::Compositor,
     converter: batch::Converter,
+    /// Set by wgpu's device-lost callback (and when a wait finds it lost).
+    lost: Arc<AtomicBool>,
     state: Mutex<State>,
 }
 
@@ -91,6 +112,52 @@ impl GpuFx {
     /// Open the GPU. Fails when there is no adapter (no driver, headless
     /// without software Vulkan).
     pub fn new() -> anyhow::Result<Self> {
+        let gpu = Gpu::open()?;
+        Ok(Self {
+            slot: Mutex::new(Slot {
+                gpu: Some(Arc::new(gpu)),
+                tried: Instant::now(),
+            }),
+        })
+    }
+
+    /// The current device. A lost one is dropped (with its programs, pools
+    /// and buffers; batches in flight keep theirs until they end) and a new
+    /// one opened, at most every [`REOPEN_EVERY`]; until then this fails and
+    /// callers take the CPU path.
+    fn gpu(&self) -> ServiceResult<Arc<Gpu>> {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(gpu) = &slot.gpu {
+            if !gpu.is_lost() {
+                return Ok(gpu.clone());
+            }
+            slot.gpu = None;
+        }
+        if slot.tried.elapsed() < REOPEN_EVERY {
+            return Err(lost());
+        }
+        slot.tried = Instant::now();
+        match Gpu::open() {
+            Ok(gpu) => {
+                eprintln!("flikk-gpu: reopened the GPU device");
+                let gpu = Arc::new(gpu);
+                slot.gpu = Some(gpu.clone());
+                Ok(gpu)
+            }
+            Err(e) => {
+                eprintln!("flikk-gpu: could not reopen the GPU device: {e:#}");
+                Err(lost())
+            }
+        }
+    }
+}
+
+fn lost() -> ServiceError {
+    ServiceError("the GPU device was lost".into())
+}
+
+impl Gpu {
+    fn open() -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -109,6 +176,12 @@ impl GpuFx {
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
             eprintln!("flikk-gpu: {e}");
         }));
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            eprintln!("flikk-gpu: device lost ({reason:?}): {message}");
+            flag.store(true, Ordering::Release);
+        });
         let vertex = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flikk-gpu fullscreen"),
             source: wgpu::ShaderSource::Wgsl(VERTEX_WGSL.into()),
@@ -133,8 +206,35 @@ impl GpuFx {
             vertex,
             sampler,
             blank,
+            lost,
             state: Mutex::new(State::default()),
         })
+    }
+
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    /// Wait for `index` to finish. wgpu panics when the wait finds the
+    /// device lost; that is caught here and the device marked lost.
+    fn wait(&self, index: wgpu::SubmissionIndex) -> ServiceResult<()> {
+        if self.is_lost() {
+            return Err(lost());
+        }
+        let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            })
+        }));
+        match poll {
+            Ok(Ok(_)) if !self.is_lost() => Ok(()),
+            Ok(Err(e)) => Err(ServiceError::new(e)),
+            Ok(Ok(_)) | Err(_) => {
+                self.lost.store(true, Ordering::Release);
+                Err(lost())
+            }
+        }
     }
 
     /// The engine state, with the program cache trimmed (between calls, so
@@ -151,18 +251,29 @@ impl GpuFx {
     /// for the compiler, see [`COMPILE_STACK`]); its error otherwise.
     fn program(&self, state: &mut State, asset: &FxAsset) -> Result<u64, String> {
         let key = wrap::program_key(asset);
-        let compile = || {
-            std::thread::scope(|scope| {
-                std::thread::Builder::new()
-                    .name("flikk-gpu compile".into())
-                    .stack_size(COMPILE_STACK)
-                    .spawn_scoped(scope, || self.compile(asset))
-                    .map_err(|e| format!("could not start the shader compiler: {e}"))?
+        if let Some(cached) = state.programs.get(&key) {
+            return cached.as_ref().map(|_| key).map_err(Clone::clone);
+        }
+        // A compiler thread that could not start is not cached, nor is a
+        // failure on a lost device: neither is the shader's fault.
+        let compiled = std::thread::scope(|scope| {
+            let compiler = std::thread::Builder::new()
+                .name("flikk-gpu compile".into())
+                .stack_size(COMPILE_STACK)
+                .spawn_scoped(scope, || self.compile(asset))
+                .map_err(|e| format!("could not start the shader compiler: {e}"))?;
+            Ok::<_, String>(
+                compiler
                     .join()
-                    .unwrap_or_else(|_| Err("the shader compiler crashed".into()))
-            })
-        };
-        match state.programs.entry(key).or_insert_with(compile) {
+                    .unwrap_or_else(|_| Err("the shader compiler crashed".into())),
+            )
+        })?;
+        if let Err(e) = &compiled
+            && self.is_lost()
+        {
+            return Err(e.clone());
+        }
+        match state.programs.entry(key).or_insert(compiled) {
             Ok(_) => Ok(key),
             Err(e) => Err(e.clone()),
         }
@@ -518,14 +629,18 @@ fn upload(
 impl FxService for GpuFx {
     fn check(&self, asset: &FxAsset) -> ServiceResult<()> {
         asset.validate().map_err(ServiceError)?;
-        let mut state = self.lock();
-        self.program(&mut state, asset)
+        let gpu = self.gpu()?;
+        let mut state = gpu.lock();
+        gpu.program(&mut state, asset)
             .map(|_| ())
             .map_err(ServiceError)
     }
 
     fn batch(&self) -> Box<dyn FxBatch + '_> {
-        Box::new(Batch::new(self))
+        match self.gpu() {
+            Ok(gpu) => Box::new(Batch::new(gpu)),
+            Err(e) => Box::new(batch::Lost(e.0)),
+        }
     }
 
     /// Runs on the GPU from one upload to one readback; an empty chain
@@ -534,7 +649,7 @@ impl FxService for GpuFx {
         if chain.is_empty() {
             return Ok(frame.clone());
         }
-        let mut batch = Box::new(Batch::new(self));
+        let mut batch = self.batch();
         let input = batch.upload(frame)?;
         let output = batch.apply(input, chain)?;
         batch.finish(output)
@@ -543,14 +658,14 @@ impl FxService for GpuFx {
     /// Frames are expected to be the same size. If they differ, the output
     /// takes `to`'s size and `from` is stretched to fit.
     fn transition(&self, from: &Frame, to: &Frame, call: &FxCall<'_>) -> ServiceResult<Frame> {
-        let mut batch = Box::new(Batch::new(self));
+        let mut batch = self.batch();
         let (a, b) = (batch.upload(from)?, batch.upload(to)?);
         let output = batch.transition(a, b, call)?;
         batch.finish(output)
     }
 
     fn generate(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame> {
-        let mut batch = Box::new(Batch::new(self));
+        let mut batch = self.batch();
         let output = batch.generate(call, width, height)?;
         batch.finish(output)
     }
@@ -563,7 +678,7 @@ impl FxService for GpuFx {
         background: [u8; 4],
         layers: &[CompositeLayer<'_>],
     ) -> ServiceResult<Frame> {
-        let mut batch = Box::new(Batch::new(self));
+        let mut batch = self.batch();
         let mut placed = Vec::with_capacity(layers.len());
         for l in layers {
             placed.push((batch.upload(l.frame)?, l.placement));
