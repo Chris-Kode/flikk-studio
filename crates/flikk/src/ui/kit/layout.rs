@@ -190,12 +190,11 @@ impl<E: InteractiveElement + Styled + ParentElement + Element + 'static> RenderO
         .lock_scroll_axis()
         .child(content);
 
+        // No rubber band: gpui-kit's stretch keeps counting travel past the
+        // edge after it stops moving, so reversing a swipe that hit an end
+        // froze the content until all of that travel was undone.
         outer
-            .child(ScrollBounce::new(
-                (self.id.clone(), "bounce"),
-                &handle,
-                area,
-            ))
+            .child(ScrollBounce::new((self.id.clone(), "bounce"), &handle, area).enabled(false))
             .when(!vertical, |outer| {
                 outer.child(ScrollableMask::vertical_wheel(&handle))
             })
