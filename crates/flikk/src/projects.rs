@@ -47,7 +47,19 @@ enum Then {
 
 /// Ask for the new project's name, folder and sequence.
 pub fn new_project(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
-    crate::ui::project_settings::open_new(state, window, cx);
+    crate::ui::project_settings::open_new(state, None, None, window, cx);
+}
+
+/// New project with its name filled in as `name`; `on_cancel` runs when
+/// the dialog closes without Create.
+pub fn new_project_named(
+    state: &Entity<EditorState>,
+    name: Option<String>,
+    on_cancel: impl FnOnce(&mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    crate::ui::project_settings::open_new(state, name, Some(Box::new(on_cancel)), window, cx);
 }
 
 /// Change the open project's sequence.
