@@ -80,6 +80,8 @@ pub struct DeliverPanel {
     custom: [Entity<InputState>; 4],
     /// Sequence size the custom width and height were last filled from.
     sequence_size: (u32, u32),
+    /// The output the user chose; without one it follows the project name
+    /// in the default folder. Each render writes the first free name from it.
     output: Option<PathBuf>,
     loudness: bool,
     burn_captions: bool,
@@ -260,16 +262,18 @@ impl DeliverPanel {
         }
     }
 
-    /// The chosen output, or a free name in the default folder.
+    /// What Render writes next: the chosen output or the project's name in
+    /// the default folder, made free of files and of queued renders.
     fn output(&self, cx: &App) -> PathBuf {
-        self.output.clone().unwrap_or_else(|| {
+        let base = self.output.clone().unwrap_or_else(|| {
             let name = format!(
                 "{}.{}",
                 self.file_stem(cx),
                 self.presets[self.preset].extension()
             );
-            flikk_deliver::free_name(&default_dir().join(name))
-        })
+            default_dir().join(name)
+        });
+        free_output(&base, &self.queue)
     }
 
     fn settings(&self, cx: &App) -> Result<RenderSettings, String> {
@@ -344,17 +348,11 @@ impl DeliverPanel {
         };
         match self.queue.enqueue(request) {
             Ok(_) => {
-                // The next render gets a fresh name.
-                self.output = Some(flikk_deliver::free_name(&output));
+                // The next render gets a fresh name: the queue holds this one.
                 self.poll(cx);
                 cx.notify();
             }
-            Err(e) => {
-                if output.exists() {
-                    self.output = Some(flikk_deliver::free_name(&output));
-                }
-                self.set_status(format!("{e:#}"), cx);
-            }
+            Err(e) => self.set_status(format!("{e:#}"), cx),
         }
     }
 
@@ -1071,6 +1069,37 @@ fn khz(sample_rate: u32) -> String {
 /// A number with a typographic minus.
 fn minus(v: f32) -> String {
     v.to_string().replace('-', "\u{2212}")
+}
+
+/// `path` if free, else the first free `name (2).ext`, `name (3).ext`, …,
+/// like [`flikk_deliver::free_name`]; a render still in `queue` holds its
+/// output before the file exists.
+fn free_output(path: &Path, queue: &RenderQueue) -> PathBuf {
+    let queued: Vec<PathBuf> = queue
+        .jobs()
+        .into_iter()
+        .filter(|j| !j.state.is_finished())
+        .map(|j| j.output)
+        .collect();
+    let taken = |p: &Path| p.exists() || queued.iter().any(|q| q == p);
+    if !taken(path) {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    (2..)
+        .map(|n| {
+            let name = match &ext {
+                Some(ext) => format!("{stem} ({n}).{ext}"),
+                None => format!("{stem} ({n})"),
+            };
+            path.with_file_name(name)
+        })
+        .find(|p| !taken(p))
+        .expect("unbounded")
 }
 
 /// The output's folder, with the home folder as `~`.
