@@ -496,16 +496,25 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Select clips. A clip selection and a transition selection exclude
+    /// each other, whichever panel sets them.
     pub fn select_clips(&mut self, clips: Vec<flikk_core::ClipId>, cx: &mut Context<Self>) {
+        if !clips.is_empty() {
+            self.selected_transition = None;
+        }
         self.selection.clips = clips;
         cx.notify();
     }
 
+    /// Select a transition, which deselects the clips.
     pub fn select_transition(
         &mut self,
         transition: Option<(flikk_core::ClipId, flikk_core::command::Edge)>,
         cx: &mut Context<Self>,
     ) {
+        if transition.is_some() {
+            self.selection.clips.clear();
+        }
         self.selected_transition = transition;
         cx.notify();
     }
