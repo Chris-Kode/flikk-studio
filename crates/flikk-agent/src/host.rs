@@ -378,8 +378,17 @@ impl AgentHost {
     pub fn report_outcome(&mut self, id: u64, outcome: String, failed: bool) {
         let asked = self.asked.remove(&id);
         match self.held.remove(&id) {
-            Some((_, reply)) if failed => reply.result(bridge::ToolResult::error(outcome)),
-            Some((_, reply)) => reply.result(bridge::ToolResult::text(outcome)),
+            Some((origin, reply)) => {
+                // An external client's quiet time starts from the answer.
+                if let Origin::External(_) = origin {
+                    self.external.last_call = Some(Instant::now());
+                }
+                reply.result(if failed {
+                    bridge::ToolResult::error(outcome)
+                } else {
+                    bridge::ToolResult::text(outcome)
+                });
+            }
             // An external client's call that gave up waiting has nobody to
             // tell; the editor's own agent never asked.
             None => {
@@ -876,7 +885,10 @@ impl AgentHost {
         let tx = self.jobs_tx.clone();
         let (turn, project) = from;
         std::thread::spawn(move || {
-            let out = job();
+            // A job that panics still answers its call and counts as done,
+            // so its turn or the external set doesn't wait on it forever.
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                .unwrap_or_else(|_| JobDone::Done(Done::error("The tool failed unexpectedly.")));
             let _ = tx.send(JobResult {
                 origin,
                 turn,
@@ -1040,11 +1052,19 @@ impl AgentHost {
 
     /// Offer the external set for review once its clients are gone or quiet.
     fn maybe_close_external(&mut self, bus: &mut CommandBus) {
+        // A call waiting on the user's approval is still under way.
+        let waiting = self
+            .held
+            .values()
+            .any(|(o, _)| matches!(o, Origin::External(_)));
         let ext = &mut self.external;
         let Some(last) = ext.last_call else {
             return;
         };
-        if ext.jobs > 0 || (!ext.connections.is_empty() && last.elapsed() < EXTERNAL_IDLE) {
+        if ext.jobs > 0
+            || waiting
+            || (!ext.connections.is_empty() && last.elapsed() < EXTERNAL_IDLE)
+        {
             return;
         }
         ext.last_call = None;

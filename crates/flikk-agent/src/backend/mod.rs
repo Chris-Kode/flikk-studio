@@ -19,11 +19,15 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// How long the backend lets a `flikk` tool call run. A call that needs the
 /// user's approval stays open until they decide, and a generated voiceover
 /// takes a while after that.
 pub(crate) const TOOL_TIMEOUT_SECS: u64 = 60 * 60;
+
+/// How long a CLI gets to exit by itself once it reported the turn over.
+const EXIT_GRACE: Duration = Duration::from_secs(10);
 
 /// How the backend should start `flikk-mcp`.
 #[derive(Clone, Debug)]
@@ -96,6 +100,11 @@ pub trait Adapter: Send {
     /// Keep stdin open until the turn finishes (streaming input).
     fn hold_stdin(&self) -> bool;
     fn parse(&mut self, line: &str) -> Vec<BackendEvent>;
+    /// The last error the CLI reported in its stream, for a stream that
+    /// ends without [`BackendEvent::Finished`].
+    fn last_error(&mut self) -> Option<String> {
+        None
+    }
 }
 
 pub fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
@@ -167,30 +176,41 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
         .spawn(move || {
             let finished = read_events(&mut *adapter, stdout, &mut stdin, &tx);
             drop(stdin);
-            // Poll so `kill` can take the lock meanwhile.
+            // Poll so `kill` can take the lock meanwhile. A CLI that said
+            // the turn is over but doesn't exit is killed after a grace.
+            let grace = Instant::now() + EXIT_GRACE;
             let status = loop {
-                match waiter.lock().unwrap().as_mut().map(|c| c.try_wait()) {
-                    Some(Ok(None)) => {}
-                    Some(Ok(Some(s))) => break Some(Ok(s)),
-                    Some(Err(e)) => break Some(Err(e)),
-                    None => break None,
+                let polled = {
+                    let mut guard = waiter.lock().unwrap();
+                    // Only this thread takes the child, once it exited.
+                    let child = guard.as_mut().expect("taken after the loop");
+                    if finished && Instant::now() >= grace {
+                        let _ = child.kill();
+                    }
+                    child.try_wait()
+                };
+                match polled {
+                    Ok(None) => {}
+                    Ok(Some(s)) => break Ok(s),
+                    Err(e) => break Err(e),
                 }
-                thread::sleep(std::time::Duration::from_millis(25));
+                thread::sleep(Duration::from_millis(25));
             };
             if !finished {
                 // Give the stderr reader a moment to finish.
-                thread::sleep(std::time::Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 let tail: Vec<_> = tail.lock().unwrap().iter().cloned().collect();
                 let error = match status {
-                    Some(Ok(s)) if s.success() => None,
-                    Some(Ok(s)) => Some(if tail.is_empty() {
+                    Ok(s) if s.success() => None,
+                    Ok(s) => Some(if tail.is_empty() {
                         format!("{} exited with {s}", adapter.kind().label())
                     } else {
                         tail.join("\n")
                     }),
-                    Some(Err(e)) => Some(e.to_string()),
-                    None => None,
+                    Err(e) => Some(e.to_string()),
                 };
+                // What the CLI itself said went wrong explains it best.
+                let error = adapter.last_error().or(error);
                 let _ = tx.send(BackendEvent::Finished {
                     error: error.or(Some("The agent stopped before finishing".into())),
                 });

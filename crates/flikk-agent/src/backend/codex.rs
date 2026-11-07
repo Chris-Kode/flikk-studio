@@ -204,6 +204,10 @@ impl Adapter for Codex {
         out.extend(self.track_calls(&v));
         out
     }
+
+    fn last_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
 }
 
 impl Codex {
@@ -220,7 +224,7 @@ impl Codex {
             "item.completed" => self.open_calls.remove(id),
             _ => false,
         };
-        changed.then(|| BackendEvent::OpenCalls(self.open_calls.len()))
+        changed.then_some(BackendEvent::OpenCalls(self.open_calls.len()))
     }
 
     fn parse_value(&mut self, v: &Value) -> Vec<BackendEvent> {
