@@ -804,7 +804,7 @@ impl EditorState {
         });
         let context = self.context();
         self.agent.send(text, context, &self.settings);
-        self.settled.clear();
+        self.clear_settled();
         self.save_chat();
         cx.notify();
     }
@@ -2045,8 +2045,23 @@ impl EditorState {
         };
         let editor = self.context();
         self.agent.send(message, editor, &self.settings);
-        self.settled.clear();
+        self.clear_settled();
         self.save_chat();
         cx.notify();
+    }
+
+    /// The user's next message clears the requests they decided, except
+    /// those still being carried out: their card stays to show how they
+    /// end.
+    fn clear_settled(&mut self) {
+        let queue = &self.render_queue;
+        self.settled.retain(|(_, outcome)| match outcome {
+            ApprovalOutcome::Working => true,
+            ApprovalOutcome::Rendering { job, .. } => queue
+                .jobs()
+                .iter()
+                .any(|j| j.id == *job && !j.state.is_finished()),
+            _ => false,
+        });
     }
 }
