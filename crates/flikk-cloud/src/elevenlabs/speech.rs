@@ -7,7 +7,7 @@
 //! so its delivery fits; a model that refuses them reads without.
 
 use super::{FORMATS, cost, write_audio};
-use flikk_core::cloud::{self, CloudError, CloudResult, GenerateRequest};
+use flikk_core::cloud::{self, CloudError, CloudResult, GenerateRequest, GenerationTask};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,7 @@ pub fn run(
     model: &str,
     request: &GenerateRequest,
     stem: &Path,
+    task: &GenerationTask,
 ) -> CloudResult<(PathBuf, Option<u64>)> {
     let GenerateRequest::Voiceover {
         text,
@@ -53,13 +54,13 @@ pub fn run(
         body["previous_text"] = json!(c.previous.trim());
         body["next_text"] = json!(c.next.trim());
     }
-    let (reply, format) = match FORMATS.post(&endpoint, &OUTPUT, key, &body) {
+    let (reply, format) = match FORMATS.post(&endpoint, &OUTPUT, key, &body, task) {
         Err(CloudError::Failed(message)) if around.is_some() && names_context(&message) => {
             if let Some(fields) = body.as_object_mut() {
                 fields.remove("previous_text");
                 fields.remove("next_text");
             }
-            FORMATS.post(&endpoint, &OUTPUT, key, &body)?
+            FORMATS.post(&endpoint, &OUTPUT, key, &body, task)?
         }
         result => result?,
     };

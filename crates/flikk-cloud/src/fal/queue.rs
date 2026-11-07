@@ -45,7 +45,13 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
     let headers = [("authorization", auth.as_str())];
     task.check()?;
     // Not retried on a server error: it may have been taken, and charged.
-    let reply = http::post_json(&format!("{QUEUE}/{endpoint}"), &headers, input, false)?;
+    let reply = http::post_json(
+        &format!("{QUEUE}/{endpoint}"),
+        &headers,
+        input,
+        false,
+        Some(task),
+    )?;
     if !reply.ok() {
         return Err(error(&reply));
     }
@@ -95,13 +101,18 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
                 lately(&last_failure, failures)
             )));
         }
-        let status = match http::look(&status_url, &headers, started.elapsed() < FRESH) {
+        // A stop while a look waits to ask again is acted on at once.
+        let stop = stop_from
+            .is_some_and(|at| Instant::now() >= at)
+            .then_some(task);
+        let status = match http::look(&status_url, &headers, started.elapsed() < FRESH, stop) {
             http::Look::Answer(status) => status,
             http::Look::Again(why) => {
                 failures += 1;
                 last_failure = why;
                 continue;
             }
+            http::Look::Stopped => continue,
             // Gone, after fal said it would stop it: stopped.
             http::Look::Refused(_) if stopping.is_some() => return Err(CloudError::Cancelled),
             http::Look::Refused(reply) => return Err(error(&reply)),
@@ -166,7 +177,7 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
     let made = Instant::now();
     let mut failures = 0;
     loop {
-        match http::look(&response_url, &headers, made.elapsed() < FRESH) {
+        match http::look(&response_url, &headers, made.elapsed() < FRESH, None) {
             http::Look::Answer(result) => return Ok(result),
             http::Look::Refused(reply) => return Err(error(&reply)),
             http::Look::Again(why) if made.elapsed() > RESULT_PATIENCE => {
@@ -174,7 +185,7 @@ pub fn run(key: &str, endpoint: &str, input: &Value, task: &GenerationTask) -> C
                     "{NAME} made it but did not hand it over (request {id}): {why}"
                 )));
             }
-            http::Look::Again(_) => {
+            http::Look::Again(_) | http::Look::Stopped => {
                 failures += 1;
                 std::thread::sleep(http::backoff(POLL, failures));
             }

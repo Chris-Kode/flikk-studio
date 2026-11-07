@@ -124,12 +124,12 @@ impl Api for ElevenLabs {
         model: &str,
         request: &GenerateRequest,
         stem: &Path,
-        _task: &GenerationTask,
+        task: &GenerationTask,
     ) -> CloudResult<(PathBuf, Option<u64>)> {
         match request {
-            GenerateRequest::Music { .. } => music::run(key, model, request, stem),
-            GenerateRequest::SoundEffect { .. } => sound::run(key, model, request, stem),
-            GenerateRequest::Voiceover { .. } => speech::run(key, model, request, stem),
+            GenerateRequest::Music { .. } => music::run(key, model, request, stem, task),
+            GenerateRequest::SoundEffect { .. } => sound::run(key, model, request, stem, task),
+            GenerateRequest::Voiceover { .. } => speech::run(key, model, request, stem, task),
             GenerateRequest::Video { .. } => Err(CloudError::Unavailable(format!(
                 "{NAME} doesn't make video"
             ))),
@@ -273,13 +273,15 @@ impl Formats {
 
     /// POST `body` to `endpoint` with each of `formats` (best first, none
     /// refused before) until one is allowed; the reply and the format
-    /// used. The last format is always tried.
+    /// used. The last format is always tried. [`CloudError::Cancelled`]
+    /// when `task` is stopped while a request waits to be tried again.
     fn post(
         &self,
         endpoint: &str,
         formats: &[&'static str],
         key: &str,
         body: &Value,
+        task: &GenerationTask,
     ) -> CloudResult<(Reply, &'static str)> {
         let last = formats.len() - 1;
         for (i, &format) in formats.iter().enumerate() {
@@ -287,7 +289,7 @@ impl Formats {
                 continue;
             }
             let url = format!("{API}{endpoint}?output_format={format}");
-            let reply = http::post_json(&url, &[("xi-api-key", key)], body, false)?;
+            let reply = http::post_json(&url, &[("xi-api-key", key)], body, false, Some(task))?;
             if i < last && format_refused(&reply) {
                 crate::lock(&self.refused).push(format);
                 continue;

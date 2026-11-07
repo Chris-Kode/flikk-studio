@@ -2,7 +2,7 @@
 //! description, optionally made to loop.
 
 use super::{FORMATS, cost, write_audio};
-use flikk_core::cloud::{CloudResult, GenerateRequest};
+use flikk_core::cloud::{CloudResult, GenerateRequest, GenerationTask};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,7 @@ pub fn run(
     model: &str,
     request: &GenerateRequest,
     stem: &Path,
+    task: &GenerationTask,
 ) -> CloudResult<(PathBuf, Option<u64>)> {
     let GenerateRequest::SoundEffect {
         prompt,
@@ -35,7 +36,7 @@ pub fn run(
         body["duration_seconds"] = json!(length.as_secs_f64().clamp(SECONDS.0, SECONDS.1));
     }
     let formats: &[&'static str] = if *looping { &OUTPUT_LOOPING } else { &OUTPUT };
-    let (reply, format) = FORMATS.post("/v1/sound-generation", formats, key, &body)?;
+    let (reply, format) = FORMATS.post("/v1/sound-generation", formats, key, &body, task)?;
     let path = write_audio(stem, format, &reply.body)?;
     Ok((path, cost(&reply)))
 }

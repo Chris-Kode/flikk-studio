@@ -74,11 +74,11 @@ pub fn run(
                 VideoMode::Text => models::H3_TEXT,
                 VideoMode::Image => {
                     if let Some(frame) = first_frame {
-                        put("image", json!(files::url(key, frame)?));
+                        put("image", json!(files::url(key, frame, task)?));
                     }
                     task.check()?;
                     if let Some(frame) = last_frame {
-                        put("last_frame_image", json!(files::url(key, frame)?));
+                        put("last_frame_image", json!(files::url(key, frame, task)?));
                     }
                     models::H3_IMAGE
                 }
@@ -111,7 +111,7 @@ pub fn run(
                     ] {
                         for reference in references.iter().filter(|r| r.kind == kind) {
                             task.check()?;
-                            let url = files::url(key, &reference.path)?;
+                            let url = files::url(key, &reference.path, task)?;
                             list.push(json!({ "type": word, "url": url }));
                         }
                     }
@@ -135,7 +135,7 @@ pub fn run(
                 put("duration_s", json!(secs));
             }
             if let Some(frame) = first_frame {
-                put("image", json!(files::url(key, frame)?));
+                put("image", json!(files::url(key, frame, task)?));
             }
             models::V25_IMAGE
         }
@@ -156,7 +156,7 @@ pub fn run(
             let mut images = Vec::new();
             for frame in first_frame.iter().chain(last_frame) {
                 task.check()?;
-                images.push(json!(files::url(key, frame)?));
+                images.push(json!(files::url(key, frame, task)?));
             }
             put("images", Value::Array(images));
             models::KEYFRAMES
@@ -249,7 +249,7 @@ fn hosted_input(
             let mut urls = Vec::new();
             for frame in first_frame.iter().chain(last_frame) {
                 task.check()?;
-                urls.push(files::url(key, frame)?);
+                urls.push(files::url(key, frame, task)?);
             }
             match &hosted.frames {
                 Frames::Fields(start, end) => {
@@ -293,7 +293,7 @@ fn hosted_input(
                 let mut urls = Vec::new();
                 for reference in references.iter().filter(|r| r.kind == kind) {
                     task.check()?;
-                    urls.push(Value::String(files::url(key, &reference.path)?));
+                    urls.push(Value::String(files::url(key, &reference.path, task)?));
                 }
                 if urls.is_empty() {
                     continue;

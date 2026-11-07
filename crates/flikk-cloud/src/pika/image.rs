@@ -82,7 +82,7 @@ pub fn run(
         let mut urls = Vec::new();
         for path in references {
             task.check()?;
-            urls.push(Value::String(files::url(key, path)?));
+            urls.push(Value::String(files::url(key, path, task)?));
         }
         input.insert("image_urls".into(), Value::Array(urls));
     }

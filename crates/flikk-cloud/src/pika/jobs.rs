@@ -29,7 +29,13 @@ pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> Cloud
     let headers = [("x-api-key", key)];
     task.check()?;
     // Not retried on a server error: it may have been taken, and charged.
-    let reply = http::post_json(&format!("{BASE}/v1/media/{path}"), &headers, input, false)?;
+    let reply = http::post_json(
+        &format!("{BASE}/v1/media/{path}"),
+        &headers,
+        input,
+        false,
+        Some(task),
+    )?;
     if !reply.ok() {
         return Err(error(&reply));
     }
@@ -80,7 +86,8 @@ pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> Cloud
             )));
         }
         std::thread::sleep(http::backoff(POLL, failures));
-        match http::look(&status_url, &headers, started.elapsed() < FRESH) {
+        // Taken: it is made and kept, whatever the task says.
+        match http::look(&status_url, &headers, started.elapsed() < FRESH, None) {
             http::Look::Answer(answer) => {
                 failures = 0;
                 job = answer;
@@ -90,6 +97,7 @@ pub fn run(key: &str, path: &str, input: &Value, task: &GenerationTask) -> Cloud
                 last_failure = why;
             }
             http::Look::Refused(reply) => return Err(error(&reply)),
+            http::Look::Stopped => {}
         }
     }
 }

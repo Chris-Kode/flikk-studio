@@ -99,11 +99,14 @@ pub fn run(
         VideoMode::Text => {}
         VideoMode::Image => {
             if let Some(frame) = first_frame {
-                input.insert(model.start_field.into(), json!(files::url(key, frame)?));
+                input.insert(
+                    model.start_field.into(),
+                    json!(files::url(key, frame, task)?),
+                );
             }
             task.check()?;
             if let Some(frame) = last_frame {
-                input.insert("end_image_url".into(), json!(files::url(key, frame)?));
+                input.insert("end_image_url".into(), json!(files::url(key, frame, task)?));
             }
         }
         VideoMode::Reference => {
@@ -118,7 +121,7 @@ pub fn run(
                 let mut urls = Vec::new();
                 for reference in references.iter().filter(|r| r.kind == kind) {
                     task.check()?;
-                    urls.push(Value::String(files::url(key, &reference.path)?));
+                    urls.push(Value::String(files::url(key, &reference.path, task)?));
                 }
                 if urls.is_empty() {
                     continue;

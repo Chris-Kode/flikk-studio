@@ -29,7 +29,7 @@ pub fn design(key: &str, design: &VoiceDesign) -> CloudResult<Designed> {
         None => body["auto_generate_text"] = json!(true),
     }
     let url = format!("{API}/v1/text-to-voice/design?output_format={FORMAT}");
-    let reply = http::post_json(&url, &[("xi-api-key", key)], &body, false)?;
+    let reply = http::post_json(&url, &[("xi-api-key", key)], &body, false, None)?;
     if !reply.ok() {
         return Err(error(&reply));
     }
@@ -85,6 +85,7 @@ pub fn save(
         &[("xi-api-key", key)],
         &body,
         false,
+        None,
     )?;
     if !reply.ok() {
         return Err(error(&reply));

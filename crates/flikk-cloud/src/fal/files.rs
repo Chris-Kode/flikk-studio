@@ -6,7 +6,7 @@
 use super::{NAME, auth, error};
 use crate::http;
 use base64::Engine as _;
-use flikk_core::cloud::{CloudError, CloudResult};
+use flikk_core::cloud::{CloudError, CloudResult, GenerationTask};
 use serde_json::json;
 use std::path::Path;
 
@@ -15,8 +15,9 @@ const INITIATE: &str = "https://rest.alpha.fal.ai/storage/upload/initiate?storag
 /// Biggest file sent inline when the storage won't take it.
 const INLINE: u64 = 8 << 20;
 
-/// A URL fal can read `path` from.
-pub fn url(key: &str, path: &Path) -> CloudResult<String> {
+/// A URL fal can read `path` from; [`CloudError::Cancelled`] when `task`
+/// is stopped while an upload waits to be tried again.
+pub fn url(key: &str, path: &Path, task: &GenerationTask) -> CloudResult<String> {
     let mime = http::media_mime(path);
     let name = path
         .file_name()
@@ -28,12 +29,13 @@ pub fn url(key: &str, path: &Path) -> CloudResult<String> {
         &[("authorization", &auth)],
         &json!({ "content_type": mime, "file_name": name }),
         true,
+        Some(task),
     )?;
     if reply.ok() {
         let json = reply.json()?;
         if let (Some(upload), Some(file)) = (json["upload_url"].as_str(), json["file_url"].as_str())
         {
-            let put = http::put_file(upload, path, &[("content-type", mime)])?;
+            let put = http::put_file(upload, path, &[("content-type", mime)], Some(task))?;
             if put.ok() {
                 return Ok(file.to_owned());
             }
