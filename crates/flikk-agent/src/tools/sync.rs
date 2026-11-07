@@ -96,7 +96,7 @@ fn finish(
     command: Option<flikk_core::command::Command>,
     reason: String,
     excerpts: Vec<String>,
-    since: u64,
+    since: flikk_core::bus::Since,
 ) -> JobDone {
     match command {
         Some(c) => JobDone::Propose {

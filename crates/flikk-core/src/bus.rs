@@ -118,6 +118,15 @@ pub enum Outcome {
     },
 }
 
+/// Where a view was seen, for a job that works on a snapshot of it: the
+/// bus version, which the user's edits are counted in, and the proposals
+/// count, which the change items are stamped with (`proposed_at`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Since {
+    pub version: u64,
+    pub proposals: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AcceptReport {
     pub accepted: Vec<ChangeItemId>,
@@ -138,6 +147,9 @@ pub struct CommandBus {
     chat: Option<String>,
     /// Counts resolutions, so the latest resolved sets are the ones kept.
     resolutions: u64,
+    /// Counts proposed items. Versions only move on commits, so this is
+    /// what orders proposals.
+    proposals: u64,
 }
 
 impl CommandBus {
@@ -151,6 +163,7 @@ impl CommandBus {
             user_touched: Vec::new(),
             chat: None,
             resolutions: 0,
+            proposals: 0,
         }
     }
 
@@ -234,6 +247,15 @@ impl CommandBus {
     pub fn view_version(&self, author: &Author) -> u64 {
         self.open_draft(author)
             .map_or(self.version, |s| s.base_version)
+    }
+
+    /// [`Self::view_version`] with the proposals [`Self::view_for`] holds,
+    /// for [`Self::execute_since`].
+    pub fn view_since(&self, author: &Author) -> Since {
+        Since {
+            version: self.view_version(author),
+            proposals: self.proposals,
+        }
     }
 
     fn open_draft(&self, author: &Author) -> Option<&ChangeSet> {
@@ -374,6 +396,8 @@ impl CommandBus {
                 }
                 item.base_version = self.version;
                 item.accepted_at = None;
+                // Like `base_version`: as if all were proposed now.
+                item.proposed_at = self.proposals;
             }
             rebuild(&mut set, &self.project, &self.user_touched, self.version);
             restored.insert(saved, set.id);
@@ -408,29 +432,50 @@ impl CommandBus {
             return self.apply_user(vec![command], label);
         }
         match self.check(&author, command.category())? {
-            Permission::Propose => self.propose(command, author, reason, None),
+            Permission::Propose => {
+                let call = self.proposals;
+                self.propose(command, author, reason, None, call)
+            }
             _ => Err(CoreError::PermissionDenied(command.category())),
         }
     }
 
-    /// Like [`Self::execute`] for a non-user author, for a command worked
-    /// out on the project as it was at version `since` (a job's snapshot,
-    /// see [`Self::view_version`]): the user's edits since then to what the
-    /// command changes conflict with it, as if it had been proposed then.
+    /// Like [`Self::execute`] for a non-user author, for one tool call's
+    /// commands worked out on the project as it was seen at `since` (a
+    /// job's snapshot, see [`Self::view_since`]): the user's edits since
+    /// then to what a command changes conflict with it, as if it had been
+    /// proposed then. So does another of the author's proposals made since
+    /// to the same things, not one of this call's. Stops at the first
+    /// command that fails.
     pub fn execute_since(
         &mut self,
-        command: Command,
+        commands: Vec<Command>,
         author: Author,
         reason: impl Into<String>,
-        since: u64,
-    ) -> Result<Outcome> {
-        if author.is_user() {
-            return self.execute(command, author, reason);
+        since: Since,
+    ) -> Vec<Result<Outcome>> {
+        let reason = reason.into();
+        let call = self.proposals;
+        let mut outcomes = Vec::new();
+        for command in commands {
+            let outcome = if author.is_user() {
+                self.execute(command, author.clone(), reason.clone())
+            } else {
+                match self.check(&author, command.category()) {
+                    Ok(Permission::Propose) => {
+                        self.propose(command, author.clone(), reason.clone(), Some(since), call)
+                    }
+                    Ok(_) => Err(CoreError::PermissionDenied(command.category())),
+                    Err(e) => Err(e),
+                }
+            };
+            let failed = outcome.is_err();
+            outcomes.push(outcome);
+            if failed {
+                break;
+            }
         }
-        match self.check(&author, command.category())? {
-            Permission::Propose => self.propose(command, author, reason.into(), Some(since)),
-            _ => Err(CoreError::PermissionDenied(command.category())),
-        }
+        outcomes
     }
 
     /// Several user commands as one undo step (e.g. "remove all silences").
@@ -479,31 +524,33 @@ impl CommandBus {
         Ok(Outcome::Applied { warnings })
     }
 
+    /// Propose `command` into `author`'s open set. `call` is the proposals
+    /// count before the tool call it is part of began.
     fn propose(
         &mut self,
         command: Command,
         author: Author,
         reason: String,
-        since: Option<u64>,
+        since: Option<Since>,
+        call: u64,
     ) -> Result<Outcome> {
         let version = self.version;
-        let project = &self.project;
         let chat = if author.is_agent() {
             self.chat.clone()
         } else {
             None
         };
-        let set = match self
+        let ix = match self
             .change_sets
-            .iter_mut()
+            .iter()
             .position(|s| s.author == author && s.state == ChangeSetState::Open)
         {
-            Some(i) => &mut self.change_sets[i],
+            Some(i) => i,
             None => {
                 self.change_sets.push(ChangeSet {
                     id: ChangeSetId::new(),
                     title: reason.clone(),
-                    author,
+                    author: author.clone(),
                     chat,
                     state: ChangeSetState::Open,
                     items: Vec::new(),
@@ -511,9 +558,10 @@ impl CommandBus {
                     draft: None,
                     resolved_at: 0,
                 });
-                self.change_sets.last_mut().unwrap()
+                self.change_sets.len() - 1
             }
         };
+        let set = &mut self.change_sets[ix];
         // A set with no items yet (e.g. its first command failed to plan)
         // must not keep planning against a snapshot older than the user's
         // latest edits.
@@ -521,20 +569,44 @@ impl CommandBus {
             set.draft = None;
             set.base_version = version;
         }
-        let draft = set.draft.get_or_insert_with(|| project.clone());
-        let Plan { ops, warnings } = command.plan(draft)?;
-        apply_all(draft, &ops)?;
+        let draft = set.draft.get_or_insert_with(|| self.project.clone());
+        let Plan { ops, mut warnings } = command.plan(draft)?;
+        // Worked out before another proposal to the same things, it would
+        // undo that one in the draft: the earlier one stays.
+        let overwrites = since.and_then(|s| self.proposed_since(&author, s, call, &ops));
+        let set = &mut self.change_sets[ix];
+        let state = match overwrites {
+            Some(target) => {
+                let what = match target {
+                    Target::Clip(_) => "this clip",
+                    Target::Track(_) | Target::TrackClips(_) => "this track",
+                    _ => "this",
+                };
+                warnings = vec![Warning::NeedsConfirmation {
+                    message: format!(
+                        "Another change to {what} was proposed while this was worked out; ask again"
+                    ),
+                }];
+                ItemState::Conflicted
+            }
+            None => {
+                apply_all(set.draft.as_mut().expect("made above"), &ops)?;
+                ItemState::Pending
+            }
+        };
+        self.proposals += 1;
         let item = ChangeItem {
             id: ChangeItemId::new(),
             command,
             reason,
             ops,
             warnings: warnings.clone(),
-            state: ItemState::Pending,
+            state,
             // Planned on the draft, but from what the project was at
             // `since`: edits after either conflict.
-            base_version: since.map_or(set.base_version, |v| v.min(set.base_version)),
+            base_version: since.map_or(set.base_version, |s| s.version.min(set.base_version)),
             accepted_at: None,
+            proposed_at: self.proposals,
         };
         let item_id = item.id;
         set.items.push(item);
@@ -543,6 +615,29 @@ impl CommandBus {
             item: item_id,
             warnings,
         })
+    }
+
+    /// What `ops` change that one of `author`'s pending items, proposed
+    /// after `since` and before the tool call that began at `call`, changes
+    /// too; `None` when nothing.
+    fn proposed_since(
+        &self,
+        author: &Author,
+        since: Since,
+        call: u64,
+        ops: &[Op],
+    ) -> Option<Target> {
+        let theirs: Vec<Target> = self
+            .change_sets
+            .iter()
+            .filter(|s| &s.author == author && s.state != ChangeSetState::Resolved)
+            .flat_map(ChangeSet::pending_items)
+            .filter(|i| i.proposed_at > since.proposals && i.proposed_at <= call)
+            .flat_map(|i| touches(&i.ops))
+            .collect();
+        ops.iter()
+            .flat_map(Op::targets)
+            .find(|t| theirs.contains(t))
     }
 
     fn open_set(&self, author: &Author) -> Option<&ChangeSet> {
@@ -772,17 +867,22 @@ impl CommandBus {
         self.version += 1;
         if by_user {
             let v = self.version;
-            self.user_touched.extend(
-                ops.iter()
-                    .flat_map(|op| {
-                        op.targets()
-                            .into_iter()
-                            .chain(op.clip_track().map(Target::TrackClips))
-                    })
-                    .map(|t| (v, t)),
-            );
+            self.user_touched
+                .extend(touches(ops).into_iter().map(|t| (v, t)));
         }
     }
+}
+
+/// What `ops` change, as conflicts count it: their targets, and which
+/// clips the tracks of the clips they change hold.
+fn touches(ops: &[Op]) -> Vec<Target> {
+    ops.iter()
+        .flat_map(|op| {
+            op.targets()
+                .into_iter()
+                .chain(op.clip_track().map(Target::TrackClips))
+        })
+        .collect()
 }
 
 /// Nothing in `set` is left to review.

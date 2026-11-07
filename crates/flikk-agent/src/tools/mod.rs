@@ -35,7 +35,8 @@ pub use catalog::{ToolSpec, catalog};
 use crate::args::{Args, ToolError};
 use crate::bridge::ToolResult;
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
-use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission};
+use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission, Since};
+use flikk_core::changeset::{ChangeSetState, ItemState};
 use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
 use flikk_core::memory::{Recipe, SourceFact, StyleRule};
@@ -131,10 +132,10 @@ impl ToolCtx<'_> {
         self.role
     }
 
-    /// The bus version [`Self::project`] is at: a job working on a snapshot
-    /// of it hands this back with its commands ([`JobDone::Propose`]).
-    pub fn version(&self) -> u64 {
-        self.bus.view_version(&self.author)
+    /// Where [`Self::project`] is at: a job working on a snapshot of it
+    /// hands this back with its commands ([`JobDone::Propose`]).
+    pub fn version(&self) -> Since {
+        self.bus.view_since(&self.author)
     }
 }
 
@@ -202,8 +203,9 @@ pub enum JobDone {
         excerpts: Vec<String>,
         /// [`ToolCtx::version`] when the job took its snapshot. The commands
         /// set whole values worked out on it, so they conflict with the
-        /// user's edits since to what they change instead of undoing them.
-        since: u64,
+        /// user's edits, and the agent's other proposals, since to what they
+        /// change instead of undoing them.
+        since: Since,
         /// For a change small enough to make again on the project as it is
         /// now (one mask of a clip's list), keeping what changed meanwhile;
         /// proposed then as a fresh change. If it gives `None`, `commands`
@@ -437,15 +439,15 @@ pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done 
     propose_from(ctx, commands, reason, None)
 }
 
-/// Propose what a job worked out on a snapshot taken at version `since`
+/// Propose what a job worked out on a snapshot taken at `since`
 /// ([`JobDone::Propose`]): remade on the project as it is now if `rebase`
-/// can, else as planned then, so the edits made since to what it changes
-/// conflict with it rather than being overwritten.
+/// can, else as planned then, so the edits and proposals made since to
+/// what it changes conflict with it rather than being overwritten.
 pub fn propose_job(
     ctx: &mut ToolCtx,
     commands: Vec<Command>,
     reason: &str,
-    since: u64,
+    since: Since,
     rebase: Option<Rebase>,
 ) -> Done {
     match rebase.and_then(|r| r(ctx.project())) {
@@ -458,12 +460,13 @@ fn propose_from(
     ctx: &mut ToolCtx,
     commands: Vec<Command>,
     reason: &str,
-    since: Option<u64>,
+    since: Option<Since>,
 ) -> Done {
-    let opens_set =
-        !ctx.bus.change_sets().iter().any(|s| {
-            s.author == ctx.author && s.state == flikk_core::changeset::ChangeSetState::Open
-        });
+    let opens_set = !ctx
+        .bus
+        .change_sets()
+        .iter()
+        .any(|s| s.author == ctx.author && s.state == ChangeSetState::Open);
     let reason = if ctx.external && opens_set {
         format!("{EXTERNAL_PREFIX}{reason}")
     } else {
@@ -471,30 +474,59 @@ fn propose_from(
     };
     let reason = reason.as_str();
     let total = commands.len();
+    let names: Vec<String> = commands.iter().map(Command::name).collect();
+    let author = ctx.author.clone();
+    let outcomes = match since {
+        Some(v) => ctx.bus.execute_since(commands, author, reason, v),
+        None => {
+            let mut outcomes = Vec::new();
+            for command in commands {
+                let outcome = ctx.bus.execute(command, author.clone(), reason);
+                let failed = outcome.is_err();
+                outcomes.push(outcome);
+                if failed {
+                    break;
+                }
+            }
+            outcomes
+        }
+    };
+    let last_name = names
+        .get(outcomes.len().saturating_sub(1))
+        .cloned()
+        .unwrap_or_default();
     let mut proposed = 0;
+    let mut overwritten = 0;
     let mut warnings = Vec::new();
     let mut failure = None;
-    let mut last_name = String::new();
-    for command in commands {
-        last_name = command.name();
-        let author = ctx.author.clone();
-        let outcome = match since {
-            Some(v) => ctx.bus.execute_since(command, author, reason, v),
-            None => ctx.bus.execute(command, author, reason),
-        };
+    for outcome in outcomes {
         match outcome {
-            Ok(BusOutcome::Proposed { warnings: w, .. })
-            | Ok(BusOutcome::Applied { warnings: w }) => {
+            Ok(BusOutcome::Proposed {
+                change_set,
+                item,
+                warnings: w,
+            }) => {
+                let conflicted = ctx
+                    .bus
+                    .change_set(change_set)
+                    .and_then(|s| s.item(item))
+                    .is_some_and(|i| i.state == ItemState::Conflicted);
+                if conflicted {
+                    overwritten += 1;
+                } else {
+                    proposed += 1;
+                    warnings.extend(w);
+                }
+            }
+            Ok(BusOutcome::Applied { warnings: w }) => {
                 proposed += 1;
                 warnings.extend(w);
             }
-            Err(e) => {
-                failure = Some(e.to_string());
-                break;
-            }
+            Err(e) => failure = Some(e.to_string()),
         }
     }
     let mut text = match (proposed, &failure) {
+        (0, None) if overwritten > 0 => "Nothing proposed.".to_owned(),
         (0, Some(e)) => format!("Nothing proposed: {e}"),
         (n, Some(e)) => format!(
             "Proposed {n} of {total} changes; then failed: {e}. The first {n} stay in the change set."
@@ -502,6 +534,11 @@ fn propose_from(
         (1, None) => "Proposed 1 change in this turn's change set.".to_owned(),
         (n, None) => format!("Proposed {n} changes in this turn's change set."),
     };
+    if overwritten > 0 {
+        text.push_str(&format!(
+            "\n{overwritten} not proposed: another change to the same clip was proposed while this was worked out, and it would undo that one. Look again and ask again if still wanted."
+        ));
+    }
     for w in &warnings {
         match w {
             Warning::TouchesProtected { note, marker } => text.push_str(&format!(
@@ -518,7 +555,7 @@ fn propose_from(
         format!("{proposed} × {last_name}: {reason}")
     };
     Done {
-        result: if proposed == 0 && failure.is_some() {
+        result: if proposed == 0 && (failure.is_some() || overwritten > 0) {
             ToolResult::error(text)
         } else {
             ToolResult::text(text)

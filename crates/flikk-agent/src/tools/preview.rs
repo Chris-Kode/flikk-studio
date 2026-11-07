@@ -11,7 +11,7 @@
 
 use super::fx::{fx_asset, kind_name, preview_values};
 use super::view::{image_content, save_png};
-use super::{Done, Job, JobDone, Step, ToolCtx};
+use super::{Done, Job, JobDone, Rebase, Step, ToolCtx};
 use crate::args::*;
 use crate::bridge::{Content, ToolResult};
 use flikk_core::command::Command;
@@ -31,7 +31,7 @@ const SCOPE_WIDTH: u32 = 960;
 const LAYER: &str = "Frames are the clip's picture with its grade, the timeline grade and its effects, before its transform.";
 
 /// A picture to feed a program, resolved on the UI thread.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Source {
     Media {
         item: MediaItem,
@@ -496,6 +496,7 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Match to {}", reference.id));
     let reference_id = reference.id;
+    let reference_t = t;
     let services = ctx.services.clone();
     let canvas = (p.timeline.settings.width, p.timeline.settings.height);
     let size = (480, (480 * canvas.1 as u64 / canvas.0.max(1) as u64) as u32);
@@ -540,12 +541,39 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         excerpts.push(
             "Matched source pictures under their clip grades; the timeline grade and effects apply on top of both.".into(),
         );
+        // The grades are set on the clips as they are by then, so other
+        // changes to them are kept, as long as the pictures matched and the
+        // grades they were matched under are the ones seen.
+        let grades = commands.clone();
+        let rebase: Rebase = Box::new(move |now: &Project| {
+            let seen = |id: ClipId, t: Option<Time>, src: &Source, grade: &Grade| {
+                now.timeline.clip(id).is_some_and(|(_, c)| {
+                    let t = t.unwrap_or(c.start + Time(c.duration.0 / 2));
+                    c.grade == *grade && clip_source(now, c, t).as_ref() == Some(src)
+                })
+            };
+            let same = seen(
+                reference_id,
+                Some(reference_t),
+                &reference_src,
+                &reference_grade,
+            ) && grades.iter().all(|command| {
+                let Command::SetGrade { clips, .. } = command else {
+                    return false;
+                };
+                targets
+                    .iter()
+                    .filter(|(id, ..)| clips.contains(id))
+                    .all(|(id, src, grade)| seen(*id, None, src, grade))
+            });
+            same.then_some(grades)
+        });
         JobDone::Propose {
             commands,
             reason,
             excerpts,
             since,
-            rebase: None,
+            rebase: Some(rebase),
         }
     });
     Ok(Step::Job(job))

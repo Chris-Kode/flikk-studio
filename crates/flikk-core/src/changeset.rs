@@ -14,8 +14,9 @@ pub enum ItemState {
     Pending,
     Accepted,
     Rejected,
-    /// The user edited something this item touches after it was proposed;
-    /// it was not applied (PRD AG6).
+    /// The user edited something this item touches after it was proposed,
+    /// or another proposal changed it while a job worked this one out; it
+    /// was not applied (PRD AG6).
     Conflicted,
 }
 
@@ -38,6 +39,10 @@ pub struct ChangeItem {
     /// again.
     #[serde(default)]
     pub accepted_at: Option<u64>,
+    /// When it was proposed, counted in the bus's proposals (not its
+    /// versions): a job's change worked out before it doesn't overwrite it.
+    #[serde(default)]
+    pub proposed_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
