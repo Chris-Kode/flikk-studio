@@ -50,11 +50,11 @@ pub struct EditorState {
     pub bus: CommandBus,
     /// The open project's file; `None` until first saved.
     pub file: Option<PathBuf>,
-    /// Bus version as last saved or opened; `None` when the project opened
-    /// with unsaved changes (recovered).
+    /// Undo position (see `undo_position`) as last saved or opened; `None` when
+    /// the project opened with unsaved changes (recovered).
     saved: Option<u64>,
-    /// Bus version of the last snapshot handed to the autosaver.
-    autosaved: Option<u64>,
+    /// What the autosaver was last told about the unsaved changes.
+    autosaved: Autosaved,
     pub services: Services,
     pub workspace: Workspace,
     pub playhead: Time,
@@ -187,7 +187,7 @@ impl EditorState {
         let chat = active_messages(&chats);
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
-        let version = bus.version();
+        let position = undo_position(&bus);
         let pump = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGENT_PUMP).await;
@@ -223,9 +223,8 @@ impl EditorState {
         let mut this = Self {
             bus,
             file,
-            saved: (!recovered).then_some(version),
-            // A recovered project's autosave already holds its changes.
-            autosaved: Some(version),
+            saved: (!recovered).then_some(position),
+            autosaved: Autosaved::opened(recovered, position),
             services: services(&cloud),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
@@ -945,8 +944,9 @@ impl EditorState {
     // --------------------------------------------------------------- projects
 
     /// Changes not saved to the project's file (or never saved at all).
+    /// Undoing back to the saved state makes it clean again.
     pub fn is_dirty(&self) -> bool {
-        self.saved != Some(self.bus.version())
+        self.saved != Some(undo_position(&self.bus))
     }
 
     /// Recently opened project files that still exist, newest first.
@@ -959,11 +959,19 @@ impl EditorState {
 
     /// Hand unsaved changes to the autosaver, for crash recovery.
     fn autosave(&mut self) {
-        let version = self.bus.version();
-        if !self.is_dirty() || self.autosaved == Some(version) {
+        if !self.is_dirty() {
+            // Undone back to the saved state: what was kept is stale.
+            if matches!(self.autosaved, Autosaved::Kept(_)) {
+                persistence::discard(self.bus.project().id);
+                self.autosaved = Autosaved::Nothing;
+            }
             return;
         }
-        self.autosaved = Some(version);
+        let position = undo_position(&self.bus);
+        if self.autosaved.covers(position) {
+            return;
+        }
+        self.autosaved = Autosaved::Kept(position);
         persistence::autosave(self.bus.project(), self.file.as_deref());
         if let Some(e) = persistence::autosave_failure() {
             self.status = Some(format!(
@@ -1018,8 +1026,8 @@ impl EditorState {
         let saved = persistence::save(&path, self.bus.project());
         if saved {
             self.file = Some(path);
-            self.saved = Some(self.bus.version());
-            self.autosaved = None;
+            self.saved = Some(undo_position(&self.bus));
+            self.autosaved = Autosaved::Nothing;
             self.status = None;
         } else {
             self.status = persistence::take_notice();
@@ -1029,10 +1037,11 @@ impl EditorState {
     }
 
     /// The user chose not to save: forget the unsaved changes kept for
-    /// crash recovery.
+    /// crash recovery, and keep them out of later autosaves (and the one
+    /// written on quit). Edits made after this are kept as usual.
     pub fn discard_changes(&mut self) {
         persistence::discard(self.bus.project().id);
-        self.autosaved = None;
+        self.autosaved = Autosaved::Discarded(undo_position(&self.bus));
     }
 
     /// Replace everything tied to the open project; engines stay. Undo
@@ -1048,10 +1057,10 @@ impl EditorState {
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.mark_generated_seen();
-        let version = self.bus.version();
+        let position = undo_position(&self.bus);
         self.file = loaded.file;
-        self.saved = (!loaded.recovered).then_some(version);
-        self.autosaved = Some(version);
+        self.saved = (!loaded.recovered).then_some(position);
+        self.autosaved = Autosaved::opened(loaded.recovered, position);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;
         self.in_out = None;
@@ -1759,6 +1768,45 @@ fn warning_text(warning: &Warning) -> String {
 
 /// Playback clock resolution.
 const PLAY_TICK: Duration = Duration::from_millis(16);
+
+/// Where the project is in its undo history: the version of the newest
+/// undo step, 0 before any. Unlike the bus version, which every undo bumps,
+/// it comes back to the same value when undo or redo returns to a state.
+fn undo_position(bus: &CommandBus) -> u64 {
+    bus.history().undo.last().map_or(0, |e| e.version)
+}
+
+/// What the autosaver was last told about the open project's unsaved
+/// changes, by undo position.
+#[derive(Clone, Copy)]
+enum Autosaved {
+    /// Nothing since the last save.
+    Nothing,
+    /// It holds the changes at this position.
+    Kept(u64),
+    /// The user threw away the changes at this position: they are not
+    /// autosaved again.
+    Discarded(u64),
+}
+
+impl Autosaved {
+    /// A recovered project's autosave already holds its changes.
+    fn opened(recovered: bool, position: u64) -> Self {
+        if recovered {
+            Self::Kept(position)
+        } else {
+            Self::Nothing
+        }
+    }
+
+    /// Nothing needs to be handed over while the project is at `position`.
+    fn covers(self, position: u64) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Kept(at) | Self::Discarded(at) => at == position,
+        }
+    }
+}
 
 /// The active session's messages as last saved.
 fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {
