@@ -1,7 +1,8 @@
 //! The program-frame compositor: what the timeline shows at a time, as one
 //! picture. The viewer (paused and playing), the export and the agent's
-//! view tools all call [`program`], so effects, transitions, generators and
-//! blend modes look the same everywhere.
+//! view tools all call [`program`] (renders [`render_program`], which fails
+//! where [`program`] leaves out a generator it could not draw), so effects,
+//! transitions, generators and blend modes look the same everywhere.
 //!
 //! Layers are drawn bottom-up from the unmuted video, overlay and title
 //! tracks (generators on title tracks are pictures). On each track, the
@@ -85,7 +86,7 @@ use crate::model::{
 use crate::person::PersonMatte;
 use crate::services::{
     Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, Placement,
-    Services, SubjectRef, Surface,
+    ServiceError, ServiceResult, Services, SubjectRef, Surface,
 };
 use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
@@ -129,7 +130,7 @@ pub fn program_with(
     view: MaskView,
 ) -> Frame {
     let size = (size.0.max(1), size.1.max(1));
-    let frame = render(
+    let (frame, _) = render(
         project,
         services,
         pictures,
@@ -137,10 +138,37 @@ pub fn program_with(
         PixelOrder::Rgba,
         view,
         |ctx| ctx.program(t),
-    )
-    .unwrap_or_else(|| black(size));
+    );
     pictures.finish();
-    frame
+    frame.unwrap_or_else(|| black(size))
+}
+
+/// [`program`] for a render, which must not leave a clip out: fails with
+/// why when a generator could not be drawn (an HTML clip whose browser did
+/// not start, a GLSL program the GPU did not run), where [`program`] draws
+/// the frame without it.
+pub fn render_program(
+    project: &Project,
+    t: Time,
+    size: (u32, u32),
+    services: &Services,
+    pictures: &mut dyn Pictures,
+) -> Result<Frame, String> {
+    let size = (size.0.max(1), size.1.max(1));
+    let (frame, failed) = render(
+        project,
+        services,
+        pictures,
+        size,
+        PixelOrder::Rgba,
+        MaskView::Cut,
+        |ctx| ctx.program(t),
+    );
+    pictures.finish();
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(frame.unwrap_or_else(|| black(size))),
+    }
 }
 
 /// The subject mask `mask` of `clip`, as [`SubjectService`] sees it: on
@@ -304,6 +332,7 @@ pub fn submit_program<'a>(
             view,
             guide: None,
             depth: None,
+            failed: None,
         };
         let surface = draw(&mut ctx)?;
         ctx.batch
@@ -312,7 +341,7 @@ pub fn submit_program<'a>(
             .ok()
     });
     let frame = submitted.unwrap_or_else(|| {
-        let frame = render_cpu(project, services, pictures, size, order, view, draw);
+        let (frame, _) = render_cpu(project, services, pictures, size, order, view, draw);
         Box::new(frame.unwrap_or_else(|| black(size)))
     });
     pictures.finish();
@@ -351,7 +380,7 @@ pub fn clip_picture(
 ) -> Option<Frame> {
     let size = (size.0.max(1), size.1.max(1));
     let view = MaskView::Cut;
-    let frame = render(
+    let (frame, _) = render(
         project,
         services,
         pictures,
@@ -365,7 +394,8 @@ pub fn clip_picture(
 }
 
 /// The picture `draw` makes, read back from the GPU engine's batch, or
-/// composed on the CPU without one or when the GPU fails.
+/// composed on the CPU without one or when the GPU fails; and the first
+/// clip that pass could not draw ([`Ctx::failed`]).
 fn render(
     project: &Project,
     services: &Services,
@@ -374,7 +404,7 @@ fn render(
     order: PixelOrder,
     view: MaskView,
     draw: impl Fn(&mut Ctx<'_, '_>) -> Option<Surface>,
-) -> Option<Frame> {
+) -> (Option<Frame>, Option<String>) {
     if let Some(engine) = &services.fx {
         let mut ctx = Ctx {
             project,
@@ -386,17 +416,21 @@ fn render(
             view,
             guide: None,
             depth: None,
+            failed: None,
         };
-        let surface = draw(&mut ctx)?;
+        let Some(surface) = draw(&mut ctx) else {
+            return (None, ctx.failed);
+        };
         match ctx.batch.submit(surface, order).and_then(|p| p.wait()) {
-            Ok(frame) => return Some(frame),
+            Ok(frame) => return (Some(frame), ctx.failed),
             Err(e) => eprintln!("flikk-core: GPU frame failed, composing on the CPU: {e}"),
         }
     }
     render_cpu(project, services, pictures, size, order, view, draw)
 }
 
-/// The picture `draw` makes without the GPU engine.
+/// The picture `draw` makes without the GPU engine, and the first clip it
+/// could not draw.
 fn render_cpu(
     project: &Project,
     services: &Services,
@@ -405,7 +439,7 @@ fn render_cpu(
     order: PixelOrder,
     view: MaskView,
     draw: impl Fn(&mut Ctx<'_, '_>) -> Option<Surface>,
-) -> Option<Frame> {
+) -> (Option<Frame>, Option<String>) {
     let mut ctx = Ctx {
         project,
         services,
@@ -416,9 +450,13 @@ fn render_cpu(
         view,
         guide: None,
         depth: None,
+        failed: None,
     };
-    let surface = draw(&mut ctx)?;
-    ctx.batch.submit(surface, order).and_then(|p| p.wait()).ok()
+    let Some(surface) = draw(&mut ctx) else {
+        return (None, ctx.failed);
+    };
+    let frame = ctx.batch.submit(surface, order).and_then(|p| p.wait()).ok();
+    (frame, ctx.failed)
 }
 
 /// [`TINT`] where `raster` (a mask raster) cuts the picture away, clear
@@ -666,6 +704,10 @@ struct Ctx<'a, 'b> {
     guide: Option<Frame>,
     /// The depth map of the frame last decoded for a clip that reads it.
     depth: Option<DepthMap>,
+    /// Why the first clip that could not be drawn was left out: a render
+    /// fails with it ([`render_program`]), the viewer shows the frame
+    /// without the clip.
+    failed: Option<String>,
 }
 
 impl Ctx<'_, '_> {
@@ -977,16 +1019,40 @@ impl Ctx<'_, '_> {
         };
         let (w, h) = self.size;
         let frame = match asset.language {
+            // Without the GPU engine GLSL generators are left out.
+            FxLanguage::Glsl if !self.programs => return None,
             FxLanguage::Glsl if grades.is_empty() => {
-                return self.batch.generate(&call, w, h).ok();
+                let made = self.batch.generate(&call, w, h);
+                return self.drawn(asset, made);
             }
-            FxLanguage::Glsl if self.programs => {
-                self.services.fx.as_ref()?.generate(&call, w, h).ok()?
+            FxLanguage::Glsl => {
+                let made = self.services.fx.as_ref()?.generate(&call, w, h);
+                self.drawn(asset, made)?
             }
-            FxLanguage::Glsl => return None,
-            FxLanguage::Html => self.services.html.as_ref()?.frame(&call, w, h).ok()?,
+            FxLanguage::Html => {
+                let made = match &self.services.html {
+                    Some(html) => html.frame(&call, w, h),
+                    None => Err(ServiceError("the HTML engine is unavailable".into())),
+                };
+                self.drawn(asset, made)?
+            }
         };
         self.upload(&frame, grades)
+    }
+
+    /// What generator `asset` made, keeping why it made nothing in
+    /// [`Ctx::failed`] when it is the first clip left out.
+    fn drawn<T>(&mut self, asset: &FxAsset, made: ServiceResult<T>) -> Option<T> {
+        made.map_err(|e| {
+            let what = match asset.language {
+                FxLanguage::Glsl => "GLSL",
+                FxLanguage::Html => "HTML",
+            };
+            self.failed.get_or_insert_with(|| {
+                format!("{what} clip “{}” could not be drawn: {e}", asset.name)
+            });
+        })
+        .ok()
     }
 
     /// Both sides of `pt` on their own canvases, blended at `t`.

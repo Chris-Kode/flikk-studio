@@ -1,5 +1,6 @@
 //! Renders through the compositor: every output frame is composed by
-//! [`flikk_core::compose::program`] at render size and piped into FFmpeg as
+//! [`flikk_core::compose::render_program`] at render size (failing the
+//! render when a clip cannot be drawn) and piped into FFmpeg as
 //! raw RGBA, where the graph ([`GraphSpec::piped`]) burns in captions and
 //! titles (so the compositor leaves them out, unless FFmpeg cannot burn them
 //! in, see [`letter`]) and builds the audio in the same process.
@@ -277,17 +278,19 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Output frame `f` (from the range start).
-    pub(crate) fn frame(&mut self, f: i64) -> Frame {
+    /// Output frame `f` (from the range start). Fails when a clip in it
+    /// could not be drawn, rather than render without it.
+    pub(crate) fn frame(&mut self, f: i64) -> Result<Frame> {
         self.tell(f);
         let t = self.time(f);
-        compose::program(
+        compose::render_program(
             self.project,
             t,
             (self.spec.width, self.spec.height),
             &self.services,
             &mut self.pictures,
         )
+        .map_err(|e| anyhow!(e))
     }
 }
 
@@ -345,7 +348,14 @@ pub(crate) fn run(
             let _ = child.wait();
             bail!("canceled");
         }
-        let frame = frames.frame(f);
+        let frame = match frames.frame(f) {
+            Ok(frame) => frame,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
         if child
             .stdin
             .as_mut()
