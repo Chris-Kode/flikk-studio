@@ -16,7 +16,7 @@ use flikk_core::agent::{AgentSettings, ChatMessage};
 use flikk_core::ids::ProjectId;
 use flikk_core::model::{Project, SequenceSettings};
 use flikk_store::project_file::{self, ProjectFile};
-use flikk_store::{Autosaver, SettingsOverrides, Snapshot, Store};
+use flikk_store::{Autosaver, Snapshot, Store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -24,9 +24,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 /// Everything needed to start editing a project.
 pub struct Loaded {
     pub project: Project,
-    /// Agent settings the project overrides; saved in its file.
-    pub overrides: SettingsOverrides,
-    /// User settings with the project's overrides.
+    /// The user's agent settings.
     pub settings: AgentSettings,
     /// The file it was opened from; `None` until first saved.
     pub file: Option<PathBuf>,
@@ -119,7 +117,6 @@ pub fn new_project(name: &str, settings: SequenceSettings) -> Loaded {
     loaded(
         ProjectFile {
             project,
-            settings: SettingsOverrides::default(),
             autosave_of: None,
         },
         false,
@@ -171,12 +168,9 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 fn loaded(file: ProjectFile, recovered: bool) -> Loaded {
-    let settings = with_store(|s| s.load_settings(&file.settings))
-        .unwrap_or_else(|| file.settings.apply(&AgentSettings::default()));
     Loaded {
         project: file.project,
-        overrides: file.settings,
-        settings,
+        settings: with_store(Store::user_settings).unwrap_or_default(),
         file: file.autosave_of,
         recovered,
     }
@@ -185,8 +179,8 @@ fn loaded(file: ProjectFile, recovered: bool) -> Loaded {
 /// Write `project` to `path`: the file, a backup now and then, and the
 /// recent list; its autosave is no longer needed. Errors are reported
 /// through [`take_notice`].
-pub fn save(path: &Path, project: &Project, overrides: &SettingsOverrides) -> bool {
-    if let Err(e) = project_file::write(path, project, overrides) {
+pub fn save(path: &Path, project: &Project) -> bool {
+    if let Err(e) = project_file::write(path, project) {
         notify(format!("{e:#}"));
         return false;
     }
@@ -199,11 +193,10 @@ pub fn save(path: &Path, project: &Project, overrides: &SettingsOverrides) -> bo
 }
 
 /// Queue unsaved changes for the background writer, for crash recovery.
-pub fn autosave(project: &Project, overrides: &SettingsOverrides, file: Option<&Path>) {
+pub fn autosave(project: &Project, file: Option<&Path>) {
     if let Some(s) = session().as_ref() {
         s.autosaver.save(Snapshot {
             project: project.clone(),
-            settings: overrides.clone(),
             file: file.map(Path::to_path_buf),
         });
     }
@@ -227,14 +220,10 @@ pub fn forget_recent(path: &Path) {
     with_store(|s| s.remove_recent_project(path));
 }
 
-/// Save settings edited in the UI. Fields the open project overrides stay
-/// project-specific (the returned overrides, saved with the project);
-/// everything else is saved for the user.
-pub fn save_settings(
-    overrides: &SettingsOverrides,
-    settings: &AgentSettings,
-) -> Option<SettingsOverrides> {
-    with_store(|s| s.save_effective_settings(overrides, settings))
+/// Save settings edited in the UI, for the user. Errors are reported
+/// through [`take_notice`].
+pub fn save_settings(settings: &AgentSettings) {
+    with_store(|s| s.save_user_settings(settings));
 }
 
 /// App quit: pending unsaved changes are written as an autosave, so they

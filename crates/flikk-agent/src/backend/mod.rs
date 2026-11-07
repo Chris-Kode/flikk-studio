@@ -7,7 +7,7 @@ mod codex;
 mod models;
 
 pub use claude::Claude;
-pub use codex::{Codex, ImageWatch};
+pub use codex::{Codex, codex_home};
 pub use models::{cached_models, refresh_models};
 
 use flikk_core::agent::{Backend as BackendKind, ModelChoice};
@@ -46,8 +46,6 @@ pub struct TurnSpec {
     pub mcp: McpLaunch,
     /// Let the backend search the web and read pages with its own tools.
     pub web: bool,
-    /// Let Codex generate images with its own tool. Claude has none.
-    pub image_generation: bool,
     /// Empty working directory under `paths::home()`, so no project file of
     /// the user's (CLAUDE.md, AGENTS.md, .codex) is ever picked up.
     pub workdir: PathBuf,

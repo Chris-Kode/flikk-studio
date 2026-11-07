@@ -1399,6 +1399,18 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::image::TOOL,
+            Some(Generate),
+            "Make a picture with the user's ChatGPT plan (GPT Image, through their Codex sign-in): a still, a background, a title card, a texture, a cutout. It lands in the pool's Images Generated bin, to use like any other picture. Each one counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes.",
+            object(
+                json!({
+                    "prompt": string("What to make: subject, composition, shape (wide 16:9, portrait 9:16, square), style and light, and any words that appear in it, exactly as written"),
+                    "transparent": boolean("A transparent background, for a cutout or an overlay (default: opaque)")
+                }),
+                &["prompt"],
+            ),
+        ),
+        spec(
             "replace_words",
             Some(Generate),
             "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: unless they allowed it, each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",

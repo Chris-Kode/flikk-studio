@@ -1,7 +1,8 @@
 //! Carrying out an approved agent request: memory goes to the store,
 //! programs and sounds to the user's library, renders and exports to `flikk-deliver`,
 //! music, sound effects, voiceovers and videos to the provider set for them, as are
-//! voices added or designed, which then go to the library. Outputs always
+//! voices added or designed, which then go to the library; pictures to the
+//! user's ChatGPT plan. Outputs always
 //! get a free name, so nothing here overwrites a file.
 
 use crate::persistence;
@@ -138,6 +139,20 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     item: flikk_core::cloud::media_item(&made, services.media.as_deref()),
                     placement,
                     summary: request.summary(),
+                })
+            })))
+        }
+        flikk_agent::tools::image::TOOL => {
+            use flikk_agent::tools::image;
+            let request =
+                image::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
+            let media = inputs.services.media.clone();
+            Ok(Started::Generate(Box::new(move || {
+                let item = image::make(&request, media.as_deref()).map_err(|e| anyhow!(e.0))?;
+                Ok(Generated {
+                    item,
+                    placement: None,
+                    summary: image::summary(&request),
                 })
             })))
         }

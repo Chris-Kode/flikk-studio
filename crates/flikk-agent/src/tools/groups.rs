@@ -452,12 +452,14 @@ pub fn unwrap_run(tool: String, args: Value) -> (String, Value) {
 
 /// `load_tools`: add groups to the turn and hand back their schemas.
 /// `load_tools`: hand back the schemas of groups the chat does not list.
-/// `loaded` holds those already handed over this turn.
+/// `loaded` holds those already handed over this turn. `generate_image`
+/// only when `images` ([`super::image::offered`]).
 pub fn load(
     bus: &CommandBus,
     role: AgentRole,
     listed: &BTreeSet<ToolCategory>,
     loaded: &mut BTreeSet<ToolCategory>,
+    images: bool,
     args: &Value,
 ) -> Done {
     let asked: Vec<&str> = match args.get("groups") {
@@ -503,6 +505,7 @@ pub fn load(
             .iter()
             .filter(|t| !CORE.contains(&t.name) && group_of(t) == Some(g))
             .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
+            .filter(|t| images || t.name != super::image::TOOL)
             .collect();
         if found.is_empty() {
             notes.push(format!(

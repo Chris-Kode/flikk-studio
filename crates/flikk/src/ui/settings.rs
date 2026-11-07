@@ -5,8 +5,9 @@ use crate::state::EditorState;
 use crate::ui::editor_settings::{page, row, section_label};
 use crate::ui::kit::{
     Button, ScrollableElement as _, Segmented, Select, SelectEvent, SelectState, Slider, Textarea,
-    h_flex, theme as t, v_flex,
+    Tooltip, h_flex, theme as t, v_flex,
 };
+use flikk_agent::tools::image;
 use flikk_core::agent::{AgentModel, AgentSettings, Backend, ModelChoice, effort_label};
 use flikk_core::bus::{AgentRole, Permission, Permissions};
 use flikk_core::command::ToolCategory;
@@ -48,6 +49,10 @@ pub struct SettingsPanel {
     frames: Entity<SliderState>,
     tile: Entity<SliderState>,
     language: Entity<SelectState<SharedString>>,
+    /// The paid ChatGPT plan Codex is signed in with, which image
+    /// generation needs: looked up when the panel opens and when the switch
+    /// is clicked.
+    chatgpt: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -149,6 +154,7 @@ impl SettingsPanel {
             frames,
             tile,
             language,
+            chatgpt: image::subscription(),
             _subscriptions,
         }
     }
@@ -357,14 +363,30 @@ impl SettingsPanel {
                 let on = *ix == 1;
                 this.update(cx, |s| s.web = on);
             }));
+        // On only with a paid ChatGPT plan to make the pictures with.
+        let linked = self.chatgpt.is_some();
         let images = Segmented::new("perm-images")
             .compact()
             .items(["Off", "On"])
-            .selected(settings.image_generation as usize)
+            .disabled_item(1, !linked)
+            .selected((settings.image_generation && linked) as usize)
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 let on = *ix == 1;
+                this.chatgpt = image::subscription();
+                if on && this.chatgpt.is_none() {
+                    cx.notify();
+                    return;
+                }
                 this.update(cx, |s| s.image_generation = on);
             }));
+        let images = div()
+            .id("perm-images-tip")
+            .when(!linked, |d| {
+                d.tooltip(Tooltip::text(
+                    "Needs a paid ChatGPT plan signed in with Codex",
+                ))
+            })
+            .child(images);
         v_flex()
             .child(section_label("Permissions").when(differs, |el| {
                 el.child(
@@ -379,13 +401,11 @@ impl SettingsPanel {
             }))
             .children(rows)
             .child(perm_row("Web", false, web.into_any_element()))
-            .when(settings.backend == Backend::Codex, |el| {
-                el.child(perm_row(
-                    "Image generation",
-                    false,
-                    images.into_any_element(),
-                ))
-            })
+            .child(perm_row(
+                "Image generation",
+                !linked,
+                images.into_any_element(),
+            ))
     }
 }
 

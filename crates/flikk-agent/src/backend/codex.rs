@@ -5,18 +5,17 @@
 //! Codex has no single "MCP only" switch, so the turn turns off what it can:
 //! the user's `config.toml` is not loaded (`--ignore-user-config`, which
 //! also drops their other MCP servers), the shell, exec and patch tools are
-//! disabled (web search and image generation too, unless the user allows
-//! them), the sandbox is read-only and approvals never prompt. Flikk's own
-//! tools are approved up front, as Flikk asks the user where it matters.
+//! disabled (web search too, unless the user allows it, and image
+//! generation always), the sandbox is read-only and approvals never
+//! prompt. Flikk's own tools are approved up front, as Flikk asks the user
+//! where it matters.
 //! Auth still comes from `CODEX_HOME`.
 
 use super::{Adapter, BackendEvent, TextJoin, TurnSpec, locate};
 use flikk_core::agent::Backend as BackendKind;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Codex {
@@ -24,64 +23,9 @@ pub struct Codex {
     last_error: Option<String>,
 }
 
-/// How often a running turn looks for new pictures.
-const LOOK_EVERY: Duration = Duration::from_millis(500);
-/// How a PNG ends: its last chunk, and that chunk's checksum.
-const PNG_END: &[u8] = b"IEND\xAE\x42\x60\x82";
-
-/// Finds the pictures a turn makes. `codex exec --json` never mentions them;
-/// Codex saves each to `$CODEX_HOME/generated_images/<thread>/<call>.png`.
-pub struct ImageWatch {
-    thread: Option<String>,
-    seen: HashSet<PathBuf>,
-    looked: Instant,
-}
-
-impl ImageWatch {
-    /// For a turn on `thread`, whose pictures so far are not this turn's.
-    pub fn new(thread: Option<String>) -> Self {
-        let mut watch = Self {
-            thread,
-            seen: HashSet::new(),
-            looked: Instant::now(),
-        };
-        watch.fresh();
-        watch
-    }
-
-    pub fn set_thread(&mut self, thread: &str) {
-        self.thread = Some(thread.to_owned());
-    }
-
-    pub fn due(&self) -> bool {
-        self.looked.elapsed() >= LOOK_EVERY
-    }
-
-    /// Pictures finished since the last call, oldest name first.
-    pub fn fresh(&mut self) -> Vec<PathBuf> {
-        self.looked = Instant::now();
-        let Some(thread) = &self.thread else {
-            return vec![];
-        };
-        let Ok(entries) = std::fs::read_dir(images_dir().join(thread)) else {
-            return vec![];
-        };
-        let mut fresh: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "png"))
-            .filter(|p| !self.seen.contains(p))
-            // Codex may still be writing it.
-            .filter(|p| std::fs::read(p).is_ok_and(|bytes| bytes.ends_with(PNG_END)))
-            .collect();
-        fresh.sort();
-        self.seen.extend(fresh.iter().cloned());
-        fresh
-    }
-}
-
-fn images_dir() -> PathBuf {
-    let home = std::env::var_os("CODEX_HOME")
+/// Codex's own folder (`CODEX_HOME`, else `~/.codex`), where its login is.
+pub fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
@@ -89,8 +33,7 @@ fn images_dir() -> PathBuf {
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(|user| PathBuf::from(user).join(".codex"))
         })
-        .unwrap_or_else(|| ".codex".into());
-    home.join("generated_images")
+        .unwrap_or_else(|| ".codex".into())
 }
 
 /// A `web_search` item, which also covers opening pages: begun, or
@@ -211,8 +154,9 @@ impl Adapter for Codex {
             "features.unified_exec=false".into(),
             "features.apply_patch_freeform=false".into(),
             format!("features.web_search_request={}", turn.web),
-            // On by default in Codex.
-            format!("features.image_generation={}", turn.image_generation),
+            // On by default in Codex; Flikk's own `generate_image` makes
+            // pictures instead, with either backend.
+            "features.image_generation=false".into(),
             "include_apply_patch_tool=false".into(),
             "tools.view_image=false".into(),
         ];

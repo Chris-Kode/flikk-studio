@@ -102,8 +102,8 @@ impl Default for VisionSettings {
     }
 }
 
-/// Agent settings (PRD "Agent configuration"). Per user, with per-project
-/// overrides for everything except `backend` and `models`.
+/// Agent settings (PRD "Agent configuration"): the user's, for every
+/// project.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentSettings {
     pub backend: Backend,
@@ -126,8 +126,9 @@ pub struct AgentSettings {
     /// the project.
     #[serde(default)]
     pub web: bool,
-    /// Image generation through Codex's own tool; Claude has none. Off by
-    /// default.
+    /// Pictures made with the user's ChatGPT plan (`generate_image`, signed
+    /// in through Codex), with either backend. Off by default: each one
+    /// counts against their plan.
     #[serde(default)]
     pub image_generation: bool,
 }

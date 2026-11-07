@@ -14,7 +14,7 @@ use flikk_core::analysis::AnalysisSteps;
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::cloud::{Capability, CloudError, GenerateRequest, GenerationTask, ProviderChoice};
-use flikk_core::model::MediaItem;
+use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::AnalysisConfig;
 use gpui_kit::*;
 
@@ -452,6 +452,7 @@ impl EditorState {
     ) -> Option<MediaId> {
         let id = item.id;
         let label = match item.generated.as_deref().map(|g| g.capability) {
+            _ if item.kind == MediaKind::Image => "Generate image",
             Some(Capability::SoundEffects) => "Generate sound effect",
             Some(Capability::Voiceover) => "Generate voiceover",
             Some(Capability::Video) => "Generate video",

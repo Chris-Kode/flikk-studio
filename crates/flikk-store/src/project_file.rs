@@ -9,7 +9,6 @@
 //! The same format holds autosaves (`paths::autosave()`, one per project id,
 //! naming the file they belong to) and backups (`paths::backups()`).
 
-use crate::SettingsOverrides;
 use anyhow::{Context, Result, bail};
 use flikk_core::ids::{MediaId, ProjectId};
 use flikk_core::model::Project;
@@ -37,8 +36,6 @@ struct FileOut<'a> {
     /// Media paths relative to the project file, by media id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     relative_paths: BTreeMap<MediaId, PathBuf>,
-    #[serde(skip_serializing_if = "SettingsOverrides::is_empty")]
-    settings: &'a SettingsOverrides,
     #[serde(skip_serializing_if = "Option::is_none")]
     autosave_of: Option<&'a Path>,
 }
@@ -51,8 +48,6 @@ struct FileIn {
     #[serde(default)]
     relative_paths: BTreeMap<MediaId, PathBuf>,
     #[serde(default)]
-    settings: SettingsOverrides,
-    #[serde(default)]
     autosave_of: Option<PathBuf>,
 }
 
@@ -60,8 +55,6 @@ struct FileIn {
 #[derive(Clone, Debug)]
 pub struct ProjectFile {
     pub project: Project,
-    /// Agent settings this project overrides.
-    pub settings: SettingsOverrides,
     /// For an autosave: the file whose unsaved changes it holds, `None` for
     /// a project never saved.
     pub autosave_of: Option<PathBuf>,
@@ -100,15 +93,13 @@ pub fn read(path: &Path) -> Result<ProjectFile> {
     }
     Ok(ProjectFile {
         project,
-        settings: file.settings,
         autosave_of: file.autosave_of,
     })
 }
 
 /// Save `project` to `path`.
-pub fn write(path: &Path, project: &Project, settings: &SettingsOverrides) -> Result<()> {
-    write_file(path, path, project, settings, None)
-        .with_context(|| format!("can't save {}", path.display()))
+pub fn write(path: &Path, project: &Project) -> Result<()> {
+    write_file(path, path, project, None).with_context(|| format!("can't save {}", path.display()))
 }
 
 /// `relative_to` is the file whose folder relative media paths start from.
@@ -116,7 +107,6 @@ pub(crate) fn write_file(
     path: &Path,
     relative_to: &Path,
     project: &Project,
-    settings: &SettingsOverrides,
     autosave_of: Option<&Path>,
 ) -> Result<()> {
     let relative_paths = relative_to
@@ -134,7 +124,6 @@ pub(crate) fn write_file(
         version: VERSION,
         project,
         relative_paths,
-        settings,
         autosave_of,
     };
     write_atomic(path, &serde_json::to_vec_pretty(&out)?)

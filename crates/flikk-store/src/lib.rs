@@ -31,7 +31,6 @@ pub use profiles::{ProfileSummary, RuleFilter};
 pub use project_file::ProjectFile;
 pub use recipes::builtin_recipes;
 pub use render_cache::RenderCacheSettings;
-pub use settings::SettingsOverrides;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;

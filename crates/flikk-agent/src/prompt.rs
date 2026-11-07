@@ -2,7 +2,7 @@
 //! (PRD AG2).
 
 use crate::args::{kind_name, range_json, secs, short};
-use flikk_core::agent::{AgentSettings, Backend, EditorContext};
+use flikk_core::agent::{AgentSettings, EditorContext};
 use flikk_core::bus::AgentRole;
 use flikk_core::memory::{RuleScope, RuleStatus, StyleRule};
 use flikk_core::model::{ClipContent, Project};
@@ -24,10 +24,12 @@ the pool when the user asks for it. Nothing else from the web comes into \
 the project.";
 
 const IMAGES: &str = "\
-You also have an image generation tool. Use it when the user asks for a \
-picture. Each one lands in the pool's Images Generated bin, not in the chat: \
-find its id with `list_media` and use it like any other picture in the pool. \
-You cannot copy or move the saved file, and do not need to.";
+Making pictures: `generate_image` (generate group) makes one with the \
+user's ChatGPT plan. Use it when the user asks for a picture, one call per \
+picture; each counts against their plan. Describe it fully in the prompt, \
+with its shape and any words in it exactly as written. It lands in the \
+pool's Images Generated bin, and the call returns its media id: use it like \
+any other picture in the pool.";
 
 const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
@@ -265,7 +267,7 @@ before you finish, and save them to the user's library with \
 
 pub fn system_prompt(role: AgentRole, settings: &AgentSettings) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
-    if settings.image_generation && settings.backend == Backend::Codex {
+    if crate::tools::image::offered(settings) {
         out.push_str("\n\n");
         out.push_str(IMAGES);
     }

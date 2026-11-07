@@ -164,6 +164,14 @@ pub fn request(
                 super::video::request_json(&request, &grabs, placement.as_ref()),
             )
         }
+        super::image::TOOL => {
+            super::image::check(ctx)?;
+            let request = super::image::parse(args)?;
+            (
+                super::image::summary(&request),
+                super::image::request_json(&request),
+            )
+        }
         "replace_words" => {
             let (fix, reading) = super::respeak::parse(ctx, args)?;
             (

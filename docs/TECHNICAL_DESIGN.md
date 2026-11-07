@@ -1141,22 +1141,30 @@ on the UI thread and run it off it:
   agent in the next turn's `<approvals>` block. Backends allow a tool call
   an hour for this. Generate media (music, sound
   effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
-  default) or Allow. A "Web" switch (off by default,
-  overridable per project) gives Claude WebSearch/WebFetch and Codex web
+  default) or Allow. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
   search. Both read pages as text only, so the same switch lists the `flikk`
   tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
   25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
   the original under `paths::web()` and adds it to the pool's "Web Images"
-  bin as the user's edit. An "Image generation" switch, shown for Codex (off by default,
-  overridable per project), sets Codex's `features.image_generation`, which
-  Codex itself turns on by default. `codex exec` does not report its
-  pictures, so the host watches `$CODEX_HOME/generated_images/<thread>/`
-  every half second, before each of the turn's tool calls and when it ends,
-  and copies new ones to `paths::generated()` and the pool's "Images
-  Generated" bin, as the user's edit. The chat shows them as `generate_image`
-  calls. Web calls show as `web_search` and `web_fetch`, read from each
-  backend's stream, whatever the backend calls them.
-* **Tools** (`flikk-agent/src/tools/`): 91 in the catalog (89 plus
+  bin as the user's edit. An "Image generation" switch (off by default, either
+  backend) lists the `flikk` tool
+  `generate_image` in the Generate category, so it asks each time unless
+  the user allowed generating. The switch turns on, and the tool and its
+  prompt section are offered, only while Codex's saved sign-in carries a
+  paid ChatGPT plan (`chatgpt_plan_type` in its ID token, not `free`); the
+  switch is dimmed with a tooltip otherwise. It sends the request Codex's own image tool
+  sends (`POST chatgpt.com/backend-api/codex/images/generations`: the
+  prompt, `gpt-image-2`, automatic size and quality, opaque or transparent
+  background) with Codex's ChatGPT sign-in from `$CODEX_HOME/auth.json`
+  (bearer token and `ChatGPT-Account-ID`, `originator: flikk`). Flikk never
+  refreshes or writes that login: an expired one asks the user to open
+  Codex, and plans without image generation (free) answer 403. The picture
+  goes to `paths::generated()` and the pool's "Images Generated" bin, as the
+  user's edit. Codex turns run with its own `features.image_generation`
+  off, so there is one image tool. Web calls show as `web_search` and
+  `web_fetch`, read from each backend's stream, whatever the backend calls
+  them.
+* **Tools** (`flikk-agent/src/tools/`): 92 in the catalog (90 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
   Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
@@ -1395,8 +1403,9 @@ available to them.
 
 * **Project files** (`flikk-store/src/project_file.rs`): `.flikk` JSON
   (`format: "flikk-project"`, `version: 1`), written atomically; media keeps
-  its absolute path and its path relative to the file, tried in that order;
-  per-project agent setting overrides travel in the file. New, Open, Save,
+  its absolute path and its path relative to the file, tried in that order.
+  Agent settings are the user's, for every project, and are not saved in
+  the file (a `settings` key older files carry is ignored). New, Open, Save,
   Save As and recent files (cmd/ctrl-N, O, S, shift-S) are in the project
   menu (`flikk/src/projects.rs`), with a dot while there are unsaved
   changes and a Save / Don't Save / Cancel question before New, Open, Quit

@@ -11,10 +11,8 @@ use flikk_core::bus::{Author, CommandBus};
 use flikk_core::cloud::{self, Capability, CloudError, GenerateRequest, MusicSection, Reading};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{MediaItem, MediaKind, Project, TrackKind};
-use flikk_core::services::MediaService;
 use flikk_core::{MediaId, Time, TimeRange, TrackId};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
 
 /// Where a generated file goes on the timeline.
 #[derive(Clone, Debug, PartialEq)]
@@ -227,16 +225,17 @@ pub fn finish(
     placement: Option<&Placement>,
     summary: &str,
 ) -> Done {
-    let length = item.info.as_ref().map_or(0.0, |i| i.duration.as_secs_f64());
+    let picture = (item.kind == MediaKind::Image).then(|| item.path.clone());
+    let length = match (&picture, item.info.as_ref()) {
+        (None, Some(info)) => format!(" ({:.1} s)", info.duration.as_secs_f64()),
+        _ => String::new(),
+    };
     let bin = cloud::generated_bin(&item);
     let media = match add_to_pool(bus, item) {
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };
-    let mut text = format!(
-        "Made it: media {} ({length:.1} s) in the {bin} bin.",
-        short(media)
-    );
+    let mut text = format!("Made it: media {}{length} in the {bin} bin.", short(media));
     match (placement, author) {
         (Some(placement), Some(author)) => {
             match propose_placement(bus, author, media, placement, summary) {
@@ -250,7 +249,9 @@ pub fn finish(
         (Some(_), None) => text.push_str(" The turn was cancelled, so it was not placed."),
         (None, _) => {}
     }
-    Done::text(format!("generated {summary}"), text)
+    let mut done = Done::text(format!("generated {summary}"), text);
+    done.images.extend(picture);
+    done
 }
 
 /// Add `item` to the pool's bin for what it is as the user's edit (it is
@@ -268,20 +269,6 @@ pub fn add_to_pool(bus: &mut CommandBus, item: MediaItem) -> Result<MediaId, Str
     bus.execute_shared(commands, label)
         .map(|_| id)
         .map_err(|e| e.to_string())
-}
-
-/// Add a picture Codex saved to the pool, copied so the project does not
-/// depend on Codex's own folder. Returns the copy.
-pub fn add_image(
-    bus: &mut CommandBus,
-    picture: &Path,
-    media: Option<&dyn MediaService>,
-) -> Result<PathBuf, String> {
-    let name = picture.file_name().unwrap_or_default().to_string_lossy();
-    let path = flikk_core::paths::generated().join(format!("codex-{name}"));
-    std::fs::copy(picture, &path).map_err(|e| e.to_string())?;
-    add_to_pool(bus, cloud::image_item(path.clone(), media))?;
-    Ok(path)
 }
 
 /// Propose `media` on the timeline as `placement` says, as `author`: on its

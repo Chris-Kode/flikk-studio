@@ -24,7 +24,6 @@ use flikk_core::command::{Command, Warning};
 use flikk_core::model::Project;
 use flikk_core::services::{AnalysisService, MediaService, Services, SubjectService};
 use flikk_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
-use flikk_store::SettingsOverrides;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -51,11 +50,9 @@ pub struct EditorState {
     pub bus: CommandBus,
     /// The open project's file; `None` until first saved.
     pub file: Option<PathBuf>,
-    /// Agent settings the project overrides; saved in its file.
-    overrides: SettingsOverrides,
-    /// Bus version and overrides as last saved or opened. The version is
-    /// `None` when the project opened with unsaved changes (recovered).
-    saved: (Option<u64>, SettingsOverrides),
+    /// Bus version as last saved or opened; `None` when the project opened
+    /// with unsaved changes (recovered).
+    saved: Option<u64>,
     /// Bus version of the last snapshot handed to the autosaver.
     autosaved: Option<u64>,
     pub services: Services,
@@ -175,7 +172,6 @@ impl EditorState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let persistence::Loaded {
             project,
-            overrides,
             settings,
             file,
             recovered,
@@ -224,10 +220,9 @@ impl EditorState {
         let mut this = Self {
             bus,
             file,
-            saved: ((!recovered).then_some(version), overrides.clone()),
+            saved: (!recovered).then_some(version),
             // A recovered project's autosave already holds its changes.
             autosaved: Some(version),
-            overrides,
             services: services(&cloud),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
@@ -637,7 +632,7 @@ impl EditorState {
                 let mut settings = self.settings.clone();
                 settings.style_profile = Some(id);
                 // The profile already holds these presets.
-                self.store_settings(&settings);
+                persistence::save_settings(&settings);
                 self.settings = settings;
                 self.load_agent_memory();
             }
@@ -934,7 +929,7 @@ impl EditorState {
 
     /// Changes not saved to the project's file (or never saved at all).
     pub fn is_dirty(&self) -> bool {
-        self.saved.0 != Some(self.bus.version()) || self.saved.1 != self.overrides
+        self.saved != Some(self.bus.version())
     }
 
     /// Recently opened project files that still exist, newest first.
@@ -952,7 +947,7 @@ impl EditorState {
             return;
         }
         self.autosaved = Some(version);
-        persistence::autosave(self.bus.project(), &self.overrides, self.file.as_deref());
+        persistence::autosave(self.bus.project(), self.file.as_deref());
     }
 
     /// Replace the open project with a new one saved at `path`, which names
@@ -998,10 +993,10 @@ impl EditorState {
         if self.bus.project().name != name {
             self.bus.rename_project(&name);
         }
-        let saved = persistence::save(&path, self.bus.project(), &self.overrides);
+        let saved = persistence::save(&path, self.bus.project());
         if saved {
             self.file = Some(path);
-            self.saved = (Some(self.bus.version()), self.overrides.clone());
+            self.saved = Some(self.bus.version());
             self.autosaved = None;
             self.status = None;
         } else {
@@ -1032,12 +1027,8 @@ impl EditorState {
         self.mark_generated_seen();
         let version = self.bus.version();
         self.file = loaded.file;
-        self.saved = (
-            (!loaded.recovered).then_some(version),
-            loaded.overrides.clone(),
-        );
+        self.saved = (!loaded.recovered).then_some(version);
         self.autosaved = Some(version);
-        self.overrides = loaded.overrides;
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;
         self.in_out = None;
@@ -1125,19 +1116,6 @@ impl EditorState {
         });
     }
 
-    /// Save settings: fields the project overrides go with the project,
-    /// the rest to the user's settings.
-    fn store_settings(&mut self, settings: &AgentSettings) {
-        let Some(overrides) = persistence::save_settings(&self.overrides, settings) else {
-            return;
-        };
-        if overrides != self.overrides {
-            self.overrides = overrides;
-            self.autosaved = None;
-            self.autosave();
-        }
-    }
-
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
         self.agent.cancel();
         cx.notify();
@@ -1145,7 +1123,7 @@ impl EditorState {
 
     pub fn set_settings(&mut self, settings: AgentSettings, cx: &mut Context<Self>) {
         self.bus.set_permissions(settings.permissions.clone());
-        self.store_settings(&settings);
+        persistence::save_settings(&settings);
         let profile_changed = settings.style_profile != self.settings.style_profile;
         let backend_changed = settings.backend != self.settings.backend;
         self.settings = settings;

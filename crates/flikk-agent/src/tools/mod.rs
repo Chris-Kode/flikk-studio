@@ -14,6 +14,7 @@ mod edit;
 mod fx;
 pub mod generate;
 pub mod groups;
+pub mod image;
 mod layout;
 mod masks;
 mod music;
@@ -173,17 +174,18 @@ impl From<Done> for Step {
 /// role's own kinds of tools. With `groups` (the editor's own turns), only
 /// the core tools and those groups, plus `load_tools` and `run_tool` for the
 /// rest; without (external clients), every tool. `view_web_image` only
-/// with `web`.
+/// with `web`, `generate_image` only when [`image::offered`].
 pub fn list(
     bus: &CommandBus,
     role: AgentRole,
     groups: Option<&BTreeSet<ToolCategory>>,
-    web: bool,
+    settings: &AgentSettings,
 ) -> Vec<Value> {
     catalog()
         .iter()
         .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
-        .filter(|t| web || t.name != web::TOOL)
+        .filter(|t| settings.web || t.name != web::TOOL)
+        .filter(|t| t.name != image::TOOL || image::offered(settings))
         .filter(|t| match groups {
             Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
             None => t.name != groups::LOAD_TOOLS && t.name != groups::RUN_TOOL,
@@ -306,6 +308,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "use_library_sound" => sounds::use_sound(ctx, &args),
         "generate_audio" => generate::serve(ctx, &args),
         "generate_video" => video::serve(ctx, &args),
+        image::TOOL => image::serve(ctx, &args),
         "find_voices" => voices::find_voices(ctx, &args),
         "add_voice" => voices::serve_add(ctx, &args),
         "design_voice" => voices::serve_design(ctx, &args),

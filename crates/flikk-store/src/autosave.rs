@@ -9,7 +9,6 @@
 //! file. Saving or discarding the changes [`Autosaver::clear`]s it, so an
 //! autosave found on the next start means the editor did not close cleanly.
 
-use crate::SettingsOverrides;
 use crate::project_file::{autosave_path, remove_autosave, write_file};
 use flikk_core::ids::ProjectId;
 use flikk_core::model::Project;
@@ -24,7 +23,6 @@ pub const MAX_DELAY: Duration = Duration::from_secs(5);
 /// Unsaved state of the open project.
 pub struct Snapshot {
     pub project: Project,
-    pub settings: SettingsOverrides,
     /// The file it belongs to; `None` while never saved.
     pub file: Option<PathBuf>,
 }
@@ -104,13 +102,7 @@ fn run(rx: Receiver<Msg>) {
         if let Some(s) = pending.take() {
             let path = autosave_path(s.project.id);
             let relative_to = s.file.as_deref().unwrap_or(&path);
-            let written = write_file(
-                &path,
-                relative_to,
-                &s.project,
-                &s.settings,
-                s.file.as_deref(),
-            );
+            let written = write_file(&path, relative_to, &s.project, s.file.as_deref());
             if let Err(e) = written {
                 eprintln!("flikk-store: autosave failed: {e:#}");
             }
