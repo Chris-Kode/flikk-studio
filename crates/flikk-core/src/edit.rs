@@ -1308,8 +1308,9 @@ fn placed_clip(project: &Project, clip: &Clip) -> Result<Clip> {
     Ok(c)
 }
 
-/// Whether `content` may sit on a `kind` track.
-fn fits_track(project: &Project, content: &ClipContent, kind: TrackKind) -> bool {
+/// Whether `content` may sit on a `kind` track. [`Project::normalize`]
+/// holds files read from disk to the same rule.
+pub(crate) fn fits_track(project: &Project, content: &ClipContent, kind: TrackKind) -> bool {
     match content {
         ClipContent::Media { media, .. } => {
             let Some(item) = project.media(*media) else {
