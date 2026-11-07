@@ -12,6 +12,7 @@ use flikk_core::library::{self, Preset};
 use flikk_core::model::{MediaItem, TrackKind};
 use flikk_core::{LibraryId, MediaId, Time, TimeRange, TrackId, model::Project};
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// The project's copy of library program `id`, copied in now if needed.
@@ -198,32 +199,50 @@ pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorSta
                 let build = |p| build_item(p, None, media.as_deref());
                 audio.into_iter().filter_map(build).collect()
             },
+            Vec::new(),
             cx,
         );
     }
 }
 
+/// Pool items being copied into the library: the library lists them only
+/// once the copy is done, so until then they can't be saved again.
+#[derive(Default)]
+struct SavingSounds(HashSet<MediaId>);
+
+impl Global for SavingSounds {}
+
 /// Save pool item `id` to the library.
 pub fn save_sound(s: &mut EditorState, id: MediaId, cx: &mut Context<EditorState>) {
+    if !can_save_sound(s, id, cx) {
+        return;
+    }
     if let Some(item) = s.bus.project().media(id).cloned() {
-        save_sounds(s, move || vec![item], cx);
+        cx.default_global::<SavingSounds>().0.insert(id);
+        save_sounds(s, move || vec![item], vec![id], cx);
     }
 }
 
 /// Whether pool item `id` can go to the library: audio that is there to
-/// copy and not in it yet.
-pub fn can_save_sound(s: &EditorState, id: MediaId) -> bool {
-    s.bus.project().media(id).is_some_and(|item| {
-        item.kind == flikk_core::model::MediaKind::Audio
-            && !s.offline.contains(&id)
-            && s.library.sound_of(item).is_none()
-    })
+/// copy and not in it, or on its way, yet.
+pub fn can_save_sound(s: &EditorState, id: MediaId, cx: &App) -> bool {
+    let saving = cx
+        .try_global::<SavingSounds>()
+        .is_some_and(|g| g.0.contains(&id));
+    !saving
+        && s.bus.project().media(id).is_some_and(|item| {
+            item.kind == flikk_core::model::MediaKind::Audio
+                && !s.offline.contains(&id)
+                && s.library.sound_of(item).is_none()
+        })
 }
 
-/// Off the UI thread: the audio is copied in.
+/// Off the UI thread: the audio is copied in, then pool items `saving`
+/// can be saved again.
 fn save_sounds(
     s: &EditorState,
     items: impl FnOnce() -> Vec<MediaItem> + Send + 'static,
+    saving: Vec<MediaId>,
     cx: &mut Context<EditorState>,
 ) {
     let lib = s.library.clone();
@@ -241,6 +260,10 @@ fn save_sounds(
     cx.spawn(async move |this, cx| {
         let errors = saved.await;
         let _ = this.update(cx, |s, cx| {
+            let pending = &mut cx.default_global::<SavingSounds>().0;
+            for id in &saving {
+                pending.remove(id);
+            }
             s.reload_library(cx);
             if !errors.is_empty() {
                 fail(s, errors.join(" · "), cx);

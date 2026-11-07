@@ -153,6 +153,63 @@ pub(crate) fn mark_tags(
     });
 }
 
+/// Take reference `tag` ("@Image2") out of `input` and number the later
+/// ones of its kind down, as the references they name move up a place.
+pub(crate) fn drop_tag(
+    input: &Entity<TextareaState>,
+    tag: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let split = |tag: &str| {
+        let tag = tag.strip_prefix('@')?;
+        let at = tag.find(|c: char| c.is_ascii_digit())?;
+        let n: usize = tag[at..].parse().ok()?;
+        Some((tag[..at].to_owned(), n))
+    };
+    let Some((what, removed)) = split(tag) else {
+        return;
+    };
+    input.update(cx, |input, cx| {
+        let text = input.value().to_string();
+        let mut cursor = input.cursor();
+        let (mut out, mut copied) = (String::with_capacity(text.len()), 0);
+        for range in references(&text) {
+            let Some(n) = split(&text[range.clone()])
+                .filter(|(w, n)| *w == what && *n >= removed)
+                .map(|(_, n)| n)
+            else {
+                continue;
+            };
+            let (start, mut end) = (range.start, range.end);
+            let new = if n == removed {
+                // With the space after it.
+                if text[end..].starts_with(' ') {
+                    end += 1;
+                }
+                String::new()
+            } else {
+                format!("@{what}{}", n - 1)
+            };
+            if cursor >= end {
+                cursor = cursor - (end - start) + new.len();
+            } else if cursor > start {
+                cursor = start + new.len();
+            }
+            out.push_str(&text[copied..start]);
+            out.push_str(&new);
+            copied = end;
+        }
+        if copied == 0 {
+            return;
+        }
+        out.push_str(&text[copied..]);
+        input.replace_all(out, window, cx);
+        input.set_selected_range(cursor..cursor, cx);
+    });
+    mark_tags(input, Tags::References, window, cx);
+}
+
 /// A tag token: its text in the accent, washed while selected.
 pub(crate) fn tag_token(token: &InlineTokenContext, _: &mut Window, _: &mut App) -> Div {
     div()

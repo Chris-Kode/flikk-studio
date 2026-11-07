@@ -1,6 +1,6 @@
 //! Pool thumbnails: one frame at 10 % of the item, the frames a pointer
 //! skims through, and a sound's peaks; read off-thread and cached by
-//! fingerprint for the session.
+//! fingerprint and path for the session.
 
 use super::MediaPoolPanel;
 use crate::state::EditorState;
@@ -154,11 +154,14 @@ impl Thumbs {
     }
 }
 
+/// By fingerprint, so copies share, and by path, so an item relinked
+/// after its frame or peaks failed reads them again.
 fn key(item: &MediaItem) -> String {
-    match &item.fingerprint {
+    let base = match &item.fingerprint {
         Some(fp) => fp.0.clone(),
         None => item.id.0.to_string(),
-    }
+    };
+    format!("{base}|{}", item.path.display())
 }
 
 /// RGBA8 → 32-bit top-down BMP, which GPUI decodes without extra crates.

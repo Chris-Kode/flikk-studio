@@ -216,11 +216,14 @@ impl ImageForm {
         let chips: Vec<AnyElement> = self
             .references
             .iter()
+            // Numbered as `request` sends them: without pictures gone from
+            // the pool.
+            .filter_map(|r| Some((*r, self.reference_name(*r, cx)?)))
             .enumerate()
-            .filter_map(|(ix, r)| Some((ix, *r, self.reference_name(*r, cx)?)))
-            .map(|(ix, reference, name)| {
+            .map(|(ix, (reference, name))| {
                 let tag = format!("@Image{}", ix + 1);
                 let insert: SharedString = tag.clone().into();
+                let remove = tag.clone();
                 h_flex()
                     .h(px(20.))
                     .pl(px(6.))
@@ -244,8 +247,9 @@ impl ImageForm {
                             .ghost()
                             .xsmall()
                             .icon(IconName::X)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.references.retain(|r| *r != reference);
+                                form::drop_tag(&this.prompt, &remove, window, cx);
                                 cx.notify();
                             })),
                     )

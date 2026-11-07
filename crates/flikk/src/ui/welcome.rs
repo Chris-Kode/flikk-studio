@@ -136,7 +136,8 @@ impl Welcome {
             return;
         };
         cx.emit(WelcomeEvent::ForgetFootage);
-        if r.missing {
+        // The list is read once; the file can have gone since.
+        if r.missing || !r.path.exists() {
             self.locate(ix, window, cx);
         } else if self.state.read(cx).file.as_ref() == Some(&r.path) {
             cx.emit(WelcomeEvent::Continue);
@@ -145,8 +146,8 @@ impl Welcome {
         }
     }
 
-    /// Find a project that moved: open the file picked instead and forget
-    /// where it was.
+    /// Find a project that moved: open the file picked instead and, once it
+    /// opened, forget where it was.
     fn locate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.recent[ix].path.clone();
         cx.emit(WelcomeEvent::ForgetFootage);
@@ -163,8 +164,13 @@ impl Welcome {
                     return;
                 };
                 if let Some(path) = paths.into_iter().next() {
-                    crate::persistence::forget_recent(&old);
-                    let _ = cx.update(|window, cx| projects::open(&state, path, window, cx));
+                    let _ = cx.update(|window, cx| {
+                        projects::open(&state, path.clone(), window, cx);
+                        // Unsaved changes ask first: the entry then stays.
+                        if state.read(cx).file.as_ref() == Some(&path) {
+                            crate::persistence::forget_recent(&old);
+                        }
+                    });
                 }
             })
             .detach();
@@ -186,6 +192,9 @@ impl Welcome {
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.visible(cx);
+        // As the list shows it: rows can go without a search, as the
+        // recovered one does once its project is saved.
+        self.selected = self.selected.min(rows.len().saturating_sub(1));
         match ev.keystroke.key.as_str() {
             "down" if !rows.is_empty() => {
                 self.selected = (self.selected + 1).min(rows.len() - 1);
