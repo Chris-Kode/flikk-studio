@@ -33,8 +33,8 @@ pub struct ChangeItem {
     #[serde(default)]
     pub base_version: u64,
     /// Bus version of the undo entry that applied it, while it is in the
-    /// history: undoing that entry makes the item pending again, redoing it
-    /// accepted.
+    /// history: undoing that entry rejects the item, redoing it accepts it
+    /// again.
     #[serde(default)]
     pub accepted_at: Option<u64>,
 }
@@ -47,7 +47,7 @@ pub enum ChangeSetState {
     /// Complete, waiting for review.
     Pending,
     /// Every item accepted, rejected or conflicted. Undoing an accepted
-    /// item's entry makes the set pending again.
+    /// item's entry rejects it; the set stays resolved.
     Resolved,
 }
 

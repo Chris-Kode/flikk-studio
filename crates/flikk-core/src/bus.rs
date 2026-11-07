@@ -247,8 +247,8 @@ impl CommandBus {
     /// items it had.
     ///
     /// An author has one open set. One of another chat goes to review
-    /// first; several of this chat's (one left open, one an undo made
-    /// pending again) become the one set.
+    /// first; several of this chat's (one left open, one still waiting
+    /// for review) become the one set.
     pub fn reopen_change_set(&mut self, author: &Author) -> Option<(ChangeSetId, usize)> {
         let chat = self.chat.clone();
         let ours = |s: &ChangeSet| &s.author == author && s.chat.is_some() && s.chat == chat;
@@ -612,9 +612,9 @@ impl CommandBus {
     }
 
     /// Show on its change set whether `entry`, just undone or redone, is
-    /// applied. Undone, the items it accepted are proposals again, planned
-    /// on the project as it is now (the undo is no conflict for them), and
-    /// their set waits for review; redone, they are accepted again.
+    /// applied. Undoing what was accepted turns it down, as Reject would:
+    /// no review comes back, and the agent doesn't build on it. Redone, it
+    /// is accepted again.
     fn reflect(&mut self, entry: &HistoryEntry, applied: bool) {
         let Some(ix) = entry
             .change_set
@@ -622,7 +622,6 @@ impl CommandBus {
         else {
             return;
         };
-        let version = self.version;
         let set = &mut self.change_sets[ix];
         let mut any = false;
         for item in set
@@ -631,25 +630,21 @@ impl CommandBus {
             .filter(|i| i.accepted_at == Some(entry.version))
         {
             any = true;
-            if applied {
-                item.state = ItemState::Accepted;
+            item.state = if applied {
+                ItemState::Accepted
             } else {
-                item.state = ItemState::Pending;
-                item.base_version = version;
-            }
+                ItemState::Rejected
+            };
         }
-        if !any {
-            return;
+        if any {
+            // An open set's draft drops what was turned down.
+            self.refresh_set(ix);
         }
-        if !applied && set.state == ChangeSetState::Resolved {
-            set.state = ChangeSetState::Pending;
-        }
-        self.refresh_set(ix);
     }
 
     /// Drop resolved sets nothing brings back, past the latest
     /// [`KEPT_RESOLVED`]: a set an undo or redo entry is from stays, as
-    /// undoing that entry makes it pending again.
+    /// undoing or redoing that entry marks its items.
     fn prune(&mut self) {
         let referenced: HashSet<ChangeSetId> = self
             .history
