@@ -600,6 +600,8 @@ impl Gizmo {
         };
         let start = c.transform_at(clip_time(c, playhead));
         self.held.clear();
+        // One drag at a time, even if the last one's release was lost.
+        self.group_drag = None;
         self.drag = Some(Drag {
             mode,
             clip,
@@ -651,6 +653,7 @@ impl Gizmo {
             return false;
         }
         self.held.clear();
+        self.drag = None;
         self.group_drag = Some(GroupDrag {
             mode,
             members,

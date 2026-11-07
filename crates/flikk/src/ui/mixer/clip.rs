@@ -335,6 +335,7 @@ fn group(header: SectionHeader, rows: Vec<Div>) -> Div {
 
 impl Render for ClipAudioFx {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.controls.prune();
         let state = self.state.read(cx);
         let project = state.bus.project();
         let playhead = state.playhead;

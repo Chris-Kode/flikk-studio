@@ -78,6 +78,18 @@ impl TimelinePanel {
         cx.notify();
     }
 
+    /// Close the popup once its clip is gone (undone, or removed by the
+    /// chat).
+    pub(super) fn close_stale_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = self.popup.as_ref().is_some_and(|p| {
+            let project = self.state.read(cx).bus.project();
+            project.timeline.clip(p.clip).is_none()
+        });
+        if gone {
+            self.close_popup(window, cx);
+        }
+    }
+
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.take().is_some() {
             window.focus(&self.focus, cx);

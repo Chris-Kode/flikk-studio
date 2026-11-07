@@ -664,6 +664,7 @@ fn meter_bar(d: Display, width: f32) -> Div {
 
 impl Render for MixerPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.controls.prune();
         let state = self.state.read(cx);
         let playing = state.playing;
         let project = state.bus.project();

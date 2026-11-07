@@ -13,7 +13,7 @@ use flikk_core::model::{Clip, Project, Property};
 use flikk_core::{ClipId, EffectId, Time, TrackId};
 use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState};
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Whose effect stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,8 +41,8 @@ pub struct Range {
 
 struct Knob {
     slider: Entity<SliderState>,
-    /// Model value last shown.
-    value: f32,
+    /// Model value last shown; `None` resyncs on the next render.
+    value: Option<f32>,
     /// Value under the pointer while dragging.
     live: Option<f32>,
     _sub: Subscription,
@@ -50,8 +50,8 @@ struct Knob {
 
 impl Knob {
     /// What the readout shows.
-    fn shown(&self) -> f32 {
-        self.live.unwrap_or(self.value)
+    fn shown(&self) -> Option<f32> {
+        self.live.or(self.value)
     }
 }
 
@@ -64,6 +64,18 @@ struct Field {
 pub struct Controls {
     knobs: HashMap<Ctl, Knob>,
     fields: HashMap<Ctl, Field>,
+    /// Controls asked for since the last [`Controls::prune`].
+    used: HashSet<Ctl>,
+}
+
+impl Controls {
+    /// Drop the controls the last render didn't show (their track, clip or
+    /// effect is gone, or folded away). Call at the start of a render.
+    pub fn prune(&mut self) {
+        let used = std::mem::take(&mut self.used);
+        self.knobs.retain(|c, _| used.contains(c));
+        self.fields.retain(|c, _| used.contains(c));
+    }
 }
 
 /// A view that owns [`Controls`].
@@ -82,9 +94,14 @@ pub fn knob<T: ControlHost>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> Entity<SliderState> {
+    host.controls().used.insert(ctl.clone());
     if let Some(k) = host.controls().knobs.get_mut(&ctl) {
-        if k.live.is_none() && (k.value.is_nan() || (k.value - value).abs() > 1e-6) {
-            k.value = value;
+        let moved = k.value.is_none_or(|v| (v - value).abs() > 1e-6);
+        // While dragging, the model only moves under it from elsewhere
+        // (undo, the chat) or after a release it never saw: follow it.
+        if moved {
+            k.value = Some(value);
+            k.live = None;
             k.slider.update(cx, |s, cx| s.set_value(value, window, cx));
         }
         return k.slider.clone();
@@ -120,7 +137,7 @@ pub fn knob<T: ControlHost>(
             k.live = (!release).then_some(v);
             if release {
                 // Resync from the model on the next render.
-                k.value = f32::NAN;
+                k.value = None;
             }
         }
         if release {
@@ -132,7 +149,7 @@ pub fn knob<T: ControlHost>(
         ctl,
         Knob {
             slider: slider.clone(),
-            value,
+            value: Some(value),
             live: None,
             _sub,
         },
@@ -142,7 +159,7 @@ pub fn knob<T: ControlHost>(
 
 /// The readout value of `ctl`, if it has a slider.
 pub fn shown<T: ControlHost>(host: &mut T, ctl: &Ctl) -> Option<f32> {
-    host.controls().knobs.get(ctl).map(Knob::shown)
+    host.controls().knobs.get(ctl).and_then(Knob::shown)
 }
 
 /// The number field for `ctl`, created on first use and following `value`
@@ -156,6 +173,7 @@ pub fn field<T: ControlHost>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> Entity<NumberFieldState> {
+    host.controls().used.insert(ctl.clone());
     if let Some(f) = host.controls().fields.get(&ctl) {
         let state = f.state.clone();
         state.update(cx, |s, cx| s.set_value(value as f64, cx));

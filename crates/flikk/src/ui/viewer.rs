@@ -1119,12 +1119,22 @@ impl ViewerPanel {
 
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         if let Some((from, pan)) = self.panning {
-            self.pan = pan + (ev.position - from);
+            if ev.pressed_button == Some(MouseButton::Middle) {
+                self.pan = pan + (ev.position - from);
+                cx.notify();
+                return;
+            }
+            // The middle button came up where we didn't see it.
+            self.panning = None;
             cx.notify();
-            return;
         }
         if self.drop_stale_drag(cx) {
             cx.notify();
+            return;
+        }
+        // The left button came up where we didn't see it: end the drag.
+        if (self.masks.dragging() || self.gizmo.dragging()) && !ev.dragging() {
+            self.release(cx);
             return;
         }
         let screen = self.screen(cx);

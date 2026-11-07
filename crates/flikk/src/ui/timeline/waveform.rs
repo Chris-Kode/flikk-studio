@@ -7,10 +7,13 @@ use flikk_core::services::MediaService;
 use flikk_core::{MediaId, Time, TimeRange};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Peaks per second of source.
 const DENSITY: f64 = 60.;
 const MAX_BUCKETS: usize = 30_000;
+/// How long a failed waveform waits before it is fetched again.
+const RETRY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -19,10 +22,16 @@ pub struct Key {
     range: TimeRange,
 }
 
+enum Slot {
+    InFlight,
+    Ready(Arc<Vec<f32>>),
+    /// The request failed then (media offline or still being read).
+    Failed(Instant),
+}
+
 #[derive(Default)]
 pub struct Waveforms {
-    /// `None` while the request is in flight, or after it failed.
-    peaks: HashMap<Key, Option<Arc<Vec<f32>>>>,
+    peaks: HashMap<Key, Slot>,
 }
 
 /// What a request needs, taken from the project on the UI thread.
@@ -61,10 +70,13 @@ impl Waveforms {
                 .source_range()
                 .unwrap_or(TimeRange::new(*source_in, *source_in + clip.duration)),
         };
-        if let Some(peaks) = self.peaks.get(&key) {
-            return (peaks.clone(), None);
+        match self.peaks.get(&key) {
+            Some(Slot::Ready(peaks)) => return (Some(peaks.clone()), None),
+            Some(Slot::InFlight) => return (None, None),
+            Some(Slot::Failed(at)) if at.elapsed() < RETRY => return (None, None),
+            Some(Slot::Failed(_)) | None => {}
         }
-        self.peaks.insert(key, None);
+        self.peaks.insert(key, Slot::InFlight);
         let buckets =
             ((key.range.duration().as_secs_f64() * DENSITY) as usize).clamp(16, MAX_BUCKETS);
         (
@@ -78,7 +90,11 @@ impl Waveforms {
     }
 
     pub fn insert(&mut self, key: Key, peaks: Option<Vec<f32>>) {
-        self.peaks.insert(key, peaks.map(Arc::new));
+        let slot = match peaks {
+            Some(peaks) => Slot::Ready(Arc::new(peaks)),
+            None => Slot::Failed(Instant::now()),
+        };
+        self.peaks.insert(key, slot);
     }
 }
 

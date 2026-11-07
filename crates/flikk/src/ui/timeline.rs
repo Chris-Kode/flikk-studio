@@ -825,14 +825,25 @@ impl TimelinePanel {
 
     fn mouse_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         self.set_alt(ev.modifiers.alt, cx);
-        if self.drag.is_some() {
-            if ev.dragging() {
-                self.drag_to(ev.position, cx);
-            }
-            return;
+        // A drop hint outlives a drag that ended elsewhere or was cancelled.
+        if self.drop.is_some() && !cx.has_active_drag() {
+            self.drop = None;
+            self.snap = None;
+            cx.notify();
         }
         let inside = self.bounds.get().contains(&ev.position);
         let hover = inside.then_some(ev.position);
+        if self.drag.is_some() {
+            // Kept current so the cursor and hints are right when it ends.
+            self.hover = hover;
+            if ev.dragging() {
+                self.drag_to(ev.position, cx);
+            } else {
+                // The button came up where we didn't see it.
+                self.mouse_up(cx);
+            }
+            return;
+        }
         let item = if inside {
             self.overlay_at(ev.position, cx)
         } else {
@@ -1003,7 +1014,7 @@ impl TimelinePanel {
                 clip, edge, ripple, ..
             }) => {
                 let Some((track, c)) = project.timeline.clip(clip) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let edge_t = match edge {
                     Edge::Start => c.start,
@@ -1046,7 +1057,7 @@ impl TimelinePanel {
             Some(Drag::Roll { left, right, .. }) => {
                 let tl = &project.timeline;
                 let (Some((_, l)), Some((_, r))) = (tl.clip(left), tl.clip(right)) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let target = self.snap_time(at, &[left, right], cx);
                 let mut delta = floor_to(target - l.end(), frame);
@@ -1063,15 +1074,19 @@ impl TimelinePanel {
             }
             Some(Drag::Slip { clip, grab, .. }) => {
                 let Some((_, c)) = project.timeline.clip(clip) else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
-                let (Some(before), after) = handles(&project, c) else {
-                    return;
+                // Without media there is no source to slip: it stays put
+                // until the button is up.
+                let delta = match handles(&project, c) {
+                    (Some(before), after) => {
+                        // Dragging right shows earlier source: the in point moves left.
+                        let delta = floor_to(grab - at, frame);
+                        let hi = after.map_or(i64::MAX, |a| a.0);
+                        Time(delta.0.clamp(-before.0, hi))
+                    }
+                    (None, _) => Time::ZERO,
                 };
-                // Dragging right shows earlier source: the in point moves left.
-                let delta = floor_to(grab - at, frame);
-                let hi = after.map_or(i64::MAX, |a| a.0);
-                let delta = Time(delta.0.clamp(-before.0, hi));
                 self.drag = Some(Drag::Slip { clip, grab, delta });
             }
             Some(Drag::Marquee {
@@ -1092,7 +1107,7 @@ impl TimelinePanel {
                     fx::placed(track).into_iter().find(|p| p.owner == owner)
                 });
                 let Some(placed) = placed else {
-                    return;
+                    return self.cancel_drag(cx);
                 };
                 let target = self.snap_time(at, &[], cx);
                 let duration = floor_to(placed.duration_at(target), frame);
@@ -1107,6 +1122,13 @@ impl TimelinePanel {
             }
             None => {}
         }
+        cx.notify();
+    }
+
+    /// Drop the drag without applying it (its clip went away).
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        self.drag = None;
+        self.snap = None;
         cx.notify();
     }
 
@@ -2723,6 +2745,7 @@ impl Render for TimelinePanel {
             let _ = window.drop_image(image);
         }
         self.alt = window.modifiers().alt;
+        self.close_stale_popup(window, cx);
         let bounds = self.bounds.get();
         let duration = self.state.read(cx).bus.project().timeline.duration();
         if !self.fitted && bounds.size.width > px(0.) && duration > Time::ZERO {
@@ -2764,6 +2787,18 @@ impl Render for TimelinePanel {
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
                         e.update(cx, |this, cx| this.mouse_up(cx));
+                    }
+                });
+                // Leaving the window sends no last move.
+                let e = entity.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        e.update(cx, |this, cx| {
+                            let hovered = this.hovered_item.take().is_some();
+                            if this.hover.take().is_some() || hovered {
+                                cx.notify();
+                            }
+                        });
                     }
                 });
                 if first_paint {
@@ -2809,7 +2844,11 @@ impl Render for TimelinePanel {
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.set_alt(ev.modifiers.alt, cx)
             }))
+            // The tool stays put while a drag runs: the drag was made with it.
             .on_action(cx.listener(|this, _: &TrimTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = if this.tool == Tool::Trim {
                     Tool::Select
                 } else {
@@ -2827,10 +2866,16 @@ impl Render for TimelinePanel {
             .on_action(cx.listener(|this, _: &NudgeRightMore, _, cx| this.nudge(10, cx)))
             .on_action(cx.listener(|this, _: &ToggleEnabled, _, cx| this.toggle_enabled(cx)))
             .on_action(cx.listener(|this, _: &SelectTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = Tool::Select;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &BladeTool, _, cx| {
+                if this.drag.is_some() {
+                    return;
+                }
                 this.tool = if this.tool == Tool::Blade {
                     Tool::Select
                 } else {
