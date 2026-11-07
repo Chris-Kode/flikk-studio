@@ -7,12 +7,18 @@
 //! the builder runs on every frame, so the dialog follows the state it
 //! reads. Escape cancels; Enter presses the focused footer button, else the
 //! confirm button.
+//!
+//! A dialog that closes itself later, such as when work it started is done,
+//! opens with [`DialogExt::open_dialog_id`] and closes with
+//! [`DialogExt::close_dialog_id`]: [`DialogExt::close_dialog`] closes
+//! whichever dialog is on top by then.
 
 use super::{button::Button, icon::IconName, popover::surface, theme as t};
 use gpui_kit::base::{Dialog as BaseDialog, Root, RootPlugin};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) fn init(cx: &mut App) {
     Root::register_plugin::<DialogLayer>(cx, DialogLayer::new);
@@ -22,6 +28,18 @@ type Build = Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog>;
 type Press = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 type Close = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// One open dialog, wherever it is in the stack. Ids are never reused, in
+/// any window, so closing a dialog that is gone closes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DialogId(usize);
+
+impl DialogId {
+    fn next() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Opening and closing the window's dialogs.
 pub trait DialogExt {
     /// A form dialog: title, close button, body, footer.
@@ -30,6 +48,14 @@ pub trait DialogExt {
         cx: &mut App,
         build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
     );
+
+    /// [`Self::open_dialog`], returning the id that closes exactly this
+    /// dialog.
+    fn open_dialog_id(
+        &mut self,
+        cx: &mut App,
+        build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
+    ) -> DialogId;
 
     /// A confirm: title, description, Cancel and the confirm button, which
     /// opens focused.
@@ -42,6 +68,9 @@ pub trait DialogExt {
     /// Closes the topmost dialog.
     fn close_dialog(&mut self, cx: &mut App);
 
+    /// Closes dialog `id` wherever it is in the stack, if it is still open.
+    fn close_dialog_id(&mut self, id: DialogId, cx: &mut App);
+
     fn has_active_dialog(&self, cx: &App) -> bool;
 }
 
@@ -52,6 +81,14 @@ impl DialogExt for Window {
         build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
     ) {
         open(self, cx, false, Rc::new(build));
+    }
+
+    fn open_dialog_id(
+        &mut self,
+        cx: &mut App,
+        build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
+    ) -> DialogId {
+        open(self, cx, false, Rc::new(build))
     }
 
     fn open_confirm(
@@ -68,6 +105,12 @@ impl DialogExt for Window {
         }
     }
 
+    fn close_dialog_id(&mut self, id: DialogId, cx: &mut App) {
+        if let Some(layer) = layer(self, cx) {
+            layer.update(cx, |layer, cx| layer.close(id, self, cx));
+        }
+    }
+
     fn has_active_dialog(&self, cx: &App) -> bool {
         layer(self, cx).is_some_and(|layer| !layer.read(cx).dialogs.is_empty())
     }
@@ -77,13 +120,14 @@ fn layer(window: &Window, cx: &App) -> Option<Entity<DialogLayer>> {
     window.root::<Root>()??.read(cx).plugin::<DialogLayer>()
 }
 
-fn open(window: &mut Window, cx: &mut App, confirm: bool, build: Build) {
+fn open(window: &mut Window, cx: &mut App, confirm: bool, build: Build) -> DialogId {
+    let id = DialogId::next();
     let Some(layer) = layer(window, cx) else {
-        return;
+        return id;
     };
     layer.update(cx, |layer, cx| {
         let dialog = Active {
-            id: layer.next_id,
+            id,
             confirm,
             focus: cx.focus_handle(),
             cancel: cx.focus_handle(),
@@ -92,7 +136,6 @@ fn open(window: &mut Window, cx: &mut App, confirm: bool, build: Build) {
             previous: window.focused(cx).map(|f| f.downgrade()),
             build,
         };
-        layer.next_id += 1;
         if confirm {
             dialog.primary.focus(window, cx);
         } else {
@@ -101,6 +144,7 @@ fn open(window: &mut Window, cx: &mut App, confirm: bool, build: Build) {
         layer.dialogs.push(dialog);
         cx.notify();
     });
+    id
 }
 
 /// What a dialog is built from, each frame.
@@ -227,7 +271,7 @@ impl Styled for Dialog {
 
 #[derive(Clone)]
 struct Active {
-    id: usize,
+    id: DialogId,
     confirm: bool,
     focus: FocusHandle,
     cancel: FocusHandle,
@@ -240,7 +284,6 @@ struct Active {
 /// The window's open dialogs, drawn over everything else.
 struct DialogLayer {
     dialogs: Vec<Active>,
-    next_id: usize,
 }
 
 impl RootPlugin for DialogLayer {}
@@ -249,7 +292,6 @@ impl DialogLayer {
     fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
         Self {
             dialogs: Vec::new(),
-            next_id: 0,
         }
     }
 
@@ -260,15 +302,16 @@ impl DialogLayer {
     }
 
     /// Closes dialog `id` if it is still open, giving focus back to what had
-    /// it before when it was on top.
-    fn close(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// it before when it was on top. Under another, the one above inherits
+    /// that focus to give back, as what it had was in the closed dialog.
+    fn close(&mut self, id: DialogId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.dialogs.iter().position(|d| d.id == id) else {
             return;
         };
         let closed = self.dialogs.remove(ix);
-        if ix == self.dialogs.len()
-            && let Some(previous) = closed.previous.and_then(|f| f.upgrade())
-        {
+        if let Some(above) = self.dialogs.get_mut(ix) {
+            above.previous = closed.previous;
+        } else if let Some(previous) = closed.previous.and_then(|f| f.upgrade()) {
             previous.focus(window, cx);
         }
         cx.notify();
@@ -473,7 +516,7 @@ fn render_dialog(
     });
 
     let popup = surface()
-        .id(("dialog", active.id))
+        .id(("dialog", active.id.0))
         .occlude()
         .flex()
         .flex_col()

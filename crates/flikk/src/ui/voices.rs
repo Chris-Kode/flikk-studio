@@ -8,9 +8,9 @@ use crate::state::EditorState;
 use crate::state::voices::{Listening, SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Badge, Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
-    PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab, Tabs, Textarea,
-    Tooltip, h_flex, v_flex,
+    Badge, Button, Checkbox, DialogExt as _, DialogId, DropdownMenu as _, EmptyState, Icon,
+    IconName, Input, PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab,
+    Tabs, Textarea, Tooltip, h_flex, v_flex,
 };
 use crate::ui::media_pool::form;
 use crate::ui::media_pool::import::is_audio;
@@ -161,6 +161,9 @@ impl Filter {
 pub struct VoicesDialog {
     state: Entity<EditorState>,
     on_kept: Option<OnKept>,
+    /// The dialog this is the body of, which closes once a voice is kept,
+    /// whatever opened over it meanwhile.
+    dialog: Option<DialogId>,
     page: Page,
     op: Option<Op>,
     error: Option<SharedString>,
@@ -246,6 +249,7 @@ impl VoicesDialog {
         let mut this = Self {
             state,
             on_kept,
+            dialog: None,
             page: Page::Find,
             op: None,
             error: None,
@@ -354,7 +358,9 @@ impl VoicesDialog {
 
     /// Close, and hand `voice` on.
     fn kept(&mut self, voice: Voice, window: &mut Window, cx: &mut Context<Self>) {
-        window.close_dialog(cx);
+        if let Some(id) = self.dialog {
+            window.close_dialog_id(id, cx);
+        }
         if let Some(on_kept) = self.on_kept.clone() {
             on_kept(&voice, window, cx);
         }
@@ -1366,7 +1372,8 @@ pub fn open(
     cx: &mut App,
 ) {
     let dialog = cx.new(|cx| VoicesDialog::new(state, start, on_kept, window, cx));
-    window.open_dialog(cx, move |d, _, cx| {
+    let body = dialog.clone();
+    let id = window.open_dialog_id(cx, move |d, _, cx| {
         let submit = dialog.clone();
         let (label, ready) = dialog.read(cx).primary(cx);
         let working = dialog.read(cx).working();
@@ -1380,4 +1387,5 @@ pub fn open(
             .confirm_disabled(!ready)
             .working(working)
     });
+    body.update(cx, |this, _| this.dialog = Some(id));
 }
