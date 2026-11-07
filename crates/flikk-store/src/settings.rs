@@ -54,11 +54,81 @@ impl Store {
 }
 
 /// Deserialize over the defaults, so settings saved by an older build
-/// (missing fields) still load instead of being reset.
+/// (missing fields) still load instead of being reset. A stored value that
+/// no longer fits (a renamed enum variant, a hand edit) falls back on its
+/// own: everything else stored is kept, so the next save loses only that.
 fn lenient<T: Serialize + DeserializeOwned + Default>(stored: serde_json::Value) -> T {
     let mut base = serde_json::to_value(T::default()).unwrap_or_default();
-    merge(&mut base, stored);
-    serde_json::from_value(base).unwrap_or_default()
+    overlay(&mut base, &mut Vec::new(), stored, &|v| {
+        T::deserialize(v).is_ok()
+    });
+    T::deserialize(&base).unwrap_or_default()
+}
+
+/// Merges `over` into `root` at `path` when the result still passes `fits`;
+/// otherwise goes down `over`'s keys and keeps each one that does. A list
+/// keeps the items that still fit, so one stale id doesn't empty
+/// `enabled_recipes` (empty turns every recipe on); with none left it keeps
+/// the default.
+fn overlay(
+    root: &mut serde_json::Value,
+    path: &mut Vec<String>,
+    over: serde_json::Value,
+    fits: &dyn Fn(&serde_json::Value) -> bool,
+) {
+    let mut candidate = root.clone();
+    merge(slot(&mut candidate, path), over.clone());
+    if fits(&candidate) {
+        *root = candidate;
+        return;
+    }
+    let over = match over {
+        serde_json::Value::Object(over) => over,
+        serde_json::Value::Array(items) => {
+            let mut kept = Vec::new();
+            for item in items {
+                kept.push(item);
+                let mut candidate = root.clone();
+                *slot(&mut candidate, path) = serde_json::Value::Array(kept.clone());
+                if !fits(&candidate) {
+                    kept.pop();
+                }
+            }
+            if !kept.is_empty() {
+                *slot(root, path) = serde_json::Value::Array(kept);
+            }
+            return;
+        }
+        _ => return,
+    };
+    let mut candidate = root.clone();
+    let at = slot(&mut candidate, path);
+    if !at.is_object() {
+        *at = serde_json::Value::Object(Default::default());
+        if !fits(&candidate) {
+            return;
+        }
+        *root = candidate;
+    }
+    for (k, v) in over {
+        path.push(k);
+        overlay(root, path, v, fits);
+        path.pop();
+    }
+}
+
+/// The value at `path`, made (as `null`) where missing. Only called on
+/// paths whose parents are objects.
+fn slot<'a>(mut value: &'a mut serde_json::Value, path: &[String]) -> &'a mut serde_json::Value {
+    for k in path {
+        value = match value {
+            serde_json::Value::Object(map) => {
+                map.entry(k.clone()).or_insert(serde_json::Value::Null)
+            }
+            other => other,
+        };
+    }
+    value
 }
 
 fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
