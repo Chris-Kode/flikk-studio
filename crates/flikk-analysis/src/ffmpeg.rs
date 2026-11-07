@@ -8,7 +8,7 @@ use flikk_core::time::{Time, TimeRange};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// Sample rate the sound models hear.
 #[cfg(feature = "sounds")]
@@ -30,8 +30,49 @@ struct Output {
     log: Vec<String>,
 }
 
+/// A spawned ffmpeg, killed and reaped when dropped (on an early return or
+/// a panic), so it never goes on decoding for nobody or stays a zombie.
+struct Process(Child);
+
+impl std::ops::Deref for Process {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Process {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // Both are no-ops once it has been waited for.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Kills the process when dropped while armed: inside the scope that reads
+/// it, since the scope only ends once the stderr reader does, and that only
+/// at ffmpeg's exit.
+struct Stop<'a>(Option<&'a mut Child>);
+
+impl Drop for Stop<'_> {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.take() {
+            let _ = child.kill();
+        }
+    }
+}
+
 /// Run ffmpeg with `args`, feeding stdout to `stdout` and calling `progress`
-/// with 0..1 when `duration` is known.
+/// with 0..1 when `duration` is known. When `stdout` fails or panics,
+/// ffmpeg is killed rather than left to decode the rest, and its error is
+/// the run's.
 fn run(
     args: &[OsString],
     duration: Option<Time>,
@@ -39,25 +80,30 @@ fn run(
     stdout: impl FnOnce(&mut dyn Read) -> Result<()>,
 ) -> Result<Output> {
     let bin = binary();
-    let mut child = Command::new(&bin)
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-nostats",
-            "-progress",
-            "pipe:2",
-        ])
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("could not run {} (set FLIKK_FFMPEG)", bin.display()))?;
+    let mut child = Process(
+        Command::new(&bin)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-nostats",
+                "-progress",
+                "pipe:2",
+            ])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not run {} (set FLIKK_FFMPEG)", bin.display()))?,
+    );
     let mut out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
     let total = duration.map(|d| d.as_secs_f64()).filter(|d| *d > 0.0);
 
     let (read, log) = std::thread::scope(|s| {
+        // Armed before the reader thread starts, so that a failure to
+        // start it kills ffmpeg too.
+        let mut stop = Stop(Some(&mut child));
         let log = s.spawn(move || {
             let mut log = Vec::new();
             for line in BufReader::new(err).lines().map_while(|l| l.ok()) {
@@ -72,16 +118,21 @@ fn run(
             log
         });
         let read = stdout(&mut out);
-        // Drain whatever is left so ffmpeg never blocks on a full pipe.
-        let _ = std::io::copy(&mut out, &mut std::io::sink());
+        if read.is_ok() {
+            stop.0 = None;
+            // Drain whatever is left so ffmpeg never blocks on a full pipe.
+            let _ = std::io::copy(&mut out, &mut std::io::sink());
+        }
+        drop(stop);
         (read, log.join().unwrap_or_default())
     });
-    let status = child.wait()?;
-    if !status.success() {
+    let status = child.wait();
+    // A reader that stopped early killed ffmpeg: its own error says why.
+    read?;
+    if !status?.success() {
         let tail: Vec<_> = log.iter().rev().take(4).rev().cloned().collect();
         bail!("ffmpeg failed: {}", tail.join(" | "));
     }
-    read?;
     Ok(Output { log })
 }
 
