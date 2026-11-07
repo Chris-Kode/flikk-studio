@@ -8,8 +8,10 @@
 //! it, and levels → transcript of that speech → word times from the
 //! aligner, or word edges on the audio where it can't → the speech no word
 //! was heard in, heard again → speakers → sounds, music and sound vectors
-//! → beats → shot changes) and caches the result by fingerprint, so an
-//! item is analyzed once (principle 4) until the user analyzes it again.
+//! → beats → shot changes) and caches the result by fingerprint with the
+//! steps it covers, so an item is analyzed once (principle 4) until the
+//! user analyzes it again. A request for steps the result lacks runs only
+//! those parts (speech, the sound pass, shot changes) and adds them to it.
 //! Results of another [`ANALYSIS_VERSION`] are not read.
 //!
 //! With a provider set for transcription ([`AnalysisConfig::speech`]) the
@@ -24,7 +26,7 @@
 //!
 //! Library sounds are analyzed without being asked, so
 //! [`AnalyzeOptions::sound_only`] leaves speech and shots out: nothing goes
-//! to a provider, and "Analyze again" adds the rest.
+//! to a provider, and analyzing the item adds the rest.
 //!
 //! A voiceover's words are its script ([`GenerationInfo::script`]), so
 //! nothing transcribes it and nothing goes to a provider: the aligner
@@ -63,7 +65,7 @@ use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::time::{Time, TimeRange};
 use flikk_models::Task as ModelTask;
 use speakers::{Diarizer, SingleSpeaker};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -117,9 +119,15 @@ pub struct AnalyzeOptions {
 /// The [`AnalysisService`] that runs everything on this machine.
 pub struct LocalAnalysis {
     shared: Arc<Shared>,
-    /// Keyed by fingerprint, so the same file is analyzed once at a time.
-    queue: JobQueue<Fingerprint>,
+    queue: JobQueue<Key>,
 }
+
+/// A job's key: the item's fingerprint, the steps asked for and whether
+/// the results are replaced. A request for more steps, or to analyze
+/// again, waits behind a job for fewer instead of being taken for it, and
+/// adds what that job left out. Jobs run one at a time ([`JOBS_AT_ONCE`]),
+/// so a file is analyzed once at a time.
+type Key = (Fingerprint, AnalysisSteps, bool);
 
 struct Task {
     item: MediaItem,
@@ -130,10 +138,10 @@ struct Task {
 struct Shared {
     options: Options,
     diarizer: Box<dyn Diarizer>,
-    results: Mutex<HashMap<Fingerprint, Arc<Analysis>>>,
-    /// Results kept in memory although a step failed; analyzed again on
-    /// the next request.
-    incomplete: Mutex<HashSet<Fingerprint>>,
+    /// Results read or made so far, with the steps each covers. A step that
+    /// failed is not among them, so the next request runs it again; only
+    /// results without failures are written to disk.
+    results: Mutex<HashMap<Fingerprint, Cached>>,
     #[cfg(feature = "whisper")]
     voice: Box<dyn flikk_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
@@ -142,10 +150,19 @@ struct Shared {
     aligner: Box<dyn flikk_models::word_timing::Aligner>,
     #[cfg(feature = "sounds")]
     sounds: sounds::SoundModels,
-    /// Sound vectors read so far, by fingerprint.
-    vectors: Mutex<HashMap<Fingerprint, Arc<SoundVectors>>>,
+    /// Sound vectors read or made so far, by fingerprint; `None` when the
+    /// sound pass of the result in memory made none, so that older ones on
+    /// disk are not read.
+    vectors: Mutex<HashMap<Fingerprint, Option<Arc<SoundVectors>>>>,
     /// The steps, and who transcribes, for jobs that start from now on.
     config: Mutex<AnalysisConfig>,
+}
+
+/// A result and the steps it covers.
+#[derive(Clone)]
+struct Cached {
+    analysis: Arc<Analysis>,
+    steps: AnalysisSteps,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -204,7 +221,6 @@ impl LocalAnalysis {
             options,
             diarizer,
             results: Mutex::default(),
-            incomplete: Mutex::default(),
             #[cfg(feature = "whisper")]
             voice: flikk_models::voice_activity::runner(ModelTask::VoiceActivity.model()),
             #[cfg(feature = "whisper")]
@@ -315,16 +331,18 @@ impl LocalAnalysis {
             );
             return self.queue.finished(label, Some(item.id), Err(message));
         };
-        if !options.refresh && self.shared.complete(&fp) {
+        let wanted = Plan::for_item(&self.shared, item, options.sound_only).ran();
+        if !options.refresh && self.shared.covers(&fp, &wanted) {
             return self.queue.finished(label, Some(item.id), Ok(()));
         }
         let shared = self.shared.clone();
+        let key = (fp.clone(), wanted, options.refresh);
         let task = Task {
             item: item.clone(),
-            fingerprint: fp.clone(),
+            fingerprint: fp,
             options,
         };
-        self.queue.push(fp, label, Some(item.id), move |job| {
+        self.queue.push(key, label, Some(item.id), move |job| {
             run(&shared, &task, job)
         })
     }
@@ -344,7 +362,8 @@ impl AnalysisService for LocalAnalysis {
         let wanted = cfg!(feature = "sounds")
             && lock(&self.shared.config).steps.sounds
             && ModelTask::SoundTagging.model().is_downloaded();
-        let done = |fp| self.shared.complete(fp);
+        let heard = || Plan::for_item(&self.shared, item, true).ran();
+        let done = |fp| self.shared.covers(fp, &heard());
         if wanted && item.fingerprint.as_ref().is_some_and(|fp| !done(fp)) {
             let options = AnalyzeOptions {
                 sound_only: true,
@@ -403,12 +422,15 @@ impl AnalysisService for LocalAnalysis {
     fn sound_vectors(&self, fingerprint: &Fingerprint) -> Option<Arc<SoundVectors>> {
         let shared = &self.shared;
         if let Some(v) = lock(&shared.vectors).get(fingerprint) {
-            return Some(v.clone());
+            return v.clone();
         }
-        // Vectors beside a result of another version are not read either.
-        shared.cached(fingerprint)?;
+        // Vectors beside a result of another version, or one that does not
+        // cover sound search, are not read either.
+        if !shared.entry(fingerprint)?.steps.sound_search() {
+            return None;
+        }
         let loaded = Arc::new(cache::load_vectors(fingerprint)?);
-        lock(&shared.vectors).insert(fingerprint.clone(), loaded.clone());
+        lock(&shared.vectors).insert(fingerprint.clone(), Some(loaded.clone()));
         Some(loaded)
     }
 
@@ -423,19 +445,29 @@ impl AnalysisService for LocalAnalysis {
 }
 
 impl Shared {
-    /// Whether full results are in memory or on disk.
-    fn complete(&self, fp: &Fingerprint) -> bool {
-        self.cached(fp).is_some() && !lock(&self.incomplete).contains(fp)
+    /// Whether results in memory or on disk hold everything a run of
+    /// `wanted` makes.
+    fn covers(&self, fp: &Fingerprint, wanted: &AnalysisSteps) -> bool {
+        self.entry(fp).is_some_and(|c| c.steps.covers(wanted))
+    }
+
+    fn cached(&self, fp: &Fingerprint) -> Option<Arc<Analysis>> {
+        self.entry(fp).map(|c| c.analysis)
     }
 
     /// Memory first, then the disk cache.
-    fn cached(&self, fp: &Fingerprint) -> Option<Arc<Analysis>> {
-        if let Some(a) = lock(&self.results).get(fp) {
-            return Some(a.clone());
+    fn entry(&self, fp: &Fingerprint) -> Option<Cached> {
+        if let Some(c) = lock(&self.results).get(fp) {
+            return Some(c.clone());
         }
-        let loaded = Arc::new(cache::load(fp)?);
-        lock(&self.results).insert(fp.clone(), loaded.clone());
-        Some(loaded)
+        let (analysis, steps) = cache::load(fp)?;
+        let loaded = Cached {
+            analysis: Arc::new(analysis),
+            steps,
+        };
+        // A job may have finished while the disk was read.
+        let mut results = lock(&self.results);
+        Some(results.entry(fp.clone()).or_insert(loaded).clone())
     }
 }
 
@@ -489,9 +521,22 @@ struct Plan {
     sounds: bool,
     search: bool,
     beats: bool,
+    /// The parts made again; the others are kept from the result the job
+    /// adds to. Speech is voice activity, the transcript and speakers;
+    /// hearing is sounds, music and sound vectors. Shot changes run when
+    /// `steps.shots` says.
+    speech: bool,
+    hearing: bool,
 }
 
 impl Plan {
+    /// The plan for analyzing `item` with the steps configured now.
+    fn for_item(shared: &Shared, item: &MediaItem, sound_only: bool) -> Self {
+        let generated = item.generated.as_deref();
+        let script = generated.and_then(GenerationInfo::script).is_some() && !sound_only;
+        Self::new(&lock(&shared.config), sound_only, script)
+    }
+
     fn new(config: &AnalysisConfig, sound_only: bool, script: bool) -> Self {
         let mut steps = config.steps;
         if sound_only {
@@ -516,16 +561,85 @@ impl Plan {
             search: sounds && steps.sound_search() && have(ModelTask::SoundSearch),
             beats: sounds && steps.beats() && have(ModelTask::Beats),
             steps,
+            speech: true,
+            hearing: true,
         }
+    }
+
+    /// The steps it runs: what its result covers when none fails.
+    fn ran(&self) -> AnalysisSteps {
+        AnalysisSteps {
+            transcript: self.steps.transcript,
+            speakers: self.steps.speakers(),
+            sounds: self.sounds,
+            beats: self.beats,
+            sound_search: self.search,
+            shots: self.steps.shots,
+        }
+    }
+
+    /// Only the parts a result covering `have` lacks, each run whole.
+    fn missing(mut self, have: &AnalysisSteps) -> Self {
+        let wanted = self.ran();
+        let lacks = |want: bool, has: bool| want && !has;
+        self.hearing = lacks(wanted.sounds, have.sounds)
+            || lacks(wanted.beats, have.beats())
+            || lacks(wanted.sound_search, have.sound_search());
+        // Voice activity is heard again with the audio unless a transcript
+        // goes with it.
+        self.speech = lacks(wanted.transcript, have.transcript)
+            || lacks(wanted.speakers, have.speakers())
+            || (self.hearing && !have.transcript);
+        if !self.speech {
+            self.steps.transcript = false;
+            self.steps.speakers = false;
+            self.online = None;
+        }
+        if !self.hearing {
+            (self.sounds, self.search, self.beats) = (false, false, false);
+        }
+        self.steps.shots &= !have.shots;
+        self
+    }
+
+    /// What a result covering `have` that this plan ran on covers, given
+    /// the parts that failed.
+    fn covered(&self, have: &AnalysisSteps, failed: &Failed) -> AnalysisSteps {
+        let ran = self.ran();
+        let mut steps = *have;
+        if self.speech {
+            steps.transcript = ran.transcript && !failed.speech;
+            steps.speakers = ran.speakers && !failed.speech;
+        }
+        if self.hearing {
+            steps.sounds = ran.sounds && !failed.hearing;
+            steps.beats = ran.beats && !failed.hearing;
+            steps.sound_search = ran.sound_search && !failed.hearing;
+        }
+        if ran.shots {
+            steps.shots = !failed.shots;
+        }
+        steps
     }
 }
 
-/// The whole pipeline for one item. A step that fails leaves its part out
+/// The parts of a job that failed.
+#[derive(Default)]
+struct Failed {
+    speech: bool,
+    hearing: bool,
+    shots: bool,
+}
+
+/// The whole pipeline for one item, or the parts of it the cached result
+/// lacks unless the task replaces it. A step that fails leaves its part out
 /// (or a stand-in: the energy VAD's speech, one speaker for all) and the
-/// rest goes on; such a result is kept in memory for this session but only
-/// complete ones are written to disk.
+/// rest goes on; such a result is kept in memory for this session, without
+/// the failed part among its steps, but only complete ones are written to
+/// disk.
 fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     let item = &task.item;
+    let fp = &task.fingerprint;
     let generated = item.generated.as_deref();
     let script = generated.and_then(GenerationInfo::script);
     let script = script.filter(|_| !task.options.sound_only);
@@ -534,10 +648,18 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         task.options.sound_only,
         script.is_some(),
     );
+    // What is made already: by a job queued before this one, too.
+    let old = shared.entry(fp).filter(|_| !task.options.refresh);
+    let have = old.as_ref().map_or(AnalysisSteps::NONE, |c| c.steps);
+    let plan = match &old {
+        Some(_) if have.covers(&plan.ran()) => return Ok(()),
+        Some(_) => plan.missing(&have),
+        None => plan,
+    };
     let steps = plan.steps;
     let script = script.filter(|_| steps.transcript);
     let duration = item.info.as_ref().map(|i| i.duration);
-    let audio_wanted = has_audio(item);
+    let audio_wanted = has_audio(item) && (plan.speech || plan.hearing);
     let video_wanted = has_video(item) && steps.shots;
     let stream = choose_stream(shared, item, &task.options);
     let mut weights = Vec::new();
@@ -545,7 +667,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         weights.push((Step::Audio, 1.0));
         if plan.online.is_some() {
             weights.push((Step::Transcript, 6.0));
-        } else {
+        } else if plan.speech {
             if cfg!(feature = "whisper") {
                 weights.push((Step::Speech, 0.5));
             }
@@ -576,8 +698,23 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         steps: weights,
     };
 
-    let mut analysis = Analysis::default();
+    // The parts made again start empty; the rest is the old result's.
+    let mut analysis = old.map_or_else(Analysis::default, |c| (*c.analysis).clone());
+    if plan.speech {
+        analysis.speech.clear();
+        analysis.transcript = None;
+    }
+    if plan.hearing {
+        analysis.sounds.clear();
+        analysis.music.clear();
+    }
+    if steps.shots {
+        analysis.shot_changes.clear();
+    }
     let mut problems: Vec<String> = Vec::new();
+    let mut failed = Failed::default();
+    // Made by the sound pass, when it runs.
+    let mut vectors = None;
     // This build cannot transcribe: keep the rest for this session, but
     // leave the disk cache for a build that can.
     let mut unpersisted = false;
@@ -593,10 +730,13 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => None,
             Err(e) => {
                 problems.push(format!("audio: {e:#}"));
+                failed.speech = true;
+                failed.hearing = true;
                 None
             }
         };
         if let Some(audio) = audio {
+            let before = problems.len();
             let (levels, sound) = align::measure(&audio);
             // What the provider heard besides words, for when the sound
             // models don't run.
@@ -623,7 +763,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                         analysis.speech = vad::speech_ranges(&audio);
                     }
                 }
-            } else {
+            } else if plan.speech {
                 let Voice { speech, stretches } =
                     listen(shared, &audio, &progress).unwrap_or_else(|e| {
                         problems.push(format!("voice activity: {e:#}"));
@@ -699,13 +839,20 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                     }
                 }
             }
+            failed.speech = problems.len() > before;
             drop(audio);
             analysis.levels = Some(levels);
             if plan.sounds {
-                if let Err(e) = hear(shared, task, stream, &plan, &mut analysis, &progress) {
-                    problems.push(format!("sounds: {e:#}"));
+                let heard = hear(shared, task, stream, &plan, &mut analysis, &progress);
+                match heard {
+                    Ok(made) => vectors = made,
+                    Err((made, e)) => {
+                        vectors = made;
+                        failed.hearing = true;
+                        problems.push(format!("sounds: {e:#}"));
+                    }
                 }
-            } else if steps.sounds {
+            } else if plan.hearing && steps.sounds {
                 (analysis.sounds, analysis.music) = from_events(events);
             }
         }
@@ -720,25 +867,47 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         ) {
             Ok(shots) => analysis.shot_changes = shots,
             Err(e) if item.info.is_none() && ffmpeg::is_missing_stream(&e) => {}
-            Err(e) => problems.push(format!("shot changes: {e:#}")),
+            Err(e) => {
+                failed.shots = true;
+                problems.push(format!("shot changes: {e:#}"));
+            }
         }
     }
 
-    let fp = &task.fingerprint;
     analysis.version = ANALYSIS_VERSION;
+    let mut covered = plan.covered(&have, &failed);
+    if unpersisted {
+        // Nothing was transcribed: a build that can adds the transcript.
+        (covered.transcript, covered.speakers) = (false, false);
+    }
     let complete = problems.is_empty();
-    if complete
-        && !unpersisted
-        && let Err(e) = cache::store(fp, &analysis)
-    {
-        problems.push(format!("cache: {e:#}"));
+    if complete && !unpersisted {
+        // The vectors first: when they can't be written, the result on
+        // disk stays the one beside the vectors there.
+        let vectors_stored = match (&vectors, plan.hearing) {
+            (_, false) => Ok(()),
+            (Some(v), true) => cache::store_vectors(fp, v),
+            (None, true) => cache::remove_vectors(fp),
+        };
+        let stored = vectors_stored
+            .map_err(|e| format!("sound vectors: {e:#}"))
+            .and_then(|()| {
+                cache::store(fp, &analysis, &covered).map_err(|e| format!("cache: {e:#}"))
+            });
+        if let Err(e) = stored {
+            problems.push(e);
+        }
     }
-    lock(&shared.results).insert(fp.clone(), Arc::new(analysis));
-    if complete {
-        lock(&shared.incomplete).remove(fp);
-    } else {
-        lock(&shared.incomplete).insert(fp.clone());
+    // The vectors of the sound pass that ran, or none: older ones are of
+    // another run, and maybe another model.
+    if plan.hearing {
+        lock(&shared.vectors).insert(fp.clone(), vectors.map(Arc::new));
     }
+    let cached = Cached {
+        analysis: Arc::new(analysis),
+        steps: covered,
+    };
+    lock(&shared.results).insert(fp.clone(), cached);
     if problems.is_empty() {
         Ok(())
     } else {
@@ -960,9 +1129,12 @@ fn from_events(events: Vec<Sound>) -> (Vec<Sound>, Vec<Music>) {
     (sounds, music)
 }
 
-/// Sounds, music, beats and sound vectors for `analysis`, whose levels are
-/// measured; sound vectors and beats only when `plan` says. A model that
-/// could not be had is an error; what the others heard is kept.
+/// The sound vectors [`hear`] made; when it failed, with why.
+type Heard = Result<Option<SoundVectors>, (Option<SoundVectors>, anyhow::Error)>;
+
+/// Sounds, music and beats for `analysis`, whose levels are measured, and
+/// its sound vectors; sound vectors and beats only when `plan` says. A
+/// model that could not be had is an error; what the others heard is kept.
 #[cfg(feature = "sounds")]
 fn hear(
     shared: &Shared,
@@ -971,33 +1143,30 @@ fn hear(
     plan: &Plan,
     analysis: &mut Analysis,
     progress: &Progress,
-) -> anyhow::Result<()> {
+) -> Heard {
     let pass = sounds::Pass {
         search: plan.search,
         beats: plan.beats,
     };
-    let heard = shared.sounds.hear(
-        &task.item.path,
-        stream,
-        task.item.info.as_ref().map(|i| i.duration),
-        analysis.levels.as_ref(),
-        pass,
-        &progress.step(Step::Sounds),
-        &progress.step(Step::Beats),
-    )?;
+    let heard = shared
+        .sounds
+        .hear(
+            &task.item.path,
+            stream,
+            task.item.info.as_ref().map(|i| i.duration),
+            analysis.levels.as_ref(),
+            pass,
+            &progress.step(Step::Sounds),
+            &progress.step(Step::Beats),
+        )
+        .map_err(|e| (None, e))?;
     analysis.sounds = heard.sounds;
     analysis.music = heard.music;
-    let mut problems = heard.problems;
-    if let Some(vectors) = heard.vectors {
-        if let Err(e) = cache::store_vectors(&task.fingerprint, &vectors) {
-            problems.push(format!("sound vectors: {e:#}"));
-        }
-        lock(&shared.vectors).insert(task.fingerprint.clone(), Arc::new(vectors));
+    if !heard.problems.is_empty() {
+        let e = anyhow::anyhow!("{}", heard.problems.join("; "));
+        return Err((heard.vectors, e));
     }
-    if !problems.is_empty() {
-        anyhow::bail!("{}", problems.join("; "));
-    }
-    Ok(())
+    Ok(heard.vectors)
 }
 
 #[cfg(not(feature = "sounds"))]
@@ -1008,8 +1177,8 @@ fn hear(
     _plan: &Plan,
     _analysis: &mut Analysis,
     _progress: &Progress,
-) -> anyhow::Result<()> {
-    Ok(())
+) -> Heard {
+    Ok(None)
 }
 
 /// Fit `words`, said in `language`, to the audio with the alignment model;

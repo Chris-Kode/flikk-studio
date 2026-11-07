@@ -185,7 +185,8 @@ pub struct AnalysisConfig {
 
 pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
-    /// item; a no-op if cached for its fingerprint.
+    /// item; a no-op if its cached result covers the steps configured now,
+    /// else only the missing ones run.
     fn analyze(&self, item: &MediaItem) -> JobId;
     /// Queue what is heard in a library sound: sounds, music, beats and
     /// sound vectors, on this machine. No speech, so it spends no

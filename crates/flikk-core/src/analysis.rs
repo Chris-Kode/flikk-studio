@@ -248,7 +248,8 @@ impl SoundVectors {
 
 /// The steps analysis runs: all of them, each when its model is on disk
 /// (a sound-only pass leaves speech and shots out). Voice activity and
-/// levels always run; a step left out stays empty in the results.
+/// levels always run; a step left out stays empty in the results. The
+/// analysis cache keeps, beside each result, the steps it covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnalysisSteps {
@@ -278,6 +279,27 @@ impl Default for AnalysisSteps {
 }
 
 impl AnalysisSteps {
+    /// No step: what a result covers when every step it ran failed.
+    pub const NONE: Self = Self {
+        transcript: false,
+        speakers: false,
+        sounds: false,
+        beats: false,
+        sound_search: false,
+        shots: false,
+    };
+
+    /// Whether results of these steps hold everything a run of `other`
+    /// makes.
+    pub fn covers(&self, other: &Self) -> bool {
+        (self.transcript || !other.transcript)
+            && (self.speakers() || !other.speakers())
+            && (self.sounds || !other.sounds)
+            && (self.beats() || !other.beats())
+            && (self.sound_search() || !other.sound_search())
+            && (self.shots || !other.shots)
+    }
+
     /// Speakers without a transcript, or beats without the music, don't run.
     pub fn speakers(&self) -> bool {
         self.transcript && self.speakers
