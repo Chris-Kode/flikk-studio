@@ -85,10 +85,26 @@ fn network(e: ureq::Error) -> CloudError {
     CloudError::Failed(format!("could not reach the provider: {e}"))
 }
 
+/// Whether `e` came before anything was sent: no address for the host, or
+/// no connection to it.
+fn unsent(e: &ureq::Error) -> bool {
+    use ureq::Timeout;
+    match e {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::ConnectProxyFailed(_)
+        | ureq::Error::Timeout(Timeout::Resolve | Timeout::Connect) => true,
+        ureq::Error::Io(e) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+        _ => false,
+    }
+}
+
 /// Run `attempt` until it gets a reply that isn't busy (or a server error,
 /// with `server_errors`), or the retries run out; the last reply is
 /// returned either way. Requests that are charged for what they make leave
-/// out `server_errors`: the work may have been done and billed.
+/// out `server_errors`: the work may have been done and billed. Those are
+/// tried again only when they never reached the provider: a busy reply, or
+/// no connection.
 fn with_retries(
     server_errors: bool,
     mut attempt: impl FnMut() -> Result<Response<Body>, ureq::Error>,
@@ -98,7 +114,7 @@ fn with_retries(
         let outcome = attempt().and_then(read);
         let wait = match &outcome {
             Ok(reply) if !reply.retryable(server_errors) => None,
-            Err(_) if !server_errors => None,
+            Err(e) if !server_errors && !unsent(e) => None,
             _ => waits.next(),
         };
         match (outcome, wait) {
@@ -249,7 +265,9 @@ pub fn put_file(url: &str, path: &Path, headers: &[(&str, &str)]) -> Result<Repl
 
 /// Fetch `url` into `path` (through a `.part` file), without holding it in
 /// memory; `progress` gets 0..1 when the server says how long it is. A
-/// file already at `path` is left as it is, and the fetch fails.
+/// file already at `path` is left as it is, and the fetch fails. Only the
+/// network is tried again: a file that can't be written (a full disk)
+/// fails at once.
 pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), CloudError> {
     let fail =
         |e: std::io::Error| CloudError::Failed(format!("could not write {}: {e}", path.display()));
@@ -272,7 +290,10 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
             let mut reader = response.into_body().into_reader();
-            let mut file = std::fs::File::create(&part)?;
+            let mut file = match std::fs::File::create(&part) {
+                Ok(file) => file,
+                Err(e) => return Ok(Err(fail(e))),
+            };
             let mut buf = vec![0; 1 << 16];
             let mut got = 0u64;
             loop {
@@ -280,14 +301,15 @@ pub fn download(url: &str, path: &Path, progress: &dyn Fn(f32)) -> Result<(), Cl
                 if n == 0 {
                     break;
                 }
-                std::io::Write::write_all(&mut file, &buf[..n])?;
+                if let Err(e) = std::io::Write::write_all(&mut file, &buf[..n]) {
+                    return Ok(Err(fail(e)));
+                }
                 got += n as u64;
                 if let Some(total) = total.filter(|t| *t > 0) {
                     progress((got as f32 / total as f32).min(1.0));
                 }
             }
-            file.sync_all()?;
-            Ok(Ok(()))
+            Ok(file.sync_all().map_err(fail))
         })();
         match (attempt, waits.next()) {
             (Ok(result), _) => break result,
