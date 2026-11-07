@@ -34,6 +34,20 @@ Autosaves, backups and the shared library stay under the user-data folder.
 FLIKK_HOME=/tmp/flikk-dev cargo run -p flikk
 ```
 
+### 3. UI copy: let the layout do the explaining
+
+Grouping, placement, icons and state should make a control clear on their
+own. Text is the last resort.
+
+- No secondary labels, subtitles, helper text or descriptions under controls
+  or headings, unless the control can't be understood without them.
+- Labels are short: one or two words, sentence case, no trailing period.
+  Show state through the control itself (disabled, selected, a spinner)
+  rather than with words.
+- Prefer a tooltip to a visible explanation. Status and errors go in the
+  existing status and error lines, briefly.
+- No emoji, no all-caps or tracked-out labels, no exclamation marks.
+
 ## State and async work
 
 ### Make the states explicit
