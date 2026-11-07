@@ -23,7 +23,8 @@
 //! before it that smoothing reads, ahead of whatever was queued before, on
 //! one worker thread; playback so keeps finding its maps made when the
 //! machine is fast enough, and shows the nearest made frame's map
-//! meanwhile.
+//! meanwhile. A frame that fails is not asked for again for
+//! [`RETRY_AFTER`]; renders try it again all the same.
 
 mod store;
 
@@ -33,10 +34,12 @@ use flikk_core::services::{Frame, FrameStream, MediaService, ServiceError, Servi
 use flikk_core::time::{Rate, Time, TimeRange};
 use flikk_models::depth::{DepthEstimator, Disparity};
 use flikk_models::{Model, Task as ModelTask};
-use std::collections::{HashSet, VecDeque};
+use std::any::Any;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use store::Raw;
 
 /// Widest frame read for the model, which sees 518 on the longer side.
@@ -59,12 +62,26 @@ const WANTED_MAX: usize = 600;
 /// Maps kept in memory, as made, and smoothed.
 const RAW_KEPT: usize = 128;
 const SMOOTHED_KEPT: usize = 32;
+/// How long a frame that failed is left before it is asked for again.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A frame's map: media, model, frame.
 type Key = (Fingerprint, &'static str, i64);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a panic making a map says, with its message when it carries one.
+fn stopped(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match detail {
+        Some(detail) => format!("making the depth map stopped unexpectedly: {detail}"),
+        None => "making the depth map stopped unexpectedly".into(),
+    }
 }
 
 /// The [`DepthService`] that runs the model on this machine.
@@ -81,10 +98,11 @@ struct Shared {
     absent: Mutex<HashSet<Key>>,
     smoothed: Mutex<VecDeque<(Key, DepthMap)>>,
     wanted: Mutex<Wanted>,
-    /// Frames that failed, not tried again this session.
-    failed: Mutex<HashSet<Key>>,
-    /// Why the last frame failed.
-    error: Mutex<Option<String>>,
+    /// Frames being made now, and their end announced.
+    making: Mutex<HashSet<Key>>,
+    made_one: Condvar,
+    /// Frames that failed: why, and when.
+    failed: Mutex<HashMap<Key, (String, Instant)>>,
     version: AtomicU64,
     seconds_per_frame: Mutex<Option<f32>>,
 }
@@ -119,8 +137,9 @@ impl LocalDepth {
                 absent: Mutex::default(),
                 smoothed: Mutex::default(),
                 wanted: Mutex::default(),
+                making: Mutex::default(),
+                made_one: Condvar::new(),
                 failed: Mutex::default(),
-                error: Mutex::default(),
                 version: AtomicU64::new(0),
                 seconds_per_frame: Mutex::default(),
             }),
@@ -368,32 +387,67 @@ impl Shared {
         }
         keep(&self.raw, key.clone(), Arc::new(raw), RAW_KEPT);
         lock(&self.absent).remove(key);
+        lock(&self.failed).remove(key);
         self.bump();
     }
 
     fn fail(&self, key: &Key, message: String) {
-        lock(&self.failed).insert(key.clone());
-        *lock(&self.error) = Some(message);
+        lock(&self.failed).insert(key.clone(), (message, Instant::now()));
         self.bump();
     }
 
-    /// Make `key` from `picture` unless it was made meanwhile.
-    fn make(&self, key: &Key, model: &'static Model, picture: ServiceResult<Frame>) -> bool {
-        if self.made(key) {
-            return true;
-        }
-        match picture
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .and_then(|p| self.estimate(model, &p))
+    /// Whether `key` failed less than [`RETRY_AFTER`] ago.
+    fn failed_lately(&self, key: &Key) -> bool {
+        lock(&self.failed)
+            .get(key)
+            .is_some_and(|(_, at)| at.elapsed() < RETRY_AFTER)
+    }
+
+    /// Make `key` from `picture` unless it is made. When another thread is
+    /// making it, waits for that (`wait`) or leaves it to it.
+    fn make(
+        &self,
+        key: &Key,
+        model: &'static Model,
+        wait: bool,
+        picture: impl FnOnce() -> ServiceResult<Frame>,
+    ) -> Result<(), String> {
         {
+            let mut making = lock(&self.making);
+            loop {
+                if self.made(key) {
+                    return Ok(());
+                }
+                if making.insert(key.clone()) {
+                    break;
+                }
+                if !wait {
+                    return Ok(());
+                }
+                making = self
+                    .made_one
+                    .wait(making)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        let _claim = Making(self, key);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let picture = picture().map_err(|e| e.to_string())?;
+            self.estimate(model, &picture).map_err(|e| format!("{e:#}"))
+        }))
+        .unwrap_or_else(|payload| {
+            // Load the model anew rather than trust what it was left as.
+            *lock(&self.runner) = None;
+            Err(stopped(payload.as_ref()))
+        });
+        match result {
             Ok(raw) => {
                 self.store(key, raw);
-                *lock(&self.error) = None;
-                true
+                Ok(())
             }
             Err(e) => {
-                self.fail(key, format!("{e:#}"));
-                false
+                self.fail(key, e.clone());
+                Err(e)
             }
         }
     }
@@ -403,11 +457,10 @@ impl Shared {
         let Some(fp) = item.fingerprint.clone() else {
             return;
         };
-        let failed = lock(&self.failed).clone();
         let keys: Vec<Key> = frames
             .into_iter()
             .map(|f| (fp.clone(), model.id, f))
-            .filter(|k| !failed.contains(k) && !self.made(k))
+            .filter(|k| !self.failed_lately(k) && !self.made(k))
             .collect();
         if keys.is_empty() {
             return;
@@ -433,6 +486,7 @@ impl Shared {
 
     /// The worker: make what is wanted until nothing is.
     fn work(self: Arc<Self>) {
+        let _working = Working(&self);
         loop {
             let next = {
                 let mut wanted = lock(&self.wanted);
@@ -453,8 +507,13 @@ impl Shared {
             else {
                 continue;
             };
-            let picture = self.media.frame(&item, time_of(&item, key.2), DECODE_WIDTH);
-            self.make(&key, model, picture);
+            // It may have failed since it was queued (a render tried it).
+            if self.failed_lately(&key) {
+                continue;
+            }
+            let _ = self.make(&key, model, false, || {
+                self.media.frame(&item, time_of(&item, key.2), DECODE_WIDTH)
+            });
         }
     }
 
@@ -485,6 +544,28 @@ impl Shared {
             keep(&self.smoothed, key, map.clone(), SMOOTHED_KEPT);
         }
         Some(map)
+    }
+}
+
+/// A frame claimed in [`Shared::making`], let go when dropped.
+struct Making<'a>(&'a Shared, &'a Key);
+
+impl Drop for Making<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.making).remove(self.1);
+        self.0.made_one.notify_all();
+    }
+}
+
+/// Marks the worker stopped should it panic past its frames.
+struct Working<'a>(&'a Shared);
+
+impl Drop for Working<'_> {
+    fn drop(&mut self) {
+        // A worker that returns marks itself stopped as it finds nothing.
+        if std::thread::panicking() {
+            lock(&self.0.wanted).working = false;
+        }
     }
 }
 
@@ -559,10 +640,6 @@ impl DepthService for LocalDepth {
 
     fn status(&self, item: &MediaItem, range: TimeRange) -> DepthStatus {
         let shared = &self.shared;
-        let error = self
-            .available()
-            .err()
-            .or_else(|| lock(&shared.error).clone());
         let Some(fp) = item.fingerprint.clone() else {
             return DepthStatus {
                 error: Some("The media has no fingerprint yet.".into()),
@@ -571,6 +648,14 @@ impl DepthService for LocalDepth {
         };
         let model = ModelTask::Depth.model();
         let (lo, hi) = frames_for(item, range);
+        // The latest failure among these frames.
+        let error = self.available().err().or_else(|| {
+            let failed = lock(&shared.failed);
+            (lo..=hi)
+                .filter_map(|f| failed.get(&(fp.clone(), model.id, f)))
+                .max_by_key(|(_, at)| *at)
+                .map(|(why, _)| why.clone())
+        });
         let made = (lo..=hi)
             .filter(|f| shared.made(&(fp.clone(), model.id, *f)))
             .count();
@@ -610,9 +695,14 @@ impl DepthService for LocalDepth {
                 return Err(ServiceError("canceled".into()));
             }
             let key = (fp.clone(), model.id, *frame);
-            lock(&shared.failed).remove(&key);
-            if !shared.make(&key, model, reader.get(*frame)) {
-                let why = lock(&shared.error).clone().unwrap_or_default();
+            // Read here even when made meanwhile, so the stream reads on.
+            let picture =
+                catch_unwind(AssertUnwindSafe(|| reader.get(*frame))).unwrap_or_else(|payload| {
+                    reader.stream = None;
+                    Err(ServiceError(stopped(payload.as_ref())))
+                });
+            // Tried again even when it failed lately: a render waits for it.
+            if let Err(why) = shared.make(&key, model, true, || picture) {
                 return Err(ServiceError(format!("frame {frame}: {why}")));
             }
             progress((i + 1) as f32 / missing.len() as f32);
