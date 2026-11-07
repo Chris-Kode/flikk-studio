@@ -18,6 +18,7 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The most of one speaker a clone hears: more adds little.
 pub const SPEAKER_LIMIT: Time = Time(180 * flikk_core::time::FLICKS_PER_SECOND);
@@ -31,17 +32,79 @@ const PAD: f64 = 0.08;
 /// The account's voices, as last read.
 #[derive(Clone, Debug, Default)]
 pub struct AccountVoices {
-    /// `None` until read.
+    /// `None` until read; kept while read again.
     pub voices: Option<Vec<Voice>>,
-    pub loading: bool,
-    pub error: Option<String>,
+    pub state: VoiceList,
+    /// Bumped by each read asked for: only the latest one's answer is taken.
+    read: u64,
+    /// Kept, or deleted, since the read on its way was asked for: applied to
+    /// what it returns, which may not have them yet.
+    kept: Vec<Voice>,
+    deleted: Vec<String>,
+    /// The sample an approval card last asked to hear, and the player as it
+    /// was then.
+    hearing: Option<(String, Listening)>,
 }
+
+/// Where reading the account's voices is.
+#[derive(Clone, Debug, Default)]
+pub enum VoiceList {
+    #[default]
+    Idle,
+    Loading {
+        read: u64,
+    },
+    /// Read for `provider`.
+    Loaded {
+        provider: Option<String>,
+    },
+    /// Read again when asked after [`VOICES_RETRY`].
+    Failed {
+        at: Instant,
+        message: String,
+    },
+}
+
+/// How long a failed read of the account's voices stands before asking for
+/// them reads them again.
+const VOICES_RETRY: Duration = Duration::from_secs(30);
 
 impl AccountVoices {
     /// Whether the account has `voice`; `None` while unknown.
     pub fn has(&self, voice: &str) -> Option<bool> {
         Some(self.voices.as_ref()?.iter().any(|v| v.id == voice))
     }
+
+    pub fn loading(&self) -> bool {
+        matches!(self.state, VoiceList::Loading { .. })
+    }
+
+    /// Why the last read failed.
+    pub fn error(&self) -> Option<String> {
+        match &self.state {
+            VoiceList::Failed { message, .. } => Some(message.clone()),
+            _ => None,
+        }
+    }
+
+    /// Drop the list, and any read on its way.
+    fn clear(&mut self) {
+        self.read += 1;
+        self.voices = None;
+        self.state = VoiceList::Idle;
+        self.kept.clear();
+        self.deleted.clear();
+    }
+}
+
+/// What the player was doing when a sample was asked for. A sample that
+/// arrives later plays only while it still is: the user hasn't played or
+/// stopped anything since.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listening {
+    /// The sound or picture played on its own, and whether it plays.
+    source: Option<(PathBuf, bool)>,
+    timeline: bool,
 }
 
 /// How a voice can be heard.
@@ -111,13 +174,37 @@ impl EditorState {
         }))
     }
 
-    /// Fetch the sample of `voice`, off the UI thread, then play it.
+    /// What the player is doing now; see [`Listening`].
+    pub fn listening(&self) -> Listening {
+        Listening {
+            source: (self.source.as_ref()).map(|s| (s.item().path.clone(), s.is_playing())),
+            timeline: self.playing,
+        }
+    }
+
+    /// Whether a sample asked for at `then` should play now that it is
+    /// here: nothing was played or stopped since. A sound that played to
+    /// its end closed on its own, which the user didn't do.
+    pub fn still_listening(&self, then: &Listening) -> bool {
+        let now = self.listening();
+        let ended = now.source.is_none() && then.source.as_ref().is_some_and(|(_, on)| *on);
+        now == *then || (ended && !now.timeline)
+    }
+
+    /// Fetch the sample of `voice`, off the UI thread, then play it if it
+    /// is still the one last asked to hear.
     pub fn hear_voice(&mut self, voice: Voice, cx: &mut Context<Self>) {
         let Some(generation) = self.generation() else {
             return;
         };
-        let media = self.services.media.clone();
         let id = voice.id.clone();
+        self.account_voices.hearing = Some((id.clone(), self.listening()));
+        // On its way already: it plays when it comes, as now asked.
+        if matches!(self.heard_voices.get(&id), Some(None)) {
+            cx.notify();
+            return;
+        }
+        let media = self.services.media.clone();
         self.heard_voices.insert(id.clone(), None);
         let fetch = cx.background_executor().spawn(async move {
             let path = generation.voice_sample(&voice)?;
@@ -126,9 +213,19 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| {
+                let wanted = match &this.account_voices.hearing {
+                    Some((last, then)) if *last == id => {
+                        let wanted = this.still_listening(then);
+                        this.account_voices.hearing = None;
+                        wanted
+                    }
+                    _ => false,
+                };
                 match result {
                     Ok(item) => {
-                        this.toggle_source(&item, cx);
+                        if wanted {
+                            this.toggle_source(&item, cx);
+                        }
                         this.heard_voices.insert(id, Some(item));
                     }
                     Err(e) => {
@@ -170,15 +267,17 @@ impl EditorState {
         self.services.generation.as_ref()?.voice_provider()
     }
 
-    /// Read the account's voices again, off the UI thread.
+    /// Read the account's voices again, off the UI thread. A read on its
+    /// way is overtaken: only the latest one's answer is taken.
     pub fn refresh_voices(&mut self, cx: &mut Context<Self>) {
         let Some(generation) = self.generation() else {
             return;
         };
-        if self.account_voices.loading {
-            return;
-        }
-        self.account_voices.loading = true;
+        let provider = self.voice_provider();
+        let list = &mut self.account_voices;
+        list.read += 1;
+        let read = list.read;
+        list.state = VoiceList::Loading { read };
         let load = cx
             .background_executor()
             .spawn(async move { generation.voices() });
@@ -186,13 +285,28 @@ impl EditorState {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
                 let list = &mut this.account_voices;
-                list.loading = false;
+                if !matches!(list.state, VoiceList::Loading { read: r } if r == read) {
+                    return;
+                }
                 match result {
-                    Ok(voices) => {
+                    Ok(mut voices) => {
+                        // What was kept or deleted while it was read.
+                        voices.retain(|v| !list.deleted.contains(&v.id));
+                        for kept in list.kept.drain(..) {
+                            if !voices.iter().any(|v| v.id == kept.id) {
+                                voices.insert(0, kept);
+                            }
+                        }
+                        list.deleted.clear();
                         list.voices = Some(voices);
-                        list.error = None;
+                        list.state = VoiceList::Loaded { provider };
                     }
-                    Err(e) => list.error = Some(e.to_string()),
+                    Err(e) => {
+                        list.state = VoiceList::Failed {
+                            at: Instant::now(),
+                            message: e.to_string(),
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -201,12 +315,29 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Read the account's voices if they haven't been.
+    /// Read the account's voices if they haven't been for the provider
+    /// doing voiceovers now, or the last read failed a while ago.
     pub fn want_voices(&mut self, cx: &mut Context<Self>) {
-        let list = &self.account_voices;
-        if list.voices.is_none() && !list.loading && list.error.is_none() {
+        let provider = self.voice_provider();
+        match &self.account_voices.state {
+            VoiceList::Idle => self.refresh_voices(cx),
+            VoiceList::Loaded { provider: listed } if *listed != provider => {
+                self.invalidate_voices(cx)
+            }
+            VoiceList::Failed { at, .. } if at.elapsed() >= VOICES_RETRY => self.refresh_voices(cx),
+            _ => {}
+        }
+    }
+
+    /// The account the voices are of changed (another provider, or key):
+    /// drop the list, and read it again if it was read or being read.
+    pub(super) fn invalidate_voices(&mut self, cx: &mut Context<Self>) {
+        let wanted = !matches!(self.account_voices.state, VoiceList::Idle);
+        self.account_voices.clear();
+        if wanted {
             self.refresh_voices(cx);
         }
+        cx.notify();
     }
 
     /// Keep `voice`, on the account now, in the library, with `sample` as
@@ -222,10 +353,16 @@ impl EditorState {
         let entry = SavedVoice::new(&provider, voice, origin);
         let saved = library::save_voice(&self.library, &entry, sample);
         self.remember_voice(&voice.id);
-        if let Some(list) = self.account_voices.voices.as_mut()
+        let account = &mut self.account_voices;
+        if let Some(list) = account.voices.as_mut()
             && !list.iter().any(|v| v.id == voice.id)
         {
             list.insert(0, voice.clone());
+        }
+        // A read on its way may not have it yet.
+        if account.loading() {
+            account.deleted.retain(|v| *v != voice.id);
+            account.kept.push(voice.clone());
         }
         match saved {
             Ok(saved) => {
@@ -318,8 +455,14 @@ impl EditorState {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
-                        if let Some(list) = this.account_voices.voices.as_mut() {
+                        let account = &mut this.account_voices;
+                        if let Some(list) = account.voices.as_mut() {
                             list.retain(|v| v.id != saved.voice);
+                        }
+                        // A read on its way may still have it.
+                        if account.loading() {
+                            account.kept.retain(|v| v.id != saved.voice);
+                            account.deleted.push(saved.voice.clone());
                         }
                         this.forget_voice(id, cx);
                     }

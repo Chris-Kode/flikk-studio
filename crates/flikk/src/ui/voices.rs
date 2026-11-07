@@ -5,7 +5,7 @@
 //! next voiceover starts on it.
 
 use crate::state::EditorState;
-use crate::state::voices::{SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
+use crate::state::voices::{Listening, SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Badge, Button, Checkbox, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName, Input,
@@ -183,8 +183,9 @@ pub struct VoicesDialog {
     selected: Option<String>,
     samples: HashMap<String, MediaItem>,
     fetching: HashSet<String>,
-    /// The sample last asked for, played when it arrives.
-    wanted: Option<String>,
+    /// The sample last asked for, played when it arrives unless the user
+    /// played or stopped something since.
+    wanted: Option<(String, Listening)>,
     // Describe
     name: Entity<InputState>,
     description: Entity<TextareaState>,
@@ -552,8 +553,11 @@ impl VoicesDialog {
             return;
         };
         let id = voice.id.clone();
-        self.fetching.insert(id.clone());
-        self.wanted = Some(id.clone());
+        self.wanted = Some((id.clone(), state.listening()));
+        // On its way already: it plays when it comes, as now asked.
+        if !self.fetching.insert(id.clone()) {
+            return;
+        }
         self.error = None;
         let fetch = cx.background_executor().spawn(async move {
             let path = generation.voice_sample(&voice)?;
@@ -565,9 +569,12 @@ impl VoicesDialog {
                 this.fetching.remove(&id);
                 match result {
                     Ok(item) => {
-                        if this.wanted.as_ref() == Some(&id) {
-                            this.wanted = None;
-                            this.state.update(cx, |s, cx| s.toggle_source(&item, cx));
+                        if let Some((_, then)) = this.wanted.take_if(|(last, _)| *last == id) {
+                            this.state.update(cx, |s, cx| {
+                                if s.still_listening(&then) {
+                                    s.toggle_source(&item, cx);
+                                }
+                            });
                         }
                         this.samples.insert(id, item);
                     }
@@ -734,11 +741,11 @@ impl VoicesDialog {
         let voices = self.shown(cx);
         let state = self.state.read(cx);
         let loading = match self.scope {
-            Scope::Account => state.account_voices.loading,
+            Scope::Account => state.account_voices.loading(),
             Scope::Shared => self.searching,
         };
         let load_error = match self.scope {
-            Scope::Account => state.account_voices.error.clone(),
+            Scope::Account => state.account_voices.error(),
             Scope::Shared => None,
         };
         let scope = Segmented::new("voice-scope")
@@ -881,6 +888,7 @@ impl VoicesDialog {
             return;
         };
         let asked = design.clone();
+        let then = state.listening();
         self.run(
             Op::Designing,
             move || {
@@ -898,8 +906,14 @@ impl VoicesDialog {
                 this.previews = previews;
                 this.picked = Some(0);
                 this.designed = Some(design);
+                // The first take plays unless the user played or stopped
+                // something meanwhile.
                 if let Some((_, item)) = this.previews.first() {
-                    this.state.update(cx, |s, cx| s.toggle_source(item, cx));
+                    this.state.update(cx, |s, cx| {
+                        if s.still_listening(&then) {
+                            s.toggle_source(item, cx);
+                        }
+                    });
                 }
             },
             window,
