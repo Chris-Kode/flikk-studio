@@ -9,7 +9,7 @@ use crate::ids::*;
 use crate::model::Project;
 use crate::ops::{Op, Target, apply_all, invert_all};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Resolved change sets kept besides those an undo or redo entry is theirs,
 /// for the review cards that still show what came of them.
@@ -302,6 +302,84 @@ impl CommandBus {
             }
         }
         Some((id, len))
+    }
+
+    /// Copies of the change sets still waiting for review, for saving with
+    /// the project's chats: open ones as pending, without drafts or undo
+    /// marks (undo history isn't saved). Items that meet an edit the user
+    /// made since they were planned are conflicted, as accepting would find.
+    pub fn waiting_change_sets(&self) -> Vec<ChangeSet> {
+        self.change_sets
+            .iter()
+            .filter(|s| s.state != ChangeSetState::Resolved && !s.items.is_empty())
+            .map(|s| ChangeSet {
+                id: s.id,
+                title: s.title.clone(),
+                author: s.author.clone(),
+                chat: s.chat.clone(),
+                state: ChangeSetState::Pending,
+                items: s
+                    .items
+                    .iter()
+                    .map(|i| {
+                        let mut item = i.clone();
+                        item.accepted_at = None;
+                        if item.state == ItemState::Pending
+                            && touched_since(&self.user_touched, item.base_version, &item.ops)
+                        {
+                            item.state = ItemState::Conflicted;
+                        }
+                        item
+                    })
+                    .collect(),
+                base_version: s.base_version,
+                draft: None,
+                resolved_at: 0,
+            })
+            .collect()
+    }
+
+    /// Bring back change sets saved by [`Self::waiting_change_sets`], e.g.
+    /// when the project opens again. Nothing is applied: they wait for
+    /// review, re-planned on the project as it is now, and items that no
+    /// longer apply are conflicted. Ids stay unless one is taken already.
+    /// Returns each restored set's saved id with the id it has now.
+    pub fn restore_change_sets(
+        &mut self,
+        sets: Vec<ChangeSet>,
+    ) -> HashMap<ChangeSetId, ChangeSetId> {
+        let mut set_ids: HashSet<_> = self.change_sets.iter().map(|s| s.id).collect();
+        let mut item_ids: HashSet<_> = self
+            .change_sets
+            .iter()
+            .flat_map(|s| &s.items)
+            .map(|i| i.id)
+            .collect();
+        let mut restored = HashMap::new();
+        for mut set in sets {
+            if set.state == ChangeSetState::Resolved || set.items.is_empty() {
+                continue;
+            }
+            let saved = set.id;
+            if !set_ids.insert(set.id) {
+                set.id = ChangeSetId::new();
+                set_ids.insert(set.id);
+            }
+            set.state = ChangeSetState::Pending;
+            set.resolved_at = 0;
+            for item in &mut set.items {
+                if !item_ids.insert(item.id) {
+                    item.id = ChangeItemId::new();
+                    item_ids.insert(item.id);
+                }
+                item.base_version = self.version;
+                item.accepted_at = None;
+            }
+            rebuild(&mut set, &self.project, &self.user_touched, self.version);
+            restored.insert(saved, set.id);
+            self.change_sets.push(set);
+        }
+        restored
     }
 
     /// Permission check for anything the bus does not execute itself

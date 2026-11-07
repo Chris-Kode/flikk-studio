@@ -67,6 +67,8 @@ pub struct EditorState {
     /// Every chat session of the project. The active one's messages are
     /// edited in `chat` and copied back on save.
     chats: persistence::Chats,
+    /// Keeps the change sets waiting for review saved beside the chats.
+    proposals: persistence::Proposals,
     /// Change set whose draft the viewer plays instead of the committed project.
     pub preview: Option<ChangeSetId>,
     /// Uncommitted edit the viewer shows while a control is dragged.
@@ -185,10 +187,11 @@ impl EditorState {
         flikk_models::restore_picks(
             &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
         );
-        let chats = persistence::load_chats(project.id);
-        let chat = active_messages(&chats);
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
+        // Brings back the proposals left waiting for review too.
+        let chats = persistence::load_chats(&mut bus);
+        let chat = active_messages(&chats);
         let position = undo_position(&bus);
         let pump = cx.spawn(async move |this, cx| {
             loop {
@@ -236,6 +239,7 @@ impl EditorState {
             settings,
             chat,
             chats,
+            proposals: persistence::Proposals::default(),
             preview: None,
             live: None,
             live_version: 0,
@@ -296,6 +300,7 @@ impl EditorState {
         // files, rather than leaving ffmpeg to finish a cut file.
         cx.on_app_quit(|this, _| {
             this.render_queue.shutdown();
+            this.proposals.sync(&this.bus);
             async {}
         })
         .detach();
@@ -483,6 +488,7 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.bus.reject(set, items);
+        self.proposals.sync(&self.bus);
         cx.notify();
     }
 
@@ -494,6 +500,7 @@ impl EditorState {
         if result.is_ok() {
             self.autosave();
             self.check_offline();
+            self.proposals.sync(&self.bus);
         }
         cx.notify();
         result.ok()
@@ -1095,6 +1102,7 @@ impl EditorState {
             self.bus.rename_project(&name);
         }
         let saved = persistence::save(&path, self.bus.project());
+        self.proposals.sync(&self.bus);
         if saved {
             self.file = Some(path);
             self.saved = Some(undo_position(&self.bus));
@@ -1123,9 +1131,11 @@ impl EditorState {
         self.agent.cancel();
         self.agent.close_project(self.bus.project().id);
         self.save_chat();
-        self.chats = persistence::load_chats(loaded.project.id);
-        self.chat = active_messages(&self.chats);
+        self.proposals.sync(&self.bus);
         self.bus = CommandBus::new(loaded.project);
+        self.proposals = persistence::Proposals::default();
+        self.chats = persistence::load_chats(&mut self.bus);
+        self.chat = active_messages(&self.chats);
         // What the new project has too goes on.
         self.cancel_left(&left);
         self.bus
@@ -1247,6 +1257,8 @@ impl EditorState {
 
     fn pump_agent(&mut self, cx: &mut Context<Self>) {
         let events = self.agent.pump(&mut self.bus, &self.services);
+        // Proposals and closed sets; cheap while nothing changed.
+        self.proposals.sync(&self.bus);
         for (project, item) in self.agent.take_orphans() {
             self.keep_for(project, item);
         }
