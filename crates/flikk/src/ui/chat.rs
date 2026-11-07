@@ -64,6 +64,9 @@ pub struct ChatPanel {
     /// Change sets whose card is up: a resolved one stays, with what came of
     /// it, until the user's next message.
     shown: HashSet<ChangeSetId>,
+    /// The user's messages in the thread when last synced: one more means
+    /// a turn started, whichever control sent it.
+    user_messages: usize,
     /// Messages whose stack of tool calls is open.
     tools_open: HashSet<usize>,
     /// Tool calls (message, call) showing their details.
@@ -110,12 +113,14 @@ impl ChatPanel {
         ];
         let signature = signature(state.read(cx));
         let chat = state.read(cx).active_chat().to_owned();
+        let user_messages = user_messages(state.read(cx));
         Self {
             state,
             composer,
             list,
             reviews: Default::default(),
             shown: HashSet::new(),
+            user_messages,
             tools_open: HashSet::new(),
             tool_open: HashSet::new(),
             signature,
@@ -129,7 +134,6 @@ impl ChatPanel {
 
     /// Send a message; the agent also gets its references resolved.
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
-        self.shown.clear();
         self.state.update(cx, |s, cx| {
             let block =
                 context::references_block(s.bus.project(), s.services.analysis.as_deref(), &text);
@@ -148,9 +152,10 @@ impl ChatPanel {
     /// Keep the virtual list's rows in step with the conversation: append
     /// new messages, remeasure when streaming text or a card changed.
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
-        let (count, sig, chat) = {
+        let (count, sig, chat, users) = {
             let s = self.state.read(cx);
-            (s.chat.len(), signature(s), s.active_chat().to_owned())
+            let chat = s.active_chat().to_owned();
+            (s.chat.len(), signature(s), chat, user_messages(s))
         };
         let changed = sig != self.signature;
         self.signature = sig;
@@ -161,6 +166,12 @@ impl ChatPanel {
             self.tool_open.clear();
             self.shown.clear();
         }
+        // A new message of the user's ends the settled cards, however it
+        // was sent; a refused one never reaches the thread.
+        if users > self.user_messages {
+            self.shown.clear();
+        }
+        self.user_messages = users;
         let n = self.list.item_count();
         if switched || count < n {
             self.list.reset(count);
@@ -582,6 +593,10 @@ fn text_style() -> TextViewStyle {
             ..Default::default()
         })
         .with_dark(true)
+}
+
+fn user_messages(s: &EditorState) -> usize {
+    s.chat.iter().filter(|m| m.role == ChatRole::User).count()
 }
 
 /// Changes whenever a visible row's height may have: streamed text, card
