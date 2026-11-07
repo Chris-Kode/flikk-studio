@@ -112,7 +112,13 @@ pub struct AgentSettings {
     pub models: ModelChoices,
     pub permissions: Permissions,
     pub instructions: String,
+    /// The recipes the agent may run; empty turns every recipe on.
     pub enabled_recipes: Vec<RecipeId>,
+    /// The built-in recipes these settings already know about, so one that
+    /// a later version adds starts on while one the user turned off stays
+    /// off (see `Store::user_settings`).
+    #[serde(default)]
+    pub known_builtins: Vec<RecipeId>,
     pub vision: VisionSettings,
     /// Language for chat replies and captions; `None` follows the source.
     pub language: Option<String>,

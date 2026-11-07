@@ -5,6 +5,7 @@ use crate::{Store, recipes};
 use anyhow::Result;
 use flikk_core::agent::AgentSettings;
 use flikk_core::cloud::CloudSettings;
+use flikk_core::ids::RecipeId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -16,12 +17,15 @@ const CLOUD_SETTINGS: &str = "cloud_settings";
 
 impl Store {
     /// User settings. First run: defaults with every built-in recipe on.
+    /// Built-ins added since the settings were saved are turned on too.
     pub fn user_settings(&self) -> Result<AgentSettings> {
+        let builtins = recipes::builtin_ids();
         let stored: Option<serde_json::Value> = self.meta(USER_SETTINGS)?;
         Ok(match stored {
-            Some(value) => lenient(value),
+            Some(value) => with_new_builtins(lenient(value), &builtins),
             None => AgentSettings {
-                enabled_recipes: recipes::builtin_ids(),
+                enabled_recipes: builtins.clone(),
+                known_builtins: builtins,
                 ..AgentSettings::default()
             },
         })
@@ -51,6 +55,24 @@ impl Store {
     pub fn save_cloud_settings(&self, settings: &CloudSettings) -> Result<()> {
         self.set_meta(CLOUD_SETTINGS, settings)
     }
+}
+
+/// Turns on the built-ins that `settings` doesn't know yet and marks them
+/// known; the ones it knows keep the user's choice. Settings saved before
+/// `known_builtins` existed know none, so every built-in missing from their
+/// list was added after they were saved and is turned on. An empty list
+/// already turns every recipe on (user recipes too), so it stays empty.
+fn with_new_builtins(mut settings: AgentSettings, builtins: &[RecipeId]) -> AgentSettings {
+    for &id in builtins {
+        if settings.known_builtins.contains(&id) {
+            continue;
+        }
+        if !settings.enabled_recipes.is_empty() && !settings.enabled_recipes.contains(&id) {
+            settings.enabled_recipes.push(id);
+        }
+        settings.known_builtins.push(id);
+    }
+    settings
 }
 
 /// Deserialize over the defaults, so settings saved by an older build
