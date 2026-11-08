@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 mod captions;
+mod chat;
 mod cloud;
 mod document;
 mod music_fit;
@@ -21,6 +22,7 @@ use crate::agent_link::{AgentLink, approve};
 use crate::notices::{Level, Notice, NoticeAction, Notices};
 use crate::persistence;
 use captions::CaptionStyles;
+use chat::ChatLog;
 use document::Document;
 use flikk_agent::PendingApproval;
 use flikk_core::agent::*;
@@ -34,7 +36,6 @@ use gpui_kit::*;
 use offline::OfflineMedia;
 use playback::Playback;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,11 +67,9 @@ pub struct EditorState {
     /// Whether the program plays, at what speed.
     playback: Playback,
     pub settings: AgentSettings,
-    /// Messages of the active chat session.
-    pub chat: Vec<ChatMessage>,
-    /// Every chat session of the project. The active one's messages are
-    /// edited in `chat` and copied back on save.
-    chats: persistence::Chats,
+    /// The project's chats, the open one's messages and the agent's
+    /// stream into them.
+    chat: ChatLog,
     /// Keeps the change sets waiting for review saved beside the chats.
     proposals: persistence::Proposals,
     /// Change set whose draft the viewer plays instead of the committed project.
@@ -83,9 +82,6 @@ pub struct EditorState {
     pub status: Option<String>,
     /// A sync by sound is being heard; the status bar shows it.
     pub syncing: bool,
-    /// The agent's last error, for the chat; cleared by the user's next
-    /// message or another chat.
-    pub agent_error: Option<String>,
     // --- panels
     /// Pool item loaded in the viewer as source (double-click in the pool).
     /// The item playing on its own, or showing in the viewer.
@@ -113,13 +109,6 @@ pub struct EditorState {
     agent: AgentLink,
     _pump: Task<()>,
     // --- chat
-    /// The last message of `chat` is the one the agent is streaming into
-    /// now: text and tool calls may go on in it. Off once a turn ends, so
-    /// an external client's calls after it start their own message.
-    stream_open: bool,
-    /// The agent's question still waiting on an answer. Only its choices
-    /// can be picked. Never saved: a reopened chat owes no answer.
-    question: Option<OpenQuestion>,
     /// Requests the user settled since their last message, and what came of them.
     pub settled: Vec<(PendingApproval, ApprovalOutcome)>,
     /// Renders approved in the chat. Clones share the queue.
@@ -195,8 +184,7 @@ impl EditorState {
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
         // Brings back the proposals left waiting for review too.
-        let chats = persistence::load_chats(&mut bus);
-        let chat = active_messages(&chats);
+        let chat = ChatLog::load(persistence::load_chats(&mut bus));
         let document = Document::opened(file, recovered, &bus);
         let pump = cx.spawn(async move |this, cx| {
             loop {
@@ -241,14 +229,12 @@ impl EditorState {
             playback: Playback::Stopped,
             settings,
             chat,
-            chats,
             proposals: persistence::Proposals::default(),
             preview: None,
             live: None,
             live_version: 0,
             status: persistence::take_notice(),
             syncing: false,
-            agent_error: None,
             source: None,
             source_marks: Default::default(),
             captions: CaptionStyles::default(),
@@ -261,8 +247,6 @@ impl EditorState {
             library: flikk_core::library::Library::load(),
             agent: AgentLink::new(),
             _pump: pump,
-            stream_open: false,
-            question: None,
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
             models_seen: (downloaded, 0),
@@ -342,8 +326,8 @@ impl EditorState {
     /// selected style profile and the facts about this project's sources.
     fn load_agent_memory(&mut self) {
         self.agent.set_role(self.settings.role);
-        self.agent.set_chat(&self.chats.active);
-        self.bus.set_chat(&self.chats.active);
+        self.agent.set_chat(self.chat.active());
+        self.bus.set_chat(self.chat.active());
         use flikk_core::memory::{FactStatus, RuleStatus};
         use flikk_store::{FactFilter, RuleFilter};
         let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
@@ -553,76 +537,6 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Files and folders attached to the active chat, which the agent may
-    /// read.
-    pub fn attachments(&self) -> &[Attachment] {
-        self.chats
-            .sessions
-            .iter()
-            .find(|s| s.id == self.chats.active)
-            .map_or(&[], |s| s.attachments.as_slice())
-    }
-
-    /// Attach `paths` to `chat` of `project`, the chat open when the user
-    /// picked or dropped them; dropped if that is no longer the open one.
-    /// Paths already attached, unreadable or inside Flikk's own data are
-    /// left out. Refused while the agent replies, so what it may read stays
-    /// fixed for the whole turn.
-    pub fn attach(
-        &mut self,
-        project: flikk_core::ProjectId,
-        chat: &str,
-        paths: Vec<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        if project != self.bus.project().id || chat != self.chats.active {
-            return;
-        }
-        if self.agent_busy() {
-            self.status = Some("Attach once the agent has replied".into());
-            cx.notify();
-            return;
-        }
-        let own = std::fs::canonicalize(flikk_core::paths::home()).ok();
-        let mut refused = Vec::new();
-        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == chat) else {
-            return;
-        };
-        for path in paths {
-            match Attachment::of(&path) {
-                Ok(a) if own.as_ref().is_some_and(|own| a.path.starts_with(own)) => {
-                    refused.push(format!("{} holds Flikk's own data", a.path.display()));
-                }
-                Ok(a) if session.attachments.iter().any(|b| b.path == a.path) => {}
-                Ok(a) => session.attachments.push(a),
-                Err(e) => refused.push(e),
-            }
-        }
-        if !refused.is_empty() {
-            self.status = Some(refused.join("; "));
-        }
-        persistence::save_chats(project, &self.chats);
-        cx.notify();
-    }
-
-    /// Stop the agent reading an attachment of the active chat. Refused
-    /// while the agent replies, like [`Self::attach`].
-    pub fn detach(&mut self, id: flikk_core::ids::AttachmentId, cx: &mut Context<Self>) {
-        if self.agent_busy() {
-            return;
-        }
-        let active = self.chats.active.clone();
-        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == active) else {
-            return;
-        };
-        let before = session.attachments.len();
-        session.attachments.retain(|a| a.id != id);
-        if session.attachments.len() != before {
-            persistence::save_chats(self.bus.project().id, &self.chats);
-            cx.notify();
-        }
-    }
-
     /// References queued by [`Self::mention`], oldest first.
     pub fn take_mentions(&mut self) -> Vec<(String, SharedString)> {
         std::mem::take(&mut self.pending_mentions)
@@ -725,175 +639,6 @@ impl EditorState {
         cx.notify();
     }
 
-    // ------------------------------------------------------------------ agent
-
-    /// A message is queued or its turn under way: another is refused.
-    pub fn agent_busy(&self) -> bool {
-        self.agent.status().is_busy()
-    }
-
-    /// Send `text` as the user's message. Does nothing while the agent is
-    /// busy: it would refuse the message, which must then not show, nor
-    /// clear the settled cards.
-    pub fn send_chat(&mut self, text: String, cx: &mut Context<Self>) {
-        self.send_chat_with_context(text, None, cx);
-    }
-
-    /// The chat's messages so far as the agent is reminded of them when its
-    /// session is new: what the user and the agent wrote, without tool rows
-    /// and cards.
-    fn chat_history(&self) -> Vec<(ChatRole, String)> {
-        self.chat
-            .iter()
-            .filter(|m| m.change_set.is_none() && !m.text.trim().is_empty())
-            .map(|m| (m.role, m.text.clone()))
-            .collect()
-    }
-
-    fn save_chat(&mut self) {
-        let id = self.chats.active.clone();
-        let title = self
-            .chat
-            .iter()
-            .find(|m| m.role == ChatRole::User)
-            .map(|m| chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project())));
-        let Some(session) = self.chats.sessions.iter_mut().find(|s| s.id == id) else {
-            return;
-        };
-        if session.title.is_empty()
-            && let Some(title) = title
-        {
-            session.title = title;
-        }
-        if let Some(last) = self.chat.last() {
-            session.at = last.at;
-        }
-        session.messages = self.chat.clone();
-        // A call still running is saved as stopped: the running mark is not
-        // saved, and the call would not go on after a reopen.
-        for row in session.messages.iter_mut().flat_map(|m| m.tools.iter_mut()) {
-            if row.running.take().is_some() {
-                row.ok = false;
-                row.summary = "Stopped".into();
-            }
-        }
-        persistence::save_chats(self.bus.project().id, &self.chats);
-    }
-
-    // ---------------------------------------------------------- chat sessions
-
-    /// Chat sessions, most recent first, as `(id, title)`.
-    pub fn chat_sessions(&self) -> Vec<(String, String)> {
-        let mut sessions: Vec<_> = self.chats.sessions.iter().collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.at));
-        sessions
-            .into_iter()
-            .map(|s| {
-                // The active chat may have messages not saved into it yet.
-                let first = (s.id == self.chats.active)
-                    .then(|| self.chat.iter().find(|m| m.role == ChatRole::User))
-                    .flatten();
-                let title = match first {
-                    _ if !s.title.is_empty() => s.title.clone(),
-                    Some(m) => {
-                        chat_title(&crate::ui::chat::plain_text(&m.text, self.bus.project()))
-                    }
-                    None => "Untitled".to_owned(),
-                };
-                (s.id.clone(), title)
-            })
-            .collect()
-    }
-
-    pub fn active_chat(&self) -> &str {
-        &self.chats.active
-    }
-
-    /// Chats can't be opened, started or deleted now: a turn is under way,
-    /// or requests in the open chat wait on the user.
-    pub fn chat_locked(&self) -> bool {
-        self.agent_busy() || !self.agent.pending_approvals().is_empty()
-    }
-
-    /// Start a chat with a fresh agent conversation. An empty active chat
-    /// is reused instead of piling up blank ones.
-    pub fn new_chat(&mut self, cx: &mut Context<Self>) {
-        if self.chat_locked() || self.chat.is_empty() {
-            return;
-        }
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        self.chats
-            .sessions
-            .push(persistence::ChatSession::new(id.clone(), now()));
-        self.switch_chat(&id, cx);
-    }
-
-    pub fn switch_chat(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.chat_locked()
-            || id == self.chats.active
-            || !self.chats.sessions.iter().any(|s| s.id == id)
-        {
-            return;
-        }
-        self.save_chat();
-        self.chats.active = id.to_owned();
-        // A chat left without a message or attachment has nothing to come
-        // back to.
-        self.chats
-            .sessions
-            .retain(|s| s.id == id || !s.messages.is_empty() || !s.attachments.is_empty());
-        self.chat = active_messages(&self.chats);
-        self.reset_chat_view();
-        self.agent.set_chat(id);
-        self.bus.set_chat(id);
-        persistence::save_chats(self.bus.project().id, &self.chats);
-        cx.notify();
-    }
-
-    /// Delete a chat and forget its agent conversation. Deleting the active
-    /// chat opens the most recent other one, or a new empty chat.
-    pub fn delete_chat(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.chat_locked() {
-            return;
-        }
-        let project = self.bus.project().id;
-        if id == self.chats.active {
-            let next = self
-                .chat_sessions()
-                .into_iter()
-                .map(|(id, _)| id)
-                .find(|other| other != id);
-            match next {
-                Some(next) => self.switch_chat(&next, cx),
-                None => {
-                    let fresh = uuid::Uuid::new_v4().simple().to_string();
-                    self.chats
-                        .sessions
-                        .push(persistence::ChatSession::new(fresh.clone(), now()));
-                    self.chat.clear();
-                    self.reset_chat_view();
-                    self.chats.active = fresh.clone();
-                    self.agent.set_chat(&fresh);
-                    self.bus.set_chat(&fresh);
-                }
-            }
-        }
-        self.chats.sessions.retain(|s| s.id != id);
-        flikk_agent::session::forget_chat(project, id);
-        persistence::save_chats(project, &self.chats);
-        cx.notify();
-    }
-
-    /// What showed for the chat that was open goes with it.
-    fn reset_chat_view(&mut self) {
-        self.settled.clear();
-        self.focused_change = None;
-        self.preview = None;
-        self.stream_open = false;
-        self.agent_error = None;
-        self.question = None;
-    }
-
     /// Replace everything tied to the open project; engines stay. Undo
     /// history does not carry over.
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
@@ -905,8 +650,7 @@ impl EditorState {
         self.proposals.sync(&self.bus);
         self.bus = CommandBus::new(loaded.project);
         self.proposals = persistence::Proposals::default();
-        self.chats = persistence::load_chats(&mut self.bus);
-        self.chat = active_messages(&self.chats);
+        self.chat = ChatLog::load(persistence::load_chats(&mut self.bus));
         // What the new project has too goes on.
         self.cancel_left(&left);
         self.bus
@@ -969,44 +713,25 @@ impl EditorState {
         }
         for event in events {
             match event {
-                AgentEvent::TextDelta { text } => match self.chat.last_mut() {
-                    Some(m)
-                        if self.stream_open
-                            && m.role == ChatRole::Agent
-                            && m.change_set.is_none()
-                            && m.choices.is_empty()
-                            && m.tools.is_empty() =>
-                    {
-                        m.text.push_str(&text)
-                    }
-                    _ => self.push_agent(text, vec![]),
-                },
-                AgentEvent::Question { text, choices } => {
-                    self.push_agent(text, choices);
-                    // A later question in the turn replaces this one.
-                    self.question = Some(OpenQuestion {
-                        chat: self.chats.active.clone(),
-                        message: self.chat.len() - 1,
-                    });
-                }
+                AgentEvent::TextDelta { text } => self.chat.append_text(text),
+                AgentEvent::Question { text, choices } => self.chat.ask(text, choices),
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
                 AgentEvent::Activity { entry } => {
                     self.tool_done(&entry, cx);
-                    self.push_tool(entry)
+                    self.chat.push_tool(entry)
                 }
-                AgentEvent::ToolStarted { entry, .. } => self.push_tool(entry),
+                AgentEvent::ToolStarted { entry, .. } => self.chat.push_tool(entry),
                 AgentEvent::ToolFinished { call, entry } => {
                     self.tool_done(&entry, cx);
-                    self.finish_tool(call, entry)
+                    self.chat.finish_tool(call, entry)
                 }
                 AgentEvent::TurnDone => {
-                    self.stop_tools();
-                    self.stream_open = false;
+                    self.chat.end_turn();
                     self.save_chat()
                 }
                 AgentEvent::Progress { .. } => {}
                 AgentEvent::Error { message } => {
-                    self.agent_error = Some(message.clone());
+                    self.chat.agent_failed(message.clone());
                     self.status = Some(message);
                 }
             }
@@ -1021,27 +746,7 @@ impl EditorState {
     /// shows once.
     fn post_change_set(&mut self, change_set: ChangeSetId) {
         self.bus.close_change_set(change_set);
-        // The open question moves up by the rows removed before it.
-        if let Some(q) = &mut self.question {
-            let before = self.chat[..q.message.min(self.chat.len())]
-                .iter()
-                .filter(|m| m.change_set == Some(change_set))
-                .count();
-            q.message -= before;
-        }
-        self.chat.retain(|m| m.change_set != Some(change_set));
-    }
-
-    fn push_agent(&mut self, text: String, choices: Vec<String>) {
-        self.stream_open = true;
-        self.chat.push(ChatMessage {
-            role: ChatRole::Agent,
-            text,
-            choices,
-            change_set: None,
-            tools: vec![],
-            at: now(),
-        });
+        self.chat.remove_change_set(change_set);
     }
 
     fn tool_done(&mut self, entry: &ActivityEntry, cx: &mut Context<Self>) {
@@ -1050,49 +755,6 @@ impl EditorState {
         if entry.ok && matches!(entry.tool.as_str(), "add_voice" | "design_voice") {
             self.reload_library(cx);
             self.refresh_voices(cx);
-        }
-    }
-
-    /// Put `entry` where call `call` was shown running. A call no longer
-    /// shown (its turn was stopped, or another chat is open) is dropped.
-    fn finish_tool(&mut self, call: u64, entry: ActivityEntry) {
-        let row = self
-            .chat
-            .iter_mut()
-            .rev()
-            .flat_map(|m| m.tools.iter_mut())
-            .find(|t| t.running == Some(call));
-        if let Some(row) = row {
-            *row = entry;
-        }
-    }
-
-    /// Calls still shown running when the turn ends were stopped with it.
-    fn stop_tools(&mut self) {
-        for row in self.chat.iter_mut().flat_map(|m| m.tools.iter_mut()) {
-            if row.running.take().is_some() {
-                row.ok = false;
-                row.summary = "Stopped".into();
-            }
-        }
-    }
-
-    /// Calls in a row stack into one message; anything else in between
-    /// starts a new stack.
-    fn push_tool(&mut self, entry: ActivityEntry) {
-        let open = std::mem::replace(&mut self.stream_open, true);
-        match self.chat.last_mut() {
-            Some(m) if open && m.role == ChatRole::Agent && !m.tools.is_empty() => {
-                m.tools.push(entry)
-            }
-            _ => self.chat.push(ChatMessage {
-                role: ChatRole::Agent,
-                text: String::new(),
-                choices: vec![],
-                change_set: None,
-                tools: vec![entry],
-                at: now(),
-            }),
         }
     }
 }
@@ -1498,35 +1160,6 @@ fn warning_text(warning: &Warning) -> String {
     }
 }
 
-/// The active session's messages as last saved.
-fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {
-    chats
-        .sessions
-        .iter()
-        .find(|s| s.id == chats.active)
-        .map(|s| s.messages.clone())
-        .unwrap_or_default()
-}
-
-/// A session title from its first message: the first line, shortened.
-fn chat_title(text: &str) -> String {
-    const MAX: usize = 28;
-    let line = text.lines().next().unwrap_or_default().trim();
-    if line.chars().count() <= MAX {
-        line.to_owned()
-    } else {
-        let short: String = line.chars().take(MAX - 1).collect();
-        format!("{}…", short.trim_end())
-    }
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 // --- chat
 
 impl EditorState {
@@ -1775,67 +1408,7 @@ pub enum ApprovalOutcome {
     Denied,
 }
 
-// ------------------------------------------------------------- chat stream
-
-/// A question the agent asked with `ask_user` that no message has answered
-/// yet.
-#[derive(Clone, Debug)]
-struct OpenQuestion {
-    /// The chat it was asked in.
-    chat: String,
-    /// Its message's index in that chat.
-    message: usize,
-}
-
 impl EditorState {
-    /// Index in `chat` of the agent's question still waiting on an answer:
-    /// only its choices can be picked.
-    pub fn open_question(&self) -> Option<usize> {
-        self.question
-            .as_ref()
-            .filter(|q| q.chat == self.chats.active && q.message < self.chat.len())
-            .map(|q| q.message)
-    }
-
-    /// Send `text` as the user's message, like [`Self::send_chat`] (nothing
-    /// while the agent is busy); the agent also reads `context` after it (the resolved `@` references), which
-    /// the chat neither shows nor stores.
-    pub fn send_chat_with_context(
-        &mut self,
-        text: String,
-        context: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.agent_busy() {
-            return;
-        }
-        let history = self.chat_history();
-        self.chat.push(ChatMessage {
-            role: ChatRole::User,
-            text: text.clone(),
-            choices: vec![],
-            change_set: None,
-            tools: vec![],
-            at: now(),
-        });
-        let message = match context {
-            Some(context) => format!("{text}\n\n{context}"),
-            None => text,
-        };
-        let editor = EditorContext {
-            history,
-            ..self.context()
-        };
-        self.agent.send(message, editor, &self.settings);
-        self.agent_error = None;
-        // Picked or typed, this message is the answer, and the question
-        // closes with it.
-        self.question = None;
-        self.clear_settled();
-        self.save_chat();
-        cx.notify();
-    }
-
     /// The user's next message clears the requests they decided, except
     /// those still being carried out: their card stays to show how they
     /// end.

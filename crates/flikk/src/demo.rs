@@ -120,7 +120,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let chat = agent_history(&mut bus, &demo);
 
     state.bus = bus;
-    state.chat = chat;
+    state.seed_chat(chat);
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![demo.ids.selected];
     timeline_selection(state, &picks);
@@ -1069,7 +1069,9 @@ fn chat_references(state: &mut EditorState, demo: &Demo, cx: &mut Context<Editor
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    state.chat.push(msg(ChatRole::User, &text, now));
+    let mut chat = state.chat().to_vec();
+    chat.push(msg(ChatRole::User, &text, now));
+    state.seed_chat(chat);
     state.mention(
         vec![
             (format!("@clip {clip}"), name.into()),
