@@ -65,19 +65,7 @@ impl Discovery {
     /// Write the file readable by the user only, replacing it atomically.
     fn write(&self) -> io::Result<PathBuf> {
         let path = Self::path();
-        std::fs::create_dir_all(paths::home())?;
-        let tmp = path.with_extension(format!("json.{}", self.pid));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
+        flikk_os::fs::write_private(&path, serde_json::to_string_pretty(self)?.as_bytes())?;
         Ok(path)
     }
 }

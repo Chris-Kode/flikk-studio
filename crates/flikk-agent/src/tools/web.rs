@@ -141,10 +141,11 @@ fn show(bytes: &[u8], format: ImageFormat, ext: &'static str, dir: &str) -> Tool
         .to_rgba8()
         .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
         .map_err(|e| ToolError(format!("Could not show the picture: {e}")))?;
-    let dir = paths::cache().join("agent").join(dir);
-    std::fs::create_dir_all(&dir)?;
-    let seen = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&seen, &png)?;
+    let seen = paths::cache()
+        .join("agent")
+        .join(dir)
+        .join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+    flikk_os::fs::write_atomic(&seen, &png)?;
     Ok(Picture {
         ext,
         width,
