@@ -61,6 +61,7 @@ use gpui_kit::*;
 pub fn init(cx: &mut App) {
     theme::install(cx);
     dialog::init(cx);
+    input::init(cx);
     menu::init(cx);
     select::init(cx);
 }

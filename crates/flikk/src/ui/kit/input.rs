@@ -12,6 +12,20 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::rc::Rc;
 
+/// Give every text field the same redo keys the project has. GPUI Base
+/// binds only `ctrl-y` off macOS; `ctrl-shift-z` would otherwise do nothing
+/// in a field, since project undo and redo stand aside there.
+pub(super) fn init(cx: &mut App) {
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-shift-z",
+        gpui_kit::base::input::Redo,
+        Some("Input"),
+    )]);
+    #[cfg(target_os = "macos")]
+    let _ = cx;
+}
+
 /// Placeholder and selection colours for the editing engine, which paints
 /// the text itself.
 pub(super) fn project_style<M: InputModeKind>(state: &Entity<InputBaseState<M>>, cx: &mut App) {

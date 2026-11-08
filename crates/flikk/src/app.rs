@@ -52,13 +52,19 @@ actions!(
     ]
 );
 
+/// Where the project's undo and redo keys apply: anywhere but a focused
+/// text field. Every kit input and textarea carries the `Input` context and
+/// keeps its own history; GPUI ranks a binding without a context above
+/// theirs, so an unscoped project undo would win inside a field.
+const PROJECT_HISTORY: Option<&str> = Some("!Input");
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-z", Undo, None),
-        KeyBinding::new("ctrl-z", Undo, None),
-        KeyBinding::new("cmd-shift-z", Redo, None),
-        KeyBinding::new("ctrl-shift-z", Redo, None),
-        KeyBinding::new("ctrl-y", Redo, None),
+        KeyBinding::new("cmd-z", Undo, PROJECT_HISTORY),
+        KeyBinding::new("ctrl-z", Undo, PROJECT_HISTORY),
+        KeyBinding::new("cmd-shift-z", Redo, PROJECT_HISTORY),
+        KeyBinding::new("ctrl-shift-z", Redo, PROJECT_HISTORY),
+        KeyBinding::new("ctrl-y", Redo, PROJECT_HISTORY),
         KeyBinding::new("space", TogglePlay, Some("Timeline")),
         KeyBinding::new("space", TogglePlay, Some("Viewer")),
         KeyBinding::new("cmd-,", OpenSettings, None),
