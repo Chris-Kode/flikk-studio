@@ -22,6 +22,7 @@ use flikk_store::{Autosaver, Snapshot, Store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, SystemTime};
 
 /// Everything needed to start editing a project.
 pub struct Loaded {
@@ -45,16 +46,16 @@ static NOTICE: Mutex<Option<String>> = Mutex::new(None);
 static LAUNCH_FILE: OnceLock<PathBuf> = OnceLock::new();
 
 fn session() -> MutexGuard<'static, Option<Session>> {
-    SESSION.lock().unwrap_or_else(|e| e.into_inner())
+    flikk_os::sync::lock(&SESSION)
 }
 
 fn notify(text: impl Into<String>) {
-    *NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.into());
+    *flikk_os::sync::lock(&NOTICE) = Some(text.into());
 }
 
 /// A one-off status line message from loading or saving (recovery, errors).
 pub fn take_notice() -> Option<String> {
-    NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
+    flikk_os::sync::lock(&NOTICE).take()
 }
 
 /// Open `path` at launch instead of the most recent project.
@@ -87,6 +88,7 @@ pub fn load_session() -> Loaded {
         });
     }
     sweep_demo_chats();
+    sweep_leftover_temps();
     let untitled = || new_project("Untitled", SequenceSettings::default());
     if crate::demo::enabled() {
         return untitled();
@@ -322,15 +324,29 @@ pub fn shutdown() {
 /// files). `None` if the store is unavailable or `f` failed; failures are
 /// reported through [`take_notice`].
 pub fn with_store<T>(f: impl FnOnce(&Store) -> flikk_store::Result<T>) -> Option<T> {
-    let guard = session();
-    let store = guard.as_ref()?.store.as_ref()?;
-    match f(store) {
+    match call_store(f)? {
         Ok(v) => Some(v),
         Err(e) => {
-            notify(format!("{e:#}"));
+            notify(e);
             None
         }
     }
+}
+
+/// Run `f` with the UI thread's store, for a caller that reports the
+/// error itself: the text of `f`'s error, or that the store is
+/// unavailable. Nothing goes through [`take_notice`], so the error is this
+/// call's own and no other notice is taken or left behind.
+pub fn try_store<T>(f: impl FnOnce(&Store) -> flikk_store::Result<T>) -> Result<T, String> {
+    call_store(f).unwrap_or_else(|| Err("The store is unavailable".into()))
+}
+
+/// `f`'s result with the store, its error as text; `None` when the store
+/// is unavailable.
+fn call_store<T>(f: impl FnOnce(&Store) -> flikk_store::Result<T>) -> Option<Result<T, String>> {
+    let guard = session();
+    let store = guard.as_ref()?.store.as_ref()?;
+    Some(f(store).map_err(|e| format!("{e:#}")))
 }
 
 /// A project's chat sessions, as JSON beside the project's other files
@@ -430,20 +446,13 @@ pub fn save_chats(project: ProjectId, chats: &Chats) {
     }
     let written = serde_json::to_vec(chats)
         .map_err(std::io::Error::other)
-        .and_then(|bytes| write_atomic(&chats_path(project), &bytes));
+        .and_then(|bytes| flikk_os::fs::write_durable(&chats_path(project), &bytes));
     match written {
         Ok(()) => {
             let _ = std::fs::remove_file(legacy_chat_path(project));
         }
         Err(e) => notify(format!("Couldn't save the chat: {e}")),
     }
-}
-
-/// Write through a temporary file, so a crash never leaves half of one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
 }
 
 /// Format of the proposals file; one with a newer version is not read.
@@ -541,7 +550,7 @@ impl Proposals {
         if self.written == Some(h.0) {
             return;
         }
-        match write_atomic(&path, &bytes) {
+        match flikk_os::fs::write_durable(&path, &bytes) {
             Ok(()) => self.written = Some(h.0),
             Err(e) => notify(format!("Couldn't save the agent's proposals: {e}")),
         }
@@ -641,6 +650,29 @@ fn sweep_demo_chats() {
                 .is_ok_and(|messages| crate::demo::is_seed_chat(&messages))
         };
         if demo {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Remove the temp files a crash left beside the chats and proposals (see
+/// [`flikk_os::fs::write_durable`]), once a day old: a younger one may be
+/// another window's write under way.
+fn sweep_leftover_temps() {
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(flikk_core::paths::projects()) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for path in entries.flatten().map(|e| e.path()) {
+        let leftover = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
+        let old = modified(&path)
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age > DAY);
+        if leftover && old {
             let _ = std::fs::remove_file(&path);
         }
     }
