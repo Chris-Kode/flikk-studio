@@ -301,12 +301,22 @@ impl Flikk {
                 if self.welcome.is_some() {
                     return bar
                         .child(
-                            div()
+                            h_flex()
                                 .pl(px(6.))
+                                .gap(px(6.))
                                 .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(t::T2)
-                                .child("Flikk"),
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(t::T2)
+                                        .child("Flikk"),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(t::mono())
+                                        .text_color(t::T3)
+                                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                                ),
                         )
                         .child(div().flex_1())
                         .child(own(h_flex().gap(px(2.))).children(self.top_right(cx)));
