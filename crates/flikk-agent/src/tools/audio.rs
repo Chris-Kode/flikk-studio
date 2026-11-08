@@ -182,9 +182,18 @@ pub fn unheard_note(project: &Project, services: &Services, range: TimeRange) ->
 }
 
 pub fn get_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
-    let project = ctx.project();
     let range = args.range("range")?;
-    let mut lines = script(project, ctx.services, range)?;
+    Ok(script_done(ctx.project(), ctx.services, range)?.into())
+}
+
+/// What `get_audio` says of `range` of `project`: its whole sound script,
+/// up to [`MAX_LINES`].
+pub(super) fn script_done(
+    project: &Project,
+    services: &Services,
+    range: TimeRange,
+) -> Result<Done, ToolError> {
+    let mut lines = script(project, services, range)?;
     let n = lines.len();
     lines.truncate(MAX_LINES);
     let mut text = format!("Audio {range}:\n");
@@ -198,12 +207,12 @@ pub fn get_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             "\n(cut short after {MAX_LINES} lines; ask for a smaller range)"
         ));
     }
-    if let Some(note) = unheard_note(project, ctx.services, range) {
+    if let Some(note) = unheard_note(project, services, range) {
         text.push_str(&format!("\n\n{note}"));
     }
     let mut done = Done::text(format!("audio {range}: {n} lines"), text);
     done.excerpts.push(lines.join("\n"));
-    Ok(done.into())
+    Ok(done)
 }
 
 pub fn get_music(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
@@ -484,14 +493,28 @@ fn rank(
 }
 
 pub fn view_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
-    let project = ctx.project();
     let range = args.range("range")?;
-    if range.duration().as_secs_f64() > PICTURE_MAX + 0.001 {
+    if !pictured(range) {
         return Err(ToolError(format!(
             "view_audio takes at most {PICTURE_MAX} s; use get_audio for longer spans"
         )));
     }
-    let Some(media) = ctx.services.media.clone() else {
+    picture_step(ctx.project(), ctx.services, range)
+}
+
+/// Whether `view_audio` draws a range this long.
+pub(super) fn pictured(range: TimeRange) -> bool {
+    range.duration().as_secs_f64() <= PICTURE_MAX + 0.001
+}
+
+/// What `view_audio` shows of `range` of `project`: its sound script, and
+/// the picture of it that the step's job draws.
+pub(super) fn picture_step(
+    project: &Project,
+    services: &Services,
+    range: TimeRange,
+) -> Result<Step, ToolError> {
+    let Some(media) = services.media.clone() else {
         return Err(ToolError(
             "Audio pictures are not available in this build yet.".into(),
         ));
@@ -501,14 +524,14 @@ pub fn view_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         return Err(ToolError(format!("No audio in {range}.")));
     }
     let mut marks = Vec::new();
-    if let Ok((words, _)) = timeline_words(project, ctx.services, range) {
+    if let Ok((words, _)) = timeline_words(project, services, range) {
         marks.extend(words.into_iter().map(|w| AudioMark {
             at: w.range,
             kind: AudioMarkKind::Word,
             label: w.text.trim().to_owned(),
         }));
     }
-    if let Some(service) = ctx.services.analysis.as_ref() {
+    if let Some(service) = services.analysis.as_ref() {
         let get = |fp: &Fingerprint| service.analysis(fp);
         marks.extend(
             heard::sounds_in_range(project, range, get)
@@ -534,7 +557,7 @@ pub fn view_audio(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         }
     }
     marks.sort_by_key(|m| m.at.start);
-    let lines = script(project, ctx.services, range).unwrap_or_default();
+    let lines = script(project, services, range).unwrap_or_default();
     let header = format!(
         "Audio {range}:\n{}",
         if lines.is_empty() {

@@ -11,7 +11,9 @@ use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, range_json, short};
 use crate::bridge::{Content, ToolResult};
 use base64::Engine;
+use flikk_core::agent::VisionSettings;
 use flikk_core::compose::{self, Stills};
+use flikk_core::memory::SourceFact;
 use flikk_core::model::{ClipContent, Project, TrackKind};
 use flikk_core::services::{CollageRequest, Frame, SamplePoint, Services};
 use flikk_core::{Time, TimeRange, paths};
@@ -20,16 +22,42 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Longest span `view_range` with `detail` accepts.
-const DETAIL_MAX: f64 = 20.0;
+pub(super) const DETAIL_MAX: f64 = 20.0;
 /// Sound script lines `view_range` opens with; `get_audio` has the rest.
 const SCRIPT_MAX: usize = 60;
-const FRAME_WIDTH: u32 = 1280;
+pub(super) const FRAME_WIDTH: u32 = 1280;
 /// Longest side of a zoomed view.
 const ZOOM_SIDE: u32 = 1280;
 /// Smallest zoom region side, in frame pixels.
 const ZOOM_MIN: f64 = 16.0;
 /// Widest frame rendered for a zoom; past it the view only magnifies.
 const ZOOM_RENDER_MAX: u32 = 7680;
+
+/// Whose seconds a view's times are: the timeline's, or a pool item's own
+/// (`view_media` sees the item alone on a timeline of its own, where the
+/// two are the same).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Clock {
+    Timeline,
+    Source,
+}
+
+impl Clock {
+    fn name(self) -> &'static str {
+        match self {
+            Clock::Timeline => "timeline",
+            Clock::Source => "source",
+        }
+    }
+
+    /// Where the rest of a sound script cut short is.
+    fn more(self) -> &'static str {
+        match self {
+            Clock::Timeline => "get_audio gives them all",
+            Clock::Source => "view_media with `audio` gives them all",
+        }
+    }
+}
 
 /// The source frame under timeline time `t`, through the topmost video clip.
 fn sample_at(project: &Project, t: Time) -> Option<SamplePoint> {
@@ -200,33 +228,55 @@ pub(super) fn image_content(path: &Path) -> Result<Content, ToolError> {
 }
 
 pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, ToolError> {
-    let project = ctx.project();
     let range = args.range("range")?;
     if detail && range.duration().as_secs_f64() > DETAIL_MAX + 0.001 {
         return Err(ToolError(format!(
             "view_range with `detail` takes at most {DETAIL_MAX} s; leave `detail` out for longer spans"
         )));
     }
-    let n = ctx.settings.vision.frames_per_collage.clamp(1, 30) as usize;
-    let tile_width = ctx.settings.vision.tile_width.clamp(64, 640);
+    range_step(
+        ctx.project(),
+        ctx.services,
+        &ctx.memory.facts,
+        &ctx.settings.vision,
+        range,
+        detail,
+        Clock::Timeline,
+    )
+}
+
+/// What `view_range` shows of `range` of `project`: the sound script, and
+/// a collage of frames that the step's job decodes.
+pub(super) fn range_step(
+    project: &Project,
+    services: &Services,
+    facts: &[SourceFact],
+    vision: &VisionSettings,
+    range: TimeRange,
+    detail: bool,
+    clock: Clock,
+) -> Result<Step, ToolError> {
+    let n = vision.frames_per_collage.clamp(1, 30) as usize;
+    let tile_width = vision.tile_width.clamp(64, 640);
     let samples = flikk_core::query::sample_points(project, range, n);
 
     // The sound script is cheap; build it here so the job only decodes.
-    let transcript = match script(project, ctx.services, range) {
+    let transcript = match script(project, services, range) {
         Ok(lines) if lines.len() > SCRIPT_MAX => format!(
-            "{}\n(… {} more lines; get_audio gives them all)",
+            "{}\n(… {} more lines; {})",
             lines[..SCRIPT_MAX].join("\n"),
-            lines.len() - SCRIPT_MAX
+            lines.len() - SCRIPT_MAX,
+            clock.more()
         ),
         Ok(lines) if !lines.is_empty() => lines.join("\n"),
         Ok(_) => "(nothing heard)".to_owned(),
         Err(ToolError(e)) => format!("({e})"),
     };
-    let facts = super::analysis::facts_for(project, &ctx.memory.facts, range);
+    let facts = super::analysis::facts_for(project, facts, range);
     let name = if detail { "detail" } else { "range" };
 
     let mut header = format!("Audio {range}:\n{transcript}");
-    if let Some(note) = unheard_note(project, ctx.services, range) {
+    if let Some(note) = unheard_note(project, services, range) {
         header.push_str(&format!("\n{note}"));
     }
     if !facts.is_empty() {
@@ -235,18 +285,18 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
             serde_json::to_string(&facts).unwrap_or_default()
         ));
     }
-    if wants_program(project, range, ctx.services) {
+    if wants_program(project, range, services) {
         let times = program_times(project, range, n);
         let project = Arc::new(project.clone());
-        let services = ctx.services.clone();
+        let services = services.clone();
         let job: Job = Box::new(move || {
             program_collage(
-                &project, &services, &times, tile_width, name, range, header, transcript,
+                &project, &services, &times, tile_width, name, range, header, transcript, clock,
             )
         });
         return Ok(Step::Job(job));
     }
-    let Some(media) = ctx.services.media.clone() else {
+    let Some(media) = services.media.clone() else {
         let mut done = Done::text(
             format!("{name} {range}: transcript only"),
             format!("{header}\n\nFrames are not available in this build yet."),
@@ -255,9 +305,13 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
         return Ok(done.into());
     };
     if samples.is_empty() {
+        let none = match clock {
+            Clock::Timeline => "No video on the timeline in this range.",
+            Clock::Source => "No picture in this range.",
+        };
         let mut done = Done::text(
             format!("{name} {range}: no video"),
-            format!("{header}\n\nNo video on the timeline in this range."),
+            format!("{header}\n\n{none}"),
         );
         done.excerpts.push(transcript);
         return Ok(done.into());
@@ -285,10 +339,11 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
             .map(|(i, t)| format!("{}: {}", i + 1, t.timeline))
             .collect();
         let text = format!(
-            "{header}\n\nCollage: {} frames, {} columns × {} rows, left to right then top to bottom. Tile timeline times: {}",
+            "{header}\n\nCollage: {} frames, {} columns × {} rows, left to right then top to bottom. Tile {} times: {}",
             collage.tiles.len(),
             collage.columns,
             collage.rows,
+            clock.name(),
             tiles.join(", ")
         );
         JobDone::Done(Done {
@@ -336,6 +391,7 @@ fn program_collage(
     range: TimeRange,
     header: String,
     transcript: String,
+    clock: Clock,
 ) -> JobDone {
     let size = compose::size_for_width(project, tile_width);
     let mut stills = Stills::new(services.media.clone(), tile_width);
@@ -361,10 +417,11 @@ fn program_collage(
         .collect();
     let cols = columns(tiles.len());
     let text = format!(
-        "{header}\n\nComposited program ({}): {} frames, {cols} columns × {} rows, left to right then top to bottom. Tile timeline times: {}",
+        "{header}\n\nComposited program ({}): {} frames, {cols} columns × {} rows, left to right then top to bottom. Tile {} times: {}",
         program_note(services),
         tiles.len(),
         tiles.len().div_ceil(cols),
+        clock.name(),
         stamps.join(", ")
     );
     JobDone::Done(Done {
@@ -393,13 +450,7 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         let services = ctx.services.clone();
         let job: Job = Box::new(move || {
             let frame_w = project.timeline.settings.width.max(2);
-            // Rendered wide enough that the region fills the view at its
-            // own resolution (the sources' detail, not an upscaled preview).
-            let width = match zoom {
-                Some(r) => ((frame_w as f64 * ZOOM_SIDE as f64 / r[2].max(r[3])).ceil() as u32)
-                    .clamp(FRAME_WIDTH, ZOOM_RENDER_MAX.max(frame_w)),
-                None => FRAME_WIDTH,
-            };
+            let width = zoom.map_or(FRAME_WIDTH, |r| zoom_width(frame_w, r));
             let size = compose::size_for_width(&project, width);
             let mut stills = Stills::new(services.media.clone(), width);
             let view = if masks {
@@ -426,7 +477,7 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 }
             }
             if let Some(region) = zoom {
-                let (zoomed, note) = zoomed(&frame, region, frame_w);
+                let (zoomed, note) = zoomed(&frame, region, frame_w, Clock::Timeline);
                 frame = zoomed;
                 text.push('\n');
                 text.push_str(&note);
@@ -491,9 +542,17 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     Ok(Step::Job(job))
 }
 
+/// How wide to render a frame `frame_w` pixels wide for a zoom on
+/// `region`: wide enough that the region fills the view at its own
+/// resolution (the sources' detail, not an upscaled preview).
+pub(super) fn zoom_width(frame_w: u32, region: [f64; 4]) -> u32 {
+    ((frame_w as f64 * ZOOM_SIDE as f64 / region[2].max(region[3])).ceil() as u32)
+        .clamp(FRAME_WIDTH, ZOOM_RENDER_MAX.max(frame_w))
+}
+
 /// `zoom` as [left, top, width, height] in frame pixels, kept inside the
 /// frame.
-fn zoom_region(project: &Project, args: &Args) -> Result<Option<[f64; 4]>, ToolError> {
+pub(super) fn zoom_region(project: &Project, args: &Args) -> Result<Option<[f64; 4]>, ToolError> {
     let Some(value) = args.value("zoom") else {
         return Ok(None);
     };
@@ -516,7 +575,12 @@ fn zoom_region(project: &Project, args: &Args) -> Result<Option<[f64; 4]>, ToolE
 /// The `region` (frame pixels) of `frame`, rendered for a frame `frame_w`
 /// pixels wide, scaled up to fit [`ZOOM_SIDE`] with a grid labelled in
 /// frame pixels, and the line that explains it.
-fn zoomed(frame: &Frame, region: [f64; 4], frame_w: u32) -> (Frame, String) {
+pub(super) fn zoomed(
+    frame: &Frame,
+    region: [f64; 4],
+    frame_w: u32,
+    clock: Clock,
+) -> (Frame, String) {
     let k = frame.width as f64 / frame_w as f64;
     let [rx, ry, rw, rh] = region;
     let fit = ZOOM_SIDE as f64 / rw.max(rh);
@@ -617,14 +681,18 @@ fn zoomed(frame: &Frame, region: [f64; 4], frame_w: u32) -> (Frame, String) {
         label(&mut buf, &format!("{v}"), 0, y + 2);
         v += step * 2.0;
     }
-    let note = format!(
-        "Zoomed ×{:.1} on frame pixels x {:.0}–{:.0}, y {:.0}–{:.0}. Grid lines every {step} px, labelled in frame pixels: use those numbers with `space: frame` in set_mask, or in place's `pin_to`.",
-        fit,
-        rx,
-        rx + rw,
-        ry,
-        ry + rh
-    );
+    let note = match clock {
+        Clock::Timeline => format!(
+            "Zoomed ×{fit:.1} on frame pixels x {rx:.0}–{:.0}, y {ry:.0}–{:.0}. Grid lines every {step} px, labelled in frame pixels: use those numbers with `space: frame` in set_mask, or in place's `pin_to`.",
+            rx + rw,
+            ry + rh
+        ),
+        Clock::Source => format!(
+            "Zoomed ×{fit:.1} on the item's own pixels x {rx:.0}–{:.0}, y {ry:.0}–{:.0}. Grid lines every {step} px, labelled in its pixels (not the sequence frame's).",
+            rx + rw,
+            ry + rh
+        ),
+    };
     (
         Frame {
             width: ow,

@@ -235,7 +235,10 @@ pub fn finish(
         Ok(media) => media,
         Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
     };
-    let mut text = format!("Made it: media {}{length} in the {bin} bin.", short(media));
+    let mut text = format!(
+        "Made it: media {}{length} in the {bin} bin; view_media shows it.",
+        short(media)
+    );
     match (placement, author) {
         (Some(placement), Some(author)) => {
             match propose_placement(bus, author, media, placement, summary) {

@@ -8,8 +8,9 @@ use flikk_core::audiofx::{AudioFx, AudioFxKind};
 use flikk_core::fx::{self, FxKind, FxLanguage};
 use flikk_core::library::Library;
 use flikk_core::model::{
-    Clip, ClipAudio, ClipContent, Curves, Grade, MarkerKind, Project, Track, Transform,
+    Clip, ClipAudio, ClipContent, Curves, Grade, MarkerKind, MediaKind, Project, Track, Transform,
 };
+use flikk_core::services::Coverage;
 use flikk_core::{Time, TimeRange};
 use serde_json::{Value, json};
 
@@ -368,6 +369,14 @@ pub fn list_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 .and_then(|f| analysis.and_then(|a| a.analysis(f)))
                 .is_some_and(|a| a.transcript.is_some());
             v["transcribed"] = json!(transcribed);
+            // Pictures are not analysed; view_media analyses the rest.
+            if let Some(a) = analysis.filter(|_| m.kind != MediaKind::Image) {
+                v["analysed"] = match a.coverage(m) {
+                    Coverage::Full => json!(true),
+                    Coverage::Partial => json!("partly"),
+                    Coverage::None => json!(false),
+                };
+            }
             v
         })
         .collect();
