@@ -1,5 +1,6 @@
-//! Locating and running the `ffmpeg`/`ffprobe` binaries, filtergraph
-//! escaping, and the no-overwrite file rules for outputs.
+//! Running the `ffmpeg`/`ffprobe` binaries (found by `flikk_os::process`)
+//! and asking them what they can do, filtergraph escaping, and the
+//! no-overwrite file rules for outputs.
 
 use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
