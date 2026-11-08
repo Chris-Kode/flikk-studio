@@ -6,6 +6,7 @@ mod cloud;
 mod document;
 mod music_fit;
 mod offline;
+mod playback;
 mod respeak;
 mod source;
 mod sync;
@@ -29,10 +30,11 @@ use flikk_core::services::{AnalysisService, MediaService, Services, SubjectServi
 use flikk_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
 use gpui_kit::*;
 use offline::OfflineMedia;
+use playback::Playback;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How often agent output and tool calls are drained on the UI thread.
 const AGENT_PUMP: Duration = Duration::from_millis(33);
@@ -59,7 +61,8 @@ pub struct EditorState {
     pub playhead: Time,
     pub in_out: Option<TimeRange>,
     pub selection: Selection,
-    pub playing: bool,
+    /// Whether the program plays, at what speed.
+    playback: Playback,
     pub settings: AgentSettings,
     /// Messages of the active chat session.
     pub chat: Vec<ChatMessage>,
@@ -108,8 +111,6 @@ pub struct EditorState {
     /// A depth effect whose focus the next click in the viewer picks.
     pub depth_pick: Option<(flikk_core::ClipId, flikk_core::EffectId)>,
     // --- timeline/viewer
-    /// Shuttle speed while playing: 1.0 is real time, negative plays backwards (JKL).
-    pub play_speed: f64,
     /// Change item picked on the timeline overlay; the chat panel reveals it.
     pub focused_change: Option<(ChangeSetId, ChangeItemId)>,
     /// Transition picked on the timeline: the clip and edge it sits on. The
@@ -118,7 +119,6 @@ pub struct EditorState {
     /// `@` references waiting for the chat composer ("Add to chat" from the
     /// timeline, inspector, transcript…): token text and chip label.
     pending_mentions: Vec<(String, SharedString)>,
-    clock: Option<Task<()>>,
     agent: AgentLink,
     _pump: Task<()>,
     // --- chat
@@ -247,7 +247,7 @@ impl EditorState {
             playhead: Time::ZERO,
             in_out: None,
             selection: Selection::default(),
-            playing: false,
+            playback: Playback::Stopped,
             settings,
             chat,
             chats,
@@ -268,13 +268,11 @@ impl EditorState {
             lettering_version: 0,
             subjects_version: 0,
             depth_pick: None,
-            play_speed: 1.0,
             focused_change: None,
             selected_transition: None,
             pending_mentions: Vec::new(),
             editing_fx: None,
             library: flikk_core::library::Library::load(),
-            clock: None,
             agent: AgentLink::new(),
             _pump: pump,
             stream_open: false,
@@ -1719,83 +1717,6 @@ impl EditorState {
         };
         self.set_in_out(Some(TimeRange::new(start, t)), cx);
     }
-
-    pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
-        if let Some(item) = self.source_picture().map(|s| s.item().clone()) {
-            self.toggle_source(&item, cx);
-            return;
-        }
-        let playing = !self.playing;
-        self.play_speed = 1.0;
-        self.set_playing(playing, cx);
-    }
-
-    /// JKL: `speed` 0 stops; otherwise play at that rate (negative = reverse).
-    pub fn shuttle(&mut self, speed: f64, cx: &mut Context<Self>) {
-        if speed == 0.0 {
-            self.set_playing(false, cx);
-        } else {
-            self.play_speed = speed;
-            self.clock = None;
-            self.set_playing(true, cx);
-        }
-    }
-
-    pub fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
-        self.playing = playing;
-        if !playing {
-            self.clock = None;
-            // A shuttle's speed ends with it, so the next play is real time.
-            self.play_speed = 1.0;
-            cx.notify();
-            return;
-        }
-        self.close_source(cx);
-        let end = self.display_project().timeline.duration();
-        if self.play_speed > 0.0 && self.playhead >= end {
-            self.playhead = Time::ZERO;
-        }
-        if self.clock.is_none() {
-            self.clock = Some(cx.spawn(async move |this, cx| {
-                let mut last = Instant::now();
-                loop {
-                    cx.background_executor().timer(PLAY_TICK).await;
-                    let alive = this.update(cx, |this, cx| this.tick(&mut last, cx));
-                    if !matches!(alive, Ok(true)) {
-                        break;
-                    }
-                }
-            }));
-        }
-        cx.notify();
-    }
-
-    /// Advance the playhead by the wall time since the last tick. A seek in
-    /// between (the playhead moved elsewhere) goes on from the new position.
-    /// Returns false once playback stopped.
-    fn tick(&mut self, last: &mut Instant, cx: &mut Context<Self>) -> bool {
-        if !self.playing {
-            return false;
-        }
-        let now = Instant::now();
-        let elapsed = now.duration_since(*last).as_secs_f64() * self.play_speed;
-        *last = now;
-        if elapsed == 0.0 {
-            return true;
-        }
-        let end = self.display_project().timeline.duration();
-        let t = self.playhead + Time::from_secs_f64(elapsed);
-        let done =
-            (self.play_speed > 0.0 && t >= end) || (self.play_speed < 0.0 && t <= Time::ZERO);
-        self.playhead = t.max(Time::ZERO).min(end);
-        if done {
-            self.playing = false;
-            self.clock = None;
-            self.play_speed = 1.0;
-        }
-        cx.notify();
-        !done
-    }
 }
 
 fn warning_text(warning: &Warning) -> String {
@@ -1807,9 +1728,6 @@ fn warning_text(warning: &Warning) -> String {
         Warning::NeedsConfirmation { message } => message.clone(),
     }
 }
-
-/// Playback clock resolution.
-const PLAY_TICK: Duration = Duration::from_millis(16);
 
 /// The active session's messages as last saved.
 fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {

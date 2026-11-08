@@ -349,7 +349,7 @@ impl ViewerPanel {
 
     /// Whether the frame can be edited: the program, paused.
     fn editable(&self, state: &EditorState) -> bool {
-        !state.playing && state.source_picture().is_none()
+        !state.is_playing() && state.source_picture().is_none()
     }
 
     /// What the picture depends on besides the playhead.
@@ -600,7 +600,7 @@ impl ViewerPanel {
         let state = self.state.read(cx);
         let media = state.services.media.clone();
         let source = state.source_picture().is_some();
-        let realtime = state.monitor_playing() && (source || state.play_speed == 1.0);
+        let realtime = state.monitor_playing() && (source || state.play_speed() == 1.0);
         let (Some(media), true) = (media, realtime) else {
             self.playback = None;
             return;
@@ -1859,8 +1859,8 @@ impl ViewerPanel {
             )
         });
 
-        let speed = state.play_speed;
-        let shuttling = source.is_none() && state.playing && speed != 1.0;
+        let speed = state.play_speed();
+        let shuttling = source.is_none() && state.is_playing() && speed != 1.0;
         let mark = |label: &'static str, at: Time| {
             h_flex()
                 .gap(px(4.))

@@ -666,7 +666,7 @@ impl Render for MixerPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.controls.prune();
         let state = self.state.read(cx);
-        let playing = state.playing;
+        let playing = state.is_playing();
         let project = state.bus.project();
         let rate = project.timeline.settings.sample_rate;
         let tracks: Vec<Track> = project

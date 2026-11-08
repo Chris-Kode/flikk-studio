@@ -5,7 +5,8 @@
 //! as they are. Timeline playback closes it, and playing it stops the
 //! timeline; seeking the timeline closes a picture.
 
-use super::{EditorState, PLAY_TICK};
+use super::EditorState;
+use super::playback::PLAY_TICK;
 use crate::ui::viewer::audio::AudioOut;
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Clip, ClipContent, MediaItem, MediaKind, Project, Track, TrackKind};
@@ -149,7 +150,7 @@ impl EditorState {
 
     pub fn monitor_playing(&self) -> bool {
         self.source_picture()
-            .map_or(self.playing, Source::is_playing)
+            .map_or(self.is_playing(), Source::is_playing)
     }
 
     /// Whether `item` is a sound that can play now.
@@ -170,7 +171,7 @@ impl EditorState {
             cx.notify();
             return;
         }
-        if self.playing {
+        if self.is_playing() {
             self.set_playing(false, cx);
         }
         self.source = Some(Source {
@@ -227,7 +228,7 @@ impl EditorState {
         if length(item).is_none() {
             return;
         }
-        if self.playing {
+        if self.is_playing() {
             self.set_playing(false, cx);
         }
         let project = match &self.source {

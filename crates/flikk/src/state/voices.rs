@@ -178,7 +178,7 @@ impl EditorState {
     pub fn listening(&self) -> Listening {
         Listening {
             source: (self.source.as_ref()).map(|s| (s.item().path.clone(), s.is_playing())),
-            timeline: self.playing,
+            timeline: self.is_playing(),
         }
     }
 

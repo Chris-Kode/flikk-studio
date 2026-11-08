@@ -142,15 +142,15 @@ pub(crate) fn transport(state: &Entity<EditorState>, action: &dyn Action, cx: &m
     state.update(cx, |s, cx| {
         let any = action.as_any();
         if any.is::<ShuttleForward>() {
-            let speed = if s.playing && s.play_speed > 0. {
-                (s.play_speed * 2.).min(8.)
+            let speed = if s.is_playing() && s.play_speed() > 0. {
+                (s.play_speed() * 2.).min(8.)
             } else {
                 1.
             };
             s.shuttle(speed, cx);
         } else if any.is::<ShuttleReverse>() {
-            let speed = if s.playing && s.play_speed < 0. {
-                (s.play_speed * 2.).max(-8.)
+            let speed = if s.is_playing() && s.play_speed() < 0. {
+                (s.play_speed() * 2.).max(-8.)
             } else {
                 -1.
             };
@@ -904,7 +904,7 @@ impl TimelinePanel {
     /// steps.
     fn scrub_to(&self, t: Time, cx: &mut App) {
         self.state.update(cx, |s, cx| {
-            if s.playing {
+            if s.is_playing() {
                 s.set_playing(false, cx);
             }
             s.seek(t, cx);
@@ -2716,7 +2716,7 @@ impl Render for TimelinePanel {
         // Keep the playhead in view while playing.
         let (playing, playhead) = {
             let s = self.state.read(cx);
-            (s.playing, s.playhead)
+            (s.is_playing(), s.playhead)
         };
         let width = f32::from(bounds.size.width);
         if playing && width > 0. && self.drag.is_none() {
