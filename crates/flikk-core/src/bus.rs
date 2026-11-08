@@ -241,16 +241,16 @@ impl CommandBus {
             .unwrap_or(&self.project)
     }
 
-    /// The bus version [`Self::view_for`] shows the project at: a job that
-    /// works on a snapshot of it proposes with [`Self::execute_since`] and
-    /// this, so edits made meanwhile conflict rather than being undone.
-    pub fn view_version(&self, author: &Author) -> u64 {
+    /// The bus version [`Self::view_for`] shows the project at.
+    fn view_version(&self, author: &Author) -> u64 {
         self.open_draft(author)
             .map_or(self.version, |s| s.base_version)
     }
 
-    /// [`Self::view_version`] with the proposals [`Self::view_for`] holds,
-    /// for [`Self::execute_since`].
+    /// The bus version and the proposals [`Self::view_for`] shows the
+    /// project with: a job that works on a snapshot of it proposes with
+    /// [`Self::execute_since`] and this, so edits made meanwhile conflict
+    /// rather than being undone.
     pub fn view_since(&self, author: &Author) -> Since {
         Since {
             version: self.view_version(author),
@@ -426,16 +426,27 @@ impl CommandBus {
         author: Author,
         reason: impl Into<String>,
     ) -> Result<Outcome> {
-        let reason = reason.into();
+        let call = self.proposals;
+        self.route(command, author, reason.into(), None, call)
+    }
+
+    /// One command by `author`: a user's applies at once as its own undo
+    /// step; anyone else's is proposed (see [`Self::propose`]) when their
+    /// permission for its category is to propose, and refused otherwise.
+    fn route(
+        &mut self,
+        command: Command,
+        author: Author,
+        reason: String,
+        since: Option<Since>,
+        call: u64,
+    ) -> Result<Outcome> {
         if author.is_user() {
             let label = command.name();
             return self.apply_user(vec![command], label);
         }
         match self.check(&author, command.category())? {
-            Permission::Propose => {
-                let call = self.proposals;
-                self.propose(command, author, reason, None, call)
-            }
+            Permission::Propose => self.propose(command, author, reason, since, call),
             _ => Err(CoreError::PermissionDenied(command.category())),
         }
     }
@@ -458,17 +469,7 @@ impl CommandBus {
         let call = self.proposals;
         let mut outcomes = Vec::new();
         for command in commands {
-            let outcome = if author.is_user() {
-                self.execute(command, author.clone(), reason.clone())
-            } else {
-                match self.check(&author, command.category()) {
-                    Ok(Permission::Propose) => {
-                        self.propose(command, author.clone(), reason.clone(), Some(since), call)
-                    }
-                    Ok(_) => Err(CoreError::PermissionDenied(command.category())),
-                    Err(e) => Err(e),
-                }
-            };
+            let outcome = self.route(command, author.clone(), reason.clone(), Some(since), call);
             let failed = outcome.is_err();
             outcomes.push(outcome);
             if failed {
@@ -487,20 +488,12 @@ impl CommandBus {
         self.apply_user(commands, label.into())
     }
 
-    /// Like [`Self::execute_batch`], and the same commands go into the
-    /// drafts of the change sets not yet reviewed, so an agent planning on
-    /// one sees the change. For additions no proposal can conflict with,
-    /// such as media a provider just made.
-    pub fn execute_shared(
-        &mut self,
-        commands: Vec<Command>,
-        label: impl Into<String>,
-    ) -> Result<Outcome> {
-        self.execute_shared_as(commands, label, Author::User)
-    }
-
-    /// [`Self::execute_shared`] as `author`: applied at once as one undo
-    /// step, with `author` on it, not proposed for review.
+    /// Like [`Self::execute_batch`] as `author`: applied at once as one
+    /// undo step, with `author` on it, not proposed for review, and the
+    /// same commands go into the drafts of the change sets not yet
+    /// reviewed, so an agent planning on one sees the change. For
+    /// additions no proposal can conflict with, such as media a provider
+    /// just made.
     ///
     /// Only for results the user already approved, such as what a
     /// generation they allowed on its approval card made: that card is the
