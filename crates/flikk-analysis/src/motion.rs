@@ -33,12 +33,13 @@ use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
+use flikk_os::sync::{lock, wait_timeout};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Widest frame measured.
@@ -64,10 +65,6 @@ const TEXTURE: f64 = 30.0;
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How often a thread waiting for another's measuring looks at `cancel`.
 const WAIT_STEP: Duration = Duration::from_millis(100);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// What a panic measuring says, with its message when it carries one.
 fn stopped(payload: &(dyn Any + Send)) -> String {
@@ -189,11 +186,7 @@ impl Shared {
                     return Err(ServiceError("cancelled".into()));
                 }
                 waiting();
-                measuring = self
-                    .measured
-                    .wait_timeout(measuring, WAIT_STEP)
-                    .unwrap_or_else(|e| e.into_inner())
-                    .0;
+                measuring = wait_timeout(&self.measured, measuring, WAIT_STEP);
             }
         }
         let _claim = Measuring(self, fp);

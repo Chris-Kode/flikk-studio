@@ -7,6 +7,7 @@ use crate::document::{Prepared, file_url};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use flikk_core::services::{Frame, ServiceError, ServiceResult};
+use flikk_os::sync::lock;
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -324,7 +325,7 @@ impl Worker {
 /// returned instead.
 fn cdp<'a>(browser: &'a mut Option<Browser>, exe: &Path) -> Result<&'a mut Cdp> {
     if browser.is_none() {
-        let failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+        let failed = lock(&FAILED_LAUNCH);
         if let Some((_, error, _)) = failed
             .as_ref()
             .filter(|(path, _, at)| path == exe && at.elapsed() < RETRY_AFTER)
@@ -333,7 +334,7 @@ fn cdp<'a>(browser: &'a mut Option<Browser>, exe: &Path) -> Result<&'a mut Cdp> 
         }
         drop(failed);
         let launched = Browser::launch(exe);
-        let mut failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failed = lock(&FAILED_LAUNCH);
         match launched {
             Ok(b) => {
                 if failed.as_ref().is_some_and(|(path, ..)| path == exe) {

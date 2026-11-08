@@ -30,7 +30,7 @@ use flikk_core::services::{
 use flikk_core::time::{Rate, Time};
 use flikk_models::matting::Matter;
 use flikk_models::{Model, Task as ModelTask};
-use flikk_os::sync::lock;
+use flikk_os::sync::{lock, wait};
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -562,7 +562,7 @@ fn work(shared: &Shared) {
                     break job;
                 }
                 state.busy = None;
-                state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+                state = wait(&shared.wake, state);
             }
         };
         let made = catch_unwind(AssertUnwindSafe(|| {

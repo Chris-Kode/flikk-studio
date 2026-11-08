@@ -5,6 +5,7 @@
 use crate::worker::{self, Request};
 use crate::{HtmlEngine, Key, document, key};
 use flikk_core::services::{Frame, FxCall, HtmlCrew, HtmlService, ServiceResult};
+use flikk_os::sync::lock;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -65,7 +66,7 @@ impl Crew {
     /// The answer for `key`; frames well in front of it will not be asked
     /// for.
     fn answer(&self, key: &Key) -> Option<Answer> {
-        let mut coming = self.coming.lock().unwrap_or_else(|e| e.into_inner());
+        let mut coming = lock(&self.coming);
         let at = coming.frames.iter().position(|(k, _)| k == key)?;
         let answer = coming.frames.remove(at).map(|(_, answer)| answer);
         coming.frames.drain(..at.saturating_sub(REORDER));
@@ -101,7 +102,7 @@ impl HtmlCrew for Crew {
         let key = key(&job, call, width, height);
         let mut capture = None;
         {
-            let mut coming = self.coming.lock().unwrap_or_else(|e| e.into_inner());
+            let mut coming = lock(&self.coming);
             if !self.engine.cached(&key) && !coming.frames.iter().any(|(k, _)| *k == key) {
                 let (reply, answer) = mpsc::channel();
                 coming.frames.push_back((key, answer));

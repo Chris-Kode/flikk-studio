@@ -41,11 +41,12 @@ use flikk_core::subject::{Fnv, Matte, SubjectPrompt};
 use flikk_core::time::{Rate, Time};
 use flikk_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use flikk_models::{Model, Task as ModelTask};
+use flikk_os::sync::lock;
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::{Frames, Packed};
 
@@ -75,10 +76,6 @@ type PromptKey = (Fingerprint, i64, u64);
 type TrackKey = (Fingerprint, u64);
 /// A tracking job: its subject and the frames it covers.
 type TrackJob = (TrackKey, i64, i64);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// The [`SubjectService`] that runs the model on this machine.
 pub struct LocalSubjects {

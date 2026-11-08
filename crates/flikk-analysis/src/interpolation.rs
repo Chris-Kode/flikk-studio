@@ -24,12 +24,13 @@ use flikk_core::services::{Between, Frame, InterpolationService};
 use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
+use flikk_os::sync::{lock, wait};
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Frames kept in memory.
@@ -44,10 +45,6 @@ const MAGIC: [u8; 4] = *b"FLKI";
 const WAITING: usize = 24;
 /// How long a frame that failed is left before the viewer asks again.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// What a panic making a frame says, with its message when it carries one.
 fn stopped(payload: &(dyn Any + Send)) -> String {
@@ -312,10 +309,7 @@ impl Shared {
                 if !wait {
                     return None;
                 }
-                making = self
-                    .finished
-                    .wait(making)
-                    .unwrap_or_else(|e| e.into_inner());
+                making = flikk_os::sync::wait(&self.finished, making);
             }
         }
         let _claim = Making(self, job.key);
@@ -355,7 +349,7 @@ impl Shared {
                     if let Some(job) = waiting.pop_back() {
                         break job;
                     }
-                    waiting = self.wake.wait(waiting).unwrap_or_else(|e| e.into_inner());
+                    waiting = wait(&self.wake, waiting);
                 }
             };
             // `make` catches the model's panics; this, the disk's. A

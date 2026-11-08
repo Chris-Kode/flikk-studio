@@ -5,11 +5,12 @@
 
 use crate::{Model, ModelFile};
 use anyhow::{Context, Result, bail};
+use flikk_os::sync::lock;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How long the server may send nothing, before the response and between
@@ -55,10 +56,6 @@ enum Job {
         cancel: Arc<AtomicBool>,
     },
     Failed(String),
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Downloads {

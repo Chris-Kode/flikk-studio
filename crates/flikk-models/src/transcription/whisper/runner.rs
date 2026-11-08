@@ -8,6 +8,7 @@ use crate::{ModelFile, SPEECH_RATE};
 use anyhow::{Context, Result};
 use flikk_core::analysis::Word;
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::sync::lock;
 use std::cmp::Reverse;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -33,7 +34,7 @@ impl Whisper {
     }
 
     fn context(&self) -> Result<Arc<WhisperContext>> {
-        let mut ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = lock(&self.ctx);
         // Its file was deleted: let go of it, and fail as if never there.
         if !self.file.is_present() {
             *ctx = None;

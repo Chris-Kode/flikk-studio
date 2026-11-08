@@ -34,11 +34,12 @@ use flikk_core::services::{Frame, FrameStream, MediaService, ServiceError, Servi
 use flikk_core::time::{Rate, Time, TimeRange};
 use flikk_models::depth::{DepthEstimator, Disparity};
 use flikk_models::{Model, Task as ModelTask};
+use flikk_os::sync::lock;
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use store::Raw;
 
@@ -67,10 +68,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A frame's map: media, model, frame.
 type Key = (Fingerprint, &'static str, i64);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// What a panic making a map says, with its message when it carries one.
 fn stopped(payload: &(dyn Any + Send)) -> String {
@@ -424,10 +421,7 @@ impl Shared {
                 if !wait {
                     return Ok(());
                 }
-                making = self
-                    .made_one
-                    .wait(making)
-                    .unwrap_or_else(|e| e.into_inner());
+                making = flikk_os::sync::wait(&self.made_one, making);
             }
         }
         let _claim = Making(self, key);
