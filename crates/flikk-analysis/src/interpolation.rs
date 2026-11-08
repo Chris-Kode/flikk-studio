@@ -24,8 +24,7 @@ use flikk_core::services::{Between, Frame, InterpolationService};
 use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
-use flikk_os::sync::{lock, wait};
-use std::any::Any;
+use flikk_os::sync::{lock, panic_message, wait};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -45,18 +44,6 @@ const MAGIC: [u8; 4] = *b"FLKI";
 const WAITING: usize = 24;
 /// How long a frame that failed is left before the viewer asks again.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
-
-/// What a panic making a frame says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("optical flow stopped unexpectedly: {detail}"),
-        None => "optical flow stopped unexpectedly".into(),
-    }
-}
 
 /// The [`InterpolationService`] that runs the model on this machine.
 pub struct LocalInterpolation {
@@ -277,7 +264,7 @@ impl Shared {
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
             *lock(&self.runner) = None;
-            Err(stopped(payload.as_ref()))
+            Err(panic_message("optical flow", payload.as_ref()))
         });
         match made {
             Ok(frame) => {
@@ -356,7 +343,7 @@ impl Shared {
             // render making this frame now keeps it for the viewer.
             let done = catch_unwind(AssertUnwindSafe(|| self.claim(&job, false)));
             if let Err(payload) = done {
-                self.fail(job.key, &stopped(payload.as_ref()));
+                self.fail(job.key, &panic_message("optical flow", payload.as_ref()));
             }
         }
     }

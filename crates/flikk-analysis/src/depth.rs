@@ -34,8 +34,7 @@ use flikk_core::services::{Frame, FrameStream, MediaService, ServiceError, Servi
 use flikk_core::time::{Rate, Time, TimeRange};
 use flikk_models::depth::{DepthEstimator, Disparity};
 use flikk_models::{Model, Task as ModelTask};
-use flikk_os::sync::lock;
-use std::any::Any;
+use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,18 +67,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A frame's map: media, model, frame.
 type Key = (Fingerprint, &'static str, i64);
-
-/// What a panic making a map says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("making the depth map stopped unexpectedly: {detail}"),
-        None => "making the depth map stopped unexpectedly".into(),
-    }
-}
 
 /// The [`DepthService`] that runs the model on this machine.
 pub struct LocalDepth {
@@ -432,7 +419,7 @@ impl Shared {
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
             *lock(&self.runner) = None;
-            Err(stopped(payload.as_ref()))
+            Err(panic_message("making the depth map", payload.as_ref()))
         });
         match result {
             Ok(raw) => {
@@ -693,7 +680,10 @@ impl DepthService for LocalDepth {
             let picture =
                 catch_unwind(AssertUnwindSafe(|| reader.get(*frame))).unwrap_or_else(|payload| {
                     reader.stream = None;
-                    Err(ServiceError(stopped(payload.as_ref())))
+                    Err(ServiceError(panic_message(
+                        "making the depth map",
+                        payload.as_ref(),
+                    )))
                 });
             // Tried again even when it failed lately: a render waits for it.
             if let Err(why) = shared.make(&key, model, true, || picture) {

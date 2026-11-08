@@ -41,6 +41,7 @@
 mod align;
 mod cache;
 mod depth;
+mod engine;
 mod ffmpeg;
 mod interpolation;
 mod motion;

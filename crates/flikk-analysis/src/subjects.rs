@@ -28,6 +28,7 @@
 
 mod store;
 
+use crate::engine::stopped_sentence;
 use crate::people::LocalPeople;
 use flikk_core::ids::MaskId;
 use flikk_core::jobs::{JobProgress, JobQueue};
@@ -42,7 +43,6 @@ use flikk_core::time::{Rate, Time};
 use flikk_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use flikk_models::{Model, Task as ModelTask};
 use flikk_os::sync::lock;
-use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -178,18 +178,6 @@ struct Failure {
     /// Whether the model was there then.
     model: bool,
     at: Instant,
-}
-
-/// What stopped work that panicked: "`what` stopped unexpectedly: …".
-fn stopped(what: &str, payload: &(dyn Any + Send)) -> String {
-    let said = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match said {
-        Some(said) => format!("{what} stopped unexpectedly: {said}"),
-        None => format!("{what} stopped unexpectedly."),
-    }
 }
 
 fn runner(model: &'static Model) -> Option<Box<dyn Segmenter>> {
@@ -576,24 +564,25 @@ impl LocalSubjects {
                 model_prompt(prompt),
             );
             self.picks.clear_finished();
-            let job =
-                self.picks
-                    .push(key.clone(), "Find subject", Some(item.id), move |_| {
-                        let made = catch_unwind(AssertUnwindSafe(|| {
-                            s.segment(model, &item, key.1, &prompt)
-                        }))
-                        .unwrap_or_else(|p| Err(ServiceError(stopped("Finding the subject", &*p))));
-                        match made {
-                            Ok(m) => {
-                                s.keep_prompted(&key, Packed::pack(&m), true);
-                                Ok(())
-                            }
-                            Err(e) => {
-                                s.fail(prompt_id(&key), e.0.clone());
-                                Err(e.0)
-                            }
+            let job = self
+                .picks
+                .push(key.clone(), "Find subject", Some(item.id), move |_| {
+                    let made =
+                        catch_unwind(AssertUnwindSafe(|| s.segment(model, &item, key.1, &prompt)))
+                            .unwrap_or_else(|p| {
+                                Err(ServiceError(stopped_sentence("Finding the subject", &*p)))
+                            });
+                    match made {
+                        Ok(m) => {
+                            s.keep_prompted(&key, Packed::pack(&m), true);
+                            Ok(())
                         }
-                    });
+                        Err(e) => {
+                            s.fail(prompt_id(&key), e.0.clone());
+                            Err(e.0)
+                        }
+                    }
+                });
             // Failed unrun (no thread could start): kept, or it is asked
             // for again on every frame.
             if let Some(message) = self.picks.failed(job) {
@@ -657,7 +646,7 @@ impl LocalSubjects {
                     if cancel.load(Ordering::SeqCst) {
                         return Ok(());
                     }
-                    let message = stopped("Tracking", &*p);
+                    let message = stopped_sentence("Tracking", &*p);
                     s.fail(track_id(&job.0), message.clone());
                     Err(message)
                 })

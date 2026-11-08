@@ -33,8 +33,7 @@ use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
-use flikk_os::sync::{lock, wait_timeout};
-use std::any::Any;
+use flikk_os::sync::{lock, panic_message, wait_timeout};
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -65,18 +64,6 @@ const TEXTURE: f64 = 30.0;
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How often a thread waiting for another's measuring looks at `cancel`.
 const WAIT_STEP: Duration = Duration::from_millis(100);
-
-/// What a panic measuring says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("measuring the camera path stopped unexpectedly: {detail}"),
-        None => "measuring the camera path stopped unexpectedly".into(),
-    }
-}
 
 /// The [`Stabilizer`] that measures on this machine.
 pub struct LocalStabilizer {
@@ -196,7 +183,12 @@ impl Shared {
         let result = catch_unwind(AssertUnwindSafe(|| {
             measure(self.media.as_ref(), item, progress, cancel)
         }))
-        .unwrap_or_else(|payload| Err(ServiceError(stopped(payload.as_ref()))));
+        .unwrap_or_else(|payload| {
+            Err(ServiceError(panic_message(
+                "measuring the camera path",
+                payload.as_ref(),
+            )))
+        });
         match result {
             Ok(path) => {
                 if let Err(e) = store(fp, &path) {
