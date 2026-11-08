@@ -17,7 +17,8 @@
 //! clicks. A tracking job waits a moment before it starts, so a few quick
 //! clicks run one; a newer subject of the same mask (another click, a trim)
 //! cancels the older's job, unless another mask waits on it too. A failed
-//! frame or job is tried again after [`RETRY_AFTER`], once the model is
+//! frame or job is tried again after
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), once the model is
 //! downloaded anew, or when a render waits on it.
 //!
 //! Person masks are its other half ([`crate::people`]): they share its
@@ -28,7 +29,7 @@
 
 mod store;
 
-use crate::engine::stopped_sentence;
+use crate::engine::{ModelFailures, stopped_sentence};
 use crate::people::LocalPeople;
 use flikk_core::ids::MaskId;
 use flikk_core::jobs::{JobProgress, JobQueue};
@@ -67,8 +68,6 @@ const UNPACKED_KEPT: usize = 16;
 /// Islands and holes smaller than this many of the model's cells are
 /// specks: dropped, and filled.
 const SPECK: usize = 16;
-/// How long a failed frame or job waits before it is tried again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A prompted frame: media, frame, prompt.
 type PromptKey = (Fingerprint, i64, u64);
@@ -99,7 +98,7 @@ struct Shared {
     looked: Mutex<HashSet<u64>>,
     /// The tracking jobs queued or running, and the masks waiting on them.
     slots: Mutex<Slots>,
-    failed: Mutex<HashMap<u64, Failure>>,
+    failed: Mutex<ModelFailures<u64>>,
     unpacked: Mutex<VecDeque<(u64, Matte)>>,
     version: AtomicU64,
     /// How long the last tracked frame took, and on which model.
@@ -170,14 +169,6 @@ impl Drop for Release {
             self.shared.bump();
         }
     }
-}
-
-/// Why a frame or a job failed.
-struct Failure {
-    message: String,
-    /// Whether the model was there then.
-    model: bool,
-    at: Instant,
 }
 
 fn runner(model: &'static Model) -> Option<Box<dyn Segmenter>> {
@@ -372,24 +363,15 @@ impl Shared {
     }
 
     /// Why `id` failed, unless it is to be tried again: the model came
-    /// since, or [`RETRY_AFTER`] passed.
+    /// since, or the time passed.
     fn failure(&self, id: u64) -> Option<String> {
-        let mut failed = lock(&self.failed);
-        let f = failed.get(&id)?;
-        if (!f.model && Self::model_here()) || f.at.elapsed() >= RETRY_AFTER {
-            failed.remove(&id);
-            return None;
-        }
-        Some(f.message.clone())
+        lock(&self.failed)
+            .recent(&id, Self::model_here())
+            .map(str::to_owned)
     }
 
     fn fail(&self, id: u64, message: String) {
-        let failure = Failure {
-            message,
-            model: Self::model_here(),
-            at: Instant::now(),
-        };
-        lock(&self.failed).insert(id, failure);
+        lock(&self.failed).record(id, message, Self::model_here());
         self.bump();
     }
 
@@ -397,7 +379,7 @@ impl Shared {
     fn retry(&self, ids: impl IntoIterator<Item = u64>) {
         let mut failed = lock(&self.failed);
         for id in ids {
-            failed.remove(&id);
+            failed.clear(&id);
         }
     }
 

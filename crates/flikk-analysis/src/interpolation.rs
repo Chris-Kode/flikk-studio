@@ -14,11 +14,11 @@
 //! on), and blended until they are made. Renders wait for each. A frame
 //! is made by one thread at a time: a render that wants one being made
 //! waits for it, and the viewer leaves it to whoever makes it. A frame
-//! that fails is not asked for again for [`RETRY_AFTER`], or until the
-//! model is downloaded when it was missing; renders try it again all the
-//! same.
+//! that fails is not asked for again for
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), or until the model
+//! is downloaded when it was missing; renders try it again all the same.
 
-use crate::engine::Claims;
+use crate::engine::{Claims, ModelFailures};
 use flikk_core::disk_cache::{DiskCache, GB, Key};
 use flikk_core::paths;
 use flikk_core::services::{Between, Frame, InterpolationService};
@@ -31,7 +31,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 /// Frames kept in memory.
 const KEPT: usize = 48;
@@ -43,8 +42,6 @@ const DISK_LIMIT: u64 = 4 * GB;
 const MAGIC: [u8; 4] = *b"FLKI";
 /// Frames waiting to be made; older requests go first.
 const WAITING: usize = 24;
-/// How long a frame that failed is left before the viewer asks again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// The [`InterpolationService`] that runs the model on this machine.
 pub struct LocalInterpolation {
@@ -59,8 +56,8 @@ struct Shared {
     wake: Condvar,
     /// The worker thread is running.
     working: AtomicBool,
-    /// Keys that failed: whether the model was there then, and when.
-    failed: Mutex<HashMap<Key, (bool, Instant)>>,
+    /// Keys that failed lately.
+    failed: Mutex<ModelFailures<Key>>,
     /// Keys being made now.
     making: Claims<Key>,
     version: AtomicU64,
@@ -236,15 +233,7 @@ impl Shared {
     /// still missing.
     fn failed(&self, key: Key) -> bool {
         let downloaded = ModelTask::FrameInterpolation.model().is_downloaded();
-        let mut failed = lock(&self.failed);
-        match failed.get(&key) {
-            Some((there, at)) if (downloaded && !there) || at.elapsed() >= RETRY_AFTER => {
-                failed.remove(&key);
-                false
-            }
-            Some(_) => true,
-            None => false,
-        }
+        lock(&self.failed).recent(&key, downloaded).is_some()
     }
 
     fn fail(&self, key: Key, why: &str) {
@@ -252,7 +241,7 @@ impl Shared {
         if downloaded {
             eprintln!("flikk-analysis: optical flow failed: {why}");
         }
-        lock(&self.failed).insert(key, (downloaded, Instant::now()));
+        lock(&self.failed).record(key, why, downloaded);
     }
 
     fn make(&self, job: &Job) -> Option<Frame> {
@@ -269,7 +258,7 @@ impl Shared {
             Ok(frame) => {
                 write(&job.key, &frame);
                 Self::keep(&mut lock(&self.made), job.key, frame.clone());
-                lock(&self.failed).remove(&job.key);
+                lock(&self.failed).clear(&job.key);
                 self.version.fetch_add(1, Ordering::SeqCst);
                 Some(frame)
             }

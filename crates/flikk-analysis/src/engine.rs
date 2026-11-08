@@ -2,6 +2,7 @@
 //! (depth maps, optical flow, camera paths, subject and person masks)
 //! share.
 
+use flikk_os::backoff::Failures;
 use flikk_os::sync::{lock, panic_detail, wait, wait_timeout};
 use std::any::Any;
 use std::collections::HashSet;
@@ -16,6 +17,57 @@ pub(crate) fn stopped_sentence(what: &str, payload: &(dyn Any + Send)) -> String
     match panic_detail(payload) {
         Some(said) => format!("{what} stopped unexpectedly: {said}"),
         None => format!("{what} stopped unexpectedly."),
+    }
+}
+
+/// Failures of work that runs on a model, each left for
+/// [`flikk_os::backoff::RETRY_AFTER`] before it is tried again, unless the
+/// model was missing when it failed and is there now: downloading it may
+/// be what fixes it.
+pub(crate) struct ModelFailures<K> {
+    /// Those that failed with the model there.
+    with_model: Failures<K>,
+    /// Those that failed without it.
+    without_model: Failures<K>,
+}
+
+impl<K> Default for ModelFailures<K> {
+    fn default() -> Self {
+        Self {
+            with_model: Failures::default(),
+            without_model: Failures::default(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> ModelFailures<K> {
+    /// Remember that `key` failed now, with `message`; `model_here` says
+    /// whether the model was there. Replaces an earlier failure of `key`.
+    pub(crate) fn record(&mut self, key: K, message: impl Into<String>, model_here: bool) {
+        let (kept, other) = if model_here {
+            (&mut self.with_model, &mut self.without_model)
+        } else {
+            (&mut self.without_model, &mut self.with_model)
+        };
+        other.clear(&key);
+        kept.record(key, message);
+    }
+
+    /// Why `key` failed, unless it is to be tried again: the time passed,
+    /// or it failed without the model and `model_here` now.
+    pub(crate) fn recent(&mut self, key: &K, model_here: bool) -> Option<&str> {
+        if model_here {
+            self.without_model.clear(key);
+        }
+        self.with_model
+            .recent(key)
+            .or_else(|| self.without_model.recent(key))
+    }
+
+    /// Forget `key`'s failure: it succeeded, or is tried again now anyway.
+    pub(crate) fn clear(&mut self, key: &K) {
+        self.with_model.clear(key);
+        self.without_model.clear(key);
     }
 }
 

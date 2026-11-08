@@ -19,7 +19,8 @@
 //! An item is measured by one thread at a time: one that wants it while
 //! another measures it waits for that and takes its path, so a render
 //! does not measure again what the background is measuring. One that
-//! failed is not queued again for [`RETRY_AFTER`]; renders measure it
+//! failed is not queued again for
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER); renders measure it
 //! again all the same. A background job stops, kept as not measured,
 //! when its item is asked for under another fingerprint (the file
 //! changed), is cancelled (it left the project) or the stabilizer is
@@ -34,13 +35,14 @@ use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
+use flikk_os::backoff::Failures;
 use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Widest frame measured.
 const WIDTH: u32 = 320;
@@ -61,8 +63,6 @@ const MAX_TURN: f64 = 0.05;
 /// Least texture (the smaller eigenvalue of a block's structure tensor,
 /// per pixel) a block needs to be measured.
 const TEXTURE: f64 = 30.0;
-/// How long an item that failed is left before it is queued again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How often a thread waiting for another's measuring looks at `cancel`.
 const WAIT_STEP: Duration = Duration::from_millis(100);
 
@@ -79,8 +79,8 @@ struct Shared {
     absent: Mutex<HashSet<Fingerprint>>,
     /// Items being measured now.
     measuring: Claims<Fingerprint>,
-    /// Items that failed: why, and when.
-    failed: Mutex<HashMap<Fingerprint, (String, Instant)>>,
+    /// Items that failed, and why.
+    failed: Mutex<Failures<Fingerprint>>,
     /// The fingerprint each media item was last asked for under.
     wanted: Mutex<HashMap<MediaId, Fingerprint>>,
     /// The stabilizer was dropped: background jobs stop.
@@ -135,12 +135,10 @@ impl Shared {
         }
     }
 
-    /// Whether `fp` failed less than [`RETRY_AFTER`] ago, and why.
+    /// Why `fp` failed, when it failed less than
+    /// [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER) ago.
     fn failed_lately(&self, fp: &Fingerprint) -> Option<String> {
-        lock(&self.failed)
-            .get(fp)
-            .filter(|(_, at)| at.elapsed() < RETRY_AFTER)
-            .map(|(why, _)| why.clone())
+        lock(&self.failed).recent(fp).map(str::to_owned)
     }
 
     /// Measure `item`, or take what another thread measuring it found,
@@ -196,13 +194,13 @@ impl Shared {
                 let path = Arc::new(path);
                 lock(&self.paths).insert(fp.clone(), path.clone());
                 lock(&self.absent).remove(fp);
-                lock(&self.failed).remove(fp);
+                lock(&self.failed).clear(fp);
                 self.version.fetch_add(1, Ordering::Relaxed);
                 Ok(path)
             }
             Err(e) => {
                 if !cancel() {
-                    lock(&self.failed).insert(fp.clone(), (e.0.clone(), Instant::now()));
+                    lock(&self.failed).record(fp.clone(), e.0.clone());
                 }
                 Err(e)
             }
