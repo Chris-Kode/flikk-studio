@@ -376,8 +376,7 @@ pub fn open_new(
     }
     let dir = state
         .read(cx)
-        .file
-        .as_ref()
+        .file()
         .and_then(|f| f.parent())
         .map(PathBuf::from)
         .unwrap_or_else(crate::ui::deliver::default_dir);

@@ -353,7 +353,7 @@ impl Flikk {
                     };
                 let (current, recent) = {
                     let s = state.read(cx);
-                    (s.file.clone(), s.recent_projects())
+                    (s.file().map(|f| f.to_path_buf()), s.recent_projects())
                 };
                 let mut menu = menu
                     .item(

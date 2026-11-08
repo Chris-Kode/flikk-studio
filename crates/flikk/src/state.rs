@@ -3,6 +3,7 @@
 //! through the same path whether it came from a button or the agent.
 
 mod cloud;
+mod document;
 mod music_fit;
 mod respeak;
 mod source;
@@ -16,6 +17,7 @@ pub use source::Source;
 use crate::agent_link::{AgentLink, approve};
 use crate::notices::{Level, Notice, NoticeAction, Notices};
 use crate::persistence;
+use document::Document;
 use flikk_agent::PendingApproval;
 use flikk_core::agent::*;
 use flikk_core::bus::{AcceptReport, Author, CommandBus, Outcome};
@@ -26,7 +28,7 @@ use flikk_core::services::{AnalysisService, MediaService, Services, SubjectServi
 use flikk_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,13 +53,8 @@ const PEOPLE_NOTICE: &str = "people-model";
 
 pub struct EditorState {
     pub bus: CommandBus,
-    /// The open project's file; `None` until first saved.
-    pub file: Option<PathBuf>,
-    /// Undo position (see `undo_position`) as last saved or opened; `None` when
-    /// the project opened with unsaved changes (recovered).
-    saved: Option<u64>,
-    /// What the autosaver was last told about the unsaved changes.
-    autosaved: Autosaved,
+    /// The open project's file and its unsaved changes.
+    document: Document,
     pub services: Services,
     pub workspace: Workspace,
     pub playhead: Time,
@@ -212,7 +209,7 @@ impl EditorState {
         // Brings back the proposals left waiting for review too.
         let chats = persistence::load_chats(&mut bus);
         let chat = active_messages(&chats);
-        let position = undo_position(&bus);
+        let document = Document::opened(file, recovered, &bus);
         let pump = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGENT_PUMP).await;
@@ -268,9 +265,7 @@ impl EditorState {
             .collect();
         let mut this = Self {
             bus,
-            file,
-            saved: (!recovered).then_some(position),
-            autosaved: Autosaved::opened(recovered, position),
+            document,
             services: services(&cloud),
             workspace: Workspace::default(),
             playhead: Time::ZERO,
@@ -1157,110 +1152,6 @@ impl EditorState {
         self.question = None;
     }
 
-    // --------------------------------------------------------------- projects
-
-    /// Changes not saved to the project's file (or never saved at all).
-    /// Undoing back to the saved state makes it clean again.
-    pub fn is_dirty(&self) -> bool {
-        self.saved != Some(undo_position(&self.bus))
-    }
-
-    /// Recently opened project files that still exist, newest first.
-    pub fn recent_projects(&self) -> Vec<PathBuf> {
-        persistence::recent()
-            .into_iter()
-            .filter(|p| p.exists())
-            .collect()
-    }
-
-    /// Hand unsaved changes to the autosaver, for crash recovery.
-    fn autosave(&mut self) {
-        if !self.is_dirty() {
-            // Undone back to the saved state: what was kept is stale.
-            if matches!(self.autosaved, Autosaved::Kept(_)) {
-                persistence::discard(self.bus.project().id);
-                self.autosaved = Autosaved::Nothing;
-            }
-            return;
-        }
-        let position = undo_position(&self.bus);
-        if self.autosaved.covers(position) {
-            return;
-        }
-        self.autosaved = Autosaved::Kept(position);
-        persistence::autosave(self.bus.project(), self.file.as_deref());
-        if let Some(e) = persistence::autosave_failure() {
-            self.status = Some(format!(
-                "Unsaved changes could not be kept for recovery: {e}"
-            ));
-        }
-    }
-
-    /// Replace the open project with a new one saved at `path`, which names
-    /// it, with a sequence of `settings`. Unsaved changes must be settled
-    /// first (see `crate::projects`). Whether it saved.
-    pub fn create_project(
-        &mut self,
-        path: PathBuf,
-        settings: flikk_core::model::SequenceSettings,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let name = flikk_store::project_file::name_of(&path);
-        self.switch_to(persistence::new_project(&name, settings), cx);
-        self.save_project(path, cx)
-    }
-
-    /// Open a project file in place of the open project; unsaved changes
-    /// must be settled first. Whether it opened.
-    pub fn open_project(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
-        if self.file.as_deref() == Some(path) {
-            return true;
-        }
-        match persistence::open(path) {
-            Some(loaded) => {
-                self.switch_to(loaded, cx);
-                true
-            }
-            None => {
-                if !path.exists() {
-                    persistence::forget_recent(path);
-                }
-                self.status = persistence::take_notice();
-                cx.notify();
-                false
-            }
-        }
-    }
-
-    /// Save the project to `path`, which becomes its file (Save As when it
-    /// differs). The project takes the file's name. Whether it saved.
-    pub fn save_project(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
-        let name = flikk_store::project_file::name_of(&path);
-        if self.bus.project().name != name {
-            self.bus.rename_project(&name);
-        }
-        let saved = persistence::save(&path, self.bus.project());
-        self.proposals.sync(&self.bus);
-        if saved {
-            self.file = Some(path);
-            self.saved = Some(undo_position(&self.bus));
-            self.autosaved = Autosaved::Nothing;
-            self.status = None;
-        } else {
-            self.status = persistence::take_notice();
-        }
-        cx.notify();
-        saved
-    }
-
-    /// The user chose not to save: forget the unsaved changes kept for
-    /// crash recovery, and keep them out of later autosaves (and the one
-    /// written on quit). Edits made after this are kept as usual.
-    pub fn discard_changes(&mut self) {
-        persistence::discard(self.bus.project().id);
-        self.autosaved = Autosaved::Discarded(undo_position(&self.bus));
-    }
-
     /// Replace everything tied to the open project; engines stay. Undo
     /// history does not carry over.
     fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
@@ -1279,10 +1170,7 @@ impl EditorState {
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.mark_generated_seen();
-        let position = undo_position(&self.bus);
-        self.file = loaded.file;
-        self.saved = (!loaded.recovered).then_some(position);
-        self.autosaved = Autosaved::opened(loaded.recovered, position);
+        self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;
         self.in_out = None;
@@ -2019,45 +1907,6 @@ fn warning_text(warning: &Warning) -> String {
 
 /// Playback clock resolution.
 const PLAY_TICK: Duration = Duration::from_millis(16);
-
-/// Where the project is in its undo history: the version of the newest
-/// undo step, 0 before any. Unlike the bus version, which every undo bumps,
-/// it comes back to the same value when undo or redo returns to a state.
-fn undo_position(bus: &CommandBus) -> u64 {
-    bus.history().undo.last().map_or(0, |e| e.version)
-}
-
-/// What the autosaver was last told about the open project's unsaved
-/// changes, by undo position.
-#[derive(Clone, Copy)]
-enum Autosaved {
-    /// Nothing since the last save.
-    Nothing,
-    /// It holds the changes at this position.
-    Kept(u64),
-    /// The user threw away the changes at this position: they are not
-    /// autosaved again.
-    Discarded(u64),
-}
-
-impl Autosaved {
-    /// A recovered project's autosave already holds its changes.
-    fn opened(recovered: bool, position: u64) -> Self {
-        if recovered {
-            Self::Kept(position)
-        } else {
-            Self::Nothing
-        }
-    }
-
-    /// Nothing needs to be handed over while the project is at `position`.
-    fn covers(self, position: u64) -> bool {
-        match self {
-            Self::Nothing => false,
-            Self::Kept(at) | Self::Discarded(at) => at == position,
-        }
-    }
-}
 
 /// The active session's messages as last saved.
 fn active_messages(chats: &persistence::Chats) -> Vec<ChatMessage> {
