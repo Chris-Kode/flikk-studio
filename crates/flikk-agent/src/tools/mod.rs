@@ -64,7 +64,7 @@ struct Stops {
 
 impl Stop {
     fn stops(&self) -> std::sync::MutexGuard<'_, Stops> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        flikk_os::sync::lock(&self.0)
     }
 
     /// A generation to follow and stop with the rest; stopped already if
