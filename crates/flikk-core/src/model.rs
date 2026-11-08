@@ -4,6 +4,8 @@
 //! Plain data with serde, so the store can persist it and the agent can read
 //! it as JSON. Mutation goes through [`crate::ops::Op`] only.
 
+mod animate;
+
 use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
