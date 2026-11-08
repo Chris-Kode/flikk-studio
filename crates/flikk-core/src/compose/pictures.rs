@@ -203,22 +203,14 @@ pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "tga"
     );
+    let kind = if still {
+        MediaKind::Image
+    } else {
+        MediaKind::Video
+    };
     MediaItem {
         id: MediaId(clip.0),
-        path: asset.to_path_buf(),
-        kind: if still {
-            MediaKind::Image
-        } else {
-            MediaKind::Video
-        },
-        fingerprint: None,
-        info: None,
-        bin: None,
-        tags: Vec::new(),
-        proxy: None,
-        generated: None,
-        name: None,
-        tone_map: Default::default(),
+        ..MediaItem::new(asset, kind)
     }
 }
 

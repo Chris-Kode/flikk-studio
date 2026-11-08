@@ -102,11 +102,7 @@ fn splice(
         .as_ref()
         .map(|i| i.duration)
         .unwrap_or(Time::ZERO);
-    let take_stream = take_item
-        .info
-        .as_ref()
-        .and_then(|i| i.audio.first())
-        .map_or(0, |a| a.index);
+    let take_stream = take_item.first_audio_stream().unwrap_or(0);
     let audio = decode(
         media,
         &take_item,

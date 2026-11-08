@@ -927,17 +927,7 @@ impl Clip {
                 sorted = true;
             }
         }
-        let generator = match &mut self.content {
-            ClipContent::Generator { fx } => Some(fx),
-            _ => None,
-        };
-        let transitions = [&mut self.transition_in, &mut self.transition_out];
-        for fx in self
-            .effects
-            .iter_mut()
-            .chain(generator)
-            .chain(transitions.into_iter().flatten().map(|t| &mut t.fx))
-        {
+        for fx in self.fx_instances_mut() {
             if !fx.keyframes.is_sorted_by_key(|k| k.at) {
                 fx.keyframes.sort_by_key(|k| k.at);
                 sorted = true;

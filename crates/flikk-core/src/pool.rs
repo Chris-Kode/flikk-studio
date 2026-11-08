@@ -3,7 +3,7 @@
 
 use crate::cloud::{Capability, Generated};
 use crate::command::Command;
-use crate::ids::{BinId, MediaId};
+use crate::ids::BinId;
 use crate::model::{Bin, MediaItem, MediaKind, Project};
 use std::path::PathBuf;
 
@@ -32,17 +32,10 @@ pub fn media_item(
         _ => MediaKind::Audio,
     };
     MediaItem {
-        id: MediaId::new(),
-        path: generated.path.clone(),
-        kind,
         fingerprint: media.and_then(|m| m.fingerprint(&generated.path).ok()),
         info: media.and_then(|m| m.probe(&generated.path).ok()),
-        bin: None,
-        tags: Vec::new(),
-        proxy: None,
         generated: Some(Box::new(generated.info.clone())),
-        name: None,
-        tone_map: Default::default(),
+        ..MediaItem::new(generated.path.clone(), kind)
     }
 }
 
@@ -51,34 +44,17 @@ pub fn media_item(
 /// [`GenerationInfo`](crate::cloud::GenerationInfo).
 pub fn image_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
     MediaItem {
-        id: MediaId::new(),
-        kind: MediaKind::Image,
         fingerprint: media.and_then(|m| m.fingerprint(&path).ok()),
         info: media.and_then(|m| m.probe(&path).ok()),
-        path,
-        bin: None,
-        tags: Vec::new(),
-        proxy: None,
-        generated: None,
-        name: None,
-        tone_map: Default::default(),
+        ..MediaItem::new(path, MediaKind::Image)
     }
 }
 
 /// `path`, a sample of a voice, as an item to listen to: not in any pool.
 pub fn sample_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
     MediaItem {
-        id: MediaId::new(),
-        kind: MediaKind::Audio,
-        fingerprint: None,
         info: media.and_then(|m| m.probe(&path).ok()),
-        path,
-        bin: None,
-        tags: Vec::new(),
-        proxy: None,
-        generated: None,
-        name: None,
-        tone_map: Default::default(),
+        ..MediaItem::new(path, MediaKind::Audio)
     }
 }
 

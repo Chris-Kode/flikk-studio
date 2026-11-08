@@ -215,7 +215,7 @@ pub fn fix(
     };
     let item = project.media(a.media).ok_or("The recording is gone.")?;
     let stream = audio_stream
-        .or_else(|| item.info.as_ref()?.audio.first().map(|s| s.index))
+        .or_else(|| item.first_audio_stream())
         .unwrap_or(0);
     let found = item.fingerprint.as_ref().and_then(&analysis);
     let speech = Speech::new(project, &analysis);

@@ -790,17 +790,11 @@ impl Sound {
     /// A media item on its audio; not in a project or a bin yet.
     pub fn item(&self) -> MediaItem {
         MediaItem {
-            id: MediaId::new(),
-            path: self.audio(),
-            kind: MediaKind::Audio,
             fingerprint: self.fingerprint.clone(),
             info: self.info.clone(),
-            bin: None,
             tags: self.tags.clone(),
-            proxy: None,
             generated: self.generated.clone(),
-            name: None,
-            tone_map: Default::default(),
+            ..MediaItem::new(self.audio(), MediaKind::Audio)
         }
     }
 }
@@ -930,19 +924,9 @@ impl SavedVoice {
 
     /// Its sample as an item to listen to: not in any pool.
     pub fn sample_item(&self) -> Option<MediaItem> {
-        Some(MediaItem {
-            id: MediaId::new(),
-            path: self.sample_file()?,
-            kind: MediaKind::Audio,
-            fingerprint: None,
-            info: Some(self.sample_info.clone()?),
-            bin: None,
-            tags: Vec::new(),
-            proxy: None,
-            generated: None,
-            name: None,
-            tone_map: Default::default(),
-        })
+        let mut item = MediaItem::new(self.sample_file()?, MediaKind::Audio);
+        item.info = Some(self.sample_info.clone()?);
+        Some(item)
     }
 
     /// How it reads a voiceover unless told otherwise.
