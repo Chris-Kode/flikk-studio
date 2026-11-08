@@ -26,6 +26,7 @@ use crate::fx::{FxAsset, FxInstance, FxRef};
 use crate::ids::{ClipId, EffectId, FxId, LibraryId, MediaId, SpeakerId};
 use crate::model::{Fingerprint, Grade, MediaInfo, MediaItem, MediaKind, Project};
 use crate::paths;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,10 +35,6 @@ pub const PROGRAM_EXT: &str = "flikkfx";
 pub const PRESET_EXT: &str = "flikkpreset";
 pub const SOUND_EXT: &str = "flikksound";
 pub const VOICE_EXT: &str = "flikkvoice";
-const PROGRAM_FORMAT: &str = "flikk-fx";
-const PRESET_FORMAT: &str = "flikk-preset";
-const SOUND_FORMAT: &str = "flikk-sound";
-const VOICE_FORMAT: &str = "flikk-voice";
 /// Name of the bin sounds from the library go into.
 pub const LIBRARY_BIN: &str = "Library";
 /// Bumped when an older file needs an upgrade step on load.
@@ -141,6 +138,33 @@ fn default_similarity() -> f32 {
     Reading::SIMILARITY
 }
 
+/// A kind of library item, kept as one JSON file of its own.
+trait Stored: Clone {
+    /// The extension of its files.
+    const EXT: &'static str;
+    /// The `format` its files name.
+    const FORMAT: &'static str;
+    /// What its files hold.
+    type File: Serialize + DeserializeOwned + Header;
+    /// The file holding the item.
+    fn file(&self) -> Self::File;
+    /// The item `file`, read from `path`, holds; `Err` when it can't be
+    /// used.
+    fn open(file: Self::File, path: &Path) -> Result<Self>;
+    /// What its file is named after.
+    fn name(&self) -> &str;
+    /// Its file; empty for an item not saved yet.
+    fn path(&self) -> &Path;
+    /// The item, kept in `path`.
+    fn at(self, path: PathBuf) -> Self;
+}
+
+/// What every library file starts with.
+trait Header {
+    /// The file's `format` and `version`.
+    fn header(&self) -> (&str, u32);
+}
+
 #[derive(Serialize, Deserialize)]
 struct ProgramFile {
     format: String,
@@ -149,28 +173,155 @@ struct ProgramFile {
     fx: FxAsset,
 }
 
+/// The file of a preset, sound or voice: its `format` and `version`, then
+/// the item's own fields.
 #[derive(Serialize, Deserialize)]
-struct PresetFile {
+struct ItemFile<T> {
     format: String,
     version: u32,
     #[serde(flatten)]
-    preset: Preset,
+    item: T,
 }
 
-#[derive(Serialize, Deserialize)]
-struct SoundFile {
-    format: String,
-    version: u32,
-    #[serde(flatten)]
-    sound: Sound,
+impl Header for ProgramFile {
+    fn header(&self) -> (&str, u32) {
+        (&self.format, self.version)
+    }
 }
 
-#[derive(Serialize, Deserialize)]
-struct VoiceFile {
-    format: String,
-    version: u32,
-    #[serde(flatten)]
-    voice: SavedVoice,
+impl<T> Header for ItemFile<T> {
+    fn header(&self) -> (&str, u32) {
+        (&self.format, self.version)
+    }
+}
+
+impl Stored for Program {
+    const EXT: &'static str = PROGRAM_EXT;
+    const FORMAT: &'static str = "flikk-fx";
+    type File = ProgramFile;
+
+    fn file(&self) -> ProgramFile {
+        ProgramFile {
+            format: Self::FORMAT.into(),
+            version: VERSION,
+            id: self.id,
+            fx: self.asset.clone(),
+        }
+    }
+
+    fn open(file: ProgramFile, path: &Path) -> Result<Self> {
+        Ok(Self {
+            id: file.id,
+            asset: file.fx,
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.asset.name
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn at(self, path: PathBuf) -> Self {
+        Self { path, ..self }
+    }
+}
+
+impl Stored for Preset {
+    const EXT: &'static str = PRESET_EXT;
+    const FORMAT: &'static str = "flikk-preset";
+    type File = ItemFile<Self>;
+
+    fn file(&self) -> ItemFile<Self> {
+        ItemFile {
+            format: Self::FORMAT.into(),
+            version: VERSION,
+            item: self.clone(),
+        }
+    }
+
+    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+        Ok(file.item.at(path.to_path_buf()))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn at(self, path: PathBuf) -> Self {
+        Self { path, ..self }
+    }
+}
+
+impl Stored for Sound {
+    const EXT: &'static str = SOUND_EXT;
+    const FORMAT: &'static str = "flikk-sound";
+    type File = ItemFile<Self>;
+
+    fn file(&self) -> ItemFile<Self> {
+        ItemFile {
+            format: Self::FORMAT.into(),
+            version: VERSION,
+            item: self.clone(),
+        }
+    }
+
+    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+        let sound = file.item.at(path.to_path_buf());
+        if !sound.audio().is_file() {
+            return Err(format!("the audio of {} is missing", name(path)));
+        }
+        Ok(sound)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn at(self, path: PathBuf) -> Self {
+        Self { path, ..self }
+    }
+}
+
+impl Stored for SavedVoice {
+    const EXT: &'static str = VOICE_EXT;
+    const FORMAT: &'static str = "flikk-voice";
+    type File = ItemFile<Self>;
+
+    fn file(&self) -> ItemFile<Self> {
+        ItemFile {
+            format: Self::FORMAT.into(),
+            version: VERSION,
+            item: self.clone(),
+        }
+    }
+
+    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+        Ok(file.item.at(path.to_path_buf()))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn at(self, path: PathBuf) -> Self {
+        Self { path, ..self }
+    }
 }
 
 /// Everything in the library, by name.
@@ -194,10 +345,10 @@ impl Library {
         for path in files {
             let ext = path.extension().and_then(|e| e.to_str());
             let read = match ext {
-                Some(PROGRAM_EXT) => read_program(&path).map(|p| lib.programs.push(p)),
-                Some(PRESET_EXT) => read_preset(&path).map(|p| lib.presets.push(p)),
-                Some(SOUND_EXT) => read_sound(&path).map(|s| lib.sounds.push(s)),
-                Some(VOICE_EXT) => read_voice(&path).map(|v| lib.voices.push(v)),
+                Some(PROGRAM_EXT) => read(&path).map(|p| lib.programs.push(p)),
+                Some(PRESET_EXT) => read(&path).map(|p| lib.presets.push(p)),
+                Some(SOUND_EXT) => read(&path).map(|s| lib.sounds.push(s)),
+                Some(VOICE_EXT) => read(&path).map(|v| lib.voices.push(v)),
                 _ => Ok(()),
             };
             if let Err(e) = read {
@@ -266,55 +417,14 @@ impl Library {
     }
 }
 
-fn read_program(path: &Path) -> Result<Program> {
-    let file: ProgramFile = read_json(path)?;
-    check(path, &file.format, PROGRAM_FORMAT, file.version)?;
-    Ok(Program {
-        id: file.id,
-        asset: file.fx,
-        path: path.to_path_buf(),
-    })
-}
-
-fn read_preset(path: &Path) -> Result<Preset> {
-    let file: PresetFile = read_json(path)?;
-    check(path, &file.format, PRESET_FORMAT, file.version)?;
-    Ok(Preset {
-        path: path.to_path_buf(),
-        ..file.preset
-    })
-}
-
-fn read_sound(path: &Path) -> Result<Sound> {
-    let file: SoundFile = read_json(path)?;
-    check(path, &file.format, SOUND_FORMAT, file.version)?;
-    let sound = Sound {
-        path: path.to_path_buf(),
-        ..file.sound
-    };
-    if !sound.audio().is_file() {
-        return Err(format!("the audio of {} is missing", name(path)));
-    }
-    Ok(sound)
-}
-
-fn read_voice(path: &Path) -> Result<SavedVoice> {
-    let file: VoiceFile = read_json(path)?;
-    check(path, &file.format, VOICE_FORMAT, file.version)?;
-    Ok(SavedVoice {
-        path: path.to_path_buf(),
-        ..file.voice
-    })
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+/// The item in the library file at `path`.
+fn read<T: Stored>(path: &Path) -> Result<T> {
     let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", name(path)))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{} doesn't read: {e}", name(path)))
-}
-
-fn check(path: &Path, format: &str, want: &str, version: u32) -> Result<()> {
-    if format != want {
-        return Err(format!("{} is not a {want} file", name(path)));
+    let file: T::File =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{} doesn't read: {e}", name(path)))?;
+    let (format, version) = file.header();
+    if format != T::FORMAT {
+        return Err(format!("{} is not a {} file", name(path), T::FORMAT));
     }
     if version > VERSION {
         return Err(format!(
@@ -322,7 +432,18 @@ fn check(path: &Path, format: &str, want: &str, version: u32) -> Result<()> {
             name(path)
         ));
     }
-    Ok(())
+    T::open(file, path)
+}
+
+/// Write `item` to its own file, under a new name when it was renamed, or
+/// to a new file when it has none: the item, kept in the file written.
+fn store<T: Stored>(item: &T) -> Result<T> {
+    let own = Some(item.path()).filter(|p| !p.as_os_str().is_empty());
+    let file = file_for(item.name(), T::EXT, own)?;
+    write_json(file.path(), &item.file())?;
+    let path = file.written();
+    moved(own, &path);
+    Ok(item.clone().at(path))
 }
 
 fn name(path: &Path) -> String {
@@ -331,36 +452,74 @@ fn name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Write beside the target, then rename over it.
+/// Write whole or not at all, and durably: the library is the user's data.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let fail = |e: &dyn std::fmt::Display| format!("can't save {}: {e}", name(path));
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| fail(&e))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
-    }
-    let tmp = path.with_file_name(format!(".{}.tmp", name(path)));
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            fail(&e)
-        })
+    flikk_os::fs::write_durable(path, &bytes).map_err(|e| fail(&e))
 }
 
-/// `name.ext` in the library, or `name 2.ext`… when another item has
-/// that file. `own` is the item's current file, which it may keep.
-fn file_for(name: &str, ext: &str, own: Option<&Path>) -> PathBuf {
+/// `title.ext` in the library, or `title 2.ext`… when another item has
+/// that file. `own` is the item's current file, which it may keep. A new
+/// name is claimed by creating it empty, so two saves never pick the same
+/// one.
+fn file_for(title: &str, ext: &str, own: Option<&Path>) -> Result<FileFor> {
     let dir = paths::library();
-    let base = file_name_part(name);
-    let free = |p: &Path| Some(p) == own || !p.exists();
-    let first = dir.join(format!("{base}.{ext}"));
-    if free(&first) {
-        return first;
+    let base = file_name_part(title);
+    let mut n = 1;
+    loop {
+        let path = match n {
+            1 => dir.join(format!("{base}.{ext}")),
+            n => dir.join(format!("{base} {n}.{ext}")),
+        };
+        n += 1;
+        if Some(path.as_path()) == own {
+            return Ok(FileFor::Own(path));
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(FileFor::Claimed(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("can't save {}: {e}", name(&path))),
+        }
     }
-    (2..)
-        .map(|i| dir.join(format!("{base} {i}.{ext}")))
-        .find(|p| free(p))
-        .unwrap_or(first)
+}
+
+/// The file an item is written to, from [`file_for`].
+enum FileFor {
+    /// The item's own file, written over.
+    Own(PathBuf),
+    /// A new name, held by an empty file of ours until the item is written
+    /// over it; removed if it never is.
+    Claimed(PathBuf),
+}
+
+impl FileFor {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Own(path) | Self::Claimed(path) => path,
+        }
+    }
+
+    /// The file, now holding the item: kept.
+    fn written(self) -> PathBuf {
+        // The claim is the item's file now: drop must not remove it.
+        let mut kept = std::mem::ManuallyDrop::new(self);
+        match &mut *kept {
+            Self::Own(path) | Self::Claimed(path) => std::mem::take(path),
+        }
+    }
+}
+
+impl Drop for FileFor {
+    fn drop(&mut self) {
+        if let Self::Claimed(path) = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// A file name part: no path separators or characters Windows refuses.
@@ -395,25 +554,12 @@ fn moved(old: Option<&Path>, path: &Path) {
 pub fn save_program(lib: &Library, asset: &FxAsset) -> Result<Program> {
     asset.validate()?;
     let existing = lib.origin_of(asset);
-    let id = existing.map_or_else(LibraryId::new, |p| p.id);
-    let old = existing.map(|p| p.path.as_path());
-    let path = file_for(&asset.name, PROGRAM_EXT, old);
     let mut stored = asset.clone();
     stored.origin = None;
-    write_json(
-        &path,
-        &ProgramFile {
-            format: PROGRAM_FORMAT.into(),
-            version: VERSION,
-            id,
-            fx: stored.clone(),
-        },
-    )?;
-    moved(old, &path);
-    Ok(Program {
-        id,
+    store(&Program {
+        id: existing.map_or_else(LibraryId::new, |p| p.id),
         asset: stored,
-        path,
+        path: existing.map(|p| p.path.clone()).unwrap_or_default(),
     })
 }
 
@@ -543,21 +689,7 @@ pub fn save_preset(preset: &Preset) -> Result<Preset> {
     if preset.name.trim().is_empty() {
         return Err("the preset needs a name".into());
     }
-    let own = Some(preset.path.as_path()).filter(|p| !p.as_os_str().is_empty());
-    let path = file_for(&preset.name, PRESET_EXT, own);
-    write_json(
-        &path,
-        &PresetFile {
-            format: PRESET_FORMAT.into(),
-            version: VERSION,
-            preset: preset.clone(),
-        },
-    )?;
-    moved(own, &path);
-    Ok(Preset {
-        path,
-        ..preset.clone()
-    })
+    store(preset)
 }
 
 pub fn rename_preset(preset: &Preset, name: &str) -> Result<Preset> {
@@ -658,17 +790,11 @@ impl Sound {
     /// A media item on its audio; not in a project or a bin yet.
     pub fn item(&self) -> MediaItem {
         MediaItem {
-            id: MediaId::new(),
-            path: self.audio(),
-            kind: MediaKind::Audio,
             fingerprint: self.fingerprint.clone(),
             info: self.info.clone(),
-            bin: None,
             tags: self.tags.clone(),
-            proxy: None,
             generated: self.generated.clone(),
-            name: None,
-            tone_map: Default::default(),
+            ..MediaItem::new(self.audio(), MediaKind::Audio)
         }
     }
 }
@@ -703,39 +829,19 @@ fn sound_name(item: &MediaItem) -> String {
     }
 }
 
-fn write_sound(sound: &Sound) -> Result<Sound> {
-    let own = Some(sound.path.as_path()).filter(|p| !p.as_os_str().is_empty());
-    let path = file_for(&sound.name, SOUND_EXT, own);
-    write_json(
-        &path,
-        &SoundFile {
-            format: SOUND_FORMAT.into(),
-            version: VERSION,
-            sound: sound.clone(),
-        },
-    )?;
-    moved(own, &path);
-    Ok(Sound {
-        path,
-        ..sound.clone()
-    })
-}
-
 /// Copy `from` to `to`, kept if already there: the same audio. Slow for
 /// long audio.
 fn copy_audio(from: &Path, to: &Path) -> Result<()> {
     if to.is_file() {
         return Ok(());
     }
-    let tmp = to.with_file_name(format!(".{}.tmp", name(to)));
-    to.parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::copy(from, &tmp))
-        .and_then(|_| std::fs::rename(&tmp, to))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("can't copy {}: {e}", name(from))
-        })
+    flikk_os::fs::write_atomic_with(to, |file| {
+        std::io::copy(&mut std::fs::File::open(from)?, file)?;
+        // On disk before it is named: sounds and samples are the user's
+        // data, which must survive a power cut.
+        file.sync_all()
+    })
+    .map_err(|e| format!("can't copy {}: {e}", name(from)))
 }
 
 /// Put audio `item` in the library: its file copied in under a folder named
@@ -755,7 +861,7 @@ pub fn save_sound(lib: &Library, item: &MediaItem) -> Result<Sound> {
         .map_or_else(|| id.0.to_string(), |f| file_name_part(&f.0));
     let file = format!("{folder}/{}", name(&item.path));
     copy_audio(&item.path, &paths::assets().join(&file))?;
-    write_sound(&Sound {
+    store(&Sound {
         id,
         name: sound_name(item),
         file,
@@ -768,7 +874,7 @@ pub fn save_sound(lib: &Library, item: &MediaItem) -> Result<Sound> {
 }
 
 pub fn rename_sound(sound: &Sound, name: &str) -> Result<Sound> {
-    write_sound(&Sound {
+    store(&Sound {
         name: name.trim().to_owned(),
         ..sound.clone()
     })
@@ -818,19 +924,9 @@ impl SavedVoice {
 
     /// Its sample as an item to listen to: not in any pool.
     pub fn sample_item(&self) -> Option<MediaItem> {
-        Some(MediaItem {
-            id: MediaId::new(),
-            path: self.sample_file()?,
-            kind: MediaKind::Audio,
-            fingerprint: None,
-            info: Some(self.sample_info.clone()?),
-            bin: None,
-            tags: Vec::new(),
-            proxy: None,
-            generated: None,
-            name: None,
-            tone_map: Default::default(),
-        })
+        let mut item = MediaItem::new(self.sample_file()?, MediaKind::Audio);
+        item.info = Some(self.sample_info.clone()?);
+        Some(item)
     }
 
     /// How it reads a voiceover unless told otherwise.
@@ -904,29 +1000,11 @@ pub fn save_voice(
         stored.sample = Some(file);
         stored.sample_info = item.info.clone();
     }
-    write_voice(&stored)
-}
-
-fn write_voice(voice: &SavedVoice) -> Result<SavedVoice> {
-    let own = Some(voice.path.as_path()).filter(|p| !p.as_os_str().is_empty());
-    let path = file_for(&voice.name, VOICE_EXT, own);
-    write_json(
-        &path,
-        &VoiceFile {
-            format: VOICE_FORMAT.into(),
-            version: VERSION,
-            voice: voice.clone(),
-        },
-    )?;
-    moved(own, &path);
-    Ok(SavedVoice {
-        path,
-        ..voice.clone()
-    })
+    store(&stored)
 }
 
 pub fn rename_voice(voice: &SavedVoice, name: &str) -> Result<SavedVoice> {
-    write_voice(&SavedVoice {
+    store(&SavedVoice {
         name: name.trim().to_owned(),
         ..voice.clone()
     })
@@ -934,7 +1012,7 @@ pub fn rename_voice(voice: &SavedVoice, name: &str) -> Result<SavedVoice> {
 
 /// Keep `reading`'s stability and similarity as how `voice` reads.
 pub fn set_voice_reading(voice: &SavedVoice, reading: &Reading) -> Result<SavedVoice> {
-    write_voice(&SavedVoice {
+    store(&SavedVoice {
         stability: reading.stability,
         similarity: reading.similarity,
         ..voice.clone()
@@ -957,7 +1035,7 @@ pub fn link_speaker(lib: &Library, voice: LibraryId, who: &VoiceSpeaker) -> Resu
         if v.id == voice {
             speakers.push(who.clone());
         }
-        write_voice(&SavedVoice {
+        store(&SavedVoice {
             speakers,
             ..v.clone()
         })?;
@@ -977,28 +1055,24 @@ pub fn remove(path: &Path) -> Result<()> {
 pub fn import(lib: &Library, path: &Path) -> Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
         Some(PROGRAM_EXT) => {
-            let program = read_program(path)?;
+            let program: Program = read(path)?;
             let mut asset = program.asset;
             asset.origin = lib.program(program.id).map(|p| p.id);
             match asset.origin {
                 Some(_) => save_program(lib, &asset).map(|_| ()),
                 None => {
-                    let path = file_for(&asset.name, PROGRAM_EXT, None);
                     asset.validate()?;
-                    write_json(
-                        &path,
-                        &ProgramFile {
-                            format: PROGRAM_FORMAT.into(),
-                            version: VERSION,
-                            id: program.id,
-                            fx: asset,
-                        },
-                    )
+                    store(&Program {
+                        id: program.id,
+                        asset,
+                        path: PathBuf::new(),
+                    })
+                    .map(|_| ())
                 }
             }
         }
         Some(PRESET_EXT) => {
-            let mut preset = read_preset(path)?;
+            let mut preset: Preset = read(path)?;
             preset.path = lib
                 .preset(preset.id)
                 .map(|p| p.path.clone())

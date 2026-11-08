@@ -405,7 +405,7 @@ fn lerp(t: &[[f32; 3]], c: usize, v: f32) -> f32 {
 /// the same few grades every frame).
 pub fn compiled(g: &Grade) -> Arc<Compiled> {
     static RECENT: Mutex<Vec<Arc<Compiled>>> = Mutex::new(Vec::new());
-    let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut recent = flikk_os::sync::lock(&RECENT);
     if let Some(i) = recent.iter().position(|c| c.grade == *g) {
         let c = recent.remove(i);
         recent.push(c.clone());
@@ -546,7 +546,7 @@ impl Cube {
         static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         {
-            let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = flikk_os::sync::lock(&CACHE);
             if let Some((_, _, c)) = cache.iter().find(|(p, m, _)| p == path && *m == modified) {
                 return Ok(c.clone());
             }
@@ -555,7 +555,7 @@ impl Cube {
             CoreError::Invalid(format!("could not read LUT {}: {e}", path.display()))
         })?;
         let cube = Arc::new(Self::parse(&text)?);
-        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = flikk_os::sync::lock(&CACHE);
         cache.retain(|(p, _, _)| p != path);
         cache.push((path.to_path_buf(), modified, cube.clone()));
         if cache.len() > 16 {
