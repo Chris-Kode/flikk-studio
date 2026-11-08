@@ -11,11 +11,12 @@ pub use codex::{Codex, codex_home};
 pub use models::{cached_models, refresh_models};
 
 use flikk_core::agent::{Backend as BackendKind, ModelChoice};
+use flikk_os::process::{ChildGuard, command as new_command};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -114,11 +115,12 @@ pub fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
     }
 }
 
-/// A running turn. Dropping it does not stop the process; call [`kill`].
+/// A running turn. Dropping it does not stop the process while its reader
+/// thread runs; call [`kill`].
 ///
 /// [`kill`]: RunningTurn::kill
 pub struct RunningTurn {
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<ChildGuard>>>,
     pub events: Receiver<BackendEvent>,
 }
 
@@ -139,7 +141,7 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = ChildGuard::spawn(&mut command)?;
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -220,9 +222,8 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
     Ok(RunningTurn { child, events: rx })
 }
 
-/// Prepare a backend CLI command: no console window, and when the editor
-/// itself runs under Claude Code, don't let the child think it is a nested
-/// session.
+/// Prepare a backend CLI command: when the editor itself runs under Claude
+/// Code, don't let the child think it is a nested session.
 fn isolate(command: &mut Command) {
     for var in [
         "CLAUDECODE",
@@ -231,7 +232,6 @@ fn isolate(command: &mut Command) {
     ] {
         command.env_remove(var);
     }
-    hide_window(command);
 }
 
 /// Pump stdout through the adapter. Returns whether `Finished` was sent.
@@ -262,21 +262,12 @@ fn read_events(
     false
 }
 
-#[cfg(windows)]
-fn hide_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_window(_: &mut Command) {}
-
 /// Find a CLI: `$override_var`, else `name` on `PATH` (with `PATHEXT` on
 /// Windows). An npm shim (`codex.cmd`) runs its script with Node directly:
 /// through `cmd /C`, the system prompt on the command line is cut at
 /// cmd's 8191 characters and its quotes, `<`, `>` and `&` are read as
-/// shell syntax. Other batch files still run through `cmd /C`.
+/// shell syntax. Other batch files still run through `cmd /C`. The command
+/// opens no console window and has no stdin until the caller sets one.
 pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
     let path = std::env::var_os(override_var)
         .filter(|v| !v.is_empty())
@@ -292,7 +283,7 @@ pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
     if !is_batch {
-        return Ok(Command::new(path));
+        return Ok(new_command(path));
     }
     if let Some(target) = shim_target(&path) {
         let is_script = target.extension().is_some_and(|e| {
@@ -301,19 +292,19 @@ pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
                 .any(|js| e.eq_ignore_ascii_case(js))
         });
         if !is_script {
-            return Ok(Command::new(target));
+            return Ok(new_command(target));
         }
         let bundled = path.with_file_name("node.exe");
         if let Some(node) = is_file(&bundled)
             .then_some(bundled)
             .or_else(|| search_path("node"))
         {
-            let mut c = Command::new(node);
+            let mut c = new_command(node);
             c.arg(target);
             return Ok(c);
         }
     }
-    let mut c = Command::new("cmd");
+    let mut c = new_command("cmd");
     c.arg("/C").arg(path);
     Ok(c)
 }
