@@ -395,18 +395,6 @@ fn jwt_claims(token: &str) -> Option<Value> {
 
 /// The picture's bytes.
 fn generate(login: &Login, request: &Prompt) -> ToolResultOf<Vec<u8>> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .user_agent(concat!("flikk/", env!("CARGO_PKG_VERSION")))
-        .http_status_as_error(false)
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .into();
     let body = json!({
         "prompt": request.prompt,
         "model": MODEL,
@@ -414,7 +402,7 @@ fn generate(login: &Login, request: &Prompt) -> ToolResultOf<Vec<u8>> {
         "size": "auto",
         "background": if request.transparent { "transparent" } else { "opaque" },
     });
-    let mut response = agent
+    let mut response = super::web::http_agent(TIMEOUT)
         .post(URL)
         .header("Authorization", format!("Bearer {}", login.token))
         .header("ChatGPT-Account-ID", &login.account)
