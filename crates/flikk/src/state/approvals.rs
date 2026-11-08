@@ -75,127 +75,89 @@ impl EditorState {
                 }
             }
             Ok(approve::Started::Background(work)) => {
-                let task = cx.background_executor().spawn(async move { work() });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        let outcome = match result {
-                            Ok(file) => {
-                                this.agent.report_outcome(
-                                    id,
-                                    format!("approved: {summary}; wrote {file}"),
-                                );
-                                ApprovalOutcome::Done(file)
-                            }
-                            Err(e) => {
-                                this.agent.report_failure(
-                                    id,
-                                    format!("approved but failed: {summary}: {e:#}"),
-                                );
-                                ApprovalOutcome::Failed(format!("{e:#}"))
-                            }
-                        };
-                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
-                            entry.1 = outcome;
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-                ApprovalOutcome::Working
+                let what = summary.clone();
+                let done = move |this: &mut Self, file: String, _: &mut Context<Self>| {
+                    this.agent
+                        .report_outcome(id, format!("approved: {what}; wrote {file}"));
+                    ApprovalOutcome::Done(file)
+                };
+                self.settle_later(id, summary, work, done, cx)
             }
             Ok(approve::Started::Voice(work)) => {
-                let task = cx.background_executor().spawn(async move { work() });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        let outcome = match result {
-                            Ok(line) => {
-                                this.agent
-                                    .report_outcome(id, format!("approved: {summary}; {line}"));
-                                this.reload_library(cx);
-                                this.refresh_voices(cx);
-                                ApprovalOutcome::Done("Voice kept in the library".into())
-                            }
-                            Err(e) => {
-                                this.agent.report_failure(
-                                    id,
-                                    format!("approved but failed: {summary}: {e:#}"),
-                                );
-                                ApprovalOutcome::Failed(format!("{e:#}"))
-                            }
-                        };
-                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
-                            entry.1 = outcome;
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-                ApprovalOutcome::Working
+                let what = summary.clone();
+                let done = move |this: &mut Self, line: String, cx: &mut Context<Self>| {
+                    this.agent
+                        .report_outcome(id, format!("approved: {what}; {line}"));
+                    this.reload_library(cx);
+                    this.refresh_voices(cx);
+                    ApprovalOutcome::Done("Voice kept in the library".into())
+                };
+                self.settle_later(id, summary, work, done, cx)
             }
             Ok(approve::Started::Respeak(work)) => {
-                let task = cx.background_executor().spawn(async move { work() });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        let outcome = match result {
-                            Ok(made) if this.bus.project().id != owner => {
-                                this.keep_approved(id, owner, made.item, &summary)
-                            }
-                            Ok(made) => this.place_respoken(id, made, cx),
-                            Err(e) => {
-                                this.agent.report_failure(
-                                    id,
-                                    format!("approved but failed: {summary}: {e:#}"),
-                                );
-                                ApprovalOutcome::Failed(format!("{e:#}"))
-                            }
-                        };
-                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
-                            entry.1 = outcome;
+                let what = summary.clone();
+                let done =
+                    move |this: &mut Self, made: approve::Respoken, cx: &mut Context<Self>| {
+                        if this.bus.project().id != owner {
+                            this.keep_approved(id, owner, made.item, &what)
+                        } else {
+                            this.place_respoken(id, made, cx)
                         }
-                        cx.notify();
-                    });
-                })
-                .detach();
-                ApprovalOutcome::Working
+                    };
+                self.settle_later(id, summary, work, done, cx)
             }
             Ok(approve::Started::Generate(work)) => {
-                let task = cx.background_executor().spawn(async move { work() });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        let outcome = match result {
-                            Ok(made) if this.bus.project().id != owner => {
-                                this.keep_approved(id, owner, made.item, &summary)
-                            }
-                            Ok(made) => this.place_generated(id, made, cx),
-                            Err(e) => {
-                                this.agent.report_failure(
-                                    id,
-                                    format!("approved but failed: {summary}: {e:#}"),
-                                );
-                                ApprovalOutcome::Failed(format!("{e:#}"))
-                            }
-                        };
-                        if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
-                            entry.1 = outcome;
+                let what = summary.clone();
+                let done =
+                    move |this: &mut Self, made: approve::Generated, cx: &mut Context<Self>| {
+                        if this.bus.project().id != owner {
+                            this.keep_approved(id, owner, made.item, &what)
+                        } else {
+                            this.place_generated(id, made, cx)
                         }
-                        cx.notify();
-                    });
-                })
-                .detach();
-                ApprovalOutcome::Working
+                    };
+                self.settle_later(id, summary, work, done, cx)
             }
-            Err(e) => {
-                self.agent
-                    .report_failure(id, format!("approved but failed: {summary}: {e:#}"));
-                ApprovalOutcome::Failed(format!("{e:#}"))
-            }
+            Err(e) => self.approval_failed(id, &summary, e),
         };
         self.settled.push((pending, outcome));
         cx.notify();
+    }
+
+    /// Run approved request `id`'s `work` off the UI thread: its card shows
+    /// it working until `done` turns what it made into the outcome (or it
+    /// failed, which the agent is told).
+    fn settle_later<T: Send + 'static>(
+        &mut self,
+        id: u64,
+        summary: String,
+        work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+        done: impl FnOnce(&mut Self, T, &mut Context<Self>) -> ApprovalOutcome + 'static,
+        cx: &mut Context<Self>,
+    ) -> ApprovalOutcome {
+        let task = cx.background_executor().spawn(async move { work() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let outcome = match result {
+                    Ok(made) => done(this, made, cx),
+                    Err(e) => this.approval_failed(id, &summary, e),
+                };
+                if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                    entry.1 = outcome;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        ApprovalOutcome::Working
+    }
+
+    /// Approved request `id` (`summary`) failed with `e`: the agent is told.
+    fn approval_failed(&mut self, id: u64, summary: &str, e: anyhow::Error) -> ApprovalOutcome {
+        self.agent
+            .report_failure(id, format!("approved but failed: {summary}: {e:#}"));
+        ApprovalOutcome::Failed(format!("{e:#}"))
     }
 
     /// A render started from the chat, as the queue sees it now.
