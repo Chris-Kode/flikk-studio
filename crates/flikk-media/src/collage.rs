@@ -3,7 +3,7 @@
 
 use crate::canvas::Canvas;
 use crate::decode::still;
-use crate::{FfmpegMedia, err, proxy, write_atomic};
+use crate::{FfmpegMedia, err, proxy};
 use flikk_core::hdr::{Mapping, ToneMap};
 use flikk_core::paths;
 use flikk_core::services::MediaService;
@@ -11,6 +11,7 @@ use flikk_core::services::{
     Collage, CollageRequest, Frame, SamplePoint, ServiceError, ServiceResult,
 };
 use flikk_core::time::Rate;
+use flikk_os::fs::write_atomic;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

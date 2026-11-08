@@ -1,47 +1,23 @@
-//! Locating and running the `ffmpeg`/`ffprobe` binaries, filtergraph
-//! escaping, and the no-overwrite file rules for outputs.
+//! Running the `ffmpeg`/`ffprobe` binaries (found by `flikk_os::process`)
+//! and asking them what they can do, filtergraph escaping, and the
+//! no-overwrite file rules for outputs.
 
 use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
-use std::ffi::OsStr;
+use flikk_core::hdr::Method;
+use flikk_os::backoff::RETRY_AFTER;
+use flikk_os::fs::place_new;
+use flikk_os::process::{ChildGuard, command, ffmpeg, ffprobe};
+use flikk_os::sync::lock;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
-
-/// `$FLIKK_FFMPEG`, else `ffmpeg` from `PATH`.
-pub fn ffmpeg() -> PathBuf {
-    binary("FLIKK_FFMPEG", "ffmpeg")
-}
-
-/// `$FLIKK_FFPROBE`, else `ffprobe` from `PATH`.
-pub fn ffprobe() -> PathBuf {
-    binary("FLIKK_FFPROBE", "ffprobe")
-}
-
-fn binary(var: &str, name: &str) -> PathBuf {
-    std::env::var_os(var)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// A command with no console window on Windows.
-pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
-    #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    cmd
-}
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Major version of the ffmpeg binary, 0 if unknown.
 fn major_version() -> u32 {
@@ -60,18 +36,67 @@ fn major_version() -> u32 {
     })
 }
 
-/// How this FFmpeg maps HDR to SDR (`zscale` or the baked LUT), found once
-/// per process; the media engine finds the same from the same binary.
-pub fn tone_method() -> flikk_core::hdr::Method {
-    static METHOD: OnceLock<flikk_core::hdr::Method> = OnceLock::new();
-    *METHOD.get_or_init(|| {
-        let out = command(ffmpeg())
+/// How this FFmpeg maps HDR to SDR (`zscale` or the baked LUT); the media
+/// engine finds the same from the same binary. See [`ToneMethodProbe`].
+pub fn tone_method() -> Method {
+    static PROBE: ToneMethodProbe = ToneMethodProbe::new();
+    PROBE.method(&ffmpeg())
+}
+
+/// How one FFmpeg binary maps HDR to SDR, asked of it (`-filters`) on first
+/// use and kept once it answered. While it doesn't answer (it can't be
+/// started, or it fails), the fallback of [`Method::from_filters`] with no
+/// listing (the LUT) is used, and the binary is asked again after
+/// [`RETRY_AFTER`]: a failure is never kept for the session.
+#[derive(Debug, Default)]
+pub struct ToneMethodProbe(Mutex<Probed>);
+
+/// What a [`ToneMethodProbe`] has learnt so far.
+#[derive(Clone, Copy, Debug, Default)]
+enum Probed {
+    #[default]
+    NotAsked,
+    Found(Method),
+    Failed {
+        at: Instant,
+    },
+}
+
+impl ToneMethodProbe {
+    /// Nothing asked yet.
+    pub const fn new() -> Self {
+        Self(Mutex::new(Probed::NotAsked))
+    }
+
+    /// The method `ffmpeg` maps with, asking it when it hasn't answered yet
+    /// and no failure is recent. Blocks while it is asked.
+    pub fn method(&self, ffmpeg: &Path) -> Method {
+        let mut probed = lock(&self.0);
+        match *probed {
+            Probed::Found(method) => return method,
+            Probed::Failed { at } if at.elapsed() < RETRY_AFTER => {
+                return Method::from_filters("");
+            }
+            Probed::NotAsked | Probed::Failed { .. } => {}
+        }
+        let listing = command(ffmpeg)
             .args(["-hide_banner", "-filters"])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        flikk_core::hdr::Method::from_filters(&out)
-    })
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        match listing {
+            Some(listing) => {
+                let method = Method::from_filters(&listing);
+                *probed = Probed::Found(method);
+                method
+            }
+            None => {
+                *probed = Probed::Failed { at: Instant::now() };
+                Method::from_filters("")
+            }
+        }
+    }
 }
 
 /// The filters mapping an HDR item's pictures to SDR with this FFmpeg,
@@ -164,7 +189,9 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<String> {
-    let mut child = Process(
+    // Guarded: an early return or a panic kills ffmpeg, so it never
+    // finishes a partial output on its own.
+    let mut child = ChildGuard::spawn(
         command(ffmpeg())
             .args([
                 "-hide_banner",
@@ -176,10 +203,9 @@ pub(crate) fn run(
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not start {}", ffmpeg().display()))?,
-    );
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("could not start {}", ffmpeg().display()))?;
 
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
@@ -224,14 +250,15 @@ pub(crate) fn run(
         bail!("canceled");
     }
     if !status.success() {
-        return Err(anyhow!(last_error(&stderr)));
+        return Err(anyhow!(last_error_lines(&stderr)));
     }
     progress(1.0);
     Ok(stderr)
 }
 
-/// The most useful lines of an ffmpeg error log.
-pub(crate) fn last_error(stderr: &str) -> String {
+/// The last three non-empty lines of an ffmpeg error log, the most useful
+/// ones; "ffmpeg failed" when it has none.
+pub(crate) fn last_error_lines(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
@@ -325,33 +352,6 @@ impl Drop for TempOutput {
     }
 }
 
-/// A spawned ffmpeg, killed and reaped when dropped while still running (on
-/// an early return or a panic), so it never finishes a partial output on
-/// its own.
-pub(crate) struct Process(pub(crate) Child);
-
-impl std::ops::Deref for Process {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Process {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        // Both are no-ops once it has been waited for.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// How many names [`publish`] tries before giving up.
 const PUBLISH_TRIES: usize = 1000;
 
@@ -365,7 +365,7 @@ pub(crate) fn publish(tmp: &TempOutput, out: &Path, job: Option<JobId>) -> Resul
         if claimed(&target, job) {
             continue;
         }
-        if place(tmp.path(), &target).context("could not move the render into place")? {
+        if place_new(tmp.path(), &target).context("could not move the render into place")? {
             return Ok(target);
         }
     }
@@ -382,40 +382,10 @@ pub(crate) fn publish_exact(tmp: &TempOutput, out: &Path) -> Result<()> {
             out.display()
         );
     }
-    if !place(tmp.path(), out).context("could not move the file into place")? {
+    if !place_new(tmp.path(), out).context("could not move the file into place")? {
         bail!("{} appeared in the meantime; not replaced", out.display());
     }
     Ok(())
-}
-
-/// Move `tmp` to `target` unless a file is there; `false` if one is.
-fn place(tmp: &Path, target: &Path) -> io::Result<bool> {
-    match fs::hard_link(tmp, target) {
-        Ok(()) => {
-            let _ = fs::remove_file(tmp);
-            return Ok(true);
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        // Filesystems without hard links (FAT, exFAT, some network shares).
-        Err(_) => {}
-    }
-    // Claim the name with an exclusive create, then rename over the claim:
-    // only our own empty file is ever replaced.
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(e),
-    }
-    fs::rename(tmp, target).inspect_err(|_| {
-        if fs::metadata(target).is_ok_and(|m| m.len() == 0) {
-            let _ = fs::remove_file(target);
-        }
-    })?;
-    Ok(true)
 }
 
 /// Write `contents` to `path` through a temp file beside it, renamed into

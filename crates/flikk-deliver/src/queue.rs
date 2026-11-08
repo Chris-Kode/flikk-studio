@@ -13,7 +13,7 @@ use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::paths;
 use flikk_core::services::Services;
-use std::any::Any;
+use flikk_os::sync::{lock, panic_message};
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -80,7 +80,7 @@ impl Inner {
     /// The entries, even after a panic poisoned the lock: every write to
     /// them is a single field store, so they are never left half-changed.
     fn entries(&self) -> MutexGuard<'_, Vec<Entry>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.entries)
     }
 }
 
@@ -94,18 +94,6 @@ impl Drop for WorkerGuard<'_> {
     }
 }
 
-/// A panic's message, when it carries one.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("the render stopped unexpectedly: {detail}"),
-        None => "the render stopped unexpectedly".into(),
-    }
-}
-
 /// Every queue alive, so the outputs of pending jobs are kept from every
 /// other output.
 static QUEUES: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
@@ -115,13 +103,13 @@ static QUEUES: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
 static CLAIMING: Mutex<()> = Mutex::new(());
 
 pub(crate) fn claiming() -> MutexGuard<'static, ()> {
-    CLAIMING.lock().unwrap_or_else(|e| e.into_inner())
+    lock(&CLAIMING)
 }
 
 /// Whether `path` is the output of a job still queued or running, other
 /// than `except`, in any queue. Never call it holding a queue's entries.
 pub(crate) fn claimed(path: &Path, except: Option<JobId>) -> bool {
-    let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut queues = lock(&QUEUES);
     queues.retain(|q| q.strong_count() > 0);
     queues.iter().filter_map(Weak::upgrade).any(|inner| {
         inner
@@ -140,7 +128,7 @@ pub struct RenderQueue {
 impl Default for RenderQueue {
     fn default() -> Self {
         let inner = Arc::new(Inner::default());
-        let mut queues = QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queues = lock(&QUEUES);
         queues.push(Arc::downgrade(&inner));
         Self { inner }
     }
@@ -317,7 +305,7 @@ impl RenderQueue {
                     message: format!("{e:#}"),
                 },
                 Err(payload) => RenderState::Failed {
-                    message: panic_message(payload.as_ref()),
+                    message: panic_message("the render", payload.as_ref()),
                 },
             };
             self.set_state(id, state, written);
@@ -486,7 +474,7 @@ fn render(
                 // Software worked where the hardware before it failed: skip
                 // that hardware for this size from now on.
                 if i > 0 {
-                    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut failed = lock(&FAILED);
                     for hw in attempts[..i].iter().flatten() {
                         failed.push((hw.clone(), spec.width, spec.height));
                     }
@@ -536,7 +524,7 @@ fn attempts(
             })?)]
         }
         Encoder::Auto => {
-            let failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+            let failed = lock(&FAILED);
             let size = (spec.width, spec.height);
             match best.filter(|hw| !failed.iter().any(|(f, w, h)| f == hw && (*w, *h) == size)) {
                 Some(hw) => vec![Some(hw), None],

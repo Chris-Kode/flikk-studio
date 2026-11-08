@@ -7,7 +7,7 @@
 //! the render worker waits for it ([`probe_until`]), the UI only peeks
 //! ([`probed`]).
 
-use crate::ffmpeg::{self, command};
+use flikk_os::process::{ChildGuard, command, ffmpeg};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::Read as _;
@@ -306,7 +306,7 @@ fn run_probe() -> Probe {
 
 /// Encoder names from `ffmpeg -encoders`.
 fn listed_encoders() -> Vec<String> {
-    let Ok(out) = command(ffmpeg::ffmpeg())
+    let Ok(out) = command(ffmpeg())
         .args(["-hide_banner", "-encoders"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -358,13 +358,13 @@ fn trial(encoder: &HwEncoder) -> bool {
             .map(OsString::from),
     );
     args.extend(["-f", "null", "-"].map(OsString::from));
-    let Ok(mut child) = command(ffmpeg::ffmpeg())
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
+    let Ok(mut child) = ChildGuard::spawn(
+        command(ffmpeg())
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    ) else {
         return false;
     };
     // Drain stderr so a chatty failure never blocks the child.
@@ -382,13 +382,12 @@ fn trial(encoder: &HwEncoder) -> bool {
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break false;
-            }
+            _ => break false,
         }
     };
+    // Killed (when still running) before the drain is joined: its pipe
+    // closes only once the child is gone.
+    drop(child);
     let _ = drain.join();
     ok
 }

@@ -27,9 +27,10 @@ use flikk_core::cloud::{
     GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
     SpeechService, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
+use flikk_os::sync::lock;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 /// Every provider the editor knows.
 pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER, &fal::PROVIDER, &pika::PROVIDER];
@@ -202,10 +203,6 @@ pub trait Api: Sync {
 pub struct Cloud {
     settings: Mutex<CloudSettings>,
     keys: Keys,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Cloud {
@@ -420,8 +417,9 @@ impl GenerationService for Cloud {
             .chars()
             .filter(char::is_ascii_alphanumeric)
             .collect();
-        let dir = flikk_core::paths::cache().join("voices");
-        let path = dir.join(format!("{name}.mp3"));
+        let path = flikk_core::paths::cache()
+            .join("voices")
+            .join(format!("{name}.mp3"));
         if path.exists() {
             flikk_core::cache_sweep::mark_used(&path);
             return Ok(path);
@@ -436,10 +434,8 @@ impl GenerationService for Cloud {
         if !reply.ok() {
             return Err(fail(format!("No sample of {}", voice.name)));
         }
-        let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(path.with_extension("mp3.part"), &reply.body))
-            .and_then(|()| std::fs::rename(path.with_extension("mp3.part"), &path));
-        written.map_err(|e| fail(format!("could not write {}: {e}", path.display())))?;
+        flikk_os::fs::write_atomic(&path, &reply.body)
+            .map_err(|e| fail(format!("could not write {}: {e}", path.display())))?;
         Ok(path)
     }
 }
@@ -607,19 +603,13 @@ fn is_leftover(name: &str) -> bool {
 }
 
 /// Move the finished file at `from` to `to`, never over a file already
-/// there: another generation's, or the user's.
+/// there: another generation's, or the user's. An `AlreadyExists` error
+/// when one is, and `from` stays.
 pub(crate) fn settle(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(from);
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-        // A file system without links: a look, then a rename.
-        Err(_) if std::fs::symlink_metadata(to).is_ok() => {
-            Err(std::io::ErrorKind::AlreadyExists.into())
-        }
-        Err(_) => std::fs::rename(from, to),
+    if flikk_os::fs::place_new(from, to)? {
+        Ok(())
+    } else {
+        Err(std::io::ErrorKind::AlreadyExists.into())
     }
 }
 
