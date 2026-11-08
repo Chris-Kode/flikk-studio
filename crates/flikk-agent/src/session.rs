@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// `paths::home()/agent`, created on first use.
-pub fn agent_dir() -> PathBuf {
+pub(crate) fn agent_dir() -> PathBuf {
     let dir = paths::home().join("agent");
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -25,7 +25,7 @@ fn file() -> PathBuf {
 pub const MAIN_CHAT: &str = "main";
 
 /// The key a backend session is stored under.
-pub fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
+pub(crate) fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
     let base = format!(
         "{}/{}/{}",
         project.0,
@@ -49,12 +49,17 @@ fn load_all() -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-pub fn load(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> Option<String> {
+pub(crate) fn load(
+    project: ProjectId,
+    chat: &str,
+    backend: Backend,
+    role: AgentRole,
+) -> Option<String> {
     load_all().remove(&key(project, chat, backend, role))
 }
 
 /// `None` forgets the session (e.g. the backend no longer knows it).
-pub fn store(
+pub(crate) fn store(
     project: ProjectId,
     chat: &str,
     backend: Backend,

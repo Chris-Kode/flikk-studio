@@ -6,8 +6,8 @@ mod claude;
 mod codex;
 mod models;
 
-pub use claude::Claude;
-pub use codex::{Codex, codex_home};
+pub(crate) use claude::Claude;
+pub(crate) use codex::{Codex, codex_home};
 pub use models::{cached_models, refresh_models};
 
 use flikk_core::agent::{Backend as BackendKind, ModelChoice};
@@ -32,7 +32,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(10);
 
 /// How the backend should start `flikk-mcp`.
 #[derive(Clone, Debug)]
-pub struct McpLaunch {
+pub(crate) struct McpLaunch {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -40,7 +40,7 @@ pub struct McpLaunch {
 
 /// Everything a backend needs for one turn.
 #[derive(Clone, Debug)]
-pub struct TurnSpec {
+pub(crate) struct TurnSpec {
     pub system_prompt: String,
     /// User message with the context block.
     pub message: String,
@@ -60,7 +60,7 @@ pub struct TurnSpec {
 
 /// What the adapters read from the CLI output.
 #[derive(Clone, Debug, PartialEq)]
-pub enum BackendEvent {
+pub(crate) enum BackendEvent {
     /// The backend's session id; persist it to resume the chat.
     Session(String),
     TextDelta(String),
@@ -92,7 +92,7 @@ pub enum BackendEvent {
     },
 }
 
-pub trait Adapter: Send {
+pub(crate) trait Adapter: Send {
     fn kind(&self) -> BackendKind;
     /// Build the command line. May write files under `turn.run_dir`.
     fn command(&self, turn: &TurnSpec) -> std::io::Result<Command>;
@@ -108,7 +108,7 @@ pub trait Adapter: Send {
     }
 }
 
-pub fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
+pub(crate) fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
     match kind {
         BackendKind::Claude => Box::new(Claude::default()),
         BackendKind::Codex => Box::new(Codex::default()),
@@ -119,13 +119,13 @@ pub fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
 /// thread runs; call [`kill`].
 ///
 /// [`kill`]: RunningTurn::kill
-pub struct RunningTurn {
+pub(crate) struct RunningTurn {
     child: Arc<Mutex<Option<ChildGuard>>>,
     pub events: Receiver<BackendEvent>,
 }
 
 impl RunningTurn {
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         if let Some(child) = self.child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
@@ -133,7 +133,7 @@ impl RunningTurn {
 }
 
 /// Start the backend for `turn` on background threads.
-pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<RunningTurn> {
+pub(crate) fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<RunningTurn> {
     let mut command = adapter.command(&turn)?;
     command
         .current_dir(&turn.workdir)
@@ -268,7 +268,7 @@ fn read_events(
 /// cmd's 8191 characters and its quotes, `<`, `>` and `&` are read as
 /// shell syntax. Other batch files still run through `cmd /C`. The command
 /// opens no console window and has no stdin until the caller sets one.
-pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
+pub(crate) fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
     let path = std::env::var_os(override_var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -359,7 +359,7 @@ fn is_file(p: &Path) -> bool {
 /// How to start the MCP server: `$FLIKK_MCP`, else `flikk-mcp` next to
 /// the running executable, else the editor itself as `<exe> mcp` (so
 /// `cargo run -p flikk` works without building `flikk-mcp`).
-pub fn mcp_command() -> std::io::Result<(PathBuf, Vec<String>)> {
+pub(crate) fn mcp_command() -> std::io::Result<(PathBuf, Vec<String>)> {
     if let Some(p) = std::env::var_os("FLIKK_MCP").filter(|v| !v.is_empty()) {
         return Ok((PathBuf::from(p), Vec::new()));
     }
@@ -390,13 +390,13 @@ pub(crate) struct TextJoin {
 
 impl TextJoin {
     /// A new assistant message starts; the next text gets a separator.
-    pub fn new_message(&mut self) {
+    pub(crate) fn new_message(&mut self) {
         if self.any {
             self.pending_break = true;
         }
     }
 
-    pub fn text(&mut self, text: &str) -> Option<BackendEvent> {
+    pub(crate) fn text(&mut self, text: &str) -> Option<BackendEvent> {
         if text.is_empty() {
             return None;
         }

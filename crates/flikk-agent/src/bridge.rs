@@ -23,12 +23,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 /// Environment variables `flikk-mcp` reads to find the editor.
-pub const ENV_ADDR: &str = "FLIKK_BRIDGE";
-pub const ENV_TOKEN: &str = "FLIKK_TOKEN";
+pub(crate) const ENV_ADDR: &str = "FLIKK_BRIDGE";
+pub(crate) const ENV_TOKEN: &str = "FLIKK_TOKEN";
 
 /// Who opened a connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Origin {
+pub(crate) enum Origin {
     /// The `flikk-mcp` of the editor's own agent turn.
     Turn,
     /// An external MCP client; one id per connection.
@@ -45,12 +45,12 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub fn path() -> PathBuf {
+    pub(crate) fn path() -> PathBuf {
         paths::home().join("bridge.json")
     }
 
     /// The published editor, if any.
-    pub fn read() -> Option<Self> {
+    pub(crate) fn read() -> Option<Self> {
         let text = std::fs::read_to_string(Self::path()).ok()?;
         serde_json::from_str(&text).ok()
     }
@@ -73,7 +73,7 @@ impl Discovery {
 /// MCP `CallToolResult` content.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Content {
+pub(crate) enum Content {
     Text {
         text: String,
     },
@@ -87,21 +87,21 @@ pub enum Content {
 
 /// MCP `CallToolResult`, forwarded verbatim by `flikk-mcp`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ToolResult {
+pub(crate) struct ToolResult {
     pub content: Vec<Content>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
 }
 
 impl ToolResult {
-    pub fn text(text: impl Into<String>) -> Self {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![Content::Text { text: text.into() }],
             is_error: false,
         }
     }
 
-    pub fn error(text: impl Into<String>) -> Self {
+    pub(crate) fn error(text: impl Into<String>) -> Self {
         Self {
             content: vec![Content::Text { text: text.into() }],
             is_error: true,
@@ -109,14 +109,14 @@ impl ToolResult {
     }
 
     /// Compact: indentation costs the model tokens and tells it nothing.
-    pub fn json(value: &Value) -> Self {
+    pub(crate) fn json(value: &Value) -> Self {
         Self::text(serde_json::to_string(value).unwrap_or_default())
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeRequest {
+pub(crate) enum BridgeRequest {
     Hello { token: String },
     List { id: u64 },
     Call { id: u64, tool: String, args: Value },
@@ -124,7 +124,7 @@ pub enum BridgeRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeResponse {
+pub(crate) enum BridgeResponse {
     /// MCP tool definitions (`name`, `description`, `inputSchema`).
     Tools {
         id: u64,
@@ -137,13 +137,13 @@ pub enum BridgeResponse {
 }
 
 /// One request waiting on the UI thread.
-pub struct Incoming {
+pub(crate) struct Incoming {
     pub origin: Origin,
     pub request: IncomingKind,
     pub reply: Reply,
 }
 
-pub enum IncomingKind {
+pub(crate) enum IncomingKind {
     List,
     Call {
         tool: String,
@@ -154,17 +154,17 @@ pub enum IncomingKind {
 }
 
 /// Answers one request; cheap to move to a worker thread.
-pub struct Reply {
+pub(crate) struct Reply {
     id: u64,
     tx: Sender<BridgeResponse>,
 }
 
 impl Reply {
-    pub fn tools(self, tools: Vec<Value>) {
+    pub(crate) fn tools(self, tools: Vec<Value>) {
         let _ = self.tx.send(BridgeResponse::Tools { id: self.id, tools });
     }
 
-    pub fn result(self, result: ToolResult) {
+    pub(crate) fn result(self, result: ToolResult) {
         let _ = self.tx.send(BridgeResponse::Result {
             id: self.id,
             result,
@@ -173,7 +173,7 @@ impl Reply {
 }
 
 /// Editor side: accepts `flikk-mcp` connections and queues their requests.
-pub struct BridgeServer {
+pub(crate) struct BridgeServer {
     addr: SocketAddr,
     token: String,
     external_token: String,
@@ -183,7 +183,7 @@ pub struct BridgeServer {
 }
 
 impl BridgeServer {
-    pub fn start() -> io::Result<Self> {
+    pub(crate) fn start() -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let addr = listener.local_addr()?;
         let token = uuid::Uuid::new_v4().simple().to_string();
@@ -210,17 +210,17 @@ impl BridgeServer {
         })
     }
 
-    pub fn addr(&self) -> SocketAddr {
+    pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// For the editor's own `flikk-mcp`.
-    pub fn token(&self) -> &str {
+    pub(crate) fn token(&self) -> &str {
         &self.token
     }
 
     /// Write `bridge.json` so external clients can find this editor.
-    pub fn publish(&mut self) -> io::Result<PathBuf> {
+    pub(crate) fn publish(&mut self) -> io::Result<PathBuf> {
         let discovery = Discovery {
             addr: self.addr.to_string(),
             token: self.external_token.clone(),
@@ -232,7 +232,7 @@ impl BridgeServer {
     }
 
     /// Remove `bridge.json` if it is still ours (best-effort).
-    pub fn unpublish(&mut self) {
+    pub(crate) fn unpublish(&mut self) {
         if let Some(mine) = self.published.take()
             && Discovery::read().is_some_and(|d| d == mine)
         {
@@ -241,7 +241,7 @@ impl BridgeServer {
     }
 
     /// Requests received since the last call; never blocks.
-    pub fn drain(&self) -> Vec<Incoming> {
+    pub(crate) fn drain(&self) -> Vec<Incoming> {
         self.rx.try_iter().collect()
     }
 }
@@ -311,7 +311,7 @@ fn serve_connection(
 }
 
 /// `flikk-mcp` side: one connection, authenticated.
-pub fn connect(addr: &str, token: &str) -> io::Result<TcpStream> {
+pub(crate) fn connect(addr: &str, token: &str) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(addr)?;
     stream.set_nodelay(true)?;
     let hello = serde_json::to_string(&BridgeRequest::Hello {

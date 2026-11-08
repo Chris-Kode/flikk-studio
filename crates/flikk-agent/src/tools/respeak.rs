@@ -19,7 +19,7 @@ use flikk_core::{MediaId, Time, TimeRange};
 use serde_json::{Value, json};
 
 /// The fix and the voice it is said in, from the tool's arguments.
-pub fn parse(ctx: &ToolCtx, args: &Args) -> ToolResultOf<(Fix, Reading)> {
+pub(crate) fn parse(ctx: &ToolCtx, args: &Args) -> ToolResultOf<(Fix, Reading)> {
     let Some(analysis) = ctx.services.analysis.clone() else {
         return fail("Analysis is not available in this build yet.");
     };
@@ -139,7 +139,7 @@ pub fn summary(fix: &Fix, reading: &Reading) -> String {
 }
 
 /// The fix with its voice, as an approval carries it.
-pub fn request_json(fix: &Fix, reading: &Reading) -> Value {
+pub(crate) fn request_json(fix: &Fix, reading: &Reading) -> Value {
     json!({ "fix": fix, "reading": reading })
 }
 
@@ -153,7 +153,7 @@ pub fn from_json(value: &Value) -> Option<(Fix, Reading)> {
 
 /// With the user's leave: a job that has the words said and fitted, then
 /// comes back to the UI thread to add them to the pool and propose the cut.
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let (fix, reading) = parse(ctx, args)?;
     let Some(source) = ctx.project().media(fix.media).cloned() else {
         return fail("the recording is not in the pool");
@@ -177,7 +177,7 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
 /// Back on the UI thread with the new words: add them to the pool, and
 /// propose them in place of the old as `author` (none when the turn was
 /// cancelled).
-pub fn finish(
+pub(crate) fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
     item: MediaItem,

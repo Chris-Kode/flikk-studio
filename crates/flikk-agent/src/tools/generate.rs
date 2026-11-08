@@ -23,11 +23,11 @@ pub struct Placement {
 }
 
 impl Placement {
-    pub fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         json!({ "at": secs(self.at), "track": self.track.map(|t| t.0.to_string()) })
     }
 
-    pub fn from_json(value: &Value) -> Option<Self> {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let at = Time::from_secs_f64(value.get("at")?.as_f64()?);
         let track = value
             .get("track")
@@ -39,7 +39,10 @@ impl Placement {
 }
 
 /// The request and its placement, from the tool's arguments.
-pub fn parse(project: &Project, args: &Args) -> ToolResultOf<(GenerateRequest, Option<Placement>)> {
+pub(crate) fn parse(
+    project: &Project,
+    args: &Args,
+) -> ToolResultOf<(GenerateRequest, Option<Placement>)> {
     let prompt = args.str("prompt")?.trim().to_owned();
     if prompt.is_empty() {
         return fail("`prompt` describes what to make");
@@ -142,7 +145,7 @@ fn sections(args: &Args) -> ToolResultOf<Vec<MusicSection>> {
 }
 
 /// One line for the approval card and the activity log.
-pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> String {
+pub(crate) fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> String {
     match placement {
         Some(p) => format!("{} → {:.1}s", request.summary(), p.at.as_secs_f64()),
         None => request.summary(),
@@ -150,7 +153,7 @@ pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> Stri
 }
 
 /// The request with its placement, as an approval carries it.
-pub fn request_json(request: &GenerateRequest, placement: Option<&Placement>) -> Value {
+pub(crate) fn request_json(request: &GenerateRequest, placement: Option<&Placement>) -> Value {
     json!({
         "request": request,
         "place": placement.map(Placement::to_json),
@@ -166,7 +169,7 @@ pub fn from_json(value: &Value) -> Option<(GenerateRequest, Option<Placement>)> 
 
 /// With the user's leave: a job that makes the file and comes back to the
 /// UI thread to add it to the pool and place it.
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let (request, placement) = parse(ctx.project(), args)?;
     let Some(generation) = ctx.services.generation.clone() else {
         return fail("Generation is not available in this build.");
@@ -190,7 +193,7 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
 }
 
 /// Why the user's settings stop it.
-pub fn unavailable(request: &GenerateRequest) -> String {
+pub(crate) fn unavailable(request: &GenerateRequest) -> String {
     unavailable_for(request.capability())
 }
 
@@ -218,7 +221,7 @@ pub fn error_text(e: &CloudError) -> String {
 
 /// Back on the UI thread with what a provider made: add it to the pool,
 /// and place it as `author` (none when the turn was cancelled).
-pub fn finish(
+pub(crate) fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
     item: MediaItem,
@@ -262,7 +265,7 @@ pub fn finish(
 /// a proposal can use it. As `author`'s change, so it is no edit of the
 /// user's that the agent's proposals would conflict with; the user's when
 /// the turn is gone.
-pub fn add_to_pool(
+pub(crate) fn add_to_pool(
     bus: &mut CommandBus,
     item: MediaItem,
     author: Option<&Author>,
