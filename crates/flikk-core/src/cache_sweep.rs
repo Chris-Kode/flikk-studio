@@ -49,8 +49,8 @@ pub fn mark_used(path: &Path) {
 }
 
 /// Remove what nothing has used for long, scratch files left behind,
-/// proxies made under a tone mapping no longer used, and temp files of
-/// library writes a crash left.
+/// proxies made under a tone mapping no longer used, and what library
+/// writes a crash left.
 pub fn sweep() {
     let cache = paths::cache();
     let now = SystemTime::now();
@@ -117,10 +117,12 @@ fn leftovers(dir: &Path, now: SystemTime) {
     }
 }
 
-/// Temp files of library writes a crash left, a day old: hidden `.tmp`
-/// files under the library and its assets. Nothing else there is touched:
-/// the library is the user's data.
+/// What library writes a crash left, a day old: hidden `.tmp` files under
+/// the library and its assets, and the empty files that claim a new item's
+/// name until it is written. Nothing else there is touched: the library
+/// is the user's data.
 fn library_leftovers(dir: &Path, now: SystemTime) {
+    use crate::library::{PRESET_EXT, PROGRAM_EXT, SOUND_EXT, VOICE_EXT};
     for entry in read_dir(dir) {
         if entry.is_dir() {
             library_leftovers(&entry, now);
@@ -130,7 +132,12 @@ fn library_leftovers(dir: &Path, now: SystemTime) {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
-        if temp && age(&entry, now).is_some_and(|a| a > DAY) {
+        let claim = entry
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| [PROGRAM_EXT, PRESET_EXT, SOUND_EXT, VOICE_EXT].contains(&e))
+            && fs::metadata(&entry).is_ok_and(|m| m.len() == 0);
+        if (temp || claim) && age(&entry, now).is_some_and(|a| a > DAY) {
             let _ = fs::remove_file(&entry);
         }
     }

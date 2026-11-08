@@ -439,8 +439,9 @@ fn read<T: Stored>(path: &Path) -> Result<T> {
 /// to a new file when it has none: the item, kept in the file written.
 fn store<T: Stored>(item: &T) -> Result<T> {
     let own = Some(item.path()).filter(|p| !p.as_os_str().is_empty());
-    let path = file_for(item.name(), T::EXT, own);
-    write_json(&path, &item.file())?;
+    let file = file_for(item.name(), T::EXT, own)?;
+    write_json(file.path(), &item.file())?;
+    let path = file.written();
     moved(own, &path);
     Ok(item.clone().at(path))
 }
@@ -458,20 +459,67 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     flikk_os::fs::write_durable(path, &bytes).map_err(|e| fail(&e))
 }
 
-/// `name.ext` in the library, or `name 2.ext`… when another item has
-/// that file. `own` is the item's current file, which it may keep.
-fn file_for(name: &str, ext: &str, own: Option<&Path>) -> PathBuf {
+/// `title.ext` in the library, or `title 2.ext`… when another item has
+/// that file. `own` is the item's current file, which it may keep. A new
+/// name is claimed by creating it empty, so two saves never pick the same
+/// one.
+fn file_for(title: &str, ext: &str, own: Option<&Path>) -> Result<FileFor> {
     let dir = paths::library();
-    let base = file_name_part(name);
-    let free = |p: &Path| Some(p) == own || !p.exists();
-    let first = dir.join(format!("{base}.{ext}"));
-    if free(&first) {
-        return first;
+    let base = file_name_part(title);
+    let mut n = 1;
+    loop {
+        let path = match n {
+            1 => dir.join(format!("{base}.{ext}")),
+            n => dir.join(format!("{base} {n}.{ext}")),
+        };
+        n += 1;
+        if Some(path.as_path()) == own {
+            return Ok(FileFor::Own(path));
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(FileFor::Claimed(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("can't save {}: {e}", name(&path))),
+        }
     }
-    (2..)
-        .map(|i| dir.join(format!("{base} {i}.{ext}")))
-        .find(|p| free(p))
-        .unwrap_or(first)
+}
+
+/// The file an item is written to, from [`file_for`].
+enum FileFor {
+    /// The item's own file, written over.
+    Own(PathBuf),
+    /// A new name, held by an empty file of ours until the item is written
+    /// over it; removed if it never is.
+    Claimed(PathBuf),
+}
+
+impl FileFor {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Own(path) | Self::Claimed(path) => path,
+        }
+    }
+
+    /// The file, now holding the item: kept.
+    fn written(self) -> PathBuf {
+        // The claim is the item's file now: drop must not remove it.
+        let mut kept = std::mem::ManuallyDrop::new(self);
+        match &mut *kept {
+            Self::Own(path) | Self::Claimed(path) => std::mem::take(path),
+        }
+    }
+}
+
+impl Drop for FileFor {
+    fn drop(&mut self) {
+        if let Self::Claimed(path) = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// A file name part: no path separators or characters Windows refuses.
