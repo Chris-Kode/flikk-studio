@@ -254,16 +254,15 @@ fn new_track(tracks: &[Track], kind: TrackKind) -> (usize, Track) {
         };
         return (last + 1, track);
     }
-    let prefix = match kind {
-        TrackKind::Video => "V",
-        TrackKind::Audio => "A",
-        TrackKind::Caption => "C",
-        TrackKind::Title => "T",
-        TrackKind::Overlay => "O",
-    };
+    let prefix = kind.prefix();
     let name = unused_name(taken, |n| format!("{prefix}{n}"), 1);
-    // Captions on top, sound at the bottom, other pictures above video.
-    let index = match kind {
+    (new_track_index(tracks, kind), Track::new(kind, name))
+}
+
+/// Where in `tracks` a new `kind` track goes: captions on top, sound at
+/// the bottom, other pictures above the video tracks.
+fn new_track_index(tracks: &[Track], kind: TrackKind) -> usize {
+    match kind {
         TrackKind::Caption => 0,
         TrackKind::Audio => tracks.len(),
         _ => tracks
@@ -271,8 +270,7 @@ fn new_track(tracks: &[Track], kind: TrackKind) -> (usize, Track) {
             .position(|t| t.kind == TrackKind::Video)
             .or_else(|| tracks.iter().position(|t| t.kind == TrackKind::Audio))
             .unwrap_or(tracks.len()),
-    };
-    (index, Track::new(kind, name))
+    }
 }
 
 /// `name(n)` for the first `n` from `from` up that is not `taken`.
@@ -445,17 +443,7 @@ impl Timeline {
         while self.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
             n += 1;
         }
-        let index = match kind {
-            TrackKind::Caption => 0,
-            TrackKind::Audio => self.tracks.len(),
-            _ => self
-                .tracks
-                .iter()
-                .position(|t| t.kind == TrackKind::Video)
-                .or_else(|| self.tracks.iter().position(|t| t.kind == TrackKind::Audio))
-                .unwrap_or(self.tracks.len()),
-        };
-        (index, format!("{prefix}{n}"))
+        (new_track_index(&self.tracks, kind), format!("{prefix}{n}"))
     }
 
     pub fn track(&self, id: TrackId) -> Option<&Track> {
