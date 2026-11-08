@@ -3,11 +3,12 @@
 //! process it talks to.
 
 use anyhow::{Context, Result, anyhow, bail};
+use flikk_os::process::ChildGuard;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
@@ -180,7 +181,7 @@ impl Cdp {
 
 /// A headless browser process; killed and its profile removed on drop.
 pub struct Browser {
-    child: Child,
+    child: ChildGuard,
     profile: PathBuf,
     pub cdp: Cdp,
 }
@@ -240,7 +241,7 @@ impl Browser {
         if running_as_root() {
             cmd.arg("--no-sandbox");
         }
-        let mut child = match cmd.spawn() {
+        let mut child = match ChildGuard::spawn(&mut cmd) {
             Ok(child) => child,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&profile);
@@ -264,14 +265,12 @@ impl Browser {
                 Err(e) => Some(anyhow!(e).context(format!("watching {}", exe.display()))),
             };
             if let Some(e) = exited {
-                let _ = child.kill();
-                let _ = child.wait();
+                drop(child);
                 let _ = std::fs::remove_dir_all(&profile);
                 return Err(e);
             }
             if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
+                drop(child);
                 let _ = std::fs::remove_dir_all(&profile);
                 bail!("{} did not open its debugging port", exe.display());
             }
@@ -280,8 +279,7 @@ impl Browser {
         let cdp = match Cdp::connect(port, &path) {
             Ok(cdp) => cdp,
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                drop(child);
                 let _ = std::fs::remove_dir_all(&profile);
                 return Err(e);
             }
@@ -296,6 +294,8 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        // Ended here, before its profile is removed: the guard would end
+        // it only once this returns.
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Helper processes may still be writing for a moment.
@@ -318,7 +318,14 @@ fn sweep_profiles(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some((page, pid)) = name.to_str().and_then(|n| {
-            let (page, rest) = match n.strip_prefix("tmp-") {
+            // A page's temp file is `.<page>.<pid>-<n>.tmp`
+            // (`flikk_os::fs::temp_sibling`), or `tmp-<pid>-<n>-<page>` as
+            // earlier versions named it.
+            let temp = || {
+                let tag = n.strip_prefix('.')?.strip_suffix(".tmp")?;
+                Some(tag.rsplit_once('.')?.1)
+            };
+            let (page, rest) = match n.strip_prefix("tmp-").or_else(temp) {
                 Some(rest) => (true, rest),
                 None => (false, n.strip_prefix("profile-")?),
             };

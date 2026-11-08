@@ -11,6 +11,7 @@ use crate::{SOUND_RATE, Windows, onnx};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::analysis::{Levels, Music, Sound};
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
@@ -43,7 +44,7 @@ impl Tagger for EfficientAt {
             slot[..w.len()].copy_from_slice(w);
         }
         let input = Tensor::from_array(([n, INPUT], flat)).map_err(|e| anyhow!("{e}"))?;
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = lock(&self.session);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *session = None;

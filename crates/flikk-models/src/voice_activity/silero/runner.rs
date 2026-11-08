@@ -8,6 +8,7 @@ use super::config::{
 use crate::voice_activity::{Speech, VoiceActivity, ranges};
 use anyhow::{Context, Result};
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::sync::lock;
 use std::ops::Range;
 use std::sync::Mutex;
 use whisper_rs::{WhisperVadContext, WhisperVadContextParams};
@@ -34,7 +35,7 @@ impl Silero {
     fn probabilities(&self, audio: &[f32], progress: &dyn Fn(f32)) -> Result<Heard> {
         // Route whisper.cpp's chatter through `log` instead of stderr.
         whisper_rs::install_logging_hooks();
-        let mut vad = self.vad.lock().unwrap_or_else(|e| e.into_inner());
+        let mut vad = lock(&self.vad);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *vad = None;

@@ -7,6 +7,7 @@ use crate::depth::{DepthEstimator, Disparity};
 use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::sync::lock;
 use ort::value::TensorRef;
 use std::sync::Mutex;
 
@@ -63,7 +64,7 @@ impl DepthEstimator for DepthAnything {
         let (w, h) = input_size(picture.width, picture.height);
         let input = pixels(picture, w, h)?;
         let sizes = [("batch_size", 1), ("height", h as i64), ("width", w as i64)];
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock(&self.sessions);
         // Its file was deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             sessions.forget();

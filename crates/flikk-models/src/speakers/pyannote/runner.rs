@@ -12,6 +12,7 @@ use crate::speakers::{Diarizer, Labels};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::analysis::Word;
 use flikk_core::time::Time;
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
@@ -27,7 +28,7 @@ impl Diarizer for Pyannote {
         if words.is_empty() || audio.is_empty() {
             return Ok((0, vec![None; words.len()]));
         }
-        let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        let mut loaded = lock(&self.loaded);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *loaded = None;

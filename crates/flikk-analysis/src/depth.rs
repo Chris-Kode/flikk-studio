@@ -28,17 +28,18 @@
 
 mod store;
 
+use crate::engine::Claims;
 use flikk_core::depth::{DepthMap, DepthService, DepthStatus};
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, MediaService, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time, TimeRange};
 use flikk_models::depth::{DepthEstimator, Disparity};
 use flikk_models::{Model, Task as ModelTask};
-use std::any::Any;
+use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::Raw;
 
@@ -68,22 +69,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// A frame's map: media, model, frame.
 type Key = (Fingerprint, &'static str, i64);
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// What a panic making a map says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("making the depth map stopped unexpectedly: {detail}"),
-        None => "making the depth map stopped unexpectedly".into(),
-    }
-}
-
 /// The [`DepthService`] that runs the model on this machine.
 pub struct LocalDepth {
     shared: Arc<Shared>,
@@ -98,9 +83,8 @@ struct Shared {
     absent: Mutex<HashSet<Key>>,
     smoothed: Mutex<VecDeque<(Key, DepthMap)>>,
     wanted: Mutex<Wanted>,
-    /// Frames being made now, and their end announced.
-    making: Mutex<HashSet<Key>>,
-    made_one: Condvar,
+    /// Frames being made now.
+    making: Claims<Key>,
     /// Frames that failed: why, and when.
     failed: Mutex<HashMap<Key, (String, Instant)>>,
     version: AtomicU64,
@@ -137,8 +121,7 @@ impl LocalDepth {
                 absent: Mutex::default(),
                 smoothed: Mutex::default(),
                 wanted: Mutex::default(),
-                making: Mutex::default(),
-                made_one: Condvar::new(),
+                making: Claims::default(),
                 failed: Mutex::default(),
                 version: AtomicU64::new(0),
                 seconds_per_frame: Mutex::default(),
@@ -412,25 +395,15 @@ impl Shared {
         wait: bool,
         picture: impl FnOnce() -> ServiceResult<Frame>,
     ) -> Result<(), String> {
-        {
-            let mut making = lock(&self.making);
-            loop {
-                if self.made(key) {
-                    return Ok(());
-                }
-                if making.insert(key.clone()) {
-                    break;
-                }
-                if !wait {
-                    return Ok(());
-                }
-                making = self
-                    .made_one
-                    .wait(making)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-        }
-        let _claim = Making(self, key);
+        let claimed = self.making.claim(
+            key,
+            || self.made(key).then_some(()),
+            || (!wait).then_some(()),
+            None,
+        );
+        let Ok(_claim) = claimed else {
+            return Ok(());
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let picture = picture().map_err(|e| e.to_string())?;
             self.estimate(model, &picture).map_err(|e| format!("{e:#}"))
@@ -438,7 +411,7 @@ impl Shared {
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
             *lock(&self.runner) = None;
-            Err(stopped(payload.as_ref()))
+            Err(panic_message("making the depth map", payload.as_ref()))
         });
         match result {
             Ok(raw) => {
@@ -544,16 +517,6 @@ impl Shared {
             keep(&self.smoothed, key, map.clone(), SMOOTHED_KEPT);
         }
         Some(map)
-    }
-}
-
-/// A frame claimed in [`Shared::making`], let go when dropped.
-struct Making<'a>(&'a Shared, &'a Key);
-
-impl Drop for Making<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.making).remove(self.1);
-        self.0.made_one.notify_all();
     }
 }
 
@@ -699,7 +662,10 @@ impl DepthService for LocalDepth {
             let picture =
                 catch_unwind(AssertUnwindSafe(|| reader.get(*frame))).unwrap_or_else(|payload| {
                     reader.stream = None;
-                    Err(ServiceError(stopped(payload.as_ref())))
+                    Err(ServiceError(panic_message(
+                        "making the depth map",
+                        payload.as_ref(),
+                    )))
                 });
             // Tried again even when it failed lately: a render waits for it.
             if let Err(why) = shared.make(&key, model, true, || picture) {

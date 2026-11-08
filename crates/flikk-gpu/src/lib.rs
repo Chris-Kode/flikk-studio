@@ -29,6 +29,7 @@ use flikk_core::fx::{FxAsset, FxKind, FxLanguage, ParamKind};
 use flikk_core::services::{
     CompositeLayer, Frame, FxBatch, FxCall, FxService, ServiceError, ServiceResult,
 };
+use flikk_os::sync::lock;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -127,7 +128,7 @@ impl GpuFx {
     /// one opened, at most every [`REOPEN_EVERY`]; until then this fails and
     /// callers take the CPU path.
     fn gpu(&self) -> ServiceResult<Arc<Gpu>> {
-        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = lock(&self.slot);
         if let Some(gpu) = &slot.gpu {
             if !gpu.is_lost() {
                 return Ok(gpu.clone());
@@ -241,7 +242,7 @@ impl Gpu {
     /// The engine state, with the program cache trimmed (between calls, so
     /// a chain's programs stay put while it runs).
     fn lock(&self) -> MutexGuard<'_, State> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.state);
         if state.programs.len() >= MAX_PROGRAMS {
             state.programs.clear();
         }
@@ -275,7 +276,7 @@ impl Gpu {
             )
         });
         // Not trimmed, so the program is still there for the caller.
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.state);
         let compiled = match compiled {
             Ok(compiled) => compiled,
             Err(e) => return (state, Err(e)),

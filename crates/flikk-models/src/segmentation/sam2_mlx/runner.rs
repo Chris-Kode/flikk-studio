@@ -10,6 +10,7 @@ use crate::segmentation::plan::{self, POINTERS};
 use crate::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::sync::lock;
 use mlx_rs::{Array, ops};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
@@ -26,7 +27,7 @@ fn err(e: impl std::fmt::Display) -> anyhow::Error {
 
 impl Sam2Mlx {
     fn net(&self) -> Result<MutexGuard<'_, Option<Net>>> {
-        let mut net = self.net.lock().unwrap_or_else(|e| e.into_inner());
+        let mut net = lock(&self.net);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *net = None;

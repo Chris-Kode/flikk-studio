@@ -17,7 +17,8 @@
 //! clicks. A tracking job waits a moment before it starts, so a few quick
 //! clicks run one; a newer subject of the same mask (another click, a trim)
 //! cancels the older's job, unless another mask waits on it too. A failed
-//! frame or job is tried again after [`RETRY_AFTER`], once the model is
+//! frame or job is tried again after
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), once the model is
 //! downloaded anew, or when a render waits on it.
 //!
 //! Person masks are its other half ([`crate::people`]): they share its
@@ -28,6 +29,7 @@
 
 mod store;
 
+use crate::engine::{ModelFailures, stopped_sentence};
 use crate::people::LocalPeople;
 use flikk_core::ids::MaskId;
 use flikk_core::jobs::{JobProgress, JobQueue};
@@ -41,11 +43,11 @@ use flikk_core::subject::{Fnv, Matte, SubjectPrompt};
 use flikk_core::time::{Rate, Time};
 use flikk_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use flikk_models::{Model, Task as ModelTask};
-use std::any::Any;
+use flikk_os::sync::lock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::{Frames, Packed};
 
@@ -66,8 +68,6 @@ const UNPACKED_KEPT: usize = 16;
 /// Islands and holes smaller than this many of the model's cells are
 /// specks: dropped, and filled.
 const SPECK: usize = 16;
-/// How long a failed frame or job waits before it is tried again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A prompted frame: media, frame, prompt.
 type PromptKey = (Fingerprint, i64, u64);
@@ -75,10 +75,6 @@ type PromptKey = (Fingerprint, i64, u64);
 type TrackKey = (Fingerprint, u64);
 /// A tracking job: its subject and the frames it covers.
 type TrackJob = (TrackKey, i64, i64);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// The [`SubjectService`] that runs the model on this machine.
 pub struct LocalSubjects {
@@ -102,7 +98,7 @@ struct Shared {
     looked: Mutex<HashSet<u64>>,
     /// The tracking jobs queued or running, and the masks waiting on them.
     slots: Mutex<Slots>,
-    failed: Mutex<HashMap<u64, Failure>>,
+    failed: Mutex<ModelFailures<u64>>,
     unpacked: Mutex<VecDeque<(u64, Matte)>>,
     version: AtomicU64,
     /// How long the last tracked frame took, and on which model.
@@ -172,26 +168,6 @@ impl Drop for Release {
         if self.ran {
             self.shared.bump();
         }
-    }
-}
-
-/// Why a frame or a job failed.
-struct Failure {
-    message: String,
-    /// Whether the model was there then.
-    model: bool,
-    at: Instant,
-}
-
-/// What stopped work that panicked: "`what` stopped unexpectedly: …".
-fn stopped(what: &str, payload: &(dyn Any + Send)) -> String {
-    let said = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match said {
-        Some(said) => format!("{what} stopped unexpectedly: {said}"),
-        None => format!("{what} stopped unexpectedly."),
     }
 }
 
@@ -387,24 +363,15 @@ impl Shared {
     }
 
     /// Why `id` failed, unless it is to be tried again: the model came
-    /// since, or [`RETRY_AFTER`] passed.
+    /// since, or the time passed.
     fn failure(&self, id: u64) -> Option<String> {
-        let mut failed = lock(&self.failed);
-        let f = failed.get(&id)?;
-        if (!f.model && Self::model_here()) || f.at.elapsed() >= RETRY_AFTER {
-            failed.remove(&id);
-            return None;
-        }
-        Some(f.message.clone())
+        lock(&self.failed)
+            .recent(&id, Self::model_here())
+            .map(str::to_owned)
     }
 
     fn fail(&self, id: u64, message: String) {
-        let failure = Failure {
-            message,
-            model: Self::model_here(),
-            at: Instant::now(),
-        };
-        lock(&self.failed).insert(id, failure);
+        lock(&self.failed).record(id, message, Self::model_here());
         self.bump();
     }
 
@@ -412,7 +379,7 @@ impl Shared {
     fn retry(&self, ids: impl IntoIterator<Item = u64>) {
         let mut failed = lock(&self.failed);
         for id in ids {
-            failed.remove(&id);
+            failed.clear(&id);
         }
     }
 
@@ -579,24 +546,25 @@ impl LocalSubjects {
                 model_prompt(prompt),
             );
             self.picks.clear_finished();
-            let job =
-                self.picks
-                    .push(key.clone(), "Find subject", Some(item.id), move |_| {
-                        let made = catch_unwind(AssertUnwindSafe(|| {
-                            s.segment(model, &item, key.1, &prompt)
-                        }))
-                        .unwrap_or_else(|p| Err(ServiceError(stopped("Finding the subject", &*p))));
-                        match made {
-                            Ok(m) => {
-                                s.keep_prompted(&key, Packed::pack(&m), true);
-                                Ok(())
-                            }
-                            Err(e) => {
-                                s.fail(prompt_id(&key), e.0.clone());
-                                Err(e.0)
-                            }
+            let job = self
+                .picks
+                .push(key.clone(), "Find subject", Some(item.id), move |_| {
+                    let made =
+                        catch_unwind(AssertUnwindSafe(|| s.segment(model, &item, key.1, &prompt)))
+                            .unwrap_or_else(|p| {
+                                Err(ServiceError(stopped_sentence("Finding the subject", &*p)))
+                            });
+                    match made {
+                        Ok(m) => {
+                            s.keep_prompted(&key, Packed::pack(&m), true);
+                            Ok(())
                         }
-                    });
+                        Err(e) => {
+                            s.fail(prompt_id(&key), e.0.clone());
+                            Err(e.0)
+                        }
+                    }
+                });
             // Failed unrun (no thread could start): kept, or it is asked
             // for again on every frame.
             if let Some(message) = self.picks.failed(job) {
@@ -660,7 +628,7 @@ impl LocalSubjects {
                     if cancel.load(Ordering::SeqCst) {
                         return Ok(());
                     }
-                    let message = stopped("Tracking", &*p);
+                    let message = stopped_sentence("Tracking", &*p);
                     s.fail(track_id(&job.0), message.clone());
                     Err(message)
                 })

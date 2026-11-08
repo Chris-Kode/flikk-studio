@@ -7,13 +7,15 @@ use crate::document::{Prepared, file_url};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use flikk_core::services::{Frame, ServiceError, ServiceResult};
+use flikk_os::backoff::Failures;
+use flikk_os::sync::lock;
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 const CLOCK: &str = include_str!("clock.js");
 /// GSAP 3.15.0 and its motion-graphics plugins, as published on npm, under
@@ -54,13 +56,11 @@ const GSAP: &str = concat!(
 const TABS: usize = 4;
 const CALL: Duration = Duration::from_secs(10);
 const LOAD: Duration = Duration::from_secs(15);
-/// How long a browser that failed to start is left before it is started
-/// again; requests meanwhile fail with its error.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
-
-/// The last launch that failed, shared by every worker of the process:
-/// executable, error, when.
-static FAILED_LAUNCH: Mutex<Option<(PathBuf, String, Instant)>> = Mutex::new(None);
+/// The last launch that failed, by executable, shared by every worker of
+/// the process. Requests fail with its error for
+/// [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), then it is started
+/// again.
+static FAILED_LAUNCH: LazyLock<Mutex<Failures<PathBuf>>> = LazyLock::new(Mutex::default);
 
 pub enum Request {
     Frame {
@@ -320,30 +320,25 @@ impl Worker {
 }
 
 /// The browser's connection, launching it on first use. A launch that
-/// failed less than [`RETRY_AFTER`] ago is not tried again: its error is
-/// returned instead.
+/// failed less than [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER) ago
+/// is not tried again: its error is returned instead.
 fn cdp<'a>(browser: &'a mut Option<Browser>, exe: &Path) -> Result<&'a mut Cdp> {
     if browser.is_none() {
-        let failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, error, _)) = failed
-            .as_ref()
-            .filter(|(path, _, at)| path == exe && at.elapsed() < RETRY_AFTER)
-        {
+        if let Some(error) = lock(&FAILED_LAUNCH).recent(&exe.to_owned()) {
             bail!("{error}");
         }
-        drop(failed);
         let launched = Browser::launch(exe);
-        let mut failed = FAILED_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failed = lock(&FAILED_LAUNCH);
         match launched {
             Ok(b) => {
-                if failed.as_ref().is_some_and(|(path, ..)| path == exe) {
-                    *failed = None;
-                }
+                failed.clear(&exe.to_owned());
                 *browser = Some(b);
             }
             Err(e) => {
                 let error = format!("{e:#}");
-                *failed = Some((exe.to_owned(), error.clone(), Instant::now()));
+                // Only the last launch is remembered.
+                failed.clear_all();
+                failed.record(exe.to_owned(), error.clone());
                 bail!("{error}");
             }
         }
@@ -470,13 +465,8 @@ fn write_page(path: &Path, doc: &[u8]) -> std::io::Result<()> {
     if holds(path) {
         return Ok(());
     }
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!("tmp-{}-{n}-{name}", std::process::id()));
-    let written = std::fs::write(&temp, doc).and_then(|()| std::fs::rename(&temp, path));
+    let written = flikk_os::fs::write_atomic(path, doc);
     if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
         // Another worker may have put the same page in place meanwhile
         // (Windows refuses to replace a file that is open).
         if holds(path) {

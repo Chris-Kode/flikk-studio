@@ -14,9 +14,7 @@ use flikk_core::ids::{MediaId, ProjectId};
 use flikk_core::model::Project;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub const EXTENSION: &str = "flikk";
@@ -131,39 +129,7 @@ pub(crate) fn write_file(
         relative_paths,
         autosave_of,
     };
-    write_atomic(path, &serde_json::to_vec_pretty(&out)?)
-}
-
-/// Write beside the target, flush, then rename over it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    if let Some(dir) = dir {
-        std::fs::create_dir_all(dir)?;
-    }
-    // Unique per write, so two writers of one file never share a temp file.
-    let tmp = path.with_file_name(format!(
-        ".{}.{}-{}.tmp",
-        file_name(path),
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written?;
-    // Make the rename itself durable. Best effort: not every file system
-    // lets a folder be synced.
-    #[cfg(unix)]
-    if let Some(dir) = dir {
-        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-    }
+    flikk_os::fs::write_durable(path, &serde_json::to_vec_pretty(&out)?)?;
     Ok(())
 }
 

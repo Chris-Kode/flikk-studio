@@ -21,7 +21,7 @@
 
 mod store;
 
-use crate::lock;
+use crate::engine::stopped_sentence;
 use flikk_core::ids::MaskId;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::person::PersonMatte;
@@ -31,7 +31,7 @@ use flikk_core::services::{
 use flikk_core::time::{Rate, Time};
 use flikk_models::matting::Matter;
 use flikk_models::{Model, Task as ModelTask};
-use std::any::Any;
+use flikk_os::sync::{lock, wait};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -536,18 +536,6 @@ impl Drop for Running<'_> {
     }
 }
 
-/// A panic's message, when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("Finding the person stopped unexpectedly: {detail}"),
-        None => "Finding the person stopped unexpectedly.".into(),
-    }
-}
-
 /// The worker: makes the chunk the newest request wants, one at a time,
 /// for good. A chunk that panics fails its media.
 fn work(shared: &Shared) {
@@ -562,7 +550,7 @@ fn work(shared: &Shared) {
                     break job;
                 }
                 state.busy = None;
-                state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+                state = wait(&shared.wake, state);
             }
         };
         let made = catch_unwind(AssertUnwindSafe(|| {
@@ -577,7 +565,7 @@ fn work(shared: &Shared) {
         let result = made.unwrap_or_else(|payload| {
             // The runner may be left broken: made again.
             matter = None;
-            Err(stopped(payload.as_ref()))
+            Err(stopped_sentence("Finding the person", payload.as_ref()))
         });
         let mut state = lock(&shared.state);
         state.busy = None;

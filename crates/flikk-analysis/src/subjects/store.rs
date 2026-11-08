@@ -6,7 +6,7 @@
 //! surely in or out), as bytes run-length coded: most of a matte is one
 //! run inside and a few outside.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use flikk_core::model::Fingerprint;
 use flikk_core::paths;
 use flikk_core::subject::Matte;
@@ -108,11 +108,7 @@ pub struct Frames {
 }
 
 fn dir(fp: &Fingerprint) -> PathBuf {
-    let safe: String =
-        fp.0.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-    paths::cache().join("mattes").join(safe)
+    paths::cache().join("mattes").join(fp.file_stem())
 }
 
 pub fn prompt_path(fp: &Fingerprint, key: u64) -> PathBuf {
@@ -171,17 +167,8 @@ pub fn store(path: &Path, frames: &Frames) -> Result<()> {
         out.extend_from_slice(&(p.runs.len() as u32).to_le_bytes());
         out.extend_from_slice(&p.runs);
     }
-    let dir = path.parent().expect("matte file has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &out).with_context(|| format!("could not write {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        bail!("could not write {}: {e}", path.display());
-    }
-    Ok(())
+    flikk_os::fs::write_atomic(path, &out)
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 struct Reader<'a>(&'a [u8]);

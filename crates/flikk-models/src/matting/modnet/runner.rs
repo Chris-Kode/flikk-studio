@@ -7,6 +7,7 @@ use crate::matting::{Alpha, Matter};
 use crate::onnx;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
@@ -26,7 +27,7 @@ impl Matter for Modnet {
         let (mw, mh) = size(w, h);
         let input = Tensor::from_array((vec![1, 3, mh, mw], planes(picture, mw, mh)))
             .map_err(|e| anyhow!("{e}"))?;
-        let mut graph = self.graph.lock().unwrap_or_else(|e| e.into_inner());
+        let mut graph = lock(&self.graph);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *graph = None;

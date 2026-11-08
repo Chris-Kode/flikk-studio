@@ -51,8 +51,9 @@ pub use download::{Downloads, Status};
 use anyhow::{Result, bail};
 use flikk_core::paths;
 use flikk_core::time::Time;
+use flikk_os::sync::lock;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 /// Samples per second of the mono audio the speech models hear: voice
 /// activity, transcription, word timing and speakers.
@@ -158,7 +159,7 @@ impl Task {
     /// default.
     pub fn model(self) -> &'static Model {
         let models = self.models();
-        let picked = picked_lock();
+        let picked = lock(&PICKED);
         models
             .iter()
             .find(|m| picked.contains(&m.id))
@@ -170,7 +171,7 @@ impl Task {
     /// now on.
     pub fn pick(self, model: &'static Model) {
         let models = self.models();
-        let mut picked = picked_lock();
+        let mut picked = lock(&PICKED);
         picked.retain(|id| models.iter().all(|m| m.id != *id));
         if models[1..].iter().any(|m| m.id == model.id) {
             picked.push(model.id);
@@ -181,13 +182,9 @@ impl Task {
 /// The models the user picked over their task's default, by id.
 static PICKED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-fn picked_lock() -> MutexGuard<'static, Vec<&'static str>> {
-    PICKED.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// The ids of the models picked over their task's default, to save.
 pub fn picked() -> Vec<&'static str> {
-    picked_lock().clone()
+    lock(&PICKED).clone()
 }
 
 /// Pick the model with each of `ids` again, as [`picked`] gave them. Ids
