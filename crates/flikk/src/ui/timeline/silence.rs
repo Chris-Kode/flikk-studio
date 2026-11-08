@@ -10,13 +10,11 @@ use flikk_core::cuts::FADE;
 use flikk_core::model::{Project, TrackKind};
 use flikk_core::services::AnalysisService;
 use flikk_core::{MediaId, Time, TimeRange};
+use flikk_os::backoff::RETRY_AFTER;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::*;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-/// How long a failed analysis waits before it is asked again.
-const RETRY: Duration = Duration::from_secs(30);
+use std::time::Instant;
 
 /// The toolbar's silence tool: whether its popover is open, its two
 /// thresholds and the source silences found so far.
@@ -130,7 +128,7 @@ impl TimelinePanel {
                 });
                 if failed {
                     // Render again once it may be asked for again.
-                    cx.background_executor().timer(RETRY).await;
+                    cx.background_executor().timer(RETRY_AFTER).await;
                     let _ = this.update(cx, |this, cx| {
                         if this.silence.open {
                             cx.notify();
@@ -257,7 +255,7 @@ pub(super) fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> An
 /// One media item's silences.
 enum Silences {
     InFlight,
-    /// The analysis failed then; asked again after [`RETRY`].
+    /// The analysis failed then; asked again after [`RETRY_AFTER`].
     Failed(Instant),
     Ready(Vec<TimeRange>),
 }
@@ -271,7 +269,7 @@ struct SilenceCache {
 
 impl SilenceCache {
     /// Media whose silences for `min` are not known or requested yet, or
-    /// failed over [`RETRY`] ago. Marks them as requested.
+    /// failed over [`RETRY_AFTER`] ago. Marks them as requested.
     fn missing(&mut self, project: &Project, min: Time) -> Vec<flikk_core::model::MediaItem> {
         if self.min != min {
             self.min = min;
@@ -281,7 +279,7 @@ impl SilenceCache {
         for clip in sound_clips(project) {
             let Some(id) = clip.1 else { continue };
             match self.by_media.get(&id) {
-                Some(Silences::Failed(at)) if at.elapsed() >= RETRY => {}
+                Some(Silences::Failed(at)) if at.elapsed() >= RETRY_AFTER => {}
                 Some(_) => continue,
                 None => {}
             }

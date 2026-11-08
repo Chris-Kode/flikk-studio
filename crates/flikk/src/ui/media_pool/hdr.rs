@@ -8,18 +8,16 @@ use super::MediaPoolPanel;
 use flikk_core::MediaId;
 use flikk_core::hdr;
 use flikk_core::model::{MediaItem, MediaKind};
+use flikk_os::backoff::RETRY_AFTER;
 use gpui_kit::*;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-/// How long a failed proxy waits before it is made again.
-const RETRY: Duration = Duration::from_secs(30);
+use std::time::Instant;
 
 /// A proxy build started this session.
 pub(super) enum Tried {
     /// Running, or made.
     Started,
-    /// Failed then; started again after [`RETRY`].
+    /// Failed then; started again after [`RETRY_AFTER`].
     Failed(Instant),
 }
 
@@ -31,7 +29,7 @@ pub(super) fn tone_key(item: &MediaItem) -> Option<String> {
 impl MediaPoolPanel {
     /// Start the proxy of each online video that has none on disk (for an
     /// HDR one, none for its tone map); each file is made once a session,
-    /// or again [`RETRY`] after it failed.
+    /// or again [`RETRY_AFTER`] after it failed.
     pub(super) fn refresh_proxies(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(media) = state.services.media.clone() else {
@@ -48,7 +46,7 @@ impl MediaPoolPanel {
             .filter(|(_, path)| match self.hdr_proxies.get(path) {
                 None => true,
                 Some(Tried::Started) => false,
-                Some(Tried::Failed(at)) => at.elapsed() >= RETRY,
+                Some(Tried::Failed(at)) => at.elapsed() >= RETRY_AFTER,
             })
             .map(|(item, path)| (item.clone(), path))
             .collect();

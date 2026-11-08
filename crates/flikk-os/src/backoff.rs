@@ -24,8 +24,10 @@ impl<K> Default for Failures<K> {
 }
 
 impl<K: Hash + Eq> Failures<K> {
-    /// Remember that `key` failed now, with `message`.
+    /// Remember that `key` failed now, with `message`. Failures past
+    /// [`RETRY_AFTER`] are forgotten here, so the map stays small.
     pub fn record(&mut self, key: K, message: impl Into<String>) {
+        self.failed.retain(|_, (_, at)| at.elapsed() < RETRY_AFTER);
         self.failed.insert(key, (message.into(), Instant::now()));
     }
 
@@ -35,11 +37,6 @@ impl<K: Hash + Eq> Failures<K> {
             .get(key)
             .filter(|(_, at)| at.elapsed() < RETRY_AFTER)
             .map(|(message, _)| message.as_str())
-    }
-
-    /// When `key` failed, however long ago; `None` when it has not.
-    pub fn failed_at(&self, key: &K) -> Option<Instant> {
-        self.failed.get(key).map(|(_, at)| *at)
     }
 
     /// Forget `key`'s failure, e.g. once it succeeded. Whether there was one.
