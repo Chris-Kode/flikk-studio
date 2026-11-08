@@ -2,6 +2,7 @@
 //! its methods instead of touching the bus directly, so every change goes
 //! through the same path whether it came from a button or the agent.
 
+mod captions;
 mod cloud;
 mod document;
 mod music_fit;
@@ -19,6 +20,7 @@ pub use source::Source;
 use crate::agent_link::{AgentLink, approve};
 use crate::notices::{Level, Notice, NoticeAction, Notices};
 use crate::persistence;
+use captions::CaptionStyles;
 use document::Document;
 use flikk_agent::PendingApproval;
 use flikk_core::agent::*;
@@ -91,20 +93,9 @@ pub struct EditorState {
     /// In and out marked on pool items in the viewer, for the next edit
     /// with them; for the session.
     pub source_marks: std::collections::HashMap<flikk_core::MediaId, TimeRange>,
-    /// Caption styles, loudness and ducking defaults of the selected style
-    /// profile; edit through [`EditorState::edit_presets`] so they are saved.
-    pub presets: flikk_core::memory::Presets,
-    /// Counts reloads of `presets`, so an edit begun before one can tell.
-    pub presets_version: u64,
-    /// Index into `presets.caption_styles` used for new captions.
-    pub caption_style: usize,
-    /// Unsaved caption style the viewer shows while a control is dragged,
-    /// with its index.
-    caption_live: Option<(usize, flikk_core::memory::CaptionStyle)>,
-    /// The caption styles `services.lettering` letters in.
-    lettering_styles: Vec<flikk_core::memory::CaptionStyle>,
-    /// Counts changes to `services.lettering`, so the viewer knows to redraw.
-    pub lettering_version: u64,
+    /// The presets in use, the caption style dragged and the styles
+    /// `services.lettering` letters in.
+    captions: CaptionStyles,
     /// `services.subjects`' version when last looked at: mattes made since
     /// show on the next draw.
     pub subjects_version: u64,
@@ -260,12 +251,7 @@ impl EditorState {
             agent_error: None,
             source: None,
             source_marks: Default::default(),
-            presets: flikk_core::memory::Presets::default(),
-            presets_version: 0,
-            caption_style: 0,
-            caption_live: None,
-            lettering_styles: Vec::new(),
-            lettering_version: 0,
+            captions: CaptionStyles::default(),
             subjects_version: 0,
             depth_pick: None,
             focused_change: None,
@@ -446,7 +432,7 @@ impl EditorState {
         if self.live.take().is_some() {
             self.live_version += 1;
         }
-        self.caption_live = None;
+        self.captions.clear_live();
     }
 
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {
@@ -737,223 +723,6 @@ impl EditorState {
     ) {
         self.selection.words = words;
         cx.notify();
-    }
-
-    /// The selected style profile's presets, or the defaults without one.
-    fn load_presets(&mut self) {
-        let mut presets = self
-            .settings
-            .style_profile
-            .and_then(|id| persistence::with_store(|s| s.profile_header(id)).flatten())
-            .map(|profile| profile.presets)
-            .unwrap_or_default();
-        if presets.caption_styles.is_empty() {
-            presets.caption_styles = flikk_core::memory::Presets::default().caption_styles;
-        }
-        self.clear_live();
-        self.presets = presets;
-        self.presets_version += 1;
-        self.caption_style = 0;
-        self.sync_caption_style();
-        self.refresh_lettering();
-    }
-
-    /// Letter captions in the styles the viewer shows, when they changed.
-    fn refresh_lettering(&mut self) {
-        let styles = self.caption_styles().into_owned();
-        if self.services.lettering.is_some() && styles == self.lettering_styles {
-            return;
-        }
-        self.services.lettering = Some(Arc::new(flikk_deliver::Letterer::new(styles.clone())));
-        self.lettering_styles = styles;
-        self.lettering_version += 1;
-    }
-
-    /// Change the presets and save them to the selected style profile,
-    /// creating a "Default" profile if there is none yet.
-    pub fn edit_presets(
-        &mut self,
-        f: impl FnOnce(&mut flikk_core::memory::Presets),
-        cx: &mut Context<Self>,
-    ) {
-        let before = self.presets.clone();
-        f(&mut self.presets);
-        self.refresh_lettering();
-        if self.presets == before {
-            return;
-        }
-        let profile = self
-            .settings
-            .style_profile
-            .filter(|id| {
-                persistence::with_store(|s| s.profile_header(*id))
-                    .flatten()
-                    .is_some()
-            })
-            .or_else(|| persistence::with_store(|s| s.create_profile("Default")).map(|p| p.id));
-        if let Some(id) = profile {
-            persistence::with_store(|s| s.set_presets(id, &self.presets));
-            if self.settings.style_profile != Some(id) {
-                let mut settings = self.settings.clone();
-                settings.style_profile = Some(id);
-                // The profile already holds these presets.
-                persistence::save_settings(&settings);
-                self.settings = settings;
-                self.load_agent_memory();
-            }
-        }
-        if let Some(notice) = persistence::take_notice() {
-            self.status = Some(notice);
-        }
-        cx.notify();
-    }
-
-    /// Make preset `index` the active caption style and save its name on
-    /// the first caption track, so the choice travels with the project.
-    pub fn pick_caption_style(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.caption_style = index;
-        let name = self
-            .presets
-            .caption_styles
-            .get(index)
-            .map(|s| s.name.clone());
-        let track = self
-            .bus
-            .project()
-            .timeline
-            .tracks
-            .iter()
-            .find(|t| t.kind == flikk_core::model::TrackKind::Caption);
-        match track {
-            Some(t) if name.is_some() && t.caption_style != name => {
-                let track = t.id;
-                self.execute(Command::SetCaptionStyle { track, style: name }, cx);
-            }
-            _ => cx.notify(),
-        }
-    }
-
-    /// Follow the caption track's saved style, e.g. after a project loads.
-    pub fn sync_caption_style(&mut self) {
-        let saved = self
-            .bus
-            .project()
-            .timeline
-            .tracks
-            .iter()
-            .find(|t| t.kind == flikk_core::model::TrackKind::Caption)
-            .and_then(|t| t.caption_style.as_deref());
-        if let Some(i) = saved.and_then(|name| {
-            self.presets
-                .caption_styles
-                .iter()
-                .position(|s| s.name == name)
-        }) {
-            self.caption_style = i;
-        }
-    }
-
-    /// Caption styles as the viewer shows them: with the one being dragged.
-    pub fn caption_styles(&self) -> std::borrow::Cow<'_, [flikk_core::memory::CaptionStyle]> {
-        let styles = &self.presets.caption_styles;
-        match &self.caption_live {
-            Some((i, live)) if *i < styles.len() => {
-                let mut styles = styles.clone();
-                styles[*i] = live.clone();
-                std::borrow::Cow::Owned(styles)
-            }
-            _ => std::borrow::Cow::Borrowed(styles),
-        }
-    }
-
-    /// Show caption style `index` as `style` without saving it.
-    pub fn show_caption_style(
-        &mut self,
-        index: usize,
-        style: flikk_core::memory::CaptionStyle,
-        cx: &mut Context<Self>,
-    ) {
-        self.caption_live = Some((index, style));
-        self.refresh_lettering();
-        cx.notify();
-    }
-
-    /// Stop showing an unsaved caption style.
-    pub fn hide_caption_style(&mut self, cx: &mut Context<Self>) {
-        if self.caption_live.take().is_some() {
-            self.refresh_lettering();
-            cx.notify();
-        }
-    }
-
-    /// Change caption style `index` and save it.
-    pub fn edit_caption_style(
-        &mut self,
-        index: usize,
-        f: impl FnOnce(&mut flikk_core::memory::CaptionStyle),
-        cx: &mut Context<Self>,
-    ) {
-        self.caption_live = None;
-        self.edit_presets(
-            |p| {
-                if let Some(style) = p.caption_styles.get_mut(index) {
-                    f(style);
-                }
-            },
-            cx,
-        );
-        self.refresh_lettering();
-        cx.notify();
-    }
-
-    /// The preset index caption `track` is styled with: its named preset,
-    /// else the first.
-    pub fn track_caption_style(&self, track: flikk_core::TrackId) -> usize {
-        self.bus
-            .project()
-            .timeline
-            .track(track)
-            .and_then(|t| t.caption_style.as_deref())
-            .and_then(|name| {
-                self.presets
-                    .caption_styles
-                    .iter()
-                    .position(|s| s.name == name)
-            })
-            .unwrap_or(0)
-    }
-
-    /// Style caption `track` with preset `index`. The first caption track's
-    /// style is also the one new captions use.
-    pub fn set_track_caption_style(
-        &mut self,
-        track: flikk_core::TrackId,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let first = self
-            .bus
-            .project()
-            .timeline
-            .tracks
-            .iter()
-            .find(|t| t.kind == flikk_core::model::TrackKind::Caption)
-            .map(|t| t.id);
-        if first == Some(track) {
-            self.pick_caption_style(index, cx);
-        } else if let Some(style) = self.presets.caption_styles.get(index) {
-            let style = Some(style.name.clone());
-            self.execute(Command::SetCaptionStyle { track, style }, cx);
-        }
-    }
-
-    /// The caption style new captions use.
-    pub fn active_caption_style(&self) -> flikk_core::memory::CaptionStyle {
-        self.presets
-            .caption_styles
-            .get(self.caption_style)
-            .cloned()
-            .unwrap_or_default()
     }
 
     // ------------------------------------------------------------------ agent
@@ -1374,7 +1143,7 @@ fn services(cloud: &Arc<flikk_cloud::Cloud>) -> Services {
         interpolation: Some(Arc::new(flikk_analysis::LocalInterpolation::new())
             as Arc<dyn flikk_core::services::InterpolationService>),
         depth,
-        // Made with the caption styles, see `EditorState::refresh_lettering`.
+        // Made with the caption styles, see `CaptionStyles::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn flikk_core::cloud::GenerationService>),
     }
@@ -1792,7 +1561,7 @@ impl EditorState {
             &pending.request,
             approve::Inputs {
                 project: self.bus.project(),
-                caption_styles: &self.presets.caption_styles,
+                caption_styles: &self.presets().caption_styles,
                 queue: &self.render_queue,
                 services: &self.services,
                 settings: &mut settings,

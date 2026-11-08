@@ -264,7 +264,7 @@ impl DeliverPanel {
 
     /// The caption presets edited in the transcript panel.
     fn caption_styles(&self, cx: &App) -> Vec<CaptionStyle> {
-        self.state.read(cx).presets.caption_styles.clone()
+        self.state.read(cx).presets().caption_styles.clone()
     }
 
     fn loudness_target(&self) -> LoudnessTarget {

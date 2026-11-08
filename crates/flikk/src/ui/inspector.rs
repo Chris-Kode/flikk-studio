@@ -125,7 +125,7 @@ impl InspectorPanel {
                 InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
             )
         };
-        let presets = state.read(cx).presets.clone();
+        let presets = state.read(cx).presets().clone();
         let target = |value: f32, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 NumberFieldState::new(window, cx)

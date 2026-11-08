@@ -363,7 +363,7 @@ impl ViewerPanel {
                 .and_then(|id| state.bus.change_set(id))
                 .map_or(0, |set| set.items.len()),
             live: state.live_version,
-            lettering: state.lettering_version,
+            lettering: state.lettering_version(),
             width: self.frame_width.get(),
             masks: match state.selection.clips.first() {
                 Some(clip) if self.masks.on && self.masks.tinted && self.editable(state) => {

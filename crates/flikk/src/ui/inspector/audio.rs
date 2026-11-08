@@ -203,7 +203,7 @@ impl InspectorPanel {
         let tracks = audio_tracks(project);
         let ducking = project.timeline.ducking.clone();
         let default_music = tracks.last().map(|t| t.id);
-        let reduction = self.state.read(cx).presets.ducking_db;
+        let reduction = self.state.read(cx).presets().ducking_db;
         let toggle = Switch::new("ducking")
             .checked(ducking.is_some())
             .disabled(default_music.is_none())
