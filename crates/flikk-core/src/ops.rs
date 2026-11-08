@@ -174,6 +174,17 @@ impl Op {
         }
     }
 
+    /// The track whose lock refuses this op: the one whose clips it adds,
+    /// removes or changes, or the track it removes. A lock keeps a track's
+    /// clips and the track itself; its name, mix, caption style and lock
+    /// stay editable, as in the track header.
+    pub fn locked_by(&self) -> Option<TrackId> {
+        match self {
+            Op::RemoveTrack { track, .. } => Some(track.id),
+            op => op.clip_track(),
+        }
+    }
+
     /// What this op changes. A removed track takes its clips with it.
     pub fn targets(&self) -> Vec<Target> {
         match self {
@@ -477,6 +488,13 @@ fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
 /// timeline's invariants ([`Project::normalize`]). Should one not, the
 /// rollback goes on with the rest and the error is returned, the project
 /// as far as it got: a broken invariant must not take the app down.
+/// The first locked track of `project` that one of `ops` would change (see
+/// [`Op::locked_by`]); `None` when they leave every locked track alone.
+pub(crate) fn locked_track<'a>(project: &'a Project, ops: &[Op]) -> Option<&'a Track> {
+    ops.iter()
+        .find_map(|op| project.timeline.track(op.locked_by()?).filter(|t| t.locked))
+}
+
 pub fn apply_all(project: &mut Project, ops: &[Op]) -> Result<()> {
     for (i, op) in ops.iter().enumerate() {
         if let Err(e) = op.apply(project) {

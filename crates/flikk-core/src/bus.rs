@@ -933,7 +933,7 @@ fn touched_since(touched: &[(u64, Target)], since: u64, ops: &[Op]) -> bool {
 /// planned, or a locked track; `project` is then unchanged.
 fn replay(project: &mut Project, item: &ChangeItem, touched: &[(u64, Target)]) -> Option<Vec<Op>> {
     if touched_since(touched, item.base_version, &item.ops)
-        || crate::edit::locked_track(project, &item.ops).is_some()
+        || crate::ops::locked_track(project, &item.ops).is_some()
     {
         return None;
     }

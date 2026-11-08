@@ -9,8 +9,8 @@ use crate::error::{CoreError, Result};
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxRef, ParamKeyframe, ParamValue, Transition};
 use crate::ids::*;
 use crate::model::*;
-use crate::ops::apply_all;
 use crate::ops::{Op, TrackProps};
+use crate::ops::{apply_all, locked_track};
 use crate::speed::{MAX_SPEED, MIN_SPEED, SpeedKey};
 use crate::time::{FLICKS_PER_SECOND, Rate, Time, TimeRange};
 use std::collections::HashMap;
@@ -20,33 +20,7 @@ pub fn plan(command: &Command, project: &Project) -> Result<Plan> {
     if let Some(track) = locked_track(project, &plan.ops) {
         return Err(locked(track));
     }
-    if !matches!(
-        command,
-        Command::AddMarker { .. }
-            | Command::EditMarker { .. }
-            | Command::RemoveMarker { .. }
-            | Command::AddTrack { .. }
-            | Command::SetTrackLocked { .. }
-            | Command::RenameTrack { .. }
-            | Command::MoveTrack { .. }
-            | Command::ImportMedia { .. }
-            | Command::UpdateMedia { .. }
-            | Command::RemoveMedia { .. }
-            | Command::RenameClip { .. }
-            | Command::SetClipColor { .. }
-            | Command::SetFormat { .. }
-            | Command::SetRates { .. }
-            | Command::AddEffect { .. }
-            | Command::SetEffect { .. }
-            | Command::RemoveEffect { .. }
-            | Command::MoveEffect { .. }
-            | Command::SetEffectKeyframe { .. }
-            | Command::RemoveEffectKeyframe { .. }
-            | Command::SetFxAsset { .. }
-            | Command::RemoveFxAsset { .. }
-            | Command::SetAudioEffects { .. }
-            | Command::SetToneMap { .. }
-    ) {
+    if command.checks_protected() {
         warn_protected(project, &mut plan);
     }
     Ok(plan)
@@ -1720,22 +1694,6 @@ fn editable_clip(tl: &Timeline, id: ClipId) -> Result<(&Track, &Clip)> {
 
 fn locked(track: &Track) -> CoreError {
     CoreError::Invalid(format!("track {} is locked", track.name))
-}
-
-/// The first locked track `ops` would change. A lock keeps a track's clips
-/// and the track itself; its mix, caption style and lock stay editable, as
-/// in the track header.
-pub(crate) fn locked_track<'a>(project: &'a Project, ops: &[Op]) -> Option<&'a Track> {
-    ops.iter().find_map(|op| {
-        let id = match op {
-            Op::InsertClip { track, .. }
-            | Op::RemoveClip { track, .. }
-            | Op::UpdateClip { track, .. } => *track,
-            Op::RemoveTrack { track, .. } => track.id,
-            _ => return None,
-        };
-        project.timeline.track(id).filter(|t| t.locked)
-    })
 }
 
 /// `track`'s clips with the one at `ix` replaced by `clip` and every clip
