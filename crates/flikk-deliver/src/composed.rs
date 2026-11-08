@@ -6,7 +6,7 @@
 //! in, see [`route`]) and builds the audio in the same process.
 
 use crate::Letterer;
-use crate::ffmpeg::{self, Process};
+use crate::ffmpeg;
 use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::compose::{self, Pictures, Streams};
@@ -17,7 +17,7 @@ use flikk_core::speed::Waiting;
 use flikk_core::stabilize;
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{ClipId, Time, TimeRange};
-use flikk_os::process::{command, ffmpeg};
+use flikk_os::process::{ChildGuard, command, ffmpeg};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::process::Stdio;
@@ -330,16 +330,16 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let mut child = Process(
+    // Guarded: every early return below kills and reaps ffmpeg.
+    let mut child = ChildGuard::spawn(
         command(ffmpeg())
             .arg("-hide_banner")
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not start {}", ffmpeg().display()))?,
-    );
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("could not start {}", ffmpeg().display()))?;
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -352,18 +352,9 @@ pub(crate) fn run(
     let mut write_failed = false;
     for f in 0..total {
         if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
             bail!("canceled");
         }
-        let frame = match frames.frame(f) {
-            Ok(frame) => frame,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
-        };
+        let frame = frames.frame(f)?;
         if child
             .stdin
             .as_mut()

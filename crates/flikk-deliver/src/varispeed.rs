@@ -8,7 +8,7 @@
 use anyhow::{Context as _, Result, bail};
 use flikk_core::model::MediaItem;
 use flikk_core::sync::varispeed::Varispeed;
-use flikk_os::process::{command, ffmpeg};
+use flikk_os::process::{ChildGuard, command, ffmpeg};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;
@@ -37,33 +37,37 @@ pub fn render(
     } else {
         format!("0:a:{n}")
     };
-    let mut decode = command(ffmpeg())
-        .args([
-            "-v",
-            "error",
-            "-nostdin",
-            "-ss",
-            &format!("{:.6}", from.max(0.0)),
-        ])
-        .arg("-i")
-        .arg(&item.path)
-        .args(["-map", &map, "-vn", "-ac", "2", "-ar", &rate.to_string()])
-        .args(["-f", "f32le", "pipe:1"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("could not run ffmpeg")?;
-    let mut encode = command(ffmpeg())
-        .args(["-v", "error", "-nostdin", "-y", "-f", "f32le", "-ac", "2"])
-        .args(["-ar", &rate.to_string(), "-i", "pipe:0"])
-        .args(["-c:a", "flac", "-sample_fmt", "s32"])
-        .arg(out)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("could not run ffmpeg")?;
+    // Both guarded: an early return (a failed write, a missing pipe) kills
+    // and reaps them.
+    let mut decode = ChildGuard::spawn(
+        command(ffmpeg())
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-ss",
+                &format!("{:.6}", from.max(0.0)),
+            ])
+            .arg("-i")
+            .arg(&item.path)
+            .args(["-map", &map, "-vn", "-ac", "2", "-ar", &rate.to_string()])
+            .args(["-f", "f32le", "pipe:1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .context("could not run ffmpeg")?;
+    let mut encode = ChildGuard::spawn(
+        command(ffmpeg())
+            .args(["-v", "error", "-nostdin", "-y", "-f", "f32le", "-ac", "2"])
+            .args(["-ar", &rate.to_string(), "-i", "pipe:0"])
+            .args(["-c:a", "flac", "-sample_fmt", "s32"])
+            .arg(out)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .context("could not run ffmpeg")?;
     let mut input = decode.stdout.take().context("ffmpeg gave no output")?;
     let mut sink = encode.stdin.take().context("ffmpeg took no input")?;
     let mut bytes = Vec::new();

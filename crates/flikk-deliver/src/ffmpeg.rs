@@ -4,11 +4,11 @@
 use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
-use flikk_os::process::{command, ffmpeg, ffprobe};
+use flikk_os::process::{ChildGuard, command, ffmpeg, ffprobe};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -135,7 +135,9 @@ pub(crate) fn run(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> Result<String> {
-    let mut child = Process(
+    // Guarded: an early return or a panic kills ffmpeg, so it never
+    // finishes a partial output on its own.
+    let mut child = ChildGuard::spawn(
         command(ffmpeg())
             .args([
                 "-hide_banner",
@@ -147,10 +149,9 @@ pub(crate) fn run(
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not start {}", ffmpeg().display()))?,
-    );
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("could not start {}", ffmpeg().display()))?;
 
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
@@ -293,33 +294,6 @@ impl TempOutput {
 impl Drop for TempOutput {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// A spawned ffmpeg, killed and reaped when dropped while still running (on
-/// an early return or a panic), so it never finishes a partial output on
-/// its own.
-pub(crate) struct Process(pub(crate) Child);
-
-impl std::ops::Deref for Process {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Process {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        // Both are no-ops once it has been waited for.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 

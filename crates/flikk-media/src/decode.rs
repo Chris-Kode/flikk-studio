@@ -8,12 +8,12 @@ use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
-use flikk_os::process::command;
+use flikk_os::process::{ChildGuard, command};
 use flikk_os::sync::lock;
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -495,9 +495,9 @@ impl PcmStream for FfmpegPcm {
 const EXIT_GRACE: Duration = Duration::from_secs(60);
 
 /// A child whose stdout is read by the owner and whose stderr is drained by a
-/// thread; killed on drop.
+/// thread; killed and reaped on drop.
 pub(crate) struct Process<R> {
-    child: Child,
+    child: ChildGuard,
     pub stdout: R,
     stderr: Arc<Mutex<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
@@ -505,10 +505,7 @@ pub(crate) struct Process<R> {
 
 impl<R> Process<R> {
     pub fn spawn(mut cmd: Command, wrap: impl FnOnce(ChildStdout) -> R) -> ServiceResult<Self> {
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let mut child = ChildGuard::spawn(cmd.stdout(Stdio::piped()).stderr(Stdio::piped()))
             .map_err(|e| err("ffmpeg", e))?;
         let stdout = wrap(child.stdout.take().expect("piped stdout"));
         let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -583,12 +580,6 @@ impl<R> Process<R> {
             }
         }
         stderr_tail(&self.stderr.lock().unwrap())
-    }
-}
-
-impl<R> Drop for Process<R> {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 
