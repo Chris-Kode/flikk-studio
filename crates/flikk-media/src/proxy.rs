@@ -28,8 +28,8 @@ pub fn proxy_path_for(item: &MediaItem) -> Option<PathBuf> {
 
 pub(crate) fn proxy_path_mapped(fingerprint: &Fingerprint, mapping: Option<&Mapping>) -> PathBuf {
     let name = match mapping {
-        Some(m) => format!("{}-{}.mp4", fingerprint.0, m.key()),
-        None => format!("{}.mp4", fingerprint.0),
+        Some(m) => format!("{}-{}.mp4", fingerprint.file_stem(), m.key()),
+        None => format!("{}.mp4", fingerprint.file_stem()),
     };
     paths::cache().join("proxies").join(name)
 }

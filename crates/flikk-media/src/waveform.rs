@@ -94,7 +94,7 @@ fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Ar
 fn peak_path(fingerprint: &Fingerprint, stream: u32) -> PathBuf {
     paths::cache()
         .join("waveforms")
-        .join(format!("{}-{stream}.peaks", fingerprint.0))
+        .join(format!("{}-{stream}.peaks", fingerprint.file_stem()))
 }
 
 fn decode(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Peaks> {
