@@ -2,7 +2,8 @@
 //! headers with their mix toggles and add-track menu.
 
 use super::layout::{self, HEADER_WIDTH, RULER_HEIGHT, TOOLBAR_HEIGHT};
-use super::{Drag, TimelinePanel, Tool, refs, silence_content};
+use super::silence::silence_content;
+use super::{Drag, TimelinePanel, Tool, refs};
 use crate::ui::RefDrag;
 use crate::ui::kit::{
     Button, ContextMenuExt as _, DropdownMenu as _, Icon, IconName, Popover, PopupMenu,
@@ -122,21 +123,18 @@ impl TimelinePanel {
         let entity = cx.entity();
         let silence = Popover::new("silence-tool")
             .anchor(Anchor::TopLeft)
-            .open(self.silence_open)
+            .open(self.silence.open)
             .on_open_change({
                 let entity = entity.clone();
                 move |open, _, cx| {
                     entity.update(cx, |this, cx| {
-                        if *open && !this.silence_open {
-                            this.silences.retry_failed();
-                        }
-                        this.silence_open = *open;
+                        this.silence.set_open(*open);
                         cx.notify();
                     })
                 }
             })
             .trigger(
-                toggle("silence", IconName::AudioLines, self.silence_open)
+                toggle("silence", IconName::AudioLines, self.silence.open)
                     .tooltip("Remove silences"),
             )
             .content(move |_, _, cx| silence_content(&entity, cx));

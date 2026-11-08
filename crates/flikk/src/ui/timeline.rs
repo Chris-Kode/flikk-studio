@@ -22,20 +22,17 @@ mod waveform;
 
 use super::transport;
 use crate::state::EditorState;
-use crate::ui::kit::{
-    Button, ContextMenuExt as _, Icon, IconName, Slider, Spinner, h_flex, popover, theme as t,
-    v_flex,
-};
+use crate::ui::kit::{ContextMenuExt as _, Icon, IconName, h_flex, popover, theme as t, v_flex};
 use flikk_core::command::{Command, Edge, InsertMode};
 use flikk_core::model::{Clip, MarkerKind, MediaKind, Project, Timeline, TrackKind, TrackMix};
 use flikk_core::{ChangeItemId, ChangeSetId, ClipId, Time, TimeRange, TrackId};
-use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState, SliderValue};
+use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use layout::{RULER_HEIGHT, Row, Viewport};
 use paint::DropHint;
 use pointer::{Drag, Hit};
-use silence::SilenceCache;
+use silence::SilenceTool;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -172,10 +169,7 @@ pub struct TimelinePanel {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     waveforms: Waveforms,
     thumbs: Thumbs,
-    silence_open: bool,
-    silence_min: Entity<SliderState>,
-    silence_padding: Entity<SliderState>,
-    silences: SilenceCache,
+    silence: SilenceTool,
     /// The toolbar's zoom slider, in px per second.
     zoom: Entity<SliderState>,
     /// What a media or FX drag over the lanes would hit.
@@ -191,7 +185,7 @@ pub struct TimelinePanel {
     menu_at: Point<Pixels>,
     popup: Option<menu::Popup>,
     _observe: Subscription,
-    _sliders: [Subscription; 3],
+    _zoom: Subscription,
 }
 
 impl TimelinePanel {
@@ -201,20 +195,7 @@ impl TimelinePanel {
         // Transport and editing keys work from the start.
         window.focus(&focus, cx);
         let _observe = cx.observe(&state, |_, _, cx| cx.notify());
-        let silence_min = cx.new(|_| {
-            SliderState::new()
-                .min(0.2)
-                .max(3.0)
-                .step(0.1)
-                .default_value(0.6)
-        });
-        let silence_padding = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(0.5)
-                .step(0.02)
-                .default_value(0.1)
-        });
+        let silence = SilenceTool::new(cx);
         let zoom = cx.new(|_| {
             SliderState::new()
                 .min(layout::MIN_PX_PER_SEC)
@@ -223,15 +204,11 @@ impl TimelinePanel {
                 .step(0.01)
                 .default_value(Viewport::default().px_per_sec)
         });
-        let _sliders = [
-            cx.subscribe(&silence_min, |_, _, _: &SliderEvent, cx| cx.notify()),
-            cx.subscribe(&silence_padding, |_, _, _: &SliderEvent, cx| cx.notify()),
-            cx.subscribe(&zoom, |this, _, ev: &SliderEvent, cx| {
-                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
-                let factor = v.end() / this.viewport.px_per_sec;
-                this.zoom(factor, cx);
-            }),
-        ];
+        let _zoom = cx.subscribe(&zoom, |this, _, ev: &SliderEvent, cx| {
+            let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
+            let factor = v.end() / this.viewport.px_per_sec;
+            this.zoom(factor, cx);
+        });
         Self {
             state,
             focus,
@@ -247,10 +224,7 @@ impl TimelinePanel {
             bounds: Rc::new(Cell::new(Bounds::default())),
             waveforms: Waveforms::default(),
             thumbs: Thumbs::default(),
-            silence_open: false,
-            silence_min,
-            silence_padding,
-            silences: SilenceCache::default(),
+            silence,
             zoom,
             drop: None,
             heights: HashMap::new(),
@@ -260,7 +234,7 @@ impl TimelinePanel {
             menu_at: Point::default(),
             popup: None,
             _observe,
-            _sliders,
+            _zoom,
         }
     }
 
@@ -587,70 +561,6 @@ impl TimelinePanel {
         });
     }
 
-    fn apply_silences(&mut self, cx: &mut Context<Self>) {
-        let (min, pad) = self.silence_params(cx);
-        let ranges = {
-            let project = self.state.read(cx).bus.project();
-            self.silences.timeline_silences(project, min, pad)
-        };
-        if ranges.is_empty() {
-            return;
-        }
-        self.silence_open = false;
-        let commands = silence::removal_commands(&ranges);
-        self.state.update(cx, |s, cx| {
-            s.edit_batch(commands, "Remove silences", cx);
-        });
-        cx.notify();
-    }
-
-    fn silence_params(&self, cx: &App) -> (Time, Time) {
-        let value = |s: &Entity<SliderState>| match s.read(cx).value() {
-            SliderValue::Single(v) | SliderValue::Range(_, v) => v as f64,
-        };
-        (
-            Time::from_secs_f64(value(&self.silence_min)),
-            Time::from_secs_f64(value(&self.silence_padding)),
-        )
-    }
-
-    /// Ask the analysis engine for source silences we don't have yet.
-    fn request_silences(&mut self, cx: &mut Context<Self>) {
-        let Some(analysis) = self.state.read(cx).services.analysis.clone() else {
-            return;
-        };
-        let (min, _) = self.silence_params(cx);
-        let missing = {
-            let project = self.state.read(cx).bus.project().clone();
-            self.silences.missing(&project, min)
-        };
-        for item in missing {
-            let analysis = analysis.clone();
-            cx.spawn(async move |this, cx| {
-                let id = item.id;
-                let found = cx
-                    .background_executor()
-                    .spawn(async move { silence::detect(analysis.as_ref(), &item, min) })
-                    .await;
-                let failed = found.is_none();
-                let _ = this.update(cx, |this, cx| {
-                    this.silences.insert(min, id, found);
-                    cx.notify();
-                });
-                if failed {
-                    // Render again once it may be asked for again.
-                    cx.background_executor().timer(silence::RETRY).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.silence_open {
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .detach();
-        }
-    }
-
     // --------------------------------------------------------------- render
 
     fn tooltip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -788,118 +698,6 @@ pub(crate) fn matching_audio_track(
     audios.get(rank).or(audios.first()).map(|t| t.id)
 }
 
-/// The silence tool's popover: thresholds, what they find, and Remove.
-fn silence_content(panel: &Entity<TimelinePanel>, cx: &mut App) -> AnyElement {
-    let this = panel.read(cx);
-    let close = {
-        let panel = panel.clone();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            panel.update(cx, |this, cx| {
-                this.silence_open = false;
-                cx.notify();
-            })
-        }
-    };
-    let card = v_flex()
-        .w(px(236.))
-        .px(px(12.))
-        .py(px(10.))
-        .gap(px(9.))
-        .child(
-            h_flex()
-                .child(
-                    div()
-                        .flex_1()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Remove silences"),
-                )
-                .child(
-                    Button::new("silence-close")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::X)
-                        .on_click(close),
-                ),
-        );
-    if this.state.read(cx).services.analysis.is_none() {
-        return card
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(t::T2)
-                    .child("Analysis is not available"),
-            )
-            .into_any_element();
-    }
-    let (min, pad) = this.silence_params(cx);
-    let project = this.state.read(cx).bus.project();
-    let found = this.silences.timeline_silences(project, min, pad);
-    let total: f64 = found.iter().map(|r| r.duration().as_secs_f64()).sum();
-    let loading = this.silences.is_loading();
-    let failed = this.silences.has_failed();
-    let row = |label: &'static str, slider: &Entity<SliderState>, value: String| {
-        h_flex()
-            .gap(px(8.))
-            .text_size(px(11.))
-            .child(div().w(px(62.)).flex_none().text_color(t::T2).child(label))
-            .child(Slider::new(slider).flex_1())
-            .child(
-                div()
-                    .w(px(44.))
-                    .flex_none()
-                    .text_right()
-                    .font_family(t::mono())
-                    .child(value),
-            )
-    };
-    let summary = if loading {
-        h_flex()
-            .gap(px(6.))
-            .text_color(t::T2)
-            .child(Spinner::new().size(px(11.)))
-            .child("Analyzing…")
-    } else if found.is_empty() && failed {
-        h_flex().text_color(t::T3).child("Analysis failed")
-    } else if found.is_empty() {
-        h_flex().text_color(t::T3).child("Nothing found")
-    } else {
-        h_flex()
-            .font_family(t::mono())
-            .text_color(t::T2)
-            .child(format!("{} regions · ", found.len()))
-            .child(div().text_color(t::ERR_TX).child(format!("−{total:.1} s")))
-    };
-    let panel = panel.clone();
-    card.child(row(
-        "Min length",
-        &this.silence_min,
-        format!("{:.1} s", min.as_secs_f64()),
-    ))
-    .child(row(
-        "Padding",
-        &this.silence_padding,
-        format!("{:.2} s", pad.as_secs_f64()),
-    ))
-    .child(
-        h_flex()
-            .gap(px(8.))
-            .pt(px(9.))
-            .border_t_1()
-            .border_color(t::LN)
-            .text_size(px(11.))
-            .child(summary.flex_1())
-            .child(
-                Button::new("apply-silences")
-                    .primary()
-                    .small()
-                    .label("Remove")
-                    .disabled(found.is_empty())
-                    .on_click(move |_, _, cx| panel.update(cx, |this, cx| this.apply_silences(cx))),
-            ),
-    )
-    .into_any_element()
-}
-
 impl Focusable for TimelinePanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -931,7 +729,7 @@ impl Render for TimelinePanel {
                 self.viewport.scroll_x = (self.viewport.scroll_x + x - width * 0.1).max(0.);
             }
         }
-        if self.silence_open {
+        if self.silence.open {
             self.request_silences(cx);
         }
         self.reveal_focused(cx);

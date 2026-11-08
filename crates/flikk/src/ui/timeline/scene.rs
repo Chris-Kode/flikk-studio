@@ -250,9 +250,8 @@ impl TimelinePanel {
             }
         }
 
-        let silences = if self.silence_open {
-            let (min, pad) = self.silence_params(cx);
-            self.silences.timeline_silences(project, min, pad)
+        let silences = if self.silence.open {
+            self.silence.found(project, cx)
         } else {
             vec![]
         };
