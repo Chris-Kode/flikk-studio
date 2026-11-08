@@ -350,11 +350,6 @@ impl MediaPoolPanel {
         .detach();
     }
 
-    /// A click on item `id`.
-    fn select(&mut self, id: MediaId, open: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.click(Entry::Media(id), open, window, cx)
-    }
-
     /// A click on an item or folder: cmd/ctrl adds or drops it, shift
     /// takes the run from the last one clicked, and a double click opens
     /// it.
@@ -1065,7 +1060,7 @@ impl MediaPoolPanel {
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 cx.stop_propagation();
-                this.select(id, ev.click_count() >= 2, window, cx)
+                this.click(Entry::Media(id), ev.click_count() >= 2, window, cx)
             }))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
             .child(self.place_marker(Entry::Media(id)))

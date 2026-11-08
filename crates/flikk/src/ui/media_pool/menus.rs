@@ -72,7 +72,9 @@ pub(super) fn item_menu(
     let mut menu = menu
         .item(
             PopupMenuItem::new(open_label).on_click(move |_, window, cx| {
-                open.update(cx, |this, cx| this.select(id, true, window, cx))
+                open.update(cx, |this, cx| {
+                    this.click(Entry::Media(id), true, window, cx)
+                })
             }),
         )
         .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {

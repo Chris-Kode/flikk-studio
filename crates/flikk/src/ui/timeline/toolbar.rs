@@ -223,7 +223,7 @@ impl TimelinePanel {
                     .w(px(24.))
                     .icon(IconName::BookmarkPlus)
                     .tooltip_kbd("Add marker", "M")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_marker(false, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.add_marker(cx))),
             )
             .child(
                 div()
@@ -391,21 +391,17 @@ impl TimelinePanel {
                             })
                             .selected(hidden)
                             .tooltip(if hidden { "Show" } else { "Hide" })
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_mute(id, cx))),
                     )
                 })
                 .when(audio, |el| {
                     el.child(
-                        mix_toggle(key("mute"), "M", track.mix.mute, t::T2, "Mute").on_click(
-                            cx.listener(move |this, _, _, cx| this.toggle_mix(id, false, cx)),
-                        ),
+                        mix_toggle(key("mute"), "M", track.mix.mute, t::T2, "Mute")
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_mute(id, cx))),
                     )
                     .child(
-                        mix_toggle(key("solo"), "S", track.mix.solo, t::WARN, "Solo").on_click(
-                            cx.listener(move |this, _, _, cx| this.toggle_mix(id, true, cx)),
-                        ),
+                        mix_toggle(key("solo"), "S", track.mix.solo, t::WARN, "Solo")
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_solo(id, cx))),
                     )
                 })
                 .context_menu(move |menu, _, _| {

@@ -134,6 +134,23 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
+/// An empty-noted marker of `kind` over `range`, as one edit.
+fn add_marker_over(
+    s: &mut EditorState,
+    range: TimeRange,
+    kind: MarkerKind,
+    cx: &mut Context<EditorState>,
+) {
+    s.edit(
+        Command::AddMarker {
+            range,
+            kind,
+            note: String::new(),
+        },
+        cx,
+    );
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Select,
@@ -462,54 +479,56 @@ impl TimelinePanel {
 
     // -------------------------------------------------------------- actions
 
-    fn add_marker(&mut self, protected: bool, cx: &mut Context<Self>) {
+    /// A note marker at the playhead.
+    fn add_marker(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let range = if protected {
-                let tl = &s.bus.project().timeline;
-                let selected = s
-                    .selection
-                    .clips
-                    .iter()
-                    .filter_map(|id| tl.clip(*id).map(|(_, c)| c.range()))
-                    .reduce(|a, b| TimeRange::new(a.start.min(b.start), a.end.max(b.end)));
-                match s.in_out.filter(|r| !r.is_empty()).or(selected) {
-                    Some(r) => r,
-                    None => {
-                        s.status =
-                            Some("Mark in and out, or select clips, to protect a range".into());
-                        cx.notify();
-                        return;
-                    }
-                }
-            } else {
-                TimeRange::new(s.playhead, s.playhead)
-            };
-            let kind = if protected {
-                MarkerKind::Protected
-            } else {
-                MarkerKind::Note
-            };
-            s.edit(
-                Command::AddMarker {
-                    range,
-                    kind,
-                    note: String::new(),
-                },
-                cx,
-            );
+            let range = TimeRange::new(s.playhead, s.playhead);
+            add_marker_over(s, range, MarkerKind::Note, cx);
         });
     }
 
-    fn toggle_mix(&mut self, track: TrackId, solo: bool, cx: &mut Context<Self>) {
+    /// A protected marker over the in/out range, else over the selected
+    /// clips; with neither, the status line says how to make one.
+    fn add_protected_marker(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let tl = &s.bus.project().timeline;
+            let selected = s
+                .selection
+                .clips
+                .iter()
+                .filter_map(|id| tl.clip(*id).map(|(_, c)| c.range()))
+                .reduce(|a, b| TimeRange::new(a.start.min(b.start), a.end.max(b.end)));
+            match s.in_out.filter(|r| !r.is_empty()).or(selected) {
+                Some(range) => add_marker_over(s, range, MarkerKind::Protected, cx),
+                None => {
+                    s.status = Some("Mark in and out, or select clips, to protect a range".into());
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    fn toggle_mute(&mut self, track: TrackId, cx: &mut Context<Self>) {
+        self.edit_mix(track, |mix| mix.mute = !mix.mute, cx);
+    }
+
+    fn toggle_solo(&mut self, track: TrackId, cx: &mut Context<Self>) {
+        self.edit_mix(track, |mix| mix.solo = !mix.solo, cx);
+    }
+
+    /// `change` applied to `track`'s mix, as one edit.
+    fn edit_mix(
+        &mut self,
+        track: TrackId,
+        change: impl FnOnce(&mut TrackMix),
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |s, cx| {
             let Some(t) = s.bus.project().timeline.track(track) else {
                 return;
             };
-            let mix = TrackMix {
-                mute: if solo { t.mix.mute } else { !t.mix.mute },
-                solo: if solo { !t.mix.solo } else { t.mix.solo },
-                ..t.mix.clone()
-            };
+            let mut mix = t.mix.clone();
+            change(&mut mix);
             s.edit(Command::SetTrackMix { track, mix }, cx);
         });
     }
@@ -860,8 +879,10 @@ impl Render for TimelinePanel {
                     this.delete_selection(true, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &AddMarker, _, cx| this.add_marker(false, cx)))
-            .on_action(cx.listener(|this, _: &AddProtectedMarker, _, cx| this.add_marker(true, cx)))
+            .on_action(cx.listener(|this, _: &AddMarker, _, cx| this.add_marker(cx)))
+            .on_action(
+                cx.listener(|this, _: &AddProtectedMarker, _, cx| this.add_protected_marker(cx)),
+            )
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.25, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(0.8, cx)))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.fit(cx)))
