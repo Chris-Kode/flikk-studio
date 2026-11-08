@@ -628,11 +628,7 @@ impl MediaPoolPanel {
         };
         let name = item_name(item);
         self.renaming_item = Some(id);
-        self.item_input.update(cx, |i, cx| {
-            i.set_value("", window, cx);
-            i.set_placeholder(name, window, cx);
-            i.focus(window, cx);
-        });
+        open_name_field(&self.item_input, name, window, cx);
         cx.notify();
     }
 
@@ -1595,6 +1591,21 @@ enum AnalyzeEntry {
 
 /// Where an item or folder painted.
 type Placed = (Entry, Bounds<Pixels>);
+
+/// Empties `input` and focuses it with the current `name` as its
+/// placeholder: typing replaces the name, an empty entry keeps it.
+fn open_name_field(
+    input: &Entity<InputState>,
+    name: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    input.update(cx, |i, cx| {
+        i.set_value("", window, cx);
+        i.set_placeholder(name, window, cx);
+        i.focus(window, cx);
+    });
+}
 
 /// A folder or an item: what the pool lists and selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

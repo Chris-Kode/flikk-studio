@@ -3,7 +3,7 @@
 
 use super::look::{inset_ring, ring};
 use super::menus::{bin_menu, folder_more};
-use super::{Entry, Layout, MediaPoolPanel, column};
+use super::{Entry, Layout, MediaPoolPanel, column, open_name_field};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{ContextMenuExt as _, DialogExt as _, Icon, IconName, Input, h_flex};
 use crate::ui::{FolderDrag, MediaDrag};
@@ -161,12 +161,7 @@ impl MediaPoolPanel {
             .map(|b| b.name)
             .unwrap_or_default();
         self.renaming = Some(id);
-        // Typing replaces the name; an empty entry keeps it.
-        self.bin_input.update(cx, |i, cx| {
-            i.set_value("", window, cx);
-            i.set_placeholder(name, window, cx);
-            i.focus(window, cx);
-        });
+        open_name_field(&self.bin_input, name, window, cx);
         cx.notify();
     }
 
