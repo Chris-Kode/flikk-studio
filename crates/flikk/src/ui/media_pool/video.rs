@@ -154,18 +154,10 @@ impl VideoForm {
         }
     }
 
-    fn picked(picker: &Picker, cx: &App) -> String {
-        picker
-            .read(cx)
-            .selected_value()
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// The start frame, when there is one: the playhead's, or a picture
     /// still in the pool.
     fn starts(&self, cx: &App) -> bool {
-        match Self::picked(&self.start, cx).as_str() {
+        match picked(&self.start, cx).as_str() {
             NONE => false,
             PLAYHEAD => true,
             id => {
@@ -220,10 +212,10 @@ impl VideoForm {
         }
         let mut grabs = Vec::new();
         let starts = self.starts(cx);
-        let (first_frame, grab) = self.frame(&Self::picked(&self.start, cx), cx);
+        let (first_frame, grab) = self.frame(&picked(&self.start, cx), cx);
         grabs.extend(grab);
         let (last_frame, grab) = if starts && self.model.last_frame {
-            self.frame(&Self::picked(&self.end, cx), cx)
+            self.frame(&picked(&self.end, cx), cx)
         } else {
             (None, None)
         };
@@ -240,8 +232,8 @@ impl VideoForm {
                 })
                 .collect()
         };
-        let aspect = Self::picked(&self.aspect, cx);
-        let resolution = Self::picked(&self.resolution, cx);
+        let aspect = picked(&self.aspect, cx);
+        let resolution = picked(&self.resolution, cx);
         let request = GenerateRequest::Video {
             prompt,
             length: Some(Time::from_secs_f64(self.seconds(cx) as f64)),
@@ -286,17 +278,7 @@ impl VideoForm {
 
     /// Put `tag` in the prompt at the cursor, set off from the word before.
     fn insert_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt.update(cx, |prompt, cx| {
-            let value = prompt.value();
-            let before = value.get(..prompt.cursor()).unwrap_or(&value);
-            let lead = if before.chars().last().is_some_and(|c| !c.is_whitespace()) {
-                " "
-            } else {
-                ""
-            };
-            prompt.insert(format!("{lead}{tag} "), window, cx);
-            prompt.focus(window, cx);
-        });
+        form::insert_tag(&self.prompt, tag, true, window, cx);
         cx.notify();
     }
 
@@ -445,6 +427,15 @@ impl Render for VideoForm {
                 el.child(form::problem(problem))
             })
     }
+}
+
+/// The value of the row `picker` has selected; empty when none is.
+pub(super) fn picked(picker: &Picker, cx: &App) -> String {
+    picker
+        .read(cx)
+        .selected_value()
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub(super) fn picker(

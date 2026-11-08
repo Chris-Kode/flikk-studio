@@ -14,10 +14,9 @@ use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Kbd, PopupMenuItem, ScrollableElement as _,
     Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
+use crate::ui::settings::efforts_of;
 use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
-use flikk_core::agent::{
-    AgentModel, Attachment, AttachmentKind, Backend, ModelChoice, effort_label,
-};
+use flikk_core::agent::{Attachment, AttachmentKind, Backend, ModelChoice, effort_label};
 use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -821,17 +820,6 @@ impl Render for Composer {
             )
             .children(self.render_suggestions(cx))
     }
-}
-
-/// Thinking levels of model `id`, or of the CLI's default model for `None`.
-fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
-    models
-        .iter()
-        .find(|m| match id {
-            Some(id) => m.id == id,
-            None => m.default,
-        })
-        .map_or(&[], |m| &m.efforts)
 }
 
 fn set_choice(
