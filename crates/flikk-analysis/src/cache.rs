@@ -34,26 +34,13 @@ fn path(fp: &Fingerprint) -> PathBuf {
 pub fn upload(fp: &Fingerprint) -> Result<PathBuf> {
     let dir = paths::cache().join("upload");
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-    Ok(dir.join(format!("{}.flac", safe_name(fp))))
+    Ok(dir.join(format!("{}.flac", fp.file_stem())))
 }
 
 fn file(fp: &Fingerprint, extension: &str) -> PathBuf {
     paths::cache()
         .join("analysis")
-        .join(format!("{}.{extension}", safe_name(fp)))
-}
-
-/// Fingerprints are hex; anything else is kept out of file names.
-fn safe_name(fp: &Fingerprint) -> String {
-    fp.0.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+        .join(format!("{}.{extension}", fp.file_stem()))
 }
 
 /// The result and the steps it covers; `None` when missing, unreadable or
@@ -111,14 +98,6 @@ pub fn remove_vectors(fp: &Fingerprint) -> Result<()> {
 }
 
 fn write(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = dest.parent().expect("cache file has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).with_context(|| format!("could not write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    Ok(())
+    flikk_os::fs::write_atomic(dest, bytes)
+        .with_context(|| format!("could not write {}", dest.display()))
 }

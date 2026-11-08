@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Default)]
-pub struct Codex {
+pub(crate) struct Codex {
     text: TextJoin,
     last_error: Option<String>,
     /// Tool call items begun and not completed, by item id.
@@ -35,7 +35,7 @@ const CALL_ITEMS: [&str; 4] = [
 ];
 
 /// Codex's own folder (`CODEX_HOME`, else `~/.codex`), where its login is.
-pub fn codex_home() -> PathBuf {
+pub(crate) fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

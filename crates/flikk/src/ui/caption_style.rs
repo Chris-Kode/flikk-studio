@@ -113,7 +113,7 @@ impl CaptionStylePanel {
             }),
         ];
         let style = state.read(cx).active_caption_style();
-        let version = state.read(cx).presets_version;
+        let version = state.read(cx).presets_version();
         let mut colors = HashMap::new();
         for paint in Paint::ALL {
             let color = paint.get(&style);
@@ -173,14 +173,14 @@ impl CaptionStylePanel {
     /// Counts preset reloads: an edit begun under another version is for
     /// presets no longer loaded.
     fn presets_version(&self, cx: &App) -> u64 {
-        self.state.read(cx).presets_version
+        self.state.read(cx).presets_version()
     }
 
     /// Index of the edited style in the profile's presets.
     fn index(&self, cx: &App) -> usize {
         let state = self.state.read(cx);
         match self.target {
-            Target::Active => state.caption_style,
+            Target::Active => state.caption_style(),
             Target::Track(track) => state.track_caption_style(track),
         }
     }
@@ -252,7 +252,7 @@ impl CaptionStylePanel {
         let Some(name) = self
             .state
             .read(cx)
-            .presets
+            .presets()
             .caption_styles
             .get(style)
             .map(|s| s.name.clone())
@@ -300,7 +300,7 @@ impl CaptionStylePanel {
         let names: Vec<String> = self
             .state
             .read(cx)
-            .presets
+            .presets()
             .caption_styles
             .iter()
             .map(|s| s.name.clone())
@@ -312,7 +312,7 @@ impl CaptionStylePanel {
         self.state.update(cx, |s, cx| {
             s.edit_presets(|p| p.caption_styles.push(style), cx)
         });
-        let i = self.state.read(cx).presets.caption_styles.len() - 1;
+        let i = self.state.read(cx).presets().caption_styles.len() - 1;
         self.pick(i, cx);
     }
 
@@ -321,7 +321,7 @@ impl CaptionStylePanel {
         // Before indices shift under it.
         self.settle_color(cx);
         self.state.update(cx, |s, cx| {
-            if s.presets.caption_styles.len() < 2 {
+            if s.presets().caption_styles.len() < 2 {
                 return;
             }
             s.edit_presets(
@@ -330,10 +330,10 @@ impl CaptionStylePanel {
                 },
                 cx,
             );
-            if s.caption_style > i || s.caption_style >= s.presets.caption_styles.len() {
-                s.caption_style = s.caption_style.saturating_sub(1);
+            let mut active = s.caption_style();
+            if active > i || active >= s.presets().caption_styles.len() {
+                active = active.saturating_sub(1);
             }
-            let active = s.caption_style;
             s.pick_caption_style(active, cx);
         });
     }
@@ -342,7 +342,7 @@ impl CaptionStylePanel {
         let Some(name) = self
             .state
             .read(cx)
-            .presets
+            .presets()
             .caption_styles
             .get(i)
             .map(|s| s.name.clone())
@@ -369,7 +369,7 @@ impl CaptionStylePanel {
         // Before the name it is saved under changes.
         self.settle_color(cx);
         let state = self.state.read(cx);
-        let styles = &state.presets.caption_styles;
+        let styles = &state.presets().caption_styles;
         let Some(old) = styles.get(i).map(|s| s.name.clone()) else {
             return;
         };
@@ -428,7 +428,7 @@ impl CaptionStylePanel {
     fn chips(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let names: Vec<String> = state
-            .presets
+            .presets()
             .caption_styles
             .iter()
             .map(|s| s.name.clone())
@@ -554,8 +554,8 @@ impl PendingColor {
     fn save(self, state: &Entity<EditorState>, cx: &mut App) {
         let (paint, color) = (self.paint, self.color);
         state.update(cx, |s, cx| {
-            let same = s.presets_version == self.version
-                && s.presets.caption_styles.get(self.style).map(|p| &p.name) == Some(&self.name);
+            let same = s.presets_version() == self.version
+                && s.presets().caption_styles.get(self.style).map(|p| &p.name) == Some(&self.name);
             if !same {
                 return;
             }
@@ -563,7 +563,7 @@ impl PendingColor {
                 let shown = s.caption_styles();
                 shown
                     .iter()
-                    .zip(&s.presets.caption_styles)
+                    .zip(&s.presets().caption_styles)
                     .position(|(shown, saved)| shown != saved)
                     .map(|i| (i, shown[i].clone()))
             };
@@ -572,7 +572,7 @@ impl PendingColor {
                 if i == self.style {
                     paint.set(&mut style, color);
                 }
-                if s.presets.caption_styles.get(i) != Some(&style) {
+                if s.presets().caption_styles.get(i) != Some(&style) {
                     s.show_caption_style(i, style, cx);
                 }
             }

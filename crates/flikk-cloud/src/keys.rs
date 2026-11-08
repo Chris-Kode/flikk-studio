@@ -11,8 +11,9 @@
 //! so the file's is always the newer. A removal the store can't make leaves
 //! an empty key in the file, which hides the store's until it can.
 
-use crate::{Provider, lock};
+use crate::Provider;
 use flikk_core::paths;
+use flikk_os::sync::lock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -203,7 +204,7 @@ fn read_file() -> Result<BTreeMap<String, String>, String> {
     }
 }
 
-/// Written owner-only, like `bridge.json`.
+/// Written owner-only, like `bridge.json`; removed when no key is left.
 fn write_file(keys: &BTreeMap<String, String>) -> Result<(), String> {
     let path = paths::credentials();
     if keys.is_empty() {
@@ -213,20 +214,6 @@ fn write_file(keys: &BTreeMap<String, String>) -> Result<(), String> {
         };
     }
     let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.part");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = options.open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)
-    };
-    write().map_err(|e| format!("could not write {}: {e}", path.display()))
+    flikk_os::fs::write_private(&path, text.as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }

@@ -30,8 +30,7 @@ pub fn apply_fx(s: &mut EditorState, r: &FxRef, cx: &mut Context<EditorState>) {
         FxKind::Effect => {
             let clips = picture_clips(s);
             if clips.is_empty() {
-                s.status = Some("Select a picture clip".into());
-                cx.notify();
+                s.say("Select a picture clip", cx);
                 return;
             }
             s.execute(
@@ -45,8 +44,7 @@ pub fn apply_fx(s: &mut EditorState, r: &FxRef, cx: &mut Context<EditorState>) {
         }
         FxKind::Transition => {
             let Some(clip) = picture_clips(s).first().copied() else {
-                s.status = Some("Select a picture clip".into());
-                cx.notify();
+                s.say("Select a picture clip", cx);
                 return;
             };
             let existing = s
@@ -80,8 +78,7 @@ pub fn apply_fx(s: &mut EditorState, r: &FxRef, cx: &mut Context<EditorState>) {
 pub fn apply_audio(s: &mut EditorState, kind: AudioFxKind, cx: &mut Context<EditorState>) {
     let targets = sound_clips(s);
     if targets.is_empty() {
-        s.status = Some("Select a clip with sound".into());
-        cx.notify();
+        s.say("Select a clip with sound", cx);
         return;
     }
     let tl = &s.bus.project().timeline;

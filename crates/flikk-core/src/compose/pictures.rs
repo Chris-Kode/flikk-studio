@@ -193,32 +193,32 @@ impl Pictures for Streams {
     }
 }
 
-/// A pool-less item for an overlay clip's asset, keyed by the clip.
-pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
-    let ext = asset
+/// Extensions (lower case) of the overlay assets drawn as one still
+/// picture; any other asset plays as video. The export graph must treat
+/// the same files as stills, so the preview matches the export.
+pub const STILL_IMAGE_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "tga"];
+
+/// Whether the overlay asset at `path` is a still picture: its extension,
+/// in any case, is one of [`STILL_IMAGE_EXTENSIONS`].
+pub fn is_still_overlay(path: &Path) -> bool {
+    let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let still = matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "tga"
-    );
+    STILL_IMAGE_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// A pool-less item for an overlay clip's asset, keyed by the clip.
+pub fn overlay_item(clip: ClipId, asset: &Path) -> MediaItem {
+    let kind = if is_still_overlay(asset) {
+        MediaKind::Image
+    } else {
+        MediaKind::Video
+    };
     MediaItem {
         id: MediaId(clip.0),
-        path: asset.to_path_buf(),
-        kind: if still {
-            MediaKind::Image
-        } else {
-            MediaKind::Video
-        },
-        fingerprint: None,
-        info: None,
-        bin: None,
-        tags: Vec::new(),
-        proxy: None,
-        generated: None,
-        name: None,
-        tone_map: Default::default(),
+        ..MediaItem::new(asset, kind)
     }
 }
 

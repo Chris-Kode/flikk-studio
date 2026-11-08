@@ -8,13 +8,13 @@
 mod analysis;
 mod approval;
 mod audio;
-pub mod catalog;
+pub(crate) mod catalog;
 mod depth;
 mod edit;
 mod files;
 mod fx;
 pub mod generate;
-pub mod groups;
+pub(crate) mod groups;
 pub mod image;
 mod layout;
 mod masks;
@@ -30,9 +30,9 @@ mod sync;
 pub mod video;
 mod view;
 pub mod voices;
-pub mod web;
+pub(crate) mod web;
 
-pub use catalog::{ToolSpec, catalog};
+pub(crate) use catalog::{ToolSpec, catalog};
 
 use crate::args::{Args, ToolError};
 use crate::bridge::ToolResult;
@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex};
 /// Stops what a turn's jobs are doing when the turn is cancelled: every
 /// generation and long wait they started through it. Clones share it.
 #[derive(Clone, Default)]
-pub struct Stop(Arc<Mutex<Stops>>);
+pub(crate) struct Stop(Arc<Mutex<Stops>>);
 
 #[derive(Default)]
 struct Stops {
@@ -64,12 +64,12 @@ struct Stops {
 
 impl Stop {
     fn stops(&self) -> std::sync::MutexGuard<'_, Stops> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        flikk_os::sync::lock(&self.0)
     }
 
     /// A generation to follow and stop with the rest; stopped already if
     /// they were.
-    pub fn task(&self) -> GenerationTask {
+    pub(crate) fn task(&self) -> GenerationTask {
         let task = GenerationTask::default();
         let mut stops = self.stops();
         if stops.stopped {
@@ -80,7 +80,7 @@ impl Stop {
     }
 
     /// A flag set when they are stopped, for waits that take one.
-    pub fn flag(&self) -> Arc<AtomicBool> {
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
         let mut stops = self.stops();
         let flag = Arc::new(AtomicBool::new(stops.stopped));
         stops.flags.push(flag.clone());
@@ -88,7 +88,7 @@ impl Stop {
     }
 
     /// Stop them all, and any started from now on.
-    pub fn stop(&self) {
+    pub(crate) fn stop(&self) {
         let mut stops = self.stops();
         stops.stopped = true;
         for task in &stops.tasks {
@@ -102,14 +102,14 @@ impl Stop {
 
 /// Long-term memory the host was given (the store owns it).
 #[derive(Clone, Debug, Default)]
-pub struct Memory {
+pub(crate) struct Memory {
     pub rules: Vec<StyleRule>,
     pub facts: Vec<SourceFact>,
     pub recipes: Vec<Recipe>,
 }
 
 /// Everything a tool may use while it runs on the UI thread.
-pub struct ToolCtx<'a> {
+pub(crate) struct ToolCtx<'a> {
     pub bus: &'a mut CommandBus,
     pub services: &'a Services,
     pub author: Author,
@@ -126,17 +126,17 @@ pub struct ToolCtx<'a> {
 }
 
 impl ToolCtx<'_> {
-    pub fn project(&self) -> &Project {
+    pub(crate) fn project(&self) -> &Project {
         self.bus.view_for(&self.author)
     }
 
-    pub fn role(&self) -> AgentRole {
+    pub(crate) fn role(&self) -> AgentRole {
         self.role
     }
 
     /// Where [`Self::project`] is at: a job working on a snapshot of it
     /// hands this back with its commands ([`JobDone::Propose`]).
-    pub fn version(&self) -> Since {
+    pub(crate) fn version(&self) -> Since {
         self.bus.view_since(&self.author)
     }
 }
@@ -154,7 +154,7 @@ pub struct ApprovalRequest {
 
 /// The result of a finished tool call plus what the activity log shows.
 #[derive(Debug, Default)]
-pub struct Done {
+pub(crate) struct Done {
     pub result: ToolResult,
     pub summary: String,
     pub images: Vec<PathBuf>,
@@ -164,7 +164,7 @@ pub struct Done {
 }
 
 impl Done {
-    pub fn text(summary: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn text(summary: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             result: ToolResult::text(text),
             summary: summary.into(),
@@ -172,7 +172,7 @@ impl Done {
         }
     }
 
-    pub fn json(summary: impl Into<String>, value: &Value) -> Self {
+    pub(crate) fn json(summary: impl Into<String>, value: &Value) -> Self {
         Self {
             result: ToolResult::json(value),
             summary: summary.into(),
@@ -180,7 +180,7 @@ impl Done {
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    pub(crate) fn error(message: impl Into<String>) -> Self {
         let message = message.into();
         Self {
             result: ToolResult::error(message.clone()),
@@ -193,10 +193,10 @@ impl Done {
 /// Remakes a job's commands on the project as it is when the job is done
 /// (see [`JobDone::Propose`]); `None` when what they change was edited
 /// since the snapshot.
-pub type Rebase = Box<dyn FnOnce(&Project) -> Option<Vec<Command>> + Send>;
+pub(crate) type Rebase = Box<dyn FnOnce(&Project) -> Option<Vec<Command>> + Send>;
 
 /// What a job hands back to the UI thread.
-pub enum JobDone {
+pub(crate) enum JobDone {
     Done(Done),
     /// Commands to propose on the UI thread (e.g. `normalize` after measuring).
     Propose {
@@ -238,9 +238,9 @@ pub enum JobDone {
     },
 }
 
-pub type Job = Box<dyn FnOnce() -> JobDone + Send>;
+pub(crate) type Job = Box<dyn FnOnce() -> JobDone + Send>;
 
-pub enum Step {
+pub(crate) enum Step {
     Done(Box<Done>),
     Job(Job),
 }
@@ -256,7 +256,7 @@ impl From<Done> for Step {
 /// the core tools and those groups, plus `load_tools` and `run_tool` for the
 /// rest; without (external clients), every tool. `view_web_image` only
 /// with `web`, `generate_image` only when [`image::offered`].
-pub fn list(
+pub(crate) fn list(
     bus: &CommandBus,
     role: AgentRole,
     groups: Option<&BTreeSet<ToolCategory>>,
@@ -308,7 +308,7 @@ pub(crate) fn visible(
 }
 
 /// Run one tool call.
-pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Step {
+pub(crate) fn serve(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Step {
     match serve_inner(ctx, tool, args) {
         Ok(step) => step,
         Err(ToolError(message)) => Done::error(message).into(),
@@ -443,10 +443,10 @@ fn internal<'a>(tool: &'a str, args: &Args) -> Result<&'a str, ToolError> {
 
 /// Change sets of external clients are titled so the user knows where they
 /// came from.
-pub const EXTERNAL_PREFIX: &str = "External agent: ";
+pub(crate) const EXTERNAL_PREFIX: &str = "External agent: ";
 
 /// Propose `commands` in order as one tool call's worth of change items.
-pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done {
+pub(crate) fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done {
     propose_from(ctx, commands, reason, None)
 }
 
@@ -454,7 +454,7 @@ pub fn propose(ctx: &mut ToolCtx, commands: Vec<Command>, reason: &str) -> Done 
 /// ([`JobDone::Propose`]): remade on the project as it is now if `rebase`
 /// can, else as planned then, so the edits and proposals made since to
 /// what it changes conflict with it rather than being overwritten.
-pub fn propose_job(
+pub(crate) fn propose_job(
     ctx: &mut ToolCtx,
     commands: Vec<Command>,
     reason: &str,

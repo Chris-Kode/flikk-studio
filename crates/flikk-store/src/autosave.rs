@@ -16,9 +16,10 @@
 use crate::project_file::{autosave_path, remove_autosave, write_file};
 use flikk_core::ids::ProjectId;
 use flikk_core::model::Project;
+use flikk_os::sync::lock;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -152,10 +153,6 @@ impl Drop for Autosaver {
             let _ = worker.join();
         }
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The snapshots waiting to be written, and when.

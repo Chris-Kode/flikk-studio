@@ -241,7 +241,7 @@ fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
         live: state.live_version,
         globals: globals(state),
     };
-    let busy = state.playing
+    let busy = state.is_playing()
         || state.source.as_ref().is_some_and(|s| s.is_playing())
         || state.render_queue.is_busy();
     let playhead = state.playhead;

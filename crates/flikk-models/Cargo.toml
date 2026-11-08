@@ -43,6 +43,7 @@ webgpu = ["ort?/webgpu", "ort?/copy-dylibs"]
 matting = ["dep:ort"]
 
 [dependencies]
+flikk-os.workspace = true
 anyhow.workspace = true
 flikk-core.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }

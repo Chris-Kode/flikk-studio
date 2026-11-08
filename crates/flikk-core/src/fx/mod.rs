@@ -83,7 +83,7 @@ mod shaders;
 mod templates;
 
 use crate::ids::{EffectId, FxId, LibraryId};
-use crate::model::{Clip, ClipContent, Ease, Project, Track};
+use crate::model::{Clip, Ease, Project, Track};
 use crate::time::{Time, TimeRange};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -649,13 +649,7 @@ pub fn uses(project: &Project, r: &FxRef) -> Vec<crate::ids::ClipId> {
         .tracks
         .iter()
         .flat_map(|t| &t.clips)
-        .filter(|c| {
-            c.effects.iter().any(|e| &e.fx == r)
-                || [&c.transition_in, &c.transition_out]
-                    .iter()
-                    .any(|t| t.as_ref().is_some_and(|t| &t.fx.fx == r))
-                || matches!(&c.content, ClipContent::Generator { fx } if &fx.fx == r)
-        })
+        .filter(|c| c.fx_instances().any(|fx| &fx.fx == r))
         .map(|c| c.id)
         .collect()
 }

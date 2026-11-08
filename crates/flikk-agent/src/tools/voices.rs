@@ -41,7 +41,7 @@ fn note_samples<'a>(voices: impl IntoIterator<Item = &'a Voice>) {
 
 /// `args` of an approval, with where `voice` can be heard when it was
 /// listed: the card plays it.
-pub fn with_sample(mut args: Value, voice: &str) -> Value {
+pub(crate) fn with_sample(mut args: Value, voice: &str) -> Value {
     let url = SAMPLES.lock().ok().and_then(|s| s.get(voice).cloned());
     if let (Some(url), Some(map)) = (url, args.as_object_mut()) {
         map.insert("sample".into(), json!(url));
@@ -49,7 +49,7 @@ pub fn with_sample(mut args: Value, voice: &str) -> Value {
     args
 }
 
-pub fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let shared = args.opt_bool("library")?.unwrap_or(false);
     let label = |key: &str, allowed: &[&str]| -> ToolResultOf<Option<String>> {
         match args.opt_str(key)?.map(str::trim).filter(|v| !v.is_empty()) {
@@ -189,7 +189,7 @@ pub struct Adding {
     pub name: String,
 }
 
-pub fn parse_add(args: &Args) -> ToolResultOf<Adding> {
+pub(crate) fn parse_add(args: &Args) -> ToolResultOf<Adding> {
     let id = |key: &str| -> ToolResultOf<String> {
         let value = args.str(key)?.trim();
         if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -211,11 +211,11 @@ pub fn parse_add(args: &Args) -> ToolResultOf<Adding> {
     })
 }
 
-pub fn add_summary(adding: &Adding) -> String {
+pub(crate) fn add_summary(adding: &Adding) -> String {
     format!("Add the voice “{}” from the Voice Library", adding.name)
 }
 
-pub fn add_json(adding: &Adding) -> Value {
+pub(crate) fn add_json(adding: &Adding) -> Value {
     json!({ "voice": adding.voice, "owner": adding.owner, "name": adding.name })
 }
 
@@ -264,7 +264,7 @@ pub fn add(
 
 // --------------------------------------------------------------- design
 
-pub fn parse_design(args: &Args) -> ToolResultOf<(VoiceDesign, String)> {
+pub(crate) fn parse_design(args: &Args) -> ToolResultOf<(VoiceDesign, String)> {
     let design = VoiceDesign {
         description: args.str("description")?.trim().to_owned(),
         text: args
@@ -283,11 +283,11 @@ pub fn parse_design(args: &Args) -> ToolResultOf<(VoiceDesign, String)> {
     Ok((design, name))
 }
 
-pub fn design_summary(design: &VoiceDesign, name: &str) -> String {
+pub(crate) fn design_summary(design: &VoiceDesign, name: &str) -> String {
     format!("Design the voice “{name}”: {}", design.description)
 }
 
-pub fn design_json(design: &VoiceDesign, name: &str) -> Value {
+pub(crate) fn design_json(design: &VoiceDesign, name: &str) -> Value {
     json!({ "design": design, "name": name })
 }
 
@@ -329,7 +329,7 @@ pub fn design(
 // ------------------------------------------------------------------ jobs
 
 /// With the user's leave (generating allowed): add a shared voice.
-pub fn serve_add(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve_add(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let adding = parse_add(args)?;
     let generation = voices_service(ctx)?;
     let media = ctx.services.media.clone();
@@ -344,7 +344,7 @@ pub fn serve_add(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
 }
 
 /// With the user's leave (generating allowed): design a voice.
-pub fn serve_design(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve_design(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let (asked, name) = parse_design(args)?;
     let generation = voices_service(ctx)?;
     let media = ctx.services.media.clone();
@@ -361,7 +361,7 @@ pub fn serve_design(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
 }
 
 /// Whether voices can be added and designed now; why not, when not.
-pub fn check_available(ctx: &ToolCtx) -> ToolResultOf<()> {
+pub(crate) fn check_available(ctx: &ToolCtx) -> ToolResultOf<()> {
     voices_service(ctx).map(|_| ())
 }
 

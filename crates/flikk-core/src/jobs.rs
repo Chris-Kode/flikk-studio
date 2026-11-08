@@ -7,10 +7,11 @@
 
 use crate::ids::{JobId, MediaId};
 use crate::services::{JobState, JobStatus};
+use flikk_os::sync::lock;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 /// What a job does; `Err` says why it failed.
 type Work = Box<dyn FnOnce(&JobProgress) -> Result<(), String> + Send>;
@@ -71,10 +72,6 @@ impl JobProgress {
             };
         }
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn set_state(jobs: &Mutex<Vec<JobStatus>>, id: JobId, state: JobState) {
@@ -251,8 +248,13 @@ impl<K: PartialEq> Shared<K> {
                 cancel,
             };
             progress.set(0.0);
-            let result = catch_unwind(AssertUnwindSafe(|| work(&progress)))
-                .unwrap_or_else(|_| Err(format!("{} stopped unexpectedly", self.name)));
+            let result =
+                catch_unwind(AssertUnwindSafe(|| work(&progress))).unwrap_or_else(|panic| {
+                    // The user sees the short message; the cause goes to the log.
+                    let message = format!("{} stopped unexpectedly", self.name);
+                    eprintln!("{}", flikk_os::sync::panic_message(&self.name, &*panic));
+                    Err(message)
+                });
             let mut queue = lock(&self.queue);
             queue.keys.retain(|(_, k, _)| *k != id);
             // A cancelled job left the list already.

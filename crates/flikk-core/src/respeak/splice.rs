@@ -15,7 +15,7 @@
 //! [`Command::ReplaceSpeech`]: crate::command::Command::ReplaceSpeech
 
 use crate::command::Plan;
-use crate::edit::{cut_out, diff_track, media_duration, split_clip};
+use crate::edit::{cut_out, diff_track, media_duration, split_clip, stretch_keyframes};
 use crate::error::{CoreError, Result};
 use crate::ids::*;
 use crate::model::*;
@@ -83,11 +83,7 @@ pub(crate) fn plan(
             next.push(c);
         }
     }
-    let stream = item
-        .info
-        .as_ref()
-        .and_then(|i| i.audio.first())
-        .map(|a| a.index);
+    let stream = item.first_audio_stream();
     let mut said = Clip::new(
         range.start,
         len,
@@ -310,14 +306,6 @@ fn held(mut m: Clip, range: TimeRange, delta: Time) -> Clip {
         k.at = k.at.scale(ratio);
         k.speed = (k.speed / ratio).max(crate::speed::MIN_SPEED);
     }
-    for k in &mut m.keyframes {
-        k.at = k.at.scale(ratio);
-    }
-    for e in &mut m.effects {
-        e.scale_keyframes(ratio);
-    }
-    for mask in &mut m.masks {
-        mask.scale_keyframes(ratio);
-    }
+    stretch_keyframes(&mut m, ratio);
     m
 }

@@ -338,7 +338,7 @@ impl Mixer {
                         let item = project.media(c.media()?)?.clone();
                         let stream = match &c.content {
                             ClipContent::Media { audio_stream, .. } => audio_stream
-                                .or_else(|| item.info.as_ref()?.audio.first().map(|a| a.index))
+                                .or_else(|| item.first_audio_stream())
                                 .unwrap_or(0),
                             _ => return None,
                         };

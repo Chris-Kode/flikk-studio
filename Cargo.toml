@@ -15,6 +15,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 flikk-core = { path = "crates/flikk-core" }
+flikk-os = { path = "crates/flikk-os" }
 flikk-store = { path = "crates/flikk-store" }
 flikk-media = { path = "crates/flikk-media" }
 flikk-analysis = { path = "crates/flikk-analysis" }

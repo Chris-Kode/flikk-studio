@@ -7,6 +7,7 @@ use crate::interpolation::Interpolator;
 use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::sync::lock;
 use ort::value::{Tensor, TensorRef};
 use std::sync::{Arc, Mutex};
 
@@ -47,7 +48,7 @@ impl Interpolator for Rife {
             ("dynamic_dim_2", mh as i64),
             ("dynamic_dim_3", mw as i64),
         ];
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock(&self.sessions);
         // Its file was deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             sessions.forget();

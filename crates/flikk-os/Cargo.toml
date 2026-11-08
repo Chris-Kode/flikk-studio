@@ -1,0 +1,7 @@
+[package]
+name = "flikk-os"
+version.workspace = true
+edition.workspace = true
+description = "Operating-system plumbing shared by every Flikk crate: whole-or-nothing file writes, child processes that never outlive their owner, poison-tolerant locks and failure back-off."
+
+[dependencies]

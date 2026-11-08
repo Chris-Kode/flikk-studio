@@ -17,7 +17,7 @@ use std::process::Command;
 const WEB_TOOLS: &str = "WebSearch,WebFetch";
 
 #[derive(Default)]
-pub struct Claude {
+pub(crate) struct Claude {
     text: TextJoin,
     /// Id of the message being streamed.
     streaming: String,

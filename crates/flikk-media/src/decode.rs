@@ -3,15 +3,17 @@
 //! Video comes out of FFmpeg as a stream of PAM images, whose headers carry
 //! the frame size, so rotation and pixel aspect never have to be predicted.
 
-use crate::{FfmpegMedia, err, is_still_image, proxy, secs_arg, stderr_tail};
+use crate::{FfmpegMedia, err, is_still_image, last_stderr_line, proxy, secs_arg};
 use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
+use flikk_os::process::{ChildGuard, command};
+use flikk_os::sync::lock;
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -95,7 +97,7 @@ pub(crate) fn still(
         max_width,
         tone.map(str::to_string),
     );
-    if let Some(frame) = crate::lock(&media.frames).get(&key) {
+    if let Some(frame) = lock(&media.frames).get(&key) {
         return Ok(frame);
     }
     // FFmpeg returns the first frame at or after the seek point; aim half a
@@ -118,7 +120,7 @@ pub(crate) fn still(
             path.display()
         ))
     })?;
-    crate::lock(&media.frames).put(key, frame.clone());
+    lock(&media.frames).put(key, frame.clone());
     Ok(frame)
 }
 
@@ -144,7 +146,7 @@ fn decode_one(
         return Err(ServiceError(format!(
             "decode {}: {}",
             path.display(),
-            stderr_tail(&out.stderr)
+            last_stderr_line(&out.stderr)
         )));
     }
     read_pam(&mut out.stdout.as_slice()).map_err(|e| err("decode", e))
@@ -266,7 +268,7 @@ pub(crate) fn playback(
     let fd = rate.frame_duration();
     let first = from.max(Time::ZERO).floor_to_frame(rate);
     let (path, tone) = video_source(media, item)?;
-    let hwaccel = !crate::lock(&media.software_only).contains(&path);
+    let hwaccel = !lock(&media.software_only).contains(&path);
     let mut stream = FfmpegFrames {
         ffmpeg: media.ffmpeg(),
         path,
@@ -350,7 +352,7 @@ impl FfmpegFrames {
     }
 
     fn software_only(&self) {
-        crate::lock(&self.software_only).insert(self.path.clone());
+        lock(&self.software_only).insert(self.path.clone());
     }
 
     fn fail(&mut self, message: String) -> ServiceError {
@@ -493,9 +495,9 @@ impl PcmStream for FfmpegPcm {
 const EXIT_GRACE: Duration = Duration::from_secs(60);
 
 /// A child whose stdout is read by the owner and whose stderr is drained by a
-/// thread; killed on drop.
+/// thread; killed and reaped on drop.
 pub(crate) struct Process<R> {
-    child: Child,
+    child: ChildGuard,
     pub stdout: R,
     stderr: Arc<Mutex<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
@@ -503,10 +505,7 @@ pub(crate) struct Process<R> {
 
 impl<R> Process<R> {
     pub fn spawn(mut cmd: Command, wrap: impl FnOnce(ChildStdout) -> R) -> ServiceResult<Self> {
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let mut child = ChildGuard::spawn(cmd.stdout(Stdio::piped()).stderr(Stdio::piped()))
             .map_err(|e| err("ffmpeg", e))?;
         let stdout = wrap(child.stdout.take().expect("piped stdout"));
         let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -526,7 +525,7 @@ impl<R> Process<R> {
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) if status.success() => return None,
-                Ok(Some(_)) => return Some(self.stderr_tail()),
+                Ok(Some(_)) => return Some(self.last_stderr_line()),
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -550,10 +549,10 @@ impl<R> Process<R> {
     /// its own or wrote an error before it was stopped.
     pub fn abort(&mut self) -> Option<String> {
         if let Ok(Some(status)) = self.child.try_wait() {
-            return (!status.success()).then(|| self.stderr_tail());
+            return (!status.success()).then(|| self.last_stderr_line());
         }
         self.kill();
-        let tail = self.stderr_tail();
+        let tail = self.last_stderr_line();
         let empty = self
             .stderr
             .lock()
@@ -570,7 +569,7 @@ impl<R> Process<R> {
 
     /// The last stderr line, once the drain thread has read what the exited
     /// child left in the pipe.
-    fn stderr_tail(&mut self) -> String {
+    fn last_stderr_line(&mut self) -> String {
         if let Some(drain) = self.drain.take() {
             let deadline = Instant::now() + Duration::from_millis(200);
             while !drain.is_finished() && Instant::now() < deadline {
@@ -580,13 +579,7 @@ impl<R> Process<R> {
                 let _ = drain.join();
             }
         }
-        stderr_tail(&self.stderr.lock().unwrap())
-    }
-}
-
-impl<R> Drop for Process<R> {
-    fn drop(&mut self) {
-        self.kill();
+        crate::last_stderr_line(&self.stderr.lock().unwrap())
     }
 }
 
@@ -608,7 +601,7 @@ fn drain(mut pipe: ChildStderr, into: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
 
 /// `Command` isn't `Clone`; rebuild it from its program and arguments.
 fn clone_command(cmd: &Command) -> Command {
-    let mut c = crate::command(Path::new(cmd.get_program()));
+    let mut c = command(cmd.get_program());
     c.args(cmd.get_args());
     c
 }

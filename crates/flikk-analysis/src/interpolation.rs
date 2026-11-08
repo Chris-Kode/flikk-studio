@@ -14,23 +14,23 @@
 //! on), and blended until they are made. Renders wait for each. A frame
 //! is made by one thread at a time: a render that wants one being made
 //! waits for it, and the viewer leaves it to whoever makes it. A frame
-//! that fails is not asked for again for [`RETRY_AFTER`], or until the
-//! model is downloaded when it was missing; renders try it again all the
-//! same.
+//! that fails is not asked for again for
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), or until the model
+//! is downloaded when it was missing; renders try it again all the same.
 
+use crate::engine::{Claims, ModelFailures};
 use flikk_core::disk_cache::{DiskCache, GB, Key};
 use flikk_core::paths;
 use flikk_core::services::{Between, Frame, InterpolationService};
 use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
-use std::any::Any;
-use std::collections::{HashMap, HashSet, VecDeque};
+use flikk_os::sync::{lock, panic_message, wait};
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Frames kept in memory.
 const KEPT: usize = 48;
@@ -42,24 +42,6 @@ const DISK_LIMIT: u64 = 4 * GB;
 const MAGIC: [u8; 4] = *b"FLKI";
 /// Frames waiting to be made; older requests go first.
 const WAITING: usize = 24;
-/// How long a frame that failed is left before the viewer asks again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// What a panic making a frame says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("optical flow stopped unexpectedly: {detail}"),
-        None => "optical flow stopped unexpectedly".into(),
-    }
-}
 
 /// The [`InterpolationService`] that runs the model on this machine.
 pub struct LocalInterpolation {
@@ -74,11 +56,10 @@ struct Shared {
     wake: Condvar,
     /// The worker thread is running.
     working: AtomicBool,
-    /// Keys that failed: whether the model was there then, and when.
-    failed: Mutex<HashMap<Key, (bool, Instant)>>,
-    /// Keys being made now, and their end announced.
-    making: Mutex<HashSet<Key>>,
-    finished: Condvar,
+    /// Keys that failed lately.
+    failed: Mutex<ModelFailures<Key>>,
+    /// Keys being made now.
+    making: Claims<Key>,
     version: AtomicU64,
 }
 
@@ -110,8 +91,7 @@ impl LocalInterpolation {
             wake: Condvar::new(),
             working: AtomicBool::new(false),
             failed: Mutex::default(),
-            making: Mutex::default(),
-            finished: Condvar::new(),
+            making: Claims::default(),
             version: AtomicU64::new(0),
         });
         // Now, so it reads the disk's index before the first frame drawn.
@@ -142,7 +122,7 @@ fn runner(model: &'static flikk_models::Model) -> Option<Arc<dyn Interpolator>> 
 fn key(request: &Between<'_>) -> Key {
     let model = ModelTask::FrameInterpolation.model();
     let folder = match &request.item.fingerprint {
-        Some(fp) => fp.0.clone(),
+        Some(fp) => fp.file_stem(),
         None => {
             let mut h = Fnv::default();
             h.write(request.item.path.to_string_lossy().as_bytes());
@@ -253,15 +233,7 @@ impl Shared {
     /// still missing.
     fn failed(&self, key: Key) -> bool {
         let downloaded = ModelTask::FrameInterpolation.model().is_downloaded();
-        let mut failed = lock(&self.failed);
-        match failed.get(&key) {
-            Some((there, at)) if (downloaded && !there) || at.elapsed() >= RETRY_AFTER => {
-                failed.remove(&key);
-                false
-            }
-            Some(_) => true,
-            None => false,
-        }
+        lock(&self.failed).recent(&key, downloaded).is_some()
     }
 
     fn fail(&self, key: Key, why: &str) {
@@ -269,7 +241,7 @@ impl Shared {
         if downloaded {
             eprintln!("flikk-analysis: optical flow failed: {why}");
         }
-        lock(&self.failed).insert(key, (downloaded, Instant::now()));
+        lock(&self.failed).record(key, why, downloaded);
     }
 
     fn make(&self, job: &Job) -> Option<Frame> {
@@ -280,13 +252,13 @@ impl Shared {
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
             *lock(&self.runner) = None;
-            Err(stopped(payload.as_ref()))
+            Err(panic_message("optical flow", payload.as_ref()))
         });
         match made {
             Ok(frame) => {
                 write(&job.key, &frame);
                 Self::keep(&mut lock(&self.made), job.key, frame.clone());
-                lock(&self.failed).remove(&job.key);
+                lock(&self.failed).clear(&job.key);
                 self.version.fetch_add(1, Ordering::SeqCst);
                 Some(frame)
             }
@@ -299,26 +271,19 @@ impl Shared {
 
     /// Whether another thread is making `key` now.
     fn being_made(&self, key: Key) -> bool {
-        lock(&self.making).contains(&key)
+        self.making.held(&key)
     }
 
     /// The frame of `job`, made here unless it is made already. While
     /// another thread makes it, waits for that with `wait` and takes its
     /// frame (making it here when that failed), and leaves it otherwise.
     fn claim(&self, job: &Job, wait: bool) -> Option<Frame> {
-        {
-            let mut making = lock(&self.making);
-            while !making.insert(job.key) {
-                if !wait {
-                    return None;
-                }
-                making = self
-                    .finished
-                    .wait(making)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-        }
-        let _claim = Making(self, job.key);
+        let claimed = self
+            .making
+            .claim(&job.key, || None, || (!wait).then_some(()), None);
+        let Ok(_claim) = claimed else {
+            return None;
+        };
         // Made by the thread just waited for, or just before the claim.
         if let Some(frame) = self.find(job.key) {
             return Some(frame);
@@ -355,14 +320,14 @@ impl Shared {
                     if let Some(job) = waiting.pop_back() {
                         break job;
                     }
-                    waiting = self.wake.wait(waiting).unwrap_or_else(|e| e.into_inner());
+                    waiting = wait(&self.wake, waiting);
                 }
             };
             // `make` catches the model's panics; this, the disk's. A
             // render making this frame now keeps it for the viewer.
             let done = catch_unwind(AssertUnwindSafe(|| self.claim(&job, false)));
             if let Err(payload) = done {
-                self.fail(job.key, &stopped(payload.as_ref()));
+                self.fail(job.key, &panic_message("optical flow", payload.as_ref()));
             }
         }
     }
@@ -420,17 +385,6 @@ impl InterpolationService for LocalInterpolation {
 
     fn version(&self) -> u64 {
         self.shared.version.load(Ordering::SeqCst)
-    }
-}
-
-/// A key claimed in [`Shared::making`], let go when dropped, a panic
-/// included, so the threads waiting for it go on.
-struct Making<'a>(&'a Shared, Key);
-
-impl Drop for Making<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.making).remove(&self.1);
-        self.0.finished.notify_all();
     }
 }
 

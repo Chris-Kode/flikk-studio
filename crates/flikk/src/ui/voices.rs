@@ -6,15 +6,17 @@
 
 use crate::state::EditorState;
 use crate::state::voices::{Listening, SIMILAR_LIMIT, SPEAKER_LIMIT, discard_recording, recording};
+use crate::ui::format::file_name;
+use crate::ui::kit::play::play_button;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Badge, Button, Checkbox, DialogExt as _, DialogId, DropdownMenu as _, EmptyState, Icon,
     IconName, Input, PopupMenuItem, Radio, ScrollableElement as _, Segmented, Spinner, Switch, Tab,
     Tabs, Textarea, Tooltip, h_flex, v_flex,
 };
+use crate::ui::listen::listen_button;
 use crate::ui::media_pool::form;
 use crate::ui::media_pool::import::is_audio;
-use crate::ui::media_pool::{listen_button, play_button};
 use flikk_core::cloud::{
     self, Capability, CloudError, DESIGN_DESCRIPTION, Voice, VoiceClone, VoiceDesign, VoiceOrigin,
     VoicePreview, VoiceQuery,
@@ -976,7 +978,7 @@ impl VoicesDialog {
                     let playing = state
                         .source
                         .as_ref()
-                        .filter(|p| p.is(item) && p.is_playing())
+                        .filter(|p| p.plays(item))
                         .map(|p| p.fraction());
                     h_flex()
                         .id(("preview", i))
@@ -1122,7 +1124,7 @@ impl VoicesDialog {
             .media
             .iter()
             .filter(|m| matches!(m.kind, MediaKind::Audio | MediaKind::Video))
-            .map(|m| (crate::ui::media_pool::item_name(m).into(), m.path.clone()))
+            .map(|m| (crate::ui::format::item_name(m).into(), m.path.clone()))
             .collect();
         let files: Vec<AnyElement> = self
             .files
@@ -1311,12 +1313,6 @@ impl Render for VoicesDialog {
                 el.child(form::problem(error))
             })
     }
-}
-
-fn file_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// A spinner the size of a play button.

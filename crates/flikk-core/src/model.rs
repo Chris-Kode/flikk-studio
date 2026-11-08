@@ -4,6 +4,8 @@
 //! Plain data with serde, so the store can persist it and the agent can read
 //! it as JSON. Mutation goes through [`crate::ops::Op`] only.
 
+mod animate;
+
 use crate::audiofx::AudioFx;
 use crate::fx::{FxAsset, FxInstance, Transition};
 use crate::ids::*;
@@ -65,7 +67,7 @@ impl Project {
     ///
     /// Clips keep their content and their place in time. A clip on a track
     /// whose kind does not take it (the rule every edit holds to, see
-    /// [`crate::edit`]) moves, at the same time, to the first track of its
+    /// `edit::fits_track`) moves, at the same time, to the first track of its
     /// kind that has room, made for it when needed. Then, on each track,
     /// clips are sorted by start; a clip that overlaps an earlier one moves
     /// to the first track of the same kind below it that has room, made for
@@ -161,7 +163,7 @@ impl Project {
     }
 
     /// The kind repair of [`Project::normalize`]: every clip its track does
-    /// not take ([`crate::edit::fits_track`]) moves, keeping its id, times
+    /// not take (`edit::fits_track`) moves, keeping its id, times
     /// and everything else, to the first track of its [`Self::home_kind`]
     /// that it overlaps nothing on, else to a new track of that kind. Clips
     /// move in track order, then by start, so the result is the same on
@@ -254,16 +256,15 @@ fn new_track(tracks: &[Track], kind: TrackKind) -> (usize, Track) {
         };
         return (last + 1, track);
     }
-    let prefix = match kind {
-        TrackKind::Video => "V",
-        TrackKind::Audio => "A",
-        TrackKind::Caption => "C",
-        TrackKind::Title => "T",
-        TrackKind::Overlay => "O",
-    };
+    let prefix = kind.prefix();
     let name = unused_name(taken, |n| format!("{prefix}{n}"), 1);
-    // Captions on top, sound at the bottom, other pictures above video.
-    let index = match kind {
+    (new_track_index(tracks, kind), Track::new(kind, name))
+}
+
+/// Where in `tracks` a new `kind` track goes: captions on top, sound at
+/// the bottom, other pictures above the video tracks.
+fn new_track_index(tracks: &[Track], kind: TrackKind) -> usize {
+    match kind {
         TrackKind::Caption => 0,
         TrackKind::Audio => tracks.len(),
         _ => tracks
@@ -271,8 +272,7 @@ fn new_track(tracks: &[Track], kind: TrackKind) -> (usize, Track) {
             .position(|t| t.kind == TrackKind::Video)
             .or_else(|| tracks.iter().position(|t| t.kind == TrackKind::Audio))
             .unwrap_or(tracks.len()),
-    };
-    (index, Track::new(kind, name))
+    }
 }
 
 /// `name(n)` for the first `n` from `from` up that is not `taken`.
@@ -332,6 +332,47 @@ pub struct MediaItem {
     /// How HDR pictures are mapped to SDR (see [`crate::hdr`]).
     #[serde(default, skip_serializing_if = "crate::hdr::ToneMap::is_default")]
     pub tone_map: crate::hdr::ToneMap,
+}
+
+impl Fingerprint {
+    /// The fingerprint as a file or folder name for the caches keyed by
+    /// it: letters and digits kept, anything else `_`. Fingerprints are
+    /// hex, so this is the fingerprint itself; one read from an edited
+    /// project file cannot name a path outside its cache folder.
+    pub fn file_stem(&self) -> String {
+        self.0
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+}
+
+impl MediaItem {
+    /// A pool item for the file at `path`, of `kind`, with a new id and
+    /// nothing else known yet: no name of its own, fingerprint, probe
+    /// results, bin, tags, proxy or generation, and HDR mapped the default
+    /// way. Set the fields that are known on the result.
+    pub fn new(path: impl Into<PathBuf>, kind: MediaKind) -> Self {
+        Self {
+            id: MediaId::new(),
+            path: path.into(),
+            name: None,
+            kind,
+            fingerprint: None,
+            info: None,
+            bin: None,
+            tags: Vec::new(),
+            proxy: None,
+            generated: None,
+            tone_map: Default::default(),
+        }
+    }
+
+    /// The index of the file's first audio stream, the one a clip plays
+    /// unless it picks another; `None` when it has none or is not probed.
+    pub fn first_audio_stream(&self) -> Option<u32> {
+        self.info.as_ref()?.audio.first().map(|a| a.index)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -404,17 +445,7 @@ impl Timeline {
         while self.tracks.iter().any(|t| t.name == format!("{prefix}{n}")) {
             n += 1;
         }
-        let index = match kind {
-            TrackKind::Caption => 0,
-            TrackKind::Audio => self.tracks.len(),
-            _ => self
-                .tracks
-                .iter()
-                .position(|t| t.kind == TrackKind::Video)
-                .or_else(|| self.tracks.iter().position(|t| t.kind == TrackKind::Audio))
-                .unwrap_or(self.tracks.len()),
-        };
-        (index, format!("{prefix}{n}"))
+        (new_track_index(&self.tracks, kind), format!("{prefix}{n}"))
     }
 
     pub fn track(&self, id: TrackId) -> Option<&Track> {
@@ -723,6 +754,33 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Every FX instance of the clip, in drawing order: its effects, its
+    /// generator when it is one, then its in and out transitions.
+    pub fn fx_instances(&self) -> impl Iterator<Item = &FxInstance> {
+        let generator = match &self.content {
+            ClipContent::Generator { fx } => Some(fx),
+            _ => None,
+        };
+        let transitions = [&self.transition_in, &self.transition_out];
+        self.effects
+            .iter()
+            .chain(generator)
+            .chain(transitions.into_iter().flatten().map(|t| &t.fx))
+    }
+
+    /// [`Clip::fx_instances`], to change.
+    pub fn fx_instances_mut(&mut self) -> impl Iterator<Item = &mut FxInstance> {
+        let generator = match &mut self.content {
+            ClipContent::Generator { fx } => Some(fx),
+            _ => None,
+        };
+        let transitions = [&mut self.transition_in, &mut self.transition_out];
+        self.effects
+            .iter_mut()
+            .chain(generator)
+            .chain(transitions.into_iter().flatten().map(|t| &mut t.fx))
+    }
+
     pub fn new(start: Time, duration: Time, content: ClipContent) -> Self {
         Self {
             id: ClipId::new(),
@@ -869,17 +927,7 @@ impl Clip {
                 sorted = true;
             }
         }
-        let generator = match &mut self.content {
-            ClipContent::Generator { fx } => Some(fx),
-            _ => None,
-        };
-        let transitions = [&mut self.transition_in, &mut self.transition_out];
-        for fx in self
-            .effects
-            .iter_mut()
-            .chain(generator)
-            .chain(transitions.into_iter().flatten().map(|t| &mut t.fx))
-        {
+        for fx in self.fx_instances_mut() {
             if !fx.keyframes.is_sorted_by_key(|k| k.at) {
                 fx.keyframes.sort_by_key(|k| k.at);
                 sorted = true;

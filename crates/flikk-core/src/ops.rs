@@ -174,6 +174,17 @@ impl Op {
         }
     }
 
+    /// The track whose lock refuses this op: the one whose clips it adds,
+    /// removes or changes, or the track it removes. A lock keeps a track's
+    /// clips and the track itself; its name, mix, caption style and lock
+    /// stay editable, as in the track header.
+    pub fn locked_by(&self) -> Option<TrackId> {
+        match self {
+            Op::RemoveTrack { track, .. } => Some(track.id),
+            op => op.clip_track(),
+        }
+    }
+
     /// What this op changes. A removed track takes its clips with it.
     pub fn targets(&self) -> Vec<Target> {
         match self {
@@ -468,6 +479,13 @@ fn track_mut(timeline: &mut Timeline, id: TrackId) -> Result<&mut Track> {
         .iter_mut()
         .find(|t| t.id == id)
         .ok_or(CoreError::TrackNotFound(id))
+}
+
+/// The first locked track of `project` that one of `ops` would change (see
+/// [`Op::locked_by`]); `None` when they leave every locked track alone.
+pub(crate) fn locked_track<'a>(project: &'a Project, ops: &[Op]) -> Option<&'a Track> {
+    ops.iter()
+        .find_map(|op| project.timeline.track(op.locked_by()?).filter(|t| t.locked))
 }
 
 /// Apply ops in order; on failure roll back the ones already applied, so the

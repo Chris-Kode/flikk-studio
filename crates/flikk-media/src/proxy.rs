@@ -2,12 +2,13 @@
 //! (PRD M4).
 
 use crate::decode::{Process, tone_then};
-use crate::{FfmpegMedia, err, tmp_sibling};
+use crate::{FfmpegMedia, err};
 use flikk_core::hdr::Mapping;
 use flikk_core::model::{Fingerprint, MediaItem};
 use flikk_core::paths;
 use flikk_core::services::{ServiceError, ServiceResult};
 use flikk_deliver::hw::{self, Codec};
+use flikk_os::fs::temp_sibling;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -27,8 +28,8 @@ pub fn proxy_path_for(item: &MediaItem) -> Option<PathBuf> {
 
 pub(crate) fn proxy_path_mapped(fingerprint: &Fingerprint, mapping: Option<&Mapping>) -> PathBuf {
     let name = match mapping {
-        Some(m) => format!("{}-{}.mp4", fingerprint.0, m.key()),
-        None => format!("{}.mp4", fingerprint.0),
+        Some(m) => format!("{}-{}.mp4", fingerprint.file_stem(), m.key()),
+        None => format!("{}.mp4", fingerprint.file_stem()),
     };
     paths::cache().join("proxies").join(name)
 }
@@ -56,7 +57,8 @@ pub(crate) fn ensure_proxy(
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| err("proxy dir", e))?;
     }
-    let tmp = tmp_sibling(&out);
+    // Muxed as `-f mp4`, so the temp name needs no extension.
+    let tmp = temp_sibling(&out);
 
     let rate = format!("{}/{}", video.rate.num, video.rate.den);
     // Half-second GOPs keep scrubbing snappy.

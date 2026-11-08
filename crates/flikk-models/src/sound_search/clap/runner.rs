@@ -9,6 +9,7 @@ use crate::sound_search::SoundSearch;
 use crate::{Windows, onnx};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::analysis::SoundVectors;
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
@@ -31,7 +32,7 @@ impl SoundSearch for Clap {
     }
 
     fn embed(&self, windows: &[&[f32]]) -> Result<Vec<Vec<f32>>> {
-        let mut session = self.audio.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = lock(&self.audio);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *session = None;
@@ -43,7 +44,7 @@ impl SoundSearch for Clap {
     }
 
     fn describe(&self, text: &str) -> Result<Vec<f32>> {
-        let mut loaded = self.text.lock().unwrap_or_else(|e| e.into_inner());
+        let mut loaded = lock(&self.text);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *loaded = None;

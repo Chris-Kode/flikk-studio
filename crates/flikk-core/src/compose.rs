@@ -70,10 +70,14 @@ mod batch;
 mod cpu;
 mod layout;
 mod pictures;
+mod placement;
 
 pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
-pub use pictures::{Pictures, Stills, Streams, frame_length, overlay_item};
+pub use pictures::{
+    Pictures, STILL_IMAGE_EXTENSIONS, Stills, Streams, frame_length, is_still_overlay, overlay_item,
+};
+pub use placement::{MAX_SKEW, Matrix3, Placement, placement, placement_from};
 
 use crate::depth::{self, DepthMap};
 use crate::fx::{self, FxAsset, FxInstance, FxKind, FxLanguage, PlacedTransition};
@@ -85,8 +89,8 @@ use crate::model::{
 };
 use crate::person::PersonMatte;
 use crate::services::{
-    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, Placement,
-    ServiceError, ServiceResult, Services, SubjectRef, Surface,
+    Between, Frame, FxBatch, FxCall, Lettered, PendingFrame, PersonRef, PixelOrder, ServiceError,
+    ServiceResult, Services, SubjectRef, Surface,
 };
 use crate::speed::{BETWEEN_STEPS, Interpolation};
 use crate::subject::Matte;
@@ -536,57 +540,6 @@ pub fn size_for_width(project: &Project, width: u32) -> (u32, u32) {
     let s = &project.timeline.settings;
     let h = width as u64 * s.height.max(1) as u64 / s.width.max(1) as u64;
     (width.max(2) & !1, (h as u32).max(2) & !1)
-}
-
-/// Steepest slant drawn, in degrees; beyond it a picture is nearly flat.
-pub const MAX_SKEW: f32 = 80.0;
-
-/// Where a `picture`-sized frame with transform `tf` lands on a `canvas`:
-/// fitted to it by `tf.fit` and centred, then transformed
-/// ([`placement_from`]), as in the export graph.
-pub fn placement(tf: &Transform, picture: (u32, u32), canvas: (u32, u32)) -> Placement {
-    let (pw, ph) = (picture.0.max(1) as f32, picture.1.max(1) as f32);
-    let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
-    let fit = tf.fit.scale(picture, canvas) as f32;
-    placement_from(tf, [cw / 2.0, ch / 2.0], [pw * fit, ph * fit], canvas)
-}
-
-/// Where a picture resting at `center` with `size` (canvas pixels) lands
-/// with transform `tf`: stretched and scaled, skewed and rotated clockwise
-/// about its anchor, then moved by `position` × canvas size.
-pub fn placement_from(
-    tf: &Transform,
-    center: [f32; 2],
-    size: [f32; 2],
-    canvas: (u32, u32),
-) -> Placement {
-    let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
-    let s = tf.scale.max(0.0);
-    let drawn = [
-        size[0] * s * tf.stretch[0].max(0.0),
-        size[1] * s * tf.stretch[1].max(0.0),
-    ];
-    let mut place = Placement {
-        center: [0.0, 0.0],
-        size: drawn,
-        rotation_deg: tf.rotation_deg,
-        skew_deg: tf.skew_deg.map(|d| d.clamp(-MAX_SKEW, MAX_SKEW)),
-        crop: tf.crop.map(|c| c.clamp(0.0, 1.0)),
-        flip: tf.flip,
-        opacity: tf.opacity.clamp(0.0, 1.0),
-        blend: tf.blend,
-        pin: tf.corner_pin,
-    };
-    // The anchor stays where it rests (plus `position`); the centre is the
-    // anchor's offset from it, scaled and turned with the picture.
-    let [a, b, c, d] = place.linear();
-    let rest = [tf.anchor[0] * size[0], tf.anchor[1] * size[1]];
-    let (ax, ay) = (tf.anchor[0] * drawn[0], tf.anchor[1] * drawn[1]);
-    place.center = [
-        center[0] + rest[0] + tf.position[0] * cw - (a * ax + b * ay),
-        center[1] + rest[1] + tf.position[1] * ch - (c * ax + d * ay),
-    ];
-    place
 }
 
 /// Whether `tf` uses anything beyond position, uniform scale, rotation and

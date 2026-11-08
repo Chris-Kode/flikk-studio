@@ -8,6 +8,7 @@ name = "flikk-mcp"
 path = "src/bin/flikk-mcp.rs"
 
 [dependencies]
+flikk-os.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

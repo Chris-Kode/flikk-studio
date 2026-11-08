@@ -93,7 +93,8 @@ pub struct DeliverPanel {
     whole_timeline: bool,
     /// For H.264 and HEVC; saved for the user.
     encoder: Encoder,
-    polling: bool,
+    /// Refreshes the panel while jobs run.
+    polling: Option<Task<()>>,
     /// The running still export's cancel flag.
     still: Option<Arc<AtomicBool>>,
     _subscriptions: Vec<Subscription>,
@@ -126,7 +127,7 @@ impl DeliverPanel {
         let custom = [
             input(seq.width.to_string(), window, cx),
             input(seq.height.to_string(), window, cx),
-            input(format_fps(seq.rate), window, cx),
+            input(crate::ui::format::fps(seq.rate), window, cx),
             input("18".into(), window, cx),
         ];
         let mut _subscriptions = vec![
@@ -192,7 +193,7 @@ impl DeliverPanel {
             burn_captions: true,
             whole_timeline: false,
             encoder: saved_encoder(),
-            polling: false,
+            polling: None,
             still: None,
             _subscriptions,
         }
@@ -257,14 +258,13 @@ impl DeliverPanel {
     fn set_status(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         let message = message.into();
         self.state.update(cx, |s, cx| {
-            s.status = Some(message);
-            cx.notify();
+            s.say(message, cx);
         });
     }
 
     /// The caption presets edited in the transcript panel.
     fn caption_styles(&self, cx: &App) -> Vec<CaptionStyle> {
-        self.state.read(cx).presets.caption_styles.clone()
+        self.state.read(cx).presets().caption_styles.clone()
     }
 
     fn loudness_target(&self) -> LoudnessTarget {
@@ -384,26 +384,15 @@ impl DeliverPanel {
 
     /// Refresh while jobs run.
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if self.polling {
+        if self.polling.is_some() {
             return;
         }
-        self.polling = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                let busy = this.update(cx, |this, cx| {
-                    cx.notify();
-                    this.polling = this.queue.is_busy();
-                    this.polling
-                });
-                if !matches!(busy, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.polling = Some(crate::ui::repaint_while(
+            cx,
+            Duration::from_millis(150),
+            |this, _| this.queue.is_busy(),
+            |this| this.polling = None,
+        ));
     }
 
     fn export(&mut self, kind: Export, cx: &mut Context<Self>) {
@@ -701,7 +690,10 @@ impl DeliverPanel {
                     .unwrap_or_else(|| self.state.read(cx).bus.project().timeline.duration());
                 let lead = if s.video.is_some() {
                     let (w, h) = s.size(seq);
-                    format!("{w}×{h} · {} fps ·", format_fps(s.rate.unwrap_or(seq.rate)))
+                    format!(
+                        "{w}×{h} · {} fps ·",
+                        crate::ui::format::fps(s.rate.unwrap_or(seq.rate))
+                    )
                 } else {
                     format!("{} kHz · {} ·", khz(seq.sample_rate), audio_label(s.audio))
                 };
@@ -1193,17 +1185,6 @@ fn file_size(path: &Path) -> Option<String> {
     } else {
         format!("{:.0} KB", (bytes / 1e3).max(1.))
     })
-}
-
-fn format_fps(rate: Rate) -> String {
-    if rate.den == 1 {
-        rate.num.to_string()
-    } else {
-        format!("{:.3}", rate.fps())
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    }
 }
 
 /// `60`, `29.97`, `30000/1001`.

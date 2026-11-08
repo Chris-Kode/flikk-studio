@@ -4,7 +4,7 @@
 //! Downbeats also run as faint lines through the lanes.
 
 use crate::canvas::Canvas;
-use crate::{FfmpegMedia, err, secs_arg, stderr_tail};
+use crate::{FfmpegMedia, err, last_stderr_line, secs_arg};
 use flikk_core::services::{
     AudioMarkKind, AudioPictureRequest, AudioSegment, Frame, ServiceError, ServiceResult,
 };
@@ -172,7 +172,7 @@ fn spectrum(media: &FfmpegMedia, seg: &AudioSegment, w: u32, h: u32) -> ServiceR
         return Err(ServiceError(format!(
             "spectrogram of {}: {}",
             seg.path.display(),
-            stderr_tail(&out.stderr)
+            last_stderr_line(&out.stderr)
         )));
     }
     Ok(Frame {

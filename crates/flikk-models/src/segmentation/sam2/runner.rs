@@ -14,6 +14,7 @@ use crate::segmentation::plan::{self, MEMORY_FRAMES, POINTERS};
 use crate::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -81,7 +82,7 @@ struct Memory {
 
 impl Sam2 {
     fn graphs(&self, memory: bool) -> Result<MutexGuard<'_, Option<Graphs>>> {
-        let mut graphs = self.graphs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut graphs = lock(&self.graphs);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *graphs = None;

@@ -5,7 +5,8 @@
 //! as they are. Timeline playback closes it, and playing it stops the
 //! timeline; seeking the timeline closes a picture.
 
-use super::{EditorState, PLAY_TICK};
+use super::EditorState;
+use super::playback::PLAY_TICK;
 use crate::ui::viewer::audio::AudioOut;
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Clip, ClipContent, MediaItem, MediaKind, Project, Track, TrackKind};
@@ -53,6 +54,11 @@ impl Source {
 
     pub fn is_playing(&self) -> bool {
         self.playing.is_some()
+    }
+
+    /// Whether this is `item` and it is playing now.
+    pub fn plays(&self, item: &MediaItem) -> bool {
+        self.is(item) && self.is_playing()
     }
 
     /// Whether it runs at all; a still doesn't.
@@ -144,7 +150,7 @@ impl EditorState {
 
     pub fn monitor_playing(&self) -> bool {
         self.source_picture()
-            .map_or(self.playing, Source::is_playing)
+            .map_or(self.is_playing(), Source::is_playing)
     }
 
     /// Whether `item` is a sound that can play now.
@@ -152,7 +158,7 @@ impl EditorState {
         item.kind == MediaKind::Audio
             && length(item).is_some()
             && self.services.media.is_some()
-            && !self.offline.contains(&item.id)
+            && !self.is_offline(item.id)
     }
 
     /// Show pool item `media` in the viewer, paused at its start.
@@ -160,12 +166,11 @@ impl EditorState {
         let Some(item) = self.bus.project().media(media).cloned() else {
             return;
         };
-        if self.offline.contains(&media) {
-            self.status = Some("That file is offline".into());
-            cx.notify();
+        if self.is_offline(media) {
+            self.say("That file is offline", cx);
             return;
         }
-        if self.playing {
+        if self.is_playing() {
             self.set_playing(false, cx);
         }
         self.source = Some(Source {
@@ -222,7 +227,7 @@ impl EditorState {
         if length(item).is_none() {
             return;
         }
-        if self.playing {
+        if self.is_playing() {
             self.set_playing(false, cx);
         }
         let project = match &self.source {
@@ -395,8 +400,7 @@ impl EditorState {
             at = at + source.duration();
         }
         if commands.is_empty() {
-            self.status = Some("No track to edit into".into());
-            cx.notify();
+            self.say("No track to edit into", cx);
             return;
         }
         if self.edit_batch(commands, "insert_clip", cx).is_some() {

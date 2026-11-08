@@ -29,6 +29,7 @@ use crate::preset::{LoudnessTarget, RenderSettings};
 use crate::{audio_fx, captions};
 use anyhow::{Context as _, Result, bail};
 use flikk_core::audiofx::{self, Span};
+use flikk_core::compose::is_still_overlay;
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::{Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind};
 use flikk_core::speed::RampAudio;
@@ -203,17 +204,6 @@ pub(crate) fn has_text(project: &Project, range: TimeRange) -> bool {
     })
 }
 
-fn is_still_path(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "tga"
-    )
-}
-
 impl Builder<'_> {
     fn label(&mut self, prefix: &str) -> String {
         self.next += 1;
@@ -373,7 +363,7 @@ impl Builder<'_> {
                 }
                 (item.path.clone(), item.kind == MediaKind::Image, known)
             }
-            ClipContent::Overlay { asset, .. } => (asset.clone(), is_still_path(asset), None),
+            ClipContent::Overlay { asset, .. } => (asset.clone(), is_still_overlay(asset), None),
             ClipContent::Title { .. }
             | ClipContent::Caption { .. }
             | ClipContent::Generator { .. } => return Ok(None),

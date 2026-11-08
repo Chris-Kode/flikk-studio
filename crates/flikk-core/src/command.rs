@@ -650,6 +650,86 @@ impl Command {
         }
     }
 
+    /// Whether the plan of this command is checked against protected ranges
+    /// and warns when it changes what plays inside one (PRD F4). Markers,
+    /// new tracks, track names, order and locks, the media pool, clip names
+    /// and colours, the sequence format and rates, effect stacks and FX
+    /// programs are not what a protected range guards, so commands that
+    /// only change those are not checked. Exhaustive, so that every new
+    /// command is classified.
+    pub fn checks_protected(&self) -> bool {
+        use Command::*;
+        match self {
+            Blade { .. }
+            | RippleDelete { .. }
+            | DeleteClips { .. }
+            | InsertClip { .. }
+            | MoveClip { .. }
+            | Trim { .. }
+            | Roll { .. }
+            | Slip { .. }
+            | Slide { .. }
+            | RemoveTrack { .. }
+            | PlaceClips { .. }
+            | SetSpeed { .. }
+            | SetSpeedRamp { .. }
+            | SetRetime { .. }
+            | SetClipsEnabled { .. }
+            | ReplaceSpeech { .. }
+            | SyncClips { .. }
+            | PlaceSynced { .. }
+            | SetTransform { .. }
+            | AddZoom { .. }
+            | SetKeyframe { .. }
+            | RemoveKeyframe { .. }
+            | SetMasks { .. }
+            | SetStabilization { .. }
+            | SetCaptionStyle { .. }
+            | AddCaption { .. }
+            | EditCaption { .. }
+            | ApplyTitle { .. }
+            | SetGrade { .. }
+            | ApplyLut { .. }
+            | CopyGrade { .. }
+            | SetTimelineGrade { .. }
+            | SetGain { .. }
+            | AddFade { .. }
+            | SetTrackMix { .. }
+            | SetDucking { .. }
+            | SetPlaylist { .. }
+            | FitMusic { .. }
+            | AddOverlay { .. }
+            | SetTransition { .. }
+            | AddGenerator { .. }
+            | SetGenerator { .. }
+            | SetBins { .. } => true,
+            AddMarker { .. }
+            | EditMarker { .. }
+            | RemoveMarker { .. }
+            | AddTrack { .. }
+            | SetTrackLocked { .. }
+            | RenameTrack { .. }
+            | MoveTrack { .. }
+            | ImportMedia { .. }
+            | UpdateMedia { .. }
+            | RemoveMedia { .. }
+            | RenameClip { .. }
+            | SetClipColor { .. }
+            | SetFormat { .. }
+            | SetRates { .. }
+            | AddEffect { .. }
+            | SetEffect { .. }
+            | RemoveEffect { .. }
+            | MoveEffect { .. }
+            | SetEffectKeyframe { .. }
+            | RemoveEffectKeyframe { .. }
+            | SetFxAsset { .. }
+            | RemoveFxAsset { .. }
+            | SetAudioEffects { .. }
+            | SetToneMap { .. } => false,
+        }
+    }
+
     /// Tool / undo-menu name, e.g. `ripple_delete`.
     pub fn name(&self) -> String {
         serde_json::to_value(self)

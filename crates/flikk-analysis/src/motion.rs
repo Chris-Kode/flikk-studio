@@ -19,12 +19,14 @@
 //! An item is measured by one thread at a time: one that wants it while
 //! another measures it waits for that and takes its path, so a render
 //! does not measure again what the background is measuring. One that
-//! failed is not queued again for [`RETRY_AFTER`]; renders measure it
+//! failed is not queued again for
+//! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER); renders measure it
 //! again all the same. A background job stops, kept as not measured,
 //! when its item is asked for under another fingerprint (the file
 //! changed), is cancelled (it left the project) or the stabilizer is
 //! dropped (the window closed).
 
+use crate::engine::Claims;
 use flikk_core::ids::{JobId, MediaId};
 use flikk_core::jobs::JobQueue;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
@@ -33,13 +35,14 @@ use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
-use std::any::Any;
+use flikk_os::backoff::Failures;
+use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Widest frame measured.
 const WIDTH: u32 = 320;
@@ -60,26 +63,8 @@ const MAX_TURN: f64 = 0.05;
 /// Least texture (the smaller eigenvalue of a block's structure tensor,
 /// per pixel) a block needs to be measured.
 const TEXTURE: f64 = 30.0;
-/// How long an item that failed is left before it is queued again.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How often a thread waiting for another's measuring looks at `cancel`.
 const WAIT_STEP: Duration = Duration::from_millis(100);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// What a panic measuring says, with its message when it carries one.
-fn stopped(payload: &(dyn Any + Send)) -> String {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    match detail {
-        Some(detail) => format!("measuring the camera path stopped unexpectedly: {detail}"),
-        None => "measuring the camera path stopped unexpectedly".into(),
-    }
-}
 
 /// The [`Stabilizer`] that measures on this machine.
 pub struct LocalStabilizer {
@@ -92,11 +77,10 @@ struct Shared {
     paths: Mutex<HashMap<Fingerprint, Arc<CameraPath>>>,
     /// Looked for on disk and not there.
     absent: Mutex<HashSet<Fingerprint>>,
-    /// Items being measured now, and their end announced.
-    measuring: Mutex<HashSet<Fingerprint>>,
-    measured: Condvar,
-    /// Items that failed: why, and when.
-    failed: Mutex<HashMap<Fingerprint, (String, Instant)>>,
+    /// Items being measured now.
+    measuring: Claims<Fingerprint>,
+    /// Items that failed, and why.
+    failed: Mutex<Failures<Fingerprint>>,
     /// The fingerprint each media item was last asked for under.
     wanted: Mutex<HashMap<MediaId, Fingerprint>>,
     /// The stabilizer was dropped: background jobs stop.
@@ -111,8 +95,7 @@ impl LocalStabilizer {
                 media,
                 paths: Mutex::default(),
                 absent: Mutex::default(),
-                measuring: Mutex::default(),
-                measured: Condvar::new(),
+                measuring: Claims::default(),
                 failed: Mutex::default(),
                 wanted: Mutex::default(),
                 closed: AtomicBool::new(false),
@@ -127,7 +110,7 @@ impl Drop for LocalStabilizer {
     fn drop(&mut self) {
         // The jobs hold `shared`, not this: tell them nobody is left.
         self.shared.closed.store(true, Ordering::Relaxed);
-        self.shared.measured.notify_all();
+        self.shared.measuring.wake_all();
     }
 }
 
@@ -152,12 +135,10 @@ impl Shared {
         }
     }
 
-    /// Whether `fp` failed less than [`RETRY_AFTER`] ago, and why.
+    /// Why `fp` failed, when it failed less than
+    /// [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER) ago.
     fn failed_lately(&self, fp: &Fingerprint) -> Option<String> {
-        lock(&self.failed)
-            .get(fp)
-            .filter(|(_, at)| at.elapsed() < RETRY_AFTER)
-            .map(|(why, _)| why.clone())
+        lock(&self.failed).recent(fp).map(str::to_owned)
     }
 
     /// Measure `item`, or take what another thread measuring it found,
@@ -173,37 +154,38 @@ impl Shared {
         again: bool,
         waiting: &dyn Fn(),
     ) -> ServiceResult<Arc<CameraPath>> {
-        {
-            let mut measuring = lock(&self.measuring);
-            loop {
-                if let Some(path) = self.path(fp) {
-                    return Ok(path);
-                }
-                if !again && let Some(why) = self.failed_lately(fp) {
-                    return Err(ServiceError(why));
-                }
-                if measuring.insert(fp.clone()) {
-                    break;
-                }
-                if cancel() {
-                    return Err(ServiceError("cancelled".into()));
-                }
-                waiting();
-                measuring = self
-                    .measured
-                    .wait_timeout(measuring, WAIT_STEP)
-                    .unwrap_or_else(|e| e.into_inner())
-                    .0;
+        let done = || {
+            if let Some(path) = self.path(fp) {
+                return Some(Ok(path));
             }
-        }
-        let _claim = Measuring(self, fp);
+            if !again && let Some(why) = self.failed_lately(fp) {
+                return Some(Err(ServiceError(why)));
+            }
+            None
+        };
+        let busy = || {
+            if cancel() {
+                return Some(Err(ServiceError("cancelled".into())));
+            }
+            waiting();
+            None
+        };
+        let _claim = match self.measuring.claim(fp, done, busy, Some(WAIT_STEP)) {
+            Ok(claim) => claim,
+            Err(answer) => return answer,
+        };
         if cancel() {
             return Err(ServiceError("cancelled".into()));
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
             measure(self.media.as_ref(), item, progress, cancel)
         }))
-        .unwrap_or_else(|payload| Err(ServiceError(stopped(payload.as_ref()))));
+        .unwrap_or_else(|payload| {
+            Err(ServiceError(panic_message(
+                "measuring the camera path",
+                payload.as_ref(),
+            )))
+        });
         match result {
             Ok(path) => {
                 if let Err(e) = store(fp, &path) {
@@ -212,27 +194,17 @@ impl Shared {
                 let path = Arc::new(path);
                 lock(&self.paths).insert(fp.clone(), path.clone());
                 lock(&self.absent).remove(fp);
-                lock(&self.failed).remove(fp);
+                lock(&self.failed).clear(fp);
                 self.version.fetch_add(1, Ordering::Relaxed);
                 Ok(path)
             }
             Err(e) => {
                 if !cancel() {
-                    lock(&self.failed).insert(fp.clone(), (e.0.clone(), Instant::now()));
+                    lock(&self.failed).record(fp.clone(), e.0.clone());
                 }
                 Err(e)
             }
         }
-    }
-}
-
-/// An item claimed in [`Shared::measuring`], let go when dropped.
-struct Measuring<'a>(&'a Shared, &'a Fingerprint);
-
-impl Drop for Measuring<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.measuring).remove(self.1);
-        self.0.measured.notify_all();
     }
 }
 
@@ -337,19 +309,9 @@ impl Stabilizer for LocalStabilizer {
 // ------------------------------------------------------------------ cache
 
 fn file(fp: &Fingerprint) -> PathBuf {
-    let name: String =
-        fp.0.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
     paths::cache()
         .join("analysis")
-        .join(format!("{name}.motion"))
+        .join(format!("{}.motion", fp.file_stem()))
 }
 
 fn load(fp: &Fingerprint) -> Option<CameraPath> {
@@ -358,14 +320,7 @@ fn load(fp: &Fingerprint) -> Option<CameraPath> {
 }
 
 fn store(fp: &Fingerprint, path: &CameraPath) -> anyhow::Result<()> {
-    let dest = file(fp);
-    let dir = dest.parent().expect("cache file has a parent");
-    std::fs::create_dir_all(dir)?;
-    let tmp = dest.with_extension(format!("motion.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec(path)?)?;
-    std::fs::rename(&tmp, &dest).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
+    flikk_os::fs::write_atomic(&file(fp), &serde_json::to_vec(path)?)?;
     Ok(())
 }
 

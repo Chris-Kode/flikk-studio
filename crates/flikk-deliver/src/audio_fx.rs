@@ -13,11 +13,12 @@
 //! | Reverb | `afir` with the Freeverb impulse response | exact (Freeverb is linear) |
 //! | Noise reduction | spectral `afftdn` | the preview approximates it with an expander |
 
-use crate::ffmpeg::{escape_path, ffmpeg};
+use crate::ffmpeg::escape_path;
 use crate::keyframes::num;
 use anyhow::{Context as _, Result};
 use flikk_core::audiofx::dsp::{self, PASS_Q, SHELF_SLOPE, db};
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
+use flikk_os::process::{command, ffmpeg};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -234,7 +235,7 @@ fn afftdn_latency() -> f64 {
     static LATENCY: OnceLock<f64> = OnceLock::new();
     *LATENCY.get_or_init(|| {
         const SR: usize = 48_000;
-        let out = crate::ffmpeg::command(ffmpeg())
+        let out = command(ffmpeg())
             .args([
                 "-v",
                 "error",
@@ -281,7 +282,7 @@ fn afftdn_latency() -> f64 {
 fn no_ir_normalization() -> &'static str {
     static OPTION: OnceLock<&'static str> = OnceLock::new();
     OPTION.get_or_init(|| {
-        let help = crate::ffmpeg::command(ffmpeg())
+        let help = command(ffmpeg())
             .args(["-hide_banner", "-h", "filter=afir"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

@@ -115,12 +115,7 @@ impl Request {
                 audio_stream: Some(s),
                 ..
             } => *s,
-            _ => self
-                .item
-                .info
-                .as_ref()
-                .and_then(|i| i.audio.first())
-                .map_or(0, |a| a.index),
+            _ => self.item.first_audio_stream().unwrap_or(0),
         }
     }
 

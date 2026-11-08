@@ -6,6 +6,7 @@ use crate::beats::{BeatTracker, Stream};
 use crate::onnx;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::time::Time;
+use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::sync::Mutex;
@@ -19,7 +20,7 @@ pub struct BeatThis {
 
 impl BeatTracker for BeatThis {
     fn track(&self, stream: Stream) -> Result<(Vec<Time>, Vec<Time>)> {
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = lock(&self.session);
         // Its files were deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
             *session = None;

@@ -31,6 +31,7 @@ mod worker;
 
 use document::Prepared;
 use flikk_core::services::{Frame, FxCall, HtmlCrew, HtmlService, ServiceError, ServiceResult};
+use flikk_os::sync::lock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
@@ -71,18 +72,18 @@ impl HtmlEngine {
     }
 
     fn cached(&self, key: &Key) -> bool {
-        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = lock(&self.cache);
         cache.frames.contains_key(key)
     }
 
     /// Keep a frame rendered elsewhere (by a render's crew).
     fn remember(&self, key: Key, frame: Frame) {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = lock(&self.cache);
         cache.put(key, frame);
     }
 
     fn send(&self, request: Request) -> ServiceResult<()> {
-        let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut requests = lock(&self.requests);
         let request = match requests.as_ref() {
             Some(tx) => match tx.send(request) {
                 Ok(()) => return Ok(()),
@@ -97,11 +98,7 @@ impl HtmlEngine {
             .name("flikk-html".into())
             .spawn(move || worker::run(exe, rx, Arc::default()))
             .map_err(ServiceError::new)?;
-        let old = self
-            .thread
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(handle);
+        let old = lock(&self.thread).replace(handle);
         if let Some(old) = old {
             let _ = old.join();
         }
@@ -124,12 +121,7 @@ impl HtmlService for HtmlEngine {
     fn frame(&self, call: &FxCall<'_>, width: u32, height: u32) -> ServiceResult<Frame> {
         let job = Arc::new(document::prepare(call));
         let key = key(&job, call, width, height);
-        if let Some(frame) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-        {
+        if let Some(frame) = lock(&self.cache).get(&key) {
             return Ok(frame);
         }
         let (reply, answer) = mpsc::channel();
@@ -142,10 +134,7 @@ impl HtmlService for HtmlEngine {
         let frame = answer
             .recv()
             .map_err(|_| ServiceError::new("the HTML engine stopped"))??;
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .put(key, frame.clone());
+        lock(&self.cache).put(key, frame.clone());
         Ok(frame)
     }
 

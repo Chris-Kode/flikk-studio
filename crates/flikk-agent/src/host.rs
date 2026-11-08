@@ -38,10 +38,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 /// Quiet time after which an external client's change set goes to review.
-pub const EXTERNAL_IDLE: Duration = Duration::from_secs(90);
+pub(crate) const EXTERNAL_IDLE: Duration = Duration::from_secs(90);
 
 /// The author external clients' proposals are made under.
-pub fn external_author() -> Author {
+pub(crate) fn external_author() -> Author {
     Author::Recipe {
         name: "External agent".into(),
     }
@@ -276,10 +276,6 @@ impl AgentHost {
     /// Takes effect on the next turn.
     pub fn set_role(&mut self, role: AgentRole) {
         self.role = role;
-    }
-
-    pub fn role(&self) -> AgentRole {
-        self.role
     }
 
     /// Continue chat session `chat` from the next turn on.

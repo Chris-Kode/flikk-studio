@@ -14,13 +14,15 @@ pub use apply::{apply_fx, duplicate, fx_mention};
 pub use glyphs::{FxGlyph, fx_glyph};
 
 use crate::state::EditorState;
+use crate::ui::format::clock_rounded;
+use crate::ui::kit::play::bar3;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, ContextMenuExt as _, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName,
     Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Tab, Tabs, Tooltip, h_flex, v_flex,
 };
+use crate::ui::listen::listen_dot;
 use crate::ui::media_pool::import::is_audio;
-use crate::ui::media_pool::{clock, listen_dot};
 use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
 use apply::Starter;
 use flikk_core::LibraryId;
@@ -209,7 +211,7 @@ fn sound_entry(s: &Sound) -> Entry {
             .unwrap_or_default(),
         glyph: FxGlyph::Audio,
         kind: None,
-        meta: s.info.as_ref().map(|i| clock(i.duration).into()),
+        meta: s.info.as_ref().map(|i| clock_rounded(i.duration).into()),
     }
 }
 
@@ -624,10 +626,7 @@ impl LibraryPanel {
             _ => None,
         };
         let playing = sample.as_ref().and_then(|s| {
-            let source = state
-                .source
-                .as_ref()
-                .filter(|p| p.is(s) && p.is_playing())?;
+            let source = state.source.as_ref().filter(|p| p.plays(s))?;
             Some(source.fraction())
         });
         // Gone from the account: it reads nothing until made again.
@@ -695,7 +694,7 @@ impl LibraryPanel {
             .when(gone, |d| d.opacity(0.45))
             .child(lead)
             .child(div().flex_1().min_w_0().truncate().child(e.name.clone()))
-            .children(playing.map(|f| bar3(f).w(px(54.)).flex_none()))
+            .children(playing.map(|f| bar3(f, t::T1).w(px(54.)).flex_none()))
             .children(meta.map(|m| {
                 div()
                     .flex_none()
@@ -783,21 +782,6 @@ fn ring(color: Rgba, width: f32) -> Vec<BoxShadow> {
     }]
 }
 
-/// How far a sound plays, as a 3 px bar.
-fn bar3(fraction: f32) -> Div {
-    div()
-        .h(px(3.))
-        .rounded_full()
-        .bg(t::alpha(t::T1, 0.08))
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .w(relative(fraction.clamp(0., 1.)))
-                .bg(t::T1),
-        )
-}
-
 fn item_menu(
     menu: PopupMenu,
     panel: &Entity<LibraryPanel>,
@@ -824,9 +808,7 @@ fn item_menu(
             let s = state.read(cx);
             let sound = s.library.sound(id).map(Sound::item);
             let preview = s.source.as_ref();
-            let playing = sound
-                .zip(preview)
-                .is_some_and(|(sound, p)| p.is(&sound) && p.is_playing());
+            let playing = sound.zip(preview).is_some_and(|(sound, p)| p.plays(&sound));
             let menu = menu
                 .item(
                     PopupMenuItem::new("Add to Project").on_click(move |_, _, cx| {
@@ -936,7 +918,7 @@ fn voice_menu(
     let playing = sample
         .as_ref()
         .zip(s.source.as_ref())
-        .is_some_and(|(item, p)| p.is(item) && p.is_playing());
+        .is_some_and(|(item, p)| p.plays(item));
     let provider = flikk_cloud::provider(&saved.provider).map_or("the provider", |p| p.name);
     let (s1, s2, s3) = (state.clone(), state.clone(), state.clone());
     let mut menu = menu.item(

@@ -5,7 +5,7 @@
 //! as `@clip 3f2a91c0`.
 
 use flikk_core::model::{Project, Track, TrackKind};
-use flikk_core::{ClipId, MarkerId, MediaId, Rate, SpeakerId, Time, TimeRange, TrackId};
+use flikk_core::{ClipId, MediaId, Rate, SpeakerId, Time, TimeRange, TrackId};
 use serde_json::{Map, Value, json};
 use std::fmt::Display;
 use uuid::Uuid;
@@ -35,15 +35,6 @@ impl<'a> Args<'a> {
         match value.as_object() {
             Some(m) => Ok(Args(m, rate)),
             None => fail("arguments must be an object"),
-        }
-    }
-
-    /// A nested object under `key`, read at the same rate.
-    pub fn object(&self, key: &str) -> ToolResultOf<Option<Args<'a>>> {
-        match self.get(key) {
-            None => Ok(None),
-            Some(Value::Object(m)) => Ok(Some(Args(m, self.1))),
-            Some(_) => fail(format!("`{key}` must be an object")),
         }
     }
 
@@ -351,17 +342,6 @@ pub fn track_id(project: &Project, text: &str) -> ToolResultOf<TrackId> {
         .map(|t| t.id)
         .collect();
     pick("track", text, found)
-}
-
-pub fn marker_id(project: &Project, text: &str) -> ToolResultOf<MarkerId> {
-    let found = project
-        .timeline
-        .markers
-        .iter()
-        .filter(|m| matches_id(&m.id.0, text))
-        .map(|m| m.id)
-        .collect();
-    pick("marker", text, found)
 }
 
 /// Speakers are only known from analysis, so the caller passes candidates.

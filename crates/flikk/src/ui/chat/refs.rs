@@ -3,6 +3,7 @@
 //! `@fx cross_dissolve` or `@range 1.000-4.500`, which is what the agent
 //! reads; `flikk_core::query::resolve_project_references` parses them.
 
+use crate::ui::format::{clock_tenths, clock_truncated};
 use crate::ui::kit::{IconName, theme as t};
 use flikk_core::audiofx::AudioFxKind;
 use flikk_core::command::Edge;
@@ -172,7 +173,7 @@ pub fn all(project: &Project) -> Vec<Reference> {
             kind: RefKind::Clip,
             id: clip.id.to_string(),
             label: clip.display_name(project),
-            detail: format!("{} · {}", track.name, clock(clip.start)),
+            detail: format!("{} · {}", track.name, clock_truncated(clip.start)),
         })
         .collect();
     out.extend(project.media.iter().map(|m| Reference {
@@ -185,7 +186,7 @@ pub fn all(project: &Project) -> Vec<Reference> {
         kind: RefKind::Marker,
         id: m.id.to_string(),
         label: marker_label(&m.note),
-        detail: clock(m.range.start),
+        detail: clock_truncated(m.range.start),
     }));
     out.extend(tl.tracks.iter().map(|t| Reference {
         kind: RefKind::Track,
@@ -482,7 +483,9 @@ fn media_detail(m: &flikk_core::model::MediaItem) -> String {
         MediaKind::Image => "Image",
     };
     match &m.info {
-        Some(info) if m.kind != MediaKind::Image => format!("{kind} · {}", clock(info.duration)),
+        Some(info) if m.kind != MediaKind::Image => {
+            format!("{kind} · {}", clock_truncated(info.duration))
+        }
         _ => kind.into(),
     }
 }
@@ -495,26 +498,6 @@ fn track_kind(kind: TrackKind) -> &'static str {
         TrackKind::Caption => "Captions",
         TrackKind::Overlay => "Overlays",
     }
-}
-
-/// `M:SS`, or `H:MM:SS` past an hour.
-pub fn clock(t: Time) -> String {
-    let s = t.as_secs_f64().max(0.0) as i64;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
-    }
-}
-
-/// [`clock`] with tenths of a second.
-pub fn clock_tenths(t: Time) -> String {
-    let tenths = (t.as_secs_f64().max(0.0) * 10.0).round() as i64;
-    format!(
-        "{}.{}",
-        clock(Time::from_secs_f64((tenths / 10) as f64)),
-        tenths % 10
-    )
 }
 
 /// `0:01.5–0:04.0`.

@@ -722,7 +722,7 @@ pub fn plan(
         s.crop,
         range,
     );
-    let mut kept = PLANS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = flikk_os::sync::lock(&PLANS);
     if let Some(i) = kept.iter().position(|(k, _, _)| *k == key) {
         let entry = kept.remove(i);
         let plan = entry.2.clone();
@@ -731,7 +731,7 @@ pub fn plan(
     }
     drop(kept);
     let plan = Arc::new(Plan::new(&path, s, range)?);
-    let mut kept = PLANS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = flikk_os::sync::lock(&PLANS);
     kept.push((key, path, plan.clone()));
     if kept.len() > PLANS_KEPT {
         kept.remove(0);

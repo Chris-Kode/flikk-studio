@@ -153,7 +153,7 @@ impl ProjectForm {
                     )
                     .child(div().text_size(px(10.)).text_color(t::T3).child(format!(
                         "{} fps · {}",
-                        fps(s.rate),
+                        crate::ui::format::sequence_fps(s.rate),
                         khz(s.sample_rate)
                     ))),
             )
@@ -376,8 +376,7 @@ pub fn open_new(
     }
     let dir = state
         .read(cx)
-        .file
-        .as_ref()
+        .file()
         .and_then(|f| f.parent())
         .map(PathBuf::from)
         .unwrap_or_else(crate::ui::deliver::default_dir);
@@ -529,18 +528,6 @@ fn tilde(dir: &Path) -> String {
         Some(rest) => Path::new("~").join(rest).display().to_string(),
         None => dir.display().to_string(),
     }
-}
-
-/// `23.976`, `25`.
-fn fps(rate: Rate) -> String {
-    Rate::SEQUENCE
-        .iter()
-        .find(|(r, _)| *r == rate)
-        .map(|(_, name)| (*name).to_owned())
-        .unwrap_or_else(|| {
-            let fps = format!("{:.3}", rate.fps());
-            fps.trim_end_matches('0').trim_end_matches('.').to_owned()
-        })
 }
 
 /// `48 kHz`, `44.1 kHz`.

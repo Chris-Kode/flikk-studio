@@ -3,6 +3,7 @@
 
 use super::layout::{RULER_HEIGHT, Row};
 use crate::ui::RefDrag;
+use crate::ui::format::minutes_tenths;
 use flikk_core::command::Edge;
 use flikk_core::model::{Clip, Marker, Project, Track};
 use flikk_core::{ClipId, Time, TimeRange};
@@ -19,7 +20,7 @@ pub fn clip(clip: &Clip, project: &Project) -> Ref {
 
 pub fn marker(marker: &Marker) -> Ref {
     let label = match marker.note.trim() {
-        "" => format!("Marker {}", clock(marker.range.start)),
+        "" => format!("Marker {}", minutes_tenths(marker.range.start)),
         note => note.to_owned(),
     };
     (format!("@marker {}", marker.id), label.into())
@@ -53,19 +54,15 @@ pub fn range(r: TimeRange) -> Ref {
             r.start.as_secs_f64(),
             r.end.as_secs_f64()
         ),
-        format!("{}–{}", clock(r.start), clock(r.end)).into(),
+        format!("{}–{}", minutes_tenths(r.start), minutes_tenths(r.end)).into(),
     )
 }
 
 pub fn time(t: Time) -> Ref {
-    (format!("@time {:.3}", t.as_secs_f64()), clock(t).into())
-}
-
-/// `M:SS.s`, the chip label for a time.
-fn clock(t: Time) -> String {
-    let tenths = (t.as_secs_f64().max(0.) * 10.).round() as i64;
-    let (m, s, f) = (tenths / 600, tenths / 10 % 60, tenths % 10);
-    format!("{m}:{s:02}.{f}")
+    (
+        format!("@time {:.3}", t.as_secs_f64()),
+        minutes_tenths(t).into(),
+    )
 }
 
 impl super::TimelinePanel {

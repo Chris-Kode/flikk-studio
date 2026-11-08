@@ -4,9 +4,10 @@
 //! picture's chip puts its tag in the prompt. Shapes, resolutions and how
 //! many pictures it follows are the picked model's.
 
-use super::video::{AUTO, Choice, Picker, picker, shape_of};
-use super::{MediaPoolPanel, form, item_name};
+use super::video::{AUTO, Choice, Picker, picked, picker, shape_of};
+use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
+use crate::ui::format::item_name;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
@@ -96,14 +97,6 @@ impl ImageForm {
         }
     }
 
-    fn picked(picker: &Picker, cx: &App) -> String {
-        picker
-            .read(cx)
-            .selected_value()
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// The name a reference goes by in the form.
     fn reference_name(&self, reference: Reference, cx: &App) -> Option<String> {
         match reference {
@@ -135,8 +128,8 @@ impl ImageForm {
                 }
             }
         }
-        let aspect = Self::picked(&self.aspect, cx);
-        let resolution = Self::picked(&self.resolution, cx);
+        let aspect = picked(&self.aspect, cx);
+        let resolution = picked(&self.resolution, cx);
         let request = GenerateRequest::Image {
             prompt,
             aspect: (aspect != AUTO && !aspect.is_empty()).then_some(aspect),
@@ -172,17 +165,7 @@ impl ImageForm {
 
     /// Put `tag` in the prompt at the cursor, set off from the word before.
     fn insert_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt.update(cx, |prompt, cx| {
-            let value = prompt.value();
-            let before = value.get(..prompt.cursor()).unwrap_or(&value);
-            let lead = if before.chars().last().is_some_and(|c| !c.is_whitespace()) {
-                " "
-            } else {
-                ""
-            };
-            prompt.insert(format!("{lead}{tag} "), window, cx);
-            prompt.focus(window, cx);
-        });
+        form::insert_tag(&self.prompt, tag, true, window, cx);
         cx.notify();
     }
 

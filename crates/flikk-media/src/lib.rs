@@ -27,10 +27,12 @@ use flikk_core::services::{
     ServiceError, ServiceResult,
 };
 use flikk_core::time::{Time, TimeRange};
+use flikk_deliver::ffmpeg::ToneMethodProbe;
+use flikk_os::process::command;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// [`MediaService`] backed by the `ffmpeg` and `ffprobe` binaries.
 pub struct FfmpegMedia {
@@ -39,7 +41,7 @@ pub struct FfmpegMedia {
     frames: Mutex<FrameCache>,
     peaks: Mutex<HashMap<(Fingerprint, u32), Arc<waveform::Peaks>>>,
     /// How this FFmpeg maps HDR to SDR, found on first use.
-    tone_method: OnceLock<hdr::Method>,
+    tone_method: ToneMethodProbe,
     /// Files hardware decoding failed on: playback decodes them in software.
     software_only: Arc<Mutex<HashSet<PathBuf>>>,
 }
@@ -47,16 +49,7 @@ pub struct FfmpegMedia {
 impl FfmpegMedia {
     /// Locates the binaries and checks that they run.
     pub fn new() -> anyhow::Result<Self> {
-        let find = |var: &str, name: &str| {
-            std::env::var_os(var)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(name))
-        };
-        Self::with_binaries(
-            find("FLIKK_FFMPEG", "ffmpeg"),
-            find("FLIKK_FFPROBE", "ffprobe"),
-        )
+        Self::with_binaries(flikk_os::process::ffmpeg(), flikk_os::process::ffprobe())
     }
 
     pub fn with_binaries(ffmpeg: PathBuf, ffprobe: PathBuf) -> anyhow::Result<Self> {
@@ -77,7 +70,7 @@ impl FfmpegMedia {
             ffprobe,
             frames: Mutex::new(FrameCache::default()),
             peaks: Mutex::new(HashMap::new()),
-            tone_method: OnceLock::new(),
+            tone_method: ToneMethodProbe::new(),
             software_only: Arc::default(),
         })
     }
@@ -94,27 +87,8 @@ impl FfmpegMedia {
         let Some(mapping) = mapping else {
             return Ok(None);
         };
-        let method = match self.tone_method.get() {
-            Some(method) => *method,
-            None => {
-                let listing = command(&self.ffmpeg)
-                    .args(["-hide_banner", "-filters"])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-                match listing {
-                    Some(listing) => *self
-                        .tone_method
-                        .get_or_init(|| hdr::Method::from_filters(&listing)),
-                    // FFmpeg did not answer: the fallback this time, and
-                    // asked again next time.
-                    None => hdr::Method::from_filters(""),
-                }
-            }
-        };
         mapping
-            .filters(method)
+            .filters(self.tone_method.method(&self.ffmpeg))
             .map(Some)
             .map_err(|e| err("tone map", e))
     }
@@ -190,26 +164,14 @@ impl MediaService for FfmpegMedia {
     }
 }
 
-/// A child process with no console window on Windows and no stdin.
-fn command(bin: &Path) -> Command {
-    let mut c = Command::new(bin);
-    c.stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
-}
-
 /// Seconds as FFmpeg reads them, to the microsecond.
 fn secs_arg(t: Time) -> String {
     format!("{:.6}", t.as_secs_f64().max(0.0))
 }
 
-/// Last line FFmpeg wrote to stderr, for error messages.
-fn stderr_tail(stderr: &[u8]) -> String {
+/// The last non-empty line FFmpeg wrote to stderr, for error messages;
+/// "unknown error" when it wrote none.
+fn last_stderr_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     text.lines()
         .rev()
@@ -219,37 +181,8 @@ fn stderr_tail(stderr: &[u8]) -> String {
         .to_string()
 }
 
-/// `m` locked, even after a panic while it was held: what the caches hold
-/// is still sound, so one panic does not break every later call.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn err(context: &str, e: impl std::fmt::Display) -> ServiceError {
     ServiceError(format!("{context}: {e}"))
-}
-
-/// Write `bytes` to `path` via a temporary sibling and a rename, so readers
-/// never see a partial file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = tmp_sibling(path);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
-}
-
-/// `name.ext` → `name.<pid>-<n>.tmp.ext`, unique per process and call.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("tmp");
-    let name = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{stem}.{}-{n}.tmp.{ext}", std::process::id()),
-        None => format!("{stem}.{}-{n}.tmp", std::process::id()),
-    };
-    path.with_file_name(name)
 }
 
 /// Still images are decoded without seeking.

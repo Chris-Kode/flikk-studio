@@ -6,16 +6,17 @@ mod claude;
 mod codex;
 mod models;
 
-pub use claude::Claude;
-pub use codex::{Codex, codex_home};
+pub(crate) use claude::Claude;
+pub(crate) use codex::{Codex, codex_home};
 pub use models::{cached_models, refresh_models};
 
 use flikk_core::agent::{Backend as BackendKind, ModelChoice};
+use flikk_os::process::{ChildGuard, command as new_command};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,7 +32,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(10);
 
 /// How the backend should start `flikk-mcp`.
 #[derive(Clone, Debug)]
-pub struct McpLaunch {
+pub(crate) struct McpLaunch {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -39,7 +40,7 @@ pub struct McpLaunch {
 
 /// Everything a backend needs for one turn.
 #[derive(Clone, Debug)]
-pub struct TurnSpec {
+pub(crate) struct TurnSpec {
     pub system_prompt: String,
     /// User message with the context block.
     pub message: String,
@@ -59,7 +60,7 @@ pub struct TurnSpec {
 
 /// What the adapters read from the CLI output.
 #[derive(Clone, Debug, PartialEq)]
-pub enum BackendEvent {
+pub(crate) enum BackendEvent {
     /// The backend's session id; persist it to resume the chat.
     Session(String),
     TextDelta(String),
@@ -91,7 +92,7 @@ pub enum BackendEvent {
     },
 }
 
-pub trait Adapter: Send {
+pub(crate) trait Adapter: Send {
     fn kind(&self) -> BackendKind;
     /// Build the command line. May write files under `turn.run_dir`.
     fn command(&self, turn: &TurnSpec) -> std::io::Result<Command>;
@@ -107,23 +108,24 @@ pub trait Adapter: Send {
     }
 }
 
-pub fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
+pub(crate) fn adapter(kind: BackendKind) -> Box<dyn Adapter> {
     match kind {
         BackendKind::Claude => Box::new(Claude::default()),
         BackendKind::Codex => Box::new(Codex::default()),
     }
 }
 
-/// A running turn. Dropping it does not stop the process; call [`kill`].
+/// A running turn. Dropping it does not stop the process while its reader
+/// thread runs; call [`kill`].
 ///
 /// [`kill`]: RunningTurn::kill
-pub struct RunningTurn {
-    child: Arc<Mutex<Option<Child>>>,
+pub(crate) struct RunningTurn {
+    child: Arc<Mutex<Option<ChildGuard>>>,
     pub events: Receiver<BackendEvent>,
 }
 
 impl RunningTurn {
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         if let Some(child) = self.child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
@@ -131,7 +133,7 @@ impl RunningTurn {
 }
 
 /// Start the backend for `turn` on background threads.
-pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<RunningTurn> {
+pub(crate) fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<RunningTurn> {
     let mut command = adapter.command(&turn)?;
     command
         .current_dir(&turn.workdir)
@@ -139,7 +141,7 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = ChildGuard::spawn(&mut command)?;
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -220,9 +222,8 @@ pub fn start(mut adapter: Box<dyn Adapter>, turn: TurnSpec) -> std::io::Result<R
     Ok(RunningTurn { child, events: rx })
 }
 
-/// Prepare a backend CLI command: no console window, and when the editor
-/// itself runs under Claude Code, don't let the child think it is a nested
-/// session.
+/// Prepare a backend CLI command: when the editor itself runs under Claude
+/// Code, don't let the child think it is a nested session.
 fn isolate(command: &mut Command) {
     for var in [
         "CLAUDECODE",
@@ -231,7 +232,6 @@ fn isolate(command: &mut Command) {
     ] {
         command.env_remove(var);
     }
-    hide_window(command);
 }
 
 /// Pump stdout through the adapter. Returns whether `Finished` was sent.
@@ -262,22 +262,13 @@ fn read_events(
     false
 }
 
-#[cfg(windows)]
-fn hide_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_window(_: &mut Command) {}
-
 /// Find a CLI: `$override_var`, else `name` on `PATH` (with `PATHEXT` on
 /// Windows). An npm shim (`codex.cmd`) runs its script with Node directly:
 /// through `cmd /C`, the system prompt on the command line is cut at
 /// cmd's 8191 characters and its quotes, `<`, `>` and `&` are read as
-/// shell syntax. Other batch files still run through `cmd /C`.
-pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
+/// shell syntax. Other batch files still run through `cmd /C`. The command
+/// opens no console window and has no stdin until the caller sets one.
+pub(crate) fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
     let path = std::env::var_os(override_var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -292,7 +283,7 @@ pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
     if !is_batch {
-        return Ok(Command::new(path));
+        return Ok(new_command(path));
     }
     if let Some(target) = shim_target(&path) {
         let is_script = target.extension().is_some_and(|e| {
@@ -301,19 +292,19 @@ pub fn locate(name: &str, override_var: &str) -> std::io::Result<Command> {
                 .any(|js| e.eq_ignore_ascii_case(js))
         });
         if !is_script {
-            return Ok(Command::new(target));
+            return Ok(new_command(target));
         }
         let bundled = path.with_file_name("node.exe");
         if let Some(node) = is_file(&bundled)
             .then_some(bundled)
             .or_else(|| search_path("node"))
         {
-            let mut c = Command::new(node);
+            let mut c = new_command(node);
             c.arg(target);
             return Ok(c);
         }
     }
-    let mut c = Command::new("cmd");
+    let mut c = new_command("cmd");
     c.arg("/C").arg(path);
     Ok(c)
 }
@@ -368,7 +359,7 @@ fn is_file(p: &Path) -> bool {
 /// How to start the MCP server: `$FLIKK_MCP`, else `flikk-mcp` next to
 /// the running executable, else the editor itself as `<exe> mcp` (so
 /// `cargo run -p flikk` works without building `flikk-mcp`).
-pub fn mcp_command() -> std::io::Result<(PathBuf, Vec<String>)> {
+pub(crate) fn mcp_command() -> std::io::Result<(PathBuf, Vec<String>)> {
     if let Some(p) = std::env::var_os("FLIKK_MCP").filter(|v| !v.is_empty()) {
         return Ok((PathBuf::from(p), Vec::new()));
     }
@@ -399,13 +390,13 @@ pub(crate) struct TextJoin {
 
 impl TextJoin {
     /// A new assistant message starts; the next text gets a separator.
-    pub fn new_message(&mut self) {
+    pub(crate) fn new_message(&mut self) {
         if self.any {
             self.pending_break = true;
         }
     }
 
-    pub fn text(&mut self, text: &str) -> Option<BackendEvent> {
+    pub(crate) fn text(&mut self, text: &str) -> Option<BackendEvent> {
         if text.is_empty() {
             return None;
         }
