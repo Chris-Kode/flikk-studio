@@ -27,11 +27,12 @@ use flikk_core::services::{
     ServiceError, ServiceResult,
 };
 use flikk_core::time::{Time, TimeRange};
+use flikk_deliver::ffmpeg::ToneMethodProbe;
 use flikk_os::process::command;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// [`MediaService`] backed by the `ffmpeg` and `ffprobe` binaries.
 pub struct FfmpegMedia {
@@ -40,7 +41,7 @@ pub struct FfmpegMedia {
     frames: Mutex<FrameCache>,
     peaks: Mutex<HashMap<(Fingerprint, u32), Arc<waveform::Peaks>>>,
     /// How this FFmpeg maps HDR to SDR, found on first use.
-    tone_method: OnceLock<hdr::Method>,
+    tone_method: ToneMethodProbe,
     /// Files hardware decoding failed on: playback decodes them in software.
     software_only: Arc<Mutex<HashSet<PathBuf>>>,
 }
@@ -69,7 +70,7 @@ impl FfmpegMedia {
             ffprobe,
             frames: Mutex::new(FrameCache::default()),
             peaks: Mutex::new(HashMap::new()),
-            tone_method: OnceLock::new(),
+            tone_method: ToneMethodProbe::new(),
             software_only: Arc::default(),
         })
     }
@@ -86,27 +87,8 @@ impl FfmpegMedia {
         let Some(mapping) = mapping else {
             return Ok(None);
         };
-        let method = match self.tone_method.get() {
-            Some(method) => *method,
-            None => {
-                let listing = command(&self.ffmpeg)
-                    .args(["-hide_banner", "-filters"])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-                match listing {
-                    Some(listing) => *self
-                        .tone_method
-                        .get_or_init(|| hdr::Method::from_filters(&listing)),
-                    // FFmpeg did not answer: the fallback this time, and
-                    // asked again next time.
-                    None => hdr::Method::from_filters(""),
-                }
-            }
-        };
         mapping
-            .filters(method)
+            .filters(self.tone_method.method(&self.ffmpeg))
             .map(Some)
             .map_err(|e| err("tone map", e))
     }

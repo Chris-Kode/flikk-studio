@@ -4,15 +4,18 @@
 use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
+use flikk_core::hdr::Method;
+use flikk_os::backoff::RETRY_AFTER;
 use flikk_os::process::{ChildGuard, command, ffmpeg, ffprobe};
+use flikk_os::sync::lock;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Major version of the ffmpeg binary, 0 if unknown.
 fn major_version() -> u32 {
@@ -31,18 +34,67 @@ fn major_version() -> u32 {
     })
 }
 
-/// How this FFmpeg maps HDR to SDR (`zscale` or the baked LUT), found once
-/// per process; the media engine finds the same from the same binary.
-pub fn tone_method() -> flikk_core::hdr::Method {
-    static METHOD: OnceLock<flikk_core::hdr::Method> = OnceLock::new();
-    *METHOD.get_or_init(|| {
-        let out = command(ffmpeg())
+/// How this FFmpeg maps HDR to SDR (`zscale` or the baked LUT); the media
+/// engine finds the same from the same binary. See [`ToneMethodProbe`].
+pub fn tone_method() -> Method {
+    static PROBE: ToneMethodProbe = ToneMethodProbe::new();
+    PROBE.method(&ffmpeg())
+}
+
+/// How one FFmpeg binary maps HDR to SDR, asked of it (`-filters`) on first
+/// use and kept once it answered. While it doesn't answer (it can't be
+/// started, or it fails), the fallback of [`Method::from_filters`] with no
+/// listing (the LUT) is used, and the binary is asked again after
+/// [`RETRY_AFTER`]: a failure is never kept for the session.
+#[derive(Debug, Default)]
+pub struct ToneMethodProbe(Mutex<Probed>);
+
+/// What a [`ToneMethodProbe`] has learnt so far.
+#[derive(Clone, Copy, Debug, Default)]
+enum Probed {
+    #[default]
+    NotAsked,
+    Found(Method),
+    Failed {
+        at: Instant,
+    },
+}
+
+impl ToneMethodProbe {
+    /// Nothing asked yet.
+    pub const fn new() -> Self {
+        Self(Mutex::new(Probed::NotAsked))
+    }
+
+    /// The method `ffmpeg` maps with, asking it when it hasn't answered yet
+    /// and no failure is recent. Blocks while it is asked.
+    pub fn method(&self, ffmpeg: &Path) -> Method {
+        let mut probed = lock(&self.0);
+        match *probed {
+            Probed::Found(method) => return method,
+            Probed::Failed { at } if at.elapsed() < RETRY_AFTER => {
+                return Method::from_filters("");
+            }
+            Probed::NotAsked | Probed::Failed { .. } => {}
+        }
+        let listing = command(ffmpeg)
             .args(["-hide_banner", "-filters"])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        flikk_core::hdr::Method::from_filters(&out)
-    })
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        match listing {
+            Some(listing) => {
+                let method = Method::from_filters(&listing);
+                *probed = Probed::Found(method);
+                method
+            }
+            None => {
+                *probed = Probed::Failed { at: Instant::now() };
+                Method::from_filters("")
+            }
+        }
+    }
 }
 
 /// The filters mapping an HDR item's pictures to SDR with this FFmpeg,
