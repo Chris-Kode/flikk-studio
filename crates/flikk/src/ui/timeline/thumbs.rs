@@ -116,5 +116,5 @@ impl Thumbs {
 /// Blocking; run on a background thread.
 pub fn fetch(media: &dyn MediaService, item: &MediaItem, t: Time) -> Option<Arc<RenderImage>> {
     let frame = media.frame(item, t, THUMB_WIDTH).ok()?;
-    crate::ui::viewer::frame_image(&frame)
+    crate::ui::viewer::to_image(&frame)
 }
