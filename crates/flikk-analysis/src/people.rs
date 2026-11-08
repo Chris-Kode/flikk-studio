@@ -21,7 +21,6 @@
 
 mod store;
 
-use crate::lock;
 use flikk_core::ids::MaskId;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
 use flikk_core::person::PersonMatte;
@@ -31,6 +30,7 @@ use flikk_core::services::{
 use flikk_core::time::{Rate, Time};
 use flikk_models::matting::Matter;
 use flikk_models::{Model, Task as ModelTask};
+use flikk_os::sync::lock;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};

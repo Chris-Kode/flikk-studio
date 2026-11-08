@@ -69,15 +69,15 @@ use flikk_core::services::{
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::time::{Time, TimeRange};
 use flikk_models::Task as ModelTask;
+use flikk_os::sync::lock;
 use speakers::{Diarizer, SingleSpeaker};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use depth::LocalDepth;
-pub use ffmpeg::binary as ffmpeg_binary;
 pub use ffmpeg::cut_speech;
 pub use interpolation::{LocalInterpolation, clear_disk as clear_interpolated};
 pub use motion::LocalStabilizer;
@@ -179,10 +179,6 @@ struct Shared {
 struct Cached {
     analysis: Arc<Analysis>,
     steps: AnalysisSteps,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The runner of the model a task runs on, made again when the user picks

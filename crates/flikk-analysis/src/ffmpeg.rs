@@ -6,11 +6,13 @@
 use anyhow::{Context, Result, bail};
 use flikk_core::analysis::Loudness;
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::process::{ChildGuard, command};
+use flikk_os::sync::lock;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Mutex;
 
 /// Sample rate the sound models hear.
 #[cfg(feature = "sounds")]
@@ -19,21 +21,9 @@ pub use flikk_models::SOUND_RATE;
 /// measured at.
 pub use flikk_models::SPEECH_RATE as SAMPLE_RATE;
 
-/// `$FLIKK_FFMPEG`, else `ffmpeg` from `PATH`.
-pub fn binary() -> PathBuf {
-    std::env::var_os("FLIKK_FFMPEG")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
-}
-
 /// A `cancel` for runs nothing stops.
 fn never() -> bool {
     false
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// What a run printed besides progress and its exit.
@@ -41,36 +31,10 @@ struct Output {
     log: Vec<String>,
 }
 
-/// A spawned ffmpeg, killed and reaped when dropped (on an early return or
-/// a panic), so it never goes on decoding for nobody or stays a zombie.
-struct Process(Child);
-
-impl std::ops::Deref for Process {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Process {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        // Both are no-ops once it has been waited for.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// Kills the process when dropped while armed: inside the scope that reads
 /// it, since the scope only ends once the stderr reader does, and that only
 /// at ffmpeg's exit.
-struct Stop<'a>(Option<&'a Mutex<Process>>);
+struct Stop<'a>(Option<&'a Mutex<ChildGuard>>);
 
 impl Drop for Stop<'_> {
     fn drop(&mut self) {
@@ -93,9 +57,9 @@ fn run(
     cancel: &(dyn Fn() -> bool + Sync),
     stdout: impl FnOnce(&mut dyn Read) -> Result<()>,
 ) -> Result<Output> {
-    let bin = binary();
-    let mut child = Process(
-        Command::new(&bin)
+    let bin = flikk_os::process::ffmpeg();
+    let mut child = ChildGuard::spawn(
+        command(&bin)
             .args([
                 "-nostdin",
                 "-hide_banner",
@@ -104,12 +68,10 @@ fn run(
                 "pipe:2",
             ])
             .args(args)
-            .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not run {} (set FLIKK_FFMPEG)", bin.display()))?,
-    );
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("could not run {} (set FLIKK_FFMPEG)", bin.display()))?;
     let mut out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
     let total = duration.map(|d| d.as_secs_f64()).filter(|d| *d > 0.0);
