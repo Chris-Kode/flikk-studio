@@ -321,19 +321,12 @@ impl ChatPanel {
         if self.render_poll.is_some() || !rendering(self.state.read(cx)) {
             return;
         }
-        self.render_poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(RENDER_POLL).await;
-                let running = this.update(cx, |this, cx| {
-                    cx.notify();
-                    rendering(this.state.read(cx))
-                });
-                if !matches!(running, Ok(true)) {
-                    break;
-                }
-            }
-            let _ = this.update(cx, |this, _| this.render_poll = None);
-        }));
+        self.render_poll = Some(crate::ui::repaint_while(
+            cx,
+            RENDER_POLL,
+            |this, cx| rendering(this.state.read(cx)),
+            |this| this.render_poll = None,
+        ));
     }
 }
 

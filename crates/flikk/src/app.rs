@@ -113,8 +113,8 @@ pub struct Flikk {
     edited: bool,
     /// The title bar was pressed: moving the pointer moves the window.
     moving: bool,
-    /// The status bar is redrawing for a running render.
-    render_poll: bool,
+    /// Redraws the status bar while a render runs.
+    render_poll: Option<Task<()>>,
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
@@ -205,7 +205,7 @@ impl Flikk {
             notices_open: false,
             edited: false,
             moving: false,
-            render_poll: false,
+            render_poll: None,
             left_tab: match crate::demo::fx_view().as_deref() {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
@@ -816,25 +816,15 @@ impl Flikk {
 
     /// Redraw the status bar until the running render finishes.
     fn poll_render(&mut self, cx: &mut Context<Self>) {
-        if self.render_poll {
+        if self.render_poll.is_some() {
             return;
         }
-        self.render_poll = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(RENDER_POLL).await;
-                let busy = this.update(cx, |this, cx| {
-                    let busy = this.state.read(cx).render_queue.is_busy();
-                    this.render_poll = busy;
-                    cx.notify();
-                    busy
-                });
-                if !matches!(busy, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.render_poll = Some(crate::ui::repaint_while(
+            cx,
+            RENDER_POLL,
+            |this, cx| this.state.read(cx).render_queue.is_busy(),
+            |this| this.render_poll = None,
+        ));
     }
 }
 

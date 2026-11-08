@@ -29,6 +29,32 @@ pub mod welcome;
 use gpui_kit::*;
 use kit::theme as t;
 
+/// Repaints the entity every `period` for as long as `busy` says there is
+/// progress to show, checking after each repaint; the first repaint is a
+/// period from now. Once `busy` is false or the entity is gone it stops,
+/// and `stopped` runs on the entity (to forget the task). The caller keeps
+/// the task: dropping it stops the repaints.
+pub fn repaint_while<T: 'static>(
+    cx: &mut Context<T>,
+    period: std::time::Duration,
+    busy: impl Fn(&T, &App) -> bool + 'static,
+    stopped: impl FnOnce(&mut T) + 'static,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor().timer(period).await;
+            let busy = this.update(cx, |this, cx| {
+                cx.notify();
+                busy(this, cx)
+            });
+            if !matches!(busy, Ok(true)) {
+                break;
+            }
+        }
+        let _ = this.update(cx, |this, _| stopped(this));
+    })
+}
+
 /// Drag payload for pool media dropped on the timeline or viewer: the
 /// item grabbed and, when it was part of a selection, the rest of it.
 #[derive(Clone, Debug)]

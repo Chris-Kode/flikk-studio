@@ -93,7 +93,8 @@ pub struct DeliverPanel {
     whole_timeline: bool,
     /// For H.264 and HEVC; saved for the user.
     encoder: Encoder,
-    polling: bool,
+    /// Refreshes the panel while jobs run.
+    polling: Option<Task<()>>,
     /// The running still export's cancel flag.
     still: Option<Arc<AtomicBool>>,
     _subscriptions: Vec<Subscription>,
@@ -192,7 +193,7 @@ impl DeliverPanel {
             burn_captions: true,
             whole_timeline: false,
             encoder: saved_encoder(),
-            polling: false,
+            polling: None,
             still: None,
             _subscriptions,
         }
@@ -383,26 +384,15 @@ impl DeliverPanel {
 
     /// Refresh while jobs run.
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if self.polling {
+        if self.polling.is_some() {
             return;
         }
-        self.polling = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                let busy = this.update(cx, |this, cx| {
-                    cx.notify();
-                    this.polling = this.queue.is_busy();
-                    this.polling
-                });
-                if !matches!(busy, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.polling = Some(crate::ui::repaint_while(
+            cx,
+            Duration::from_millis(150),
+            |this, _| this.queue.is_busy(),
+            |this| this.polling = None,
+        ));
     }
 
     fn export(&mut self, kind: Export, cx: &mut Context<Self>) {
