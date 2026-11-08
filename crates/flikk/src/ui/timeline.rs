@@ -1766,7 +1766,7 @@ impl TimelinePanel {
                             label: clip.display_name(project).into(),
                             color: clip.color.map(|c| rgb(c.rgb())),
                             enabled: clip.enabled,
-                            offline: clip.media().is_some_and(|m| state.offline.contains(&m)),
+                            offline: clip.media().is_some_and(|m| state.is_offline(m)),
                             icon,
                             effects: !clip.effects.is_empty(),
                             speed: if clip.is_ramped() {

@@ -470,7 +470,7 @@ impl MediaPoolPanel {
         let state = self.state.read(cx);
         let playable = match item.kind {
             MediaKind::Audio => state.can_listen(&item),
-            MediaKind::Video => state.services.media.is_some() && !state.offline.contains(&item.id),
+            MediaKind::Video => state.services.media.is_some() && !state.is_offline(item.id),
             MediaKind::Image => false,
         };
         if playable {
@@ -1257,7 +1257,7 @@ impl MediaPoolPanel {
                 .map(|p| p.fraction()),
             progress: self.progress(item.id),
             selected: self.sel.has_item(item.id),
-            offline: state.offline.contains(&item.id),
+            offline: state.is_offline(item.id),
         }
     }
 
@@ -2144,7 +2144,7 @@ fn item_menu(
     }
     let mut menu = menu;
     let state = panel.read(cx).state.clone();
-    if state.read(cx).offline.contains(&id) {
+    if state.read(cx).is_offline(id) {
         menu = menu
             .item(
                 PopupMenuItem::new("Relink…")

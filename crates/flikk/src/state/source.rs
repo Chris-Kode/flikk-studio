@@ -157,7 +157,7 @@ impl EditorState {
         item.kind == MediaKind::Audio
             && length(item).is_some()
             && self.services.media.is_some()
-            && !self.offline.contains(&item.id)
+            && !self.is_offline(item.id)
     }
 
     /// Show pool item `media` in the viewer, paused at its start.
@@ -165,7 +165,7 @@ impl EditorState {
         let Some(item) = self.bus.project().media(media).cloned() else {
             return;
         };
-        if self.offline.contains(&media) {
+        if self.is_offline(media) {
             self.status = Some("That file is offline".into());
             cx.notify();
             return;

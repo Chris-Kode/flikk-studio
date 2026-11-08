@@ -5,6 +5,7 @@
 mod cloud;
 mod document;
 mod music_fit;
+mod offline;
 mod respeak;
 mod source;
 mod sync;
@@ -27,6 +28,7 @@ use flikk_core::model::Project;
 use flikk_core::services::{AnalysisService, MediaService, Services, SubjectService};
 use flikk_core::{ChangeItemId, ChangeSetId, Time, TimeRange};
 use gpui_kit::*;
+use offline::OfflineMedia;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,9 +38,6 @@ use std::time::{Duration, Instant};
 const AGENT_PUMP: Duration = Duration::from_millis(33);
 /// How often the model files are looked for on disk.
 const MODELS_POLL: Duration = Duration::from_secs(1);
-/// How often every media file is looked for on disk, so one that goes
-/// missing or comes back mid-session is noticed.
-const OFFLINE_POLL: Duration = Duration::from_secs(2);
 /// Key of the notice listing the models not downloaded.
 const MODELS_NOTICE: &str = "models-missing";
 /// How often subject mattes are looked for, so views draw them as they
@@ -147,9 +146,7 @@ pub struct EditorState {
     /// Warnings and errors under the top bar's notice button.
     pub notices: Notices,
     /// Media whose source file is missing.
-    pub offline: HashSet<flikk_core::MediaId>,
-    /// The media paths `offline` was worked out for.
-    media_paths: Vec<(flikk_core::MediaId, PathBuf)>,
+    offline: OfflineMedia,
     /// Which of `model_tasks` had their model, and `models.finished()`, when
     /// the notices were last brought up to date.
     models_seen: (Vec<bool>, u64),
@@ -226,27 +223,6 @@ impl EditorState {
                 }
             }
         });
-        let offline_poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(OFFLINE_POLL).await;
-                let Ok(paths) = this.update(cx, |this, _| this.media_paths.clone()) else {
-                    break;
-                };
-                // Off the UI thread: an unplugged or network drive can be
-                // slow to answer.
-                let (paths, missing) = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let missing = missing_media(&paths);
-                        (paths, missing)
-                    })
-                    .await;
-                let update = this.update(cx, |this, cx| this.recheck_offline(&paths, missing, cx));
-                if update.is_err() {
-                    break;
-                }
-            }
-        });
         let subjects_poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(SUBJECTS_POLL).await;
@@ -309,10 +285,9 @@ impl EditorState {
             model_tasks,
             models: flikk_models::Downloads::default(),
             notices: Notices::default(),
-            offline: HashSet::new(),
-            media_paths: Vec::new(),
+            offline: OfflineMedia::default(),
             _models_poll: models_poll,
-            _offline_poll: offline_poll,
+            _offline_poll: Self::poll_offline(cx),
             _subjects_poll: subjects_poll,
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
@@ -1190,69 +1165,6 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Work out which sources are missing when the media list changed, and
-    /// keep the notice about them current.
-    fn check_offline(&mut self) {
-        let paths: Vec<_> = self
-            .bus
-            .project()
-            .media
-            .iter()
-            .map(|m| (m.id, m.path.clone()))
-            .collect();
-        if paths == self.media_paths {
-            return;
-        }
-        self.offline = missing_media(&paths);
-        self.media_paths = paths;
-        self.offline_notice();
-    }
-
-    /// Take the periodic look at `paths` on disk: sources that went
-    /// missing, or came back when a drive was plugged in again. A look
-    /// taken before the media list changed is dropped.
-    fn recheck_offline(
-        &mut self,
-        paths: &[(flikk_core::MediaId, PathBuf)],
-        missing: HashSet<flikk_core::MediaId>,
-        cx: &mut Context<Self>,
-    ) {
-        if paths != self.media_paths.as_slice() || missing == self.offline {
-            return;
-        }
-        self.offline = missing;
-        self.offline_notice();
-        cx.notify();
-    }
-
-    fn offline_notice(&mut self) {
-        const KEY: &str = "offline-media";
-        if self.offline.is_empty() {
-            self.notices.clear(KEY);
-            return;
-        }
-        let items: Vec<String> = self
-            .bus
-            .project()
-            .media
-            .iter()
-            .filter(|m| self.offline.contains(&m.id))
-            .map(crate::ui::media_pool::item_name)
-            .collect();
-        let title = match items.len() {
-            1 => "1 media file is offline".to_owned(),
-            n => format!("{n} media files are offline"),
-        };
-        self.notices.set(Notice {
-            key: KEY.into(),
-            level: Level::Warning,
-            title,
-            items,
-            detail: None,
-            action: Some(NoticeAction::Relink),
-        });
-    }
-
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
         self.agent.cancel();
         cx.notify();
@@ -1884,15 +1796,6 @@ impl EditorState {
         cx.notify();
         !done
     }
-}
-
-/// The media in `paths` whose file is not on disk.
-fn missing_media(paths: &[(flikk_core::MediaId, PathBuf)]) -> HashSet<flikk_core::MediaId> {
-    paths
-        .iter()
-        .filter(|(_, p)| !p.exists())
-        .map(|(id, _)| *id)
-        .collect()
 }
 
 fn warning_text(warning: &Warning) -> String {

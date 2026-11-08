@@ -232,7 +232,7 @@ pub fn can_save_sound(s: &EditorState, id: MediaId, cx: &App) -> bool {
     !saving
         && s.bus.project().media(id).is_some_and(|item| {
             item.kind == flikk_core::model::MediaKind::Audio
-                && !s.offline.contains(&id)
+                && !s.is_offline(id)
                 && s.library.sound_of(item).is_none()
         })
 }
