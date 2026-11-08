@@ -1410,15 +1410,7 @@ fn set_speed(project: &Project, id: ClipId, speed: f64, ripple: bool) -> Result<
     if c.is_ramped() {
         c.settle_ramp();
     }
-    for k in &mut c.keyframes {
-        k.at = k.at.scale(ratio);
-    }
-    for e in &mut c.effects {
-        e.scale_keyframes(ratio);
-    }
-    for m in &mut c.masks {
-        m.scale_keyframes(ratio);
-    }
+    stretch_keyframes(&mut c, ratio);
     c.audio.fade_in = c.audio.fade_in.min(duration);
     c.audio.fade_out = c.audio.fade_out.min(duration);
     let shift = if ripple {
@@ -1484,15 +1476,7 @@ fn set_speed_ramp(
     };
     let length = length.max(min_len(tl));
     let ratio = length.as_secs_f64() / duration;
-    for k in &mut c.keyframes {
-        k.at = k.at.scale(ratio);
-    }
-    for e in &mut c.effects {
-        e.scale_keyframes(ratio);
-    }
-    for m in &mut c.masks {
-        m.scale_keyframes(ratio);
-    }
+    stretch_keyframes(&mut c, ratio);
     let ix = clip_index(track, id);
     let mut end = length;
     if !ripple && let Some(next) = track.clips.get(ix + 1) {
@@ -1945,6 +1929,23 @@ pub fn with_duration(clip: &Clip, duration: Time) -> Clip {
     c.audio.fade_in = c.audio.fade_in.min(duration);
     c.audio.fade_out = c.audio.fade_out.min(duration);
     c
+}
+
+/// Stretch the clip-relative times of `clip`'s keyframes, effect keyframes
+/// and mask keyframes by `ratio`, for a clip whose length changes by that
+/// factor (2.0 = twice as long). Speed keys are left to the caller, since
+/// each retime changes their speeds its own way; generator and transition
+/// keyframes keep their times.
+pub(crate) fn stretch_keyframes(clip: &mut Clip, ratio: f64) {
+    for k in &mut clip.keyframes {
+        k.at = k.at.scale(ratio);
+    }
+    for e in &mut clip.effects {
+        e.scale_keyframes(ratio);
+    }
+    for m in &mut clip.masks {
+        m.scale_keyframes(ratio);
+    }
 }
 
 /// Keyframes at or before clip time `t`, plus one at `t` for each property
