@@ -141,10 +141,11 @@ fn show(bytes: &[u8], format: ImageFormat, ext: &'static str, dir: &str) -> Tool
         .to_rgba8()
         .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
         .map_err(|e| ToolError(format!("Could not show the picture: {e}")))?;
-    let dir = paths::cache().join("agent").join(dir);
-    std::fs::create_dir_all(&dir)?;
-    let seen = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&seen, &png)?;
+    let seen = paths::cache()
+        .join("agent")
+        .join(dir)
+        .join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+    flikk_os::fs::write_atomic(&seen, &png)?;
     Ok(Picture {
         ext,
         width,
@@ -156,19 +157,7 @@ fn show(bytes: &[u8], format: ImageFormat, ext: &'static str, dir: &str) -> Tool
 
 /// The body of `url` and its content type.
 fn download(url: &str) -> ToolResultOf<(Vec<u8>, Option<String>)> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .user_agent(concat!("flikk/", env!("CARGO_PKG_VERSION")))
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(60)))
-        .build()
-        .into();
-    let mut response = agent
+    let mut response = http_agent(Duration::from_secs(60))
         .get(url)
         .call()
         .map_err(|e| ToolError(format!("Could not reach {url}: {e}")))?;
@@ -188,6 +177,24 @@ fn download(url: &str) -> ToolResultOf<(Vec<u8>, Option<String>)> {
         .read_to_vec()
         .map_err(|e| ToolError(format!("Could not download {url}: {e}")))?;
     Ok((bytes, content_type))
+}
+
+/// An HTTP client for the agent's own requests: the system's root
+/// certificates, Flikk's user agent, every status answered as a response
+/// (not an error) and `timeout` for each whole request.
+pub(super) fn http_agent(timeout: Duration) -> ureq::Agent {
+    use ureq::tls::{RootCerts, TlsConfig};
+    ureq::Agent::config_builder()
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .user_agent(concat!("flikk/", env!("CARGO_PKG_VERSION")))
+        .http_status_as_error(false)
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
 }
 
 /// Back on the UI thread: add the picture to the pool's `bin` at once, as

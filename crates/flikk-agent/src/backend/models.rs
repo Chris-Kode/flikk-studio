@@ -7,6 +7,7 @@
 use super::{isolate, locate};
 use crate::session;
 use flikk_core::agent::{AgentModel, Backend};
+use flikk_os::process::ChildGuard;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Write};
@@ -38,10 +39,7 @@ fn load_all() -> BTreeMap<String, Vec<AgentModel>> {
 
 fn save_all(all: &BTreeMap<String, Vec<AgentModel>>) {
     if let Ok(bytes) = serde_json::to_vec_pretty(all) {
-        let tmp = file().with_extension("json.tmp");
-        if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, file());
-        }
+        let _ = flikk_os::fs::write_atomic(&file(), &bytes);
     }
 }
 
@@ -218,7 +216,7 @@ fn send(stdin: &mut ChildStdin, message: &Value) -> io::Result<()> {
 
 /// Run `command` as a JSON-lines peer: send `first`, then hand each message
 /// it prints to `on_message` (which may answer through stdin) until that
-/// returns a result. The process is killed either way.
+/// returns a result. The process is killed either way, also on a panic.
 fn exchange<T>(
     mut command: Command,
     first: &[Value],
@@ -232,7 +230,7 @@ fn exchange<T>(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     isolate(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = ChildGuard::spawn(&mut command)?;
     let (mut stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -269,7 +267,6 @@ fn exchange<T>(
             }
         }
     })();
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
     result
 }

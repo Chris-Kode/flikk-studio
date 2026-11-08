@@ -671,9 +671,6 @@ pub fn forget(sessions: &[String]) {
 
 fn save_all(all: &BTreeMap<String, Vec<String>>) {
     if let Ok(bytes) = serde_json::to_vec_pretty(all) {
-        let tmp = stored_file().with_extension("json.tmp");
-        if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, stored_file());
-        }
+        let _ = flikk_os::fs::write_durable(&stored_file(), &bytes);
     }
 }

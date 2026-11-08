@@ -40,7 +40,7 @@ const MAX_PROMPT: usize = 32_000;
 
 /// Who makes the picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Route {
+pub(crate) enum Route {
     /// The image provider set in Settings → Integrations.
     Provider,
     /// The user's ChatGPT plan, through Codex's sign-in.
@@ -50,7 +50,7 @@ pub enum Route {
 /// Who makes pictures for `settings`: the provider set for them, which
 /// wins over the agent's own setting, else the ChatGPT plan when the user
 /// turned it on and Codex is signed in with a paid one.
-pub fn route(settings: &AgentSettings, services: &Services) -> Option<Route> {
+pub(crate) fn route(settings: &AgentSettings, services: &Services) -> Option<Route> {
     let provider = services
         .generation
         .as_ref()
@@ -65,7 +65,7 @@ pub fn route(settings: &AgentSettings, services: &Services) -> Option<Route> {
 }
 
 /// Whether turns are offered `generate_image`.
-pub fn offered(settings: &AgentSettings, services: &Services) -> bool {
+pub(crate) fn offered(settings: &AgentSettings, services: &Services) -> bool {
     route(settings, services).is_some()
 }
 
@@ -96,7 +96,7 @@ impl Request {
 
 /// The request from the tool's arguments, for whoever makes pictures now;
 /// a provider's is checked against the model the user picked.
-pub fn parse(
+pub(crate) fn parse(
     project: &Project,
     settings: &AgentSettings,
     services: &Services,
@@ -168,7 +168,7 @@ pub fn parse(
 }
 
 /// A provider's refusal as the model should read it.
-pub fn error_text(e: &CloudError) -> String {
+pub(crate) fn error_text(e: &CloudError) -> String {
     match e {
         CloudError::BadPrompt { message, .. } => format!(
             "Refused: {message}. Change the request to fit the model the user picked, or tell the user."
@@ -203,7 +203,7 @@ pub fn summary(request: &Request) -> String {
 }
 
 /// The request as an approval carries it.
-pub fn request_json(request: &Request) -> Value {
+pub(crate) fn request_json(request: &Request) -> Value {
     match request {
         Request::Provider { request, grabs } => json!({
             "via": "provider",
@@ -243,7 +243,7 @@ pub fn subscription() -> Option<String> {
 
 /// With the user's leave: a job that makes the picture and comes back to
 /// the UI thread to add it to the pool.
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let request = parse(ctx.project(), ctx.settings, ctx.services, args)?;
     let services = ctx.services.clone();
     let project = request.grabs_frames().then(|| ctx.project().clone());
@@ -395,18 +395,6 @@ fn jwt_claims(token: &str) -> Option<Value> {
 
 /// The picture's bytes.
 fn generate(login: &Login, request: &Prompt) -> ToolResultOf<Vec<u8>> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .user_agent(concat!("flikk/", env!("CARGO_PKG_VERSION")))
-        .http_status_as_error(false)
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .into();
     let body = json!({
         "prompt": request.prompt,
         "model": MODEL,
@@ -414,7 +402,7 @@ fn generate(login: &Login, request: &Prompt) -> ToolResultOf<Vec<u8>> {
         "size": "auto",
         "background": if request.transparent { "transparent" } else { "opaque" },
     });
-    let mut response = agent
+    let mut response = super::web::http_agent(TIMEOUT)
         .post(URL)
         .header("Authorization", format!("Bearer {}", login.token))
         .header("ChatGPT-Account-ID", &login.account)

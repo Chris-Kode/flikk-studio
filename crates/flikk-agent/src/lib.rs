@@ -12,13 +12,13 @@
 //! * [`tools`] is the catalog (one JSON schema per PRD tool) and the code that
 //!   runs each tool against the `CommandBus` as `Author::Agent`.
 
-pub mod args;
+mod args;
 pub mod backend;
 pub mod bridge;
 pub mod host;
 pub mod mcp;
-pub mod prompt;
-pub mod recipes;
+mod prompt;
+mod recipes;
 pub mod session;
 pub mod tools;
 

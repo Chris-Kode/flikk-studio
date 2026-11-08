@@ -53,7 +53,7 @@ impl FrameGrab {
 
 /// Write the program at `at` as a PNG at `path`: the sequence's picture,
 /// at most [`FRAME_WIDTH`] wide, as the viewer shows it.
-pub fn grab_frame(
+pub(crate) fn grab_frame(
     project: &Project,
     services: &Services,
     at: Time,
@@ -65,18 +65,7 @@ pub fn grab_frame(
     let mut stills = Stills::new(services.media.clone(), width);
     let frame = compose::program(project, at, size, services, &mut stills);
     let fail = |e: String| format!("could not grab the frame at {:.2} s: {e}", at.as_secs_f64());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| fail(e.to_string()))?;
-    }
-    let file = std::fs::File::create(path).map_err(|e| fail(e.to_string()))?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| fail(e.to_string()))?;
-    writer
-        .write_image_data(&frame.rgba)
-        .map_err(|e| fail(e.to_string()))?;
-    writer.finish().map_err(|e| fail(e.to_string()))
+    super::view::write_png(path, &frame).map_err(|e| fail(e.to_string()))
 }
 
 /// Grab each of `grabs`, so the request's frames are on disk.
@@ -90,7 +79,7 @@ pub fn grab_all(project: &Project, services: &Services, grabs: &[FrameGrab]) -> 
 /// tool's arguments; checked against `model`, the one picked for video.
 /// Without `sound` (the user's setting) it is made silent, whatever the
 /// arguments say.
-pub fn parse(
+pub(crate) fn parse(
     project: &Project,
     model: Option<&VideoModel>,
     sound: bool,
@@ -190,7 +179,7 @@ pub fn error_text(e: &CloudError) -> String {
 }
 
 /// "Video, 5 s: …", then what it starts on or follows, and where it goes.
-pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> String {
+pub(crate) fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> String {
     let mut text = request.summary();
     if let GenerateRequest::Video {
         first_frame,
@@ -215,7 +204,7 @@ pub fn summary(request: &GenerateRequest, placement: Option<&Placement>) -> Stri
 }
 
 /// The request with its frames and placement, as an approval carries it.
-pub fn request_json(
+pub(crate) fn request_json(
     request: &GenerateRequest,
     grabs: &[FrameGrab],
     placement: Option<&Placement>,
@@ -241,7 +230,7 @@ pub fn from_json(value: &Value) -> Option<(GenerateRequest, Vec<FrameGrab>, Opti
 
 /// With the user's leave: a job that grabs its frames, makes the video and
 /// comes back to the UI thread to add it to the pool and place it.
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let Some(generation) = ctx.services.generation.clone() else {
         return fail("Generation is not available in this build.");
     };
