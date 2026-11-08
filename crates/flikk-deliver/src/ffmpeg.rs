@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
 use flikk_core::hdr::Method;
 use flikk_os::backoff::RETRY_AFTER;
+use flikk_os::fs::place_new;
 use flikk_os::process::{ChildGuard, command, ffmpeg, ffprobe};
 use flikk_os::sync::lock;
 use std::fs;
@@ -362,7 +363,7 @@ pub(crate) fn publish(tmp: &TempOutput, out: &Path, job: Option<JobId>) -> Resul
         if claimed(&target, job) {
             continue;
         }
-        if place(tmp.path(), &target).context("could not move the render into place")? {
+        if place_new(tmp.path(), &target).context("could not move the render into place")? {
             return Ok(target);
         }
     }
@@ -379,40 +380,10 @@ pub(crate) fn publish_exact(tmp: &TempOutput, out: &Path) -> Result<()> {
             out.display()
         );
     }
-    if !place(tmp.path(), out).context("could not move the file into place")? {
+    if !place_new(tmp.path(), out).context("could not move the file into place")? {
         bail!("{} appeared in the meantime; not replaced", out.display());
     }
     Ok(())
-}
-
-/// Move `tmp` to `target` unless a file is there; `false` if one is.
-fn place(tmp: &Path, target: &Path) -> io::Result<bool> {
-    match fs::hard_link(tmp, target) {
-        Ok(()) => {
-            let _ = fs::remove_file(tmp);
-            return Ok(true);
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        // Filesystems without hard links (FAT, exFAT, some network shares).
-        Err(_) => {}
-    }
-    // Claim the name with an exclusive create, then rename over the claim:
-    // only our own empty file is ever replaced.
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(e),
-    }
-    fs::rename(tmp, target).inspect_err(|_| {
-        if fs::metadata(target).is_ok_and(|m| m.len() == 0) {
-            let _ = fs::remove_file(target);
-        }
-    })?;
-    Ok(true)
 }
 
 /// Write `contents` to `path` through a temp file beside it, renamed into
