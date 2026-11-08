@@ -368,6 +368,7 @@ fn request_icon(request: &ApprovalRequest) -> IconName {
         _ => match request.category {
             ToolCategory::Deliver => IconName::Clapperboard,
             ToolCategory::Generate => IconName::Volume2,
+            ToolCategory::CaptionStyles => IconName::Captions,
             _ => IconName::BookOpen,
         },
     }

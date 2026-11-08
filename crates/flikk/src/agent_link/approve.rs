@@ -38,6 +38,9 @@ pub enum Started {
     /// Runs off the UI thread, saying a fix's words again; yields them for
     /// the pool, with the fix to cut them in by.
     Respeak(Box<dyn FnOnce() -> Result<Respoken> + Send>),
+    /// A change to the style profile's caption styles, for the editor
+    /// state to make.
+    CaptionStyle(flikk_agent::tools::caption_styles::Op),
 }
 
 /// Words an approved fix had said again.
@@ -197,6 +200,11 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 )
                 .map_err(|e| anyhow!(e))
             })))
+        }
+        tool if flikk_agent::tools::caption_styles::TOOLS.contains(&tool) => {
+            flikk_agent::tools::caption_styles::Op::from_json(args)
+                .map(Started::CaptionStyle)
+                .ok_or_else(|| anyhow!("the request could not be read"))
         }
         "export_otio" => {
             let project = inputs.project.clone();

@@ -6,6 +6,10 @@ use crate::model::{Ease, Fingerprint};
 use crate::time::TimeRange;
 use serde::{Deserialize, Serialize};
 
+mod caption_patch;
+
+pub use caption_patch::{BackgroundPatch, CaptionStylePatch, MotionPatch, limits};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum RuleScope {

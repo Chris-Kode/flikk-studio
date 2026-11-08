@@ -118,6 +118,20 @@ impl EditorState {
                     };
                 self.settle_later(id, summary, work, done, cx)
             }
+            Ok(approve::Started::CaptionStyle(op)) => match self.change_caption_styles(op, cx) {
+                // Allowed requests were never shown: their card says what
+                // changed rather than "Saved".
+                Ok(_) if pending.request.allowed => {
+                    self.agent.report_outcome(id, format!("saved: {summary}"));
+                    ApprovalOutcome::Done(summary.clone())
+                }
+                Ok(line) => {
+                    self.agent
+                        .report_outcome(id, format!("approved: {summary}"));
+                    ApprovalOutcome::Done(line)
+                }
+                Err(e) => self.approval_failed(id, &summary, e),
+            },
             Err(e) => self.approval_failed(id, &summary, e),
         };
         self.settled.push((pending, outcome));

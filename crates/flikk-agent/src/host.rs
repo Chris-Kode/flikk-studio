@@ -295,6 +295,11 @@ impl AgentHost {
         self.memory.facts = facts;
     }
 
+    /// The selected style profile's caption styles, as saved.
+    pub fn set_caption_styles(&mut self, styles: Vec<flikk_core::memory::CaptionStyle>) {
+        self.memory.caption_styles = styles;
+    }
+
     /// Queue a turn; it starts on the next [`pump`](Self::pump).
     pub fn send(&mut self, message: String, context: EditorContext, settings: &AgentSettings) {
         if self.status().is_busy() {

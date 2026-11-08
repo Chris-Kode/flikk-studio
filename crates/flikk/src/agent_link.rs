@@ -73,6 +73,11 @@ impl AgentLink {
         self.host.set_memory(rules, facts);
     }
 
+    /// The caption styles of the selected style profile, as saved.
+    pub fn set_caption_styles(&mut self, styles: Vec<flikk_core::memory::CaptionStyle>) {
+        self.host.set_caption_styles(styles);
+    }
+
     /// Requests waiting for the user's approval in the open chat.
     pub fn pending_approvals(&self) -> Vec<PendingApproval> {
         self.host.pending_approvals()

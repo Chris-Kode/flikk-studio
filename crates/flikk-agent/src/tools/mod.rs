@@ -8,6 +8,7 @@
 mod analysis;
 mod approval;
 mod audio;
+pub mod caption_styles;
 pub(crate) mod catalog;
 mod depth;
 mod edit;
@@ -41,7 +42,7 @@ use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Perm
 use flikk_core::changeset::{ChangeSetState, ItemState};
 use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
-use flikk_core::memory::{Recipe, SourceFact, StyleRule};
+use flikk_core::memory::{CaptionStyle, Recipe, SourceFact, StyleRule};
 use flikk_core::model::Project;
 use flikk_core::services::Services;
 use serde_json::Value;
@@ -106,6 +107,8 @@ pub(crate) struct Memory {
     pub rules: Vec<StyleRule>,
     pub facts: Vec<SourceFact>,
     pub recipes: Vec<Recipe>,
+    /// The caption styles of the selected style profile, as saved.
+    pub caption_styles: Vec<CaptionStyle>,
 }
 
 /// Everything a tool may use while it runs on the UI thread.
@@ -150,6 +153,9 @@ pub struct ApprovalRequest {
     pub args: Value,
     /// One line for the approval dialog.
     pub summary: String,
+    /// The user allowed this category: the UI carries it out without
+    /// asking (caption styles, which only the UI can save).
+    pub allowed: bool,
 }
 
 /// The result of a finished tool call plus what the activity log shows.
@@ -358,8 +364,11 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
             category.label()
         ))
     })?;
-    if permission == Permission::NeedsApproval {
-        return approval::request(ctx, tool, category, &args).map(Into::into);
+    // Caption styles are saved by the UI, so even allowed ones go there
+    // as a request it carries out at once.
+    let ask = permission == Permission::NeedsApproval;
+    if ask || category == ToolCategory::CaptionStyles {
+        return approval::request(ctx, tool, category, &args, !ask).map(Into::into);
     }
     match internal(tool, &args)? {
         "get_timeline" => read::get_timeline(ctx, &args),
@@ -369,6 +378,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "get_markers" => read::get_markers(ctx, &args),
         "list_fx" => read::list_fx(ctx, &args),
         "get_fx" => read::get_fx(ctx, &args),
+        "list_caption_styles" => caption_styles::list(ctx).map(Into::into),
 
         "search_transcript" => analysis::search_transcript(ctx, &args),
         "get_transcript" => analysis::get_transcript(ctx, &args),
