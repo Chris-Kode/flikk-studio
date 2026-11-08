@@ -72,6 +72,11 @@ pub struct ChatPanel {
     tools_open: HashSet<usize>,
     /// Tool calls (message, call) showing their details.
     tool_open: HashSet<(usize, usize)>,
+    /// The answered requests' stack is folded to its header.
+    approvals_folded: bool,
+    /// Scroll positions of the waiting requests and the answered stack.
+    pending_scroll: ScrollHandle,
+    settled_scroll: ScrollHandle,
     /// What the rows were last measured for.
     signature: u64,
     /// Chat session the rows show.
@@ -124,6 +129,9 @@ impl ChatPanel {
             user_messages,
             tools_open: HashSet::new(),
             tool_open: HashSet::new(),
+            approvals_folded: false,
+            pending_scroll: ScrollHandle::new(),
+            settled_scroll: ScrollHandle::new(),
             signature,
             chat,
             sessions_open: false,
@@ -177,13 +185,11 @@ impl ChatPanel {
             self.tools_open.clear();
             self.tool_open.clear();
         }
-        if switched {
-            self.shown.clear();
-        }
         // A new message of the user's ends the settled cards, however it
         // was sent; a refused one never reaches the thread.
-        if users > self.user_messages {
+        if switched || users > self.user_messages {
             self.shown.clear();
+            self.approvals_folded = false;
         }
         self.user_messages = users;
         // Forget the review state of cards no longer up.
