@@ -22,7 +22,7 @@ pub mod compose;
 pub mod cuts;
 pub mod depth;
 pub mod disk_cache;
-pub mod edit;
+pub(crate) mod edit;
 pub mod error;
 pub mod fx;
 pub mod grade;
