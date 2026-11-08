@@ -624,10 +624,7 @@ impl LibraryPanel {
             _ => None,
         };
         let playing = sample.as_ref().and_then(|s| {
-            let source = state
-                .source
-                .as_ref()
-                .filter(|p| p.is(s) && p.is_playing())?;
+            let source = state.source.as_ref().filter(|p| p.plays(s))?;
             Some(source.fraction())
         });
         // Gone from the account: it reads nothing until made again.
@@ -824,9 +821,7 @@ fn item_menu(
             let s = state.read(cx);
             let sound = s.library.sound(id).map(Sound::item);
             let preview = s.source.as_ref();
-            let playing = sound
-                .zip(preview)
-                .is_some_and(|(sound, p)| p.is(&sound) && p.is_playing());
+            let playing = sound.zip(preview).is_some_and(|(sound, p)| p.plays(&sound));
             let menu = menu
                 .item(
                     PopupMenuItem::new("Add to Project").on_click(move |_, _, cx| {
@@ -936,7 +931,7 @@ fn voice_menu(
     let playing = sample
         .as_ref()
         .zip(s.source.as_ref())
-        .is_some_and(|(item, p)| p.is(item) && p.is_playing());
+        .is_some_and(|(item, p)| p.plays(item));
     let provider = flikk_cloud::provider(&saved.provider).map_or("the provider", |p| p.name);
     let (s1, s2, s3) = (state.clone(), state.clone(), state.clone());
     let mut menu = menu.item(

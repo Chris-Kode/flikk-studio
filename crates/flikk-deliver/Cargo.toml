@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+flikk-os.workspace = true
 anyhow.workspace = true
 cosmic-text = "0.19"
 flikk-core.workspace = true

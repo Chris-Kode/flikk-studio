@@ -1826,6 +1826,7 @@ dependencies = [
  "flikk-html",
  "flikk-media",
  "flikk-models",
+ "flikk-os",
  "flikk-store",
  "gpui-kit",
  "image",
@@ -1844,6 +1845,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "flikk-core",
+ "flikk-os",
  "ignore",
  "image",
  "png 0.18.1",
@@ -1861,6 +1863,7 @@ dependencies = [
  "anyhow",
  "flikk-core",
  "flikk-models",
+ "flikk-os",
  "png 0.18.1",
  "qoi",
  "serde",
@@ -1873,6 +1876,7 @@ version = "0.1.14"
 dependencies = [
  "base64 0.22.1",
  "flikk-core",
+ "flikk-os",
  "keyring",
  "serde",
  "serde_json",
@@ -1883,6 +1887,7 @@ dependencies = [
 name = "flikk-core"
 version = "0.1.14"
 dependencies = [
+ "flikk-os",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1896,6 +1901,7 @@ dependencies = [
  "anyhow",
  "cosmic-text",
  "flikk-core",
+ "flikk-os",
  "serde",
  "serde_json",
 ]
@@ -1906,6 +1912,7 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "flikk-core",
+ "flikk-os",
  "image",
  "naga",
  "pollster",
@@ -1919,6 +1926,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "flikk-core",
+ "flikk-os",
  "png 0.18.1",
  "serde_json",
  "tungstenite",
@@ -1932,6 +1940,7 @@ dependencies = [
  "blake3",
  "flikk-core",
  "flikk-deliver",
+ "flikk-os",
  "png 0.18.1",
  "serde_json",
 ]
@@ -1942,6 +1951,7 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "flikk-core",
+ "flikk-os",
  "mlx-rs",
  "ort",
  "serde_json",
@@ -1951,12 +1961,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flikk-os"
+version = "0.1.14"
+
+[[package]]
 name = "flikk-store"
 version = "0.1.14"
 dependencies = [
  "anyhow",
  "chrono",
  "flikk-core",
+ "flikk-os",
  "rusqlite",
  "serde",
  "serde_json",

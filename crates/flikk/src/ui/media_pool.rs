@@ -2839,8 +2839,7 @@ fn listening_to(state: &Entity<EditorState>, id: MediaId, cx: &App) -> bool {
     let state = state.read(cx);
     let item = state.bus.project().media(id);
     let preview = state.source.as_ref();
-    item.zip(preview)
-        .is_some_and(|(item, p)| p.is(item) && p.is_playing())
+    item.zip(preview).is_some_and(|(item, p)| p.plays(item))
 }
 
 /// `bins` in tree order, each with how deep it sits.
@@ -3238,7 +3237,7 @@ pub(crate) fn listen_button(
     cx: &App,
 ) -> Button {
     let preview = state.read(cx).source.as_ref();
-    let playing = preview.is_some_and(|p| p.is(item) && p.is_playing());
+    let playing = preview.is_some_and(|p| p.plays(item));
     let (state, item) = (state.clone(), item.clone());
     play_button(id, playing)
         .tooltip(if playing { "Pause" } else { "Play" })
@@ -3270,7 +3269,7 @@ pub(crate) fn listen_dot(
     cx: &App,
 ) -> Stateful<Div> {
     let preview = state.read(cx).source.as_ref();
-    let playing = preview.is_some_and(|p| p.is(item) && p.is_playing());
+    let playing = preview.is_some_and(|p| p.plays(item));
     let (state, item) = (state.clone(), item.clone());
     play_dot(id, playing, size)
         .tooltip(Tooltip::text(if playing { "Pause" } else { "Play" }))

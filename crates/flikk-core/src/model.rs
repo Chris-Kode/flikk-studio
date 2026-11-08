@@ -334,6 +334,47 @@ pub struct MediaItem {
     pub tone_map: crate::hdr::ToneMap,
 }
 
+impl Fingerprint {
+    /// The fingerprint as a file or folder name for the caches keyed by
+    /// it: letters and digits kept, anything else `_`. Fingerprints are
+    /// hex, so this is the fingerprint itself; one read from an edited
+    /// project file cannot name a path outside its cache folder.
+    pub fn file_stem(&self) -> String {
+        self.0
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+}
+
+impl MediaItem {
+    /// A pool item for the file at `path`, of `kind`, with a new id and
+    /// nothing else known yet: no name of its own, fingerprint, probe
+    /// results, bin, tags, proxy or generation, and HDR mapped the default
+    /// way. Set the fields that are known on the result.
+    pub fn new(path: impl Into<PathBuf>, kind: MediaKind) -> Self {
+        Self {
+            id: MediaId::new(),
+            path: path.into(),
+            name: None,
+            kind,
+            fingerprint: None,
+            info: None,
+            bin: None,
+            tags: Vec::new(),
+            proxy: None,
+            generated: None,
+            tone_map: Default::default(),
+        }
+    }
+
+    /// The index of the file's first audio stream, the one a clip plays
+    /// unless it picks another; `None` when it has none or is not probed.
+    pub fn first_audio_stream(&self) -> Option<u32> {
+        self.info.as_ref()?.audio.first().map(|a| a.index)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaInfo {
     pub duration: Time,
@@ -723,6 +764,33 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Every FX instance of the clip, in drawing order: its effects, its
+    /// generator when it is one, then its in and out transitions.
+    pub fn fx_instances(&self) -> impl Iterator<Item = &FxInstance> {
+        let generator = match &self.content {
+            ClipContent::Generator { fx } => Some(fx),
+            _ => None,
+        };
+        let transitions = [&self.transition_in, &self.transition_out];
+        self.effects
+            .iter()
+            .chain(generator)
+            .chain(transitions.into_iter().flatten().map(|t| &t.fx))
+    }
+
+    /// [`Clip::fx_instances`], to change.
+    pub fn fx_instances_mut(&mut self) -> impl Iterator<Item = &mut FxInstance> {
+        let generator = match &mut self.content {
+            ClipContent::Generator { fx } => Some(fx),
+            _ => None,
+        };
+        let transitions = [&mut self.transition_in, &mut self.transition_out];
+        self.effects
+            .iter_mut()
+            .chain(generator)
+            .chain(transitions.into_iter().flatten().map(|t| &mut t.fx))
+    }
+
     pub fn new(start: Time, duration: Time, content: ClipContent) -> Self {
         Self {
             id: ClipId::new(),

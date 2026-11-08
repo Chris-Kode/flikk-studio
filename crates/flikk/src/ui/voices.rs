@@ -976,7 +976,7 @@ impl VoicesDialog {
                     let playing = state
                         .source
                         .as_ref()
-                        .filter(|p| p.is(item) && p.is_playing())
+                        .filter(|p| p.plays(item))
                         .map(|p| p.fraction());
                     h_flex()
                         .id(("preview", i))

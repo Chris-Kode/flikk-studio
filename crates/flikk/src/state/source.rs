@@ -55,6 +55,11 @@ impl Source {
         self.playing.is_some()
     }
 
+    /// Whether this is `item` and it is playing now.
+    pub fn plays(&self, item: &MediaItem) -> bool {
+        self.is(item) && self.is_playing()
+    }
+
     /// Whether it runs at all; a still doesn't.
     pub fn can_play(&self) -> bool {
         length(&self.item).is_some()
