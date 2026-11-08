@@ -5,6 +5,7 @@
 //! a label that scrubs, the value, and the keyframe lane.
 
 mod audio;
+mod audio_fx;
 mod clip;
 mod color;
 mod controls;

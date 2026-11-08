@@ -5,7 +5,6 @@
 //! meter with peak hold, and mute/solo. Meters read the playback mixer's
 //! levels ([`meter`]); every change is a `Command`.
 
-pub mod clip;
 pub mod controls;
 pub mod meter;
 pub mod stack;

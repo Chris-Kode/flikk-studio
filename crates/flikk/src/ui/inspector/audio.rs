@@ -2,6 +2,7 @@
 //! effects ([`ClipAudioFx`]), loudness with normalize, and ducking (PRD
 //! A1–A3). The track mixer is its own panel (`ui/mixer.rs`).
 
+use super::audio_fx::ClipAudioFx;
 use super::param::{Key, format_value};
 use super::{
     InspectorPanel, View, audio_tracks, clip, group, is_media, label, panel_header, row,
@@ -9,7 +10,6 @@ use super::{
 };
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{Button, IconName, NumberField, Segmented, Switch, h_flex, v_flex};
-use crate::ui::mixer::clip::ClipAudioFx;
 use flikk_core::analysis::Loudness;
 use flikk_core::command::Command;
 use flikk_core::model::{Clip, Ducking, Project};
