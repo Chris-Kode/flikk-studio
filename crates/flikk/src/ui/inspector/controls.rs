@@ -11,12 +11,12 @@
 
 use super::{InspectorPanel, label, row, select_field};
 use crate::ui::MediaDrag;
+use crate::ui::format::item_name;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     ColorField, DropdownMenu as _, IconName, Keyframe, KeyframeNav, NumberField, NumberFieldEvent,
     NumberFieldState, PopupMenuItem, ScrubLabel, Switch, Textarea, h_flex, v_flex,
 };
-use crate::ui::media_pool::item_name;
 use flikk_core::command::{Command, Edge};
 use flikk_core::fx::{self, FxAsset, FxInstance, ParamKind, ParamSpec, ParamValue, Transition};
 use flikk_core::model::{ClipContent, MediaKind, Project};

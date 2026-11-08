@@ -126,7 +126,7 @@ impl DeliverPanel {
         let custom = [
             input(seq.width.to_string(), window, cx),
             input(seq.height.to_string(), window, cx),
-            input(format_fps(seq.rate), window, cx),
+            input(crate::ui::format::fps(seq.rate), window, cx),
             input("18".into(), window, cx),
         ];
         let mut _subscriptions = vec![
@@ -700,7 +700,10 @@ impl DeliverPanel {
                     .unwrap_or_else(|| self.state.read(cx).bus.project().timeline.duration());
                 let lead = if s.video.is_some() {
                     let (w, h) = s.size(seq);
-                    format!("{w}×{h} · {} fps ·", format_fps(s.rate.unwrap_or(seq.rate)))
+                    format!(
+                        "{w}×{h} · {} fps ·",
+                        crate::ui::format::fps(s.rate.unwrap_or(seq.rate))
+                    )
                 } else {
                     format!("{} kHz · {} ·", khz(seq.sample_rate), audio_label(s.audio))
                 };
@@ -1192,17 +1195,6 @@ fn file_size(path: &Path) -> Option<String> {
     } else {
         format!("{:.0} KB", (bytes / 1e3).max(1.))
     })
-}
-
-fn format_fps(rate: Rate) -> String {
-    if rate.den == 1 {
-        rate.num.to_string()
-    } else {
-        format!("{:.3}", rate.fps())
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    }
 }
 
 /// `60`, `29.97`, `30000/1001`.

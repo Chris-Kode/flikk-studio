@@ -30,7 +30,7 @@ use crate::ui::{
 };
 use flikk_core::agent::Workspace;
 use flikk_core::changeset::ChangeSetState;
-use flikk_core::{ProjectId, Rate, TimeRange};
+use flikk_core::{ProjectId, TimeRange};
 use flikk_deliver::RenderState;
 use gpui_kit::base::{InteractiveElementExt as _, ResizablePanel};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -698,7 +698,12 @@ impl Flikk {
         let format = if s.workspace == Workspace::Audio {
             format!("{} kHz", format.sample_rate as f32 / 1000.)
         } else {
-            format!("{}×{} · {} fps", format.width, format.height, fps(rate))
+            format!(
+                "{}×{} · {} fps",
+                format.width,
+                format.height,
+                crate::ui::format::fps(rate)
+            )
         };
         let rendering = s
             .render_queue
@@ -873,15 +878,6 @@ fn cache_fraction(s: &EditorState) -> Option<f32> {
         }
     }
     (total > 0).then(|| cached as f32 / total as f32)
-}
-
-/// "25", "29.97".
-fn fps(rate: Rate) -> String {
-    if rate.den == 1 {
-        return rate.num.to_string();
-    }
-    let text = format!("{:.3}", rate.fps());
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 impl Render for Flikk {

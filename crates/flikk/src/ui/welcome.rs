@@ -52,7 +52,9 @@ impl Recent {
             let s = &f.project.timeline.settings;
             format!("{} · {}p", aspect(s.width, s.height), s.width.min(s.height))
         });
-        let duration = file.as_ref().map(|f| clock(f.project.timeline.duration()));
+        let duration = file
+            .as_ref()
+            .map(|f| crate::ui::format::clock_padded(f.project.timeline.duration()));
         Self {
             missing: !path.exists(),
             path,
@@ -656,13 +658,4 @@ fn aspect(w: u32, h: u32) -> String {
     }
     let g = gcd(w, h).max(1);
     format!("{}:{}", w / g, h / g)
-}
-
-/// "41:20", or "1:02:15" past an hour.
-fn clock(t: flikk_core::Time) -> String {
-    let s = t.as_secs_f64().max(0.) as u64;
-    match s / 3600 {
-        0 => format!("{:02}:{:02}", s / 60, s % 60),
-        h => format!("{h}:{:02}:{:02}", s / 60 % 60, s % 60),
-    }
 }

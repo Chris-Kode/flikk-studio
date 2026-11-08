@@ -721,7 +721,7 @@ pub(super) fn clip_name(clip: &Clip, project: &Project) -> String {
     match &clip.content {
         ClipContent::Media { media, .. } => project
             .media(*media)
-            .map(crate::ui::media_pool::item_name)
+            .map(crate::ui::format::item_name)
             .unwrap_or_default(),
         ClipContent::Title { template, .. } => template.clone(),
         ClipContent::Caption { text, .. } => text.lines().next().unwrap_or_default().to_owned(),

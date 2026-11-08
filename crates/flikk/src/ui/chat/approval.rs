@@ -14,7 +14,7 @@ use crate::ui::kit::{
     Button, Icon, IconName, Progress, ScrollableElement as _, Spinner, Tooltip, h_flex, theme as t,
     v_flex,
 };
-use crate::ui::media_pool::listen_dot;
+use crate::ui::listen::listen_dot;
 use crate::ui::voices::{self, OnKept, Start};
 use flikk_agent::PendingApproval;
 use flikk_agent::tools::ApprovalRequest;

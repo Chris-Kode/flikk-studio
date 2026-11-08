@@ -13,12 +13,15 @@ mod video;
 pub(crate) mod voiceover;
 
 use crate::state::EditorState;
+use crate::ui::format::{clock_rounded, file_name, fps_two_places};
+use crate::ui::kit::play::{bar3, seek_bar};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, ContextMenuExt as _, DialogExt as _, DropdownMenu as _, EmptyState, Icon, IconName,
-    Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Spinner, Tooltip, h_flex, v_flex,
+    Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Spinner, h_flex, v_flex,
 };
 use crate::ui::library::shared;
+use crate::ui::listen::listen_dot;
 use crate::ui::{FolderDrag, MediaDrag};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Bin, MediaItem, MediaKind};
@@ -34,6 +37,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thumbs::Thumbs;
+
+/// Kept at its old path for callers outside the UI.
+pub(crate) use crate::ui::format::item_name;
 
 const POLL: Duration = Duration::from_millis(500);
 
@@ -1435,7 +1441,7 @@ impl MediaPoolPanel {
         let duration = item
             .info
             .as_ref()
-            .map_or("—".to_owned(), |i| clock(i.duration));
+            .map_or("—".to_owned(), |i| clock_rounded(i.duration));
         let selected = look.selected;
         let more = self.more_button(id, group.clone(), cx);
         let bin = self.bin_name(item.bin, cx);
@@ -1742,7 +1748,7 @@ impl MediaPoolPanel {
                         .font_family(t::mono())
                         .text_size(px(10.))
                         .text_color(t::T3)
-                        .child(clock(at)),
+                        .child(clock_rounded(at)),
                 )
                 .into_any_element(),
         )
@@ -1751,7 +1757,7 @@ impl MediaPoolPanel {
     fn details(&self, item: &MediaItem, cx: &mut Context<Self>) -> AnyElement {
         let mut lines: Vec<SharedString> = Vec::new();
         if let Some(info) = &item.info {
-            let mut head = vec![clock(info.duration)];
+            let mut head = vec![clock_rounded(info.duration)];
             if let Some(v) = &info.video {
                 head.push(format!("{}×{}", v.width, v.height));
                 head.push(format!("{:.2} fps", v.rate.fps()).replace(".00", ""));
@@ -3052,22 +3058,7 @@ fn duration_chip(duration: Time) -> impl IntoElement {
         .font_weight(FontWeight::MEDIUM)
         .text_size(px(9.))
         .text_color(t::T1)
-        .child(clock(duration))
-}
-
-/// A 3 px bar at `fraction` in `color`.
-fn bar3(fraction: f32, color: Rgba) -> Div {
-    div()
-        .h(px(3.))
-        .rounded_full()
-        .bg(t::alpha(t::T1, 0.08))
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .w(relative(fraction.clamp(0., 1.)))
-                .bg(color),
-        )
+        .child(clock_rounded(duration))
 }
 
 /// Selection: a 1.5 px accent ring around a thumbnail.
@@ -3113,7 +3104,7 @@ fn meta(item: &MediaItem, used: usize) -> String {
             parts.push(format!("{}×{}", v.width, v.height));
         } else {
             parts.push(resolution(v.width, v.height));
-            parts.push(format!("{}p", trim_rate(v.rate.fps())));
+            parts.push(format!("{}p", fps_two_places(v.rate.fps())));
         }
     } else {
         parts.extend(ext);
@@ -3136,7 +3127,12 @@ fn format_of(item: &MediaItem) -> String {
         if item.kind == MediaKind::Image {
             return format!("{}×{}", v.width, v.height);
         }
-        return format!("{}×{} · {} fps", v.width, v.height, trim_rate(v.rate.fps()));
+        return format!(
+            "{}×{} · {} fps",
+            v.width,
+            v.height,
+            fps_two_places(v.rate.fps())
+        );
     }
     info.audio
         .first()
@@ -3162,12 +3158,6 @@ fn resolution(width: u32, height: u32) -> String {
     }
 }
 
-/// "25", "29.97".
-fn trim_rate(fps: f64) -> String {
-    let s = format!("{fps:.2}");
-    s.trim_end_matches('0').trim_end_matches('.').to_owned()
-}
-
 /// "MP4", "WAV": the file's extension, else the first name the
 /// container goes by ("mov,mp4,m4a,…" is one demuxer).
 fn file_type(item: &MediaItem) -> Option<String> {
@@ -3180,129 +3170,6 @@ fn file_type(item: &MediaItem) -> Option<String> {
         (!first.is_empty()).then(|| first.to_uppercase())
     });
     ext.or(container)
-}
-
-fn file_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-/// A bar at `fraction`; a click on it calls `seek` with where, 0..1.
-pub(crate) fn seek_bar(
-    fraction: f32,
-    marked: Option<(f32, f32)>,
-    seek: impl Fn(f32, &mut App) + 'static,
-    _: &App,
-) -> impl IntoElement {
-    let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
-    let seen = bounds.clone();
-    div()
-        .relative()
-        .flex_1()
-        .min_w_0()
-        .h(px(14.))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, move |ev, _, cx| {
-            let b = bounds.get();
-            seek((ev.position.x - b.left()) / b.size.width, cx);
-        })
-        .child(
-            canvas(move |b, _, _| seen.set(b), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
-        .children(marked.map(|(a, b)| {
-            // The marked part, under the position.
-            let (a, b) = (a.clamp(0., 1.), b.clamp(0., 1.));
-            div()
-                .absolute()
-                .left(relative(a))
-                .w(relative((b - a).max(0.)))
-                .h(px(9.))
-                .rounded(px(2.))
-                .bg(t::alpha(t::AC, 0.3))
-        }))
-        .child(bar3(fraction, t::T1).w_full())
-}
-
-/// Play or pause `item` from a row or form: an icon button that holds the
-/// hover surface while it plays.
-pub(crate) fn listen_button(
-    id: impl Into<ElementId>,
-    state: &Entity<EditorState>,
-    item: &MediaItem,
-    cx: &App,
-) -> Button {
-    let preview = state.read(cx).source.as_ref();
-    let playing = preview.is_some_and(|p| p.plays(item));
-    let (state, item) = (state.clone(), item.clone());
-    play_button(id, playing)
-        .tooltip(if playing { "Pause" } else { "Play" })
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            state.update(cx, |s, cx| s.toggle_source(&item, cx));
-        })
-}
-
-/// The row play button's look, without what it plays.
-pub(crate) fn play_button(id: impl Into<ElementId>, playing: bool) -> Button {
-    Button::new(id)
-        .ghost()
-        .small()
-        .icon(if playing {
-            IconName::Pause
-        } else {
-            IconName::Play
-        })
-        .selected(playing)
-}
-
-/// A round play button `size` across; white while `item` plays.
-pub(crate) fn listen_dot(
-    id: impl Into<ElementId>,
-    state: &Entity<EditorState>,
-    item: &MediaItem,
-    size: Pixels,
-    cx: &App,
-) -> Stateful<Div> {
-    let preview = state.read(cx).source.as_ref();
-    let playing = preview.is_some_and(|p| p.plays(item));
-    let (state, item) = (state.clone(), item.clone());
-    play_dot(id, playing, size)
-        .tooltip(Tooltip::text(if playing { "Pause" } else { "Play" }))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            state.update(cx, |s, cx| s.toggle_source(&item, cx));
-        })
-}
-
-/// The round play button's look, without what it plays.
-pub(crate) fn play_dot(id: impl Into<ElementId>, playing: bool, size: Pixels) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(size)
-        .rounded_full()
-        .cursor_pointer()
-        .when(playing, |d| d.bg(t::T1).text_color(t::G))
-        .when(!playing, |d| {
-            d.bg(t::HV).text_color(t::T1).hover(|s| s.bg(t::PS))
-        })
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
-            Icon::new(if playing {
-                IconName::Pause
-            } else {
-                IconName::Play
-            })
-            .size(size * 0.45),
-        )
 }
 
 #[derive(Clone, Copy)]
@@ -3321,25 +3188,5 @@ impl Progress {
             Progress::Analyzing(f) => Some((f, t::AC)),
             Progress::Queued | Progress::Failed => None,
         }
-    }
-}
-
-pub(crate) fn item_name(item: &MediaItem) -> String {
-    if let Some(name) = &item.name {
-        return name.clone();
-    }
-    item.path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| item.path.display().to_string())
-}
-
-/// `M:SS`, or `H:MM:SS` past an hour.
-pub(crate) fn clock(t: Time) -> String {
-    let s = t.as_secs_f64().max(0.0).round() as i64;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
     }
 }

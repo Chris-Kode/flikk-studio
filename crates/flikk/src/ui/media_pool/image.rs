@@ -5,8 +5,9 @@
 //! many pictures it follows are the picked model's.
 
 use super::video::{AUTO, Choice, Picker, picker, shape_of};
-use super::{MediaPoolPanel, form, item_name};
+use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
+use crate::ui::format::item_name;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,

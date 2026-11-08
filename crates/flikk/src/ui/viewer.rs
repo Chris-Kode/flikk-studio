@@ -40,11 +40,12 @@ use super::timeline::{
 use crate::app::TogglePlay;
 use crate::render_cache::{self, Globals};
 use crate::state::EditorState;
+use crate::ui::format::item_name;
+use crate::ui::kit::play::seek_bar;
 use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Panel, PanelHeader, PopupMenuItem, Segmented,
     Tooltip, h_flex, theme as t, v_flex,
 };
-use crate::ui::media_pool::{item_name, seek_bar};
 
 /// What Reframe around subjects asks the agent.
 const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \

@@ -5,8 +5,9 @@
 //! the prompt. Lengths, shapes and resolutions are the picked model's, and
 //! the video runs as long as In/Out when they are set.
 
-use super::{MediaPoolPanel, form, item_name};
+use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
+use crate::ui::format::item_name;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,

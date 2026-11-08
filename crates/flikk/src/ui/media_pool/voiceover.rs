@@ -6,14 +6,16 @@
 //! find, design or clone another, which this form then reads with. A voice
 //! in the library starts on the stability and similarity it last read with.
 
-use super::{MediaPoolPanel, form, listen_button, play_button};
+use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
 use crate::state::voices::Listening;
+use crate::ui::kit::play::play_button;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
     SelectItem, SelectState, Spinner, Textarea, h_flex, v_flex,
 };
+use crate::ui::listen::listen_button;
 use flikk_core::cloud::{
     self, Capability, CloudResult, GenerateRequest, Reading, SCRIPT_CHARS, Voice,
 };

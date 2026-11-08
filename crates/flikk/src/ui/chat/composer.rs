@@ -661,7 +661,7 @@ impl Composer {
                     .into_iter()
                     .map(|id| {
                         let name = project.media(id).map_or(drag.name.clone(), |m| {
-                            crate::ui::media_pool::item_name(m).into()
+                            crate::ui::format::item_name(m).into()
                         });
                         (format!("@media {id}"), name)
                     })

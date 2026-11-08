@@ -244,7 +244,7 @@ impl TranscriptPanel {
                     .rounded_full()
                     .when(row.low, |d| d.bg(t::WARN)),
             )
-            .child(crate::ui::media_pool::clock(range.start));
+            .child(crate::ui::format::clock_rounded(range.start));
         let item = h_flex()
             .id(("caption", ix))
             .min_h(px(28.))
