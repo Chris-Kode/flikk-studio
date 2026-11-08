@@ -65,18 +65,7 @@ pub fn grab_frame(
     let mut stills = Stills::new(services.media.clone(), width);
     let frame = compose::program(project, at, size, services, &mut stills);
     let fail = |e: String| format!("could not grab the frame at {:.2} s: {e}", at.as_secs_f64());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| fail(e.to_string()))?;
-    }
-    let file = std::fs::File::create(path).map_err(|e| fail(e.to_string()))?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| fail(e.to_string()))?;
-    writer
-        .write_image_data(&frame.rgba)
-        .map_err(|e| fail(e.to_string()))?;
-    writer.finish().map_err(|e| fail(e.to_string()))
+    super::view::write_png(path, &frame).map_err(|e| fail(e.to_string()))
 }
 
 /// Grab each of `grabs`, so the request's frames are on disk.
