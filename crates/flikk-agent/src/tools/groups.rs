@@ -30,7 +30,7 @@ pub const RUN_TOOL: &str = "run_tool";
 
 /// Listed on every turn: reading, looking, listening and cutting, and the
 /// attached files (they say so when nothing is attached).
-pub const CORE: [&str; 25] = [
+pub const CORE: [&str; 26] = [
     "get_timeline",
     "get_selection",
     "list_media",
@@ -44,6 +44,7 @@ pub const CORE: [&str; 25] = [
     "get_audio",
     "view_range",
     "view_frame",
+    "view_media",
     super::web::TOOL,
     "blade",
     "ripple_delete",

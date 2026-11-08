@@ -1170,10 +1170,10 @@ on the UI thread and run it off it:
   off, so there is one image tool. Web calls show as `web_search` and
   `web_fetch`, read from each backend's stream, whatever the backend calls
   them.
-* **Tools** (`flikk-agent/src/tools/`): 92 in the catalog (90 plus
+* **Tools** (`flikk-agent/src/tools/`): 106 in the catalog (104 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
-  Each turn lists 20 core tools plus `run_tool`, and the groups (`edit`,
+  Each turn lists 26 core tools (`load_tools` among them) plus `run_tool`, and the groups (`edit`,
   `transform`, `captions`, `color`, `audio`, `effects`, `overlays`,
   `generate`, `memory`, `deliver`) the turn is likely to need, picked from the
   workspace, the selection and words in the message. A chat keeps the list
@@ -1189,6 +1189,15 @@ on the UI thread and run it off it:
   script for any range), `get_music` (tempo, downbeats, level changes; every
   beat with `beats`), `search_sounds` (2 s steps ranked by a description or
   an example range) and `view_audio` (up to 30 s of spectrogram lanes).
+  `view_media` (`tools/pool.rs`) sees a pool item on its own, placed or
+  not, in its own seconds: it puts the item alone on a scratch timeline at
+  its own size and frame rate, from its first frame, so the views above
+  run on it unchanged (a video's collage and script, with `detail`; one
+  frame with `t` and `zoom` in its pixels; a picture whole or zoomed; with
+  `audio`, or for audio, the whole script and a spectrogram up to 30 s).
+  An item whose analysis is missing is analysed first (`analyze`, as the
+  pool's Analyze) and the call waits on that job, stopping with the turn;
+  `list_media` says which items are analysed.
   `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
   target clear of words wins over a nearer one on a word.
 * **Subject masks:** `set_mask` with `shape.type: subject` (`tools/masks.rs`)

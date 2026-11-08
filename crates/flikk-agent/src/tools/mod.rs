@@ -19,6 +19,7 @@ pub mod image;
 mod layout;
 mod masks;
 mod music;
+mod pool;
 mod preview;
 mod read;
 pub mod respeak;
@@ -381,6 +382,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "view_range" => view::view_range(ctx, &args, false),
         "view_detail" => view::view_range(ctx, &args, true),
         "view_frame" => view::view_frame(ctx, &args),
+        "view_media" => pool::view_media(ctx, &args),
         "get_layout" => layout::get_layout(ctx, &args),
         "view_audio" => audio::view_audio(ctx, &args),
         "get_scopes" => preview::get_scopes(ctx, &args),

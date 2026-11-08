@@ -201,7 +201,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "list_media",
             Some(ReadProject),
-            "Media pool items, optionally in one bin.",
+            "Media pool items, optionally in one bin, with whether each is analysed. view_media sees or hears one.",
             object(json!({ "bin": string("Bin name") }), &[]),
         ),
         spec(
@@ -363,6 +363,30 @@ pub fn catalog() -> Vec<ToolSpec> {
                     { "t": 12.0, "zoom": [760, 180, 420, 420] },
                     { "t": "0:08.000", "zoom": [780, 260, 520, 340] },
                     { "t": 12.0, "masks": true, "zoom": [600, 100, 700, 700] }
+                ]),
+            ),
+        ),
+        spec(
+            "view_media",
+            Some(View),
+            "See or hear a media pool item on its own, whether or not it is on the timeline: never place media just to look at it. Times are the item's own seconds. A video: its sound script and a collage of up to 30 frames over `range` (default: all of it), denser with `detail` (at most 20 s); with `t`, one full frame, and `zoom` magnifies a region of it under a grid in the item's pixels. A picture: the whole picture, or `zoom` on part of it. Audio, or a video's sound with `audio`: its whole sound script (words, sounds, music, silences), and a spectrogram with words, sounds and beats marked when `range` is at most 30 s. An item not analysed yet is analysed first and the call waits for it.",
+            examples(
+                object(
+                    json!({
+                        "media": string("Media id from list_media, or an `@media` token"),
+                        "range": range("Part of the item, in its own seconds (default: all of it)"),
+                        "detail": boolean("Video: denser frames over at most 20 s"),
+                        "t": time("Video: one frame at this second of the item"),
+                        "zoom": numbers(4, "[left, top, width, height] in the item's pixels: a video frame at `t`, or a picture"),
+                        "audio": boolean("Video: hear its sound instead of seeing frames")
+                    }),
+                    &["media"],
+                ),
+                json!([
+                    { "media": "3f2a91c0" },
+                    { "media": "3f2a91c0", "range": { "start": 4.0, "end": 9.0 }, "detail": true },
+                    { "media": "3f2a91c0", "t": 6.5, "zoom": [640, 200, 480, 360] },
+                    { "media": "3f2a91c0", "audio": true, "range": { "start": 0, "end": 12 } }
                 ]),
             ),
         ),

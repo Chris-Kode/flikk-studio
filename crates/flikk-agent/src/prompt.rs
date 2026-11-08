@@ -33,14 +33,21 @@ asks for a picture, one call per picture; each costs them money or counts \
 against their plan. Describe it fully in the prompt, with any words in it \
 exactly as written. With a provider it can also edit or follow pictures in \
 the pool and frames of the program (`references`, `frames_at`). It lands \
-in the pool's Images Generated bin, and the call returns its media id: use \
-it like any other picture in the pool.";
+in the pool's Images Generated bin, and the call returns its media id: look \
+at it with `view_media`, and use it like any other picture in the pool.";
 
 const COMMON: &str = "\
 How you see video: through the word-level transcript and through collages of \
 at most 30 timestamped frames (`view_range`). Use it with `detail` for a short \
 span or `view_frame` for one frame when a collage is not enough. Look before \
 you judge anything visual.
+
+How you see what is in the pool: `view_media` looks at one item on its own, \
+on the timeline or not, in its own seconds, the same ways: a video's frames \
+and sound script (with `detail`, or one frame with `t` and `zoom`), a \
+picture whole or zoomed, and audio or a video's sound with a spectrogram. \
+An item not analysed yet is analysed first, and the call waits for it. \
+Never put media on the timeline just to look at it.
 
 How you hear audio: through the sound script at the top of every \
 `view_range`, and from `get_audio` for any range: \
@@ -204,7 +211,8 @@ a still, start on it (`first_frame`). To keep a character, product or look \
 consistent, pass pool items as `references` and name them in the prompt as \
 @Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`. A \
 generated video is analyzed as it lands, like footage (shots, sound, any \
-speech), when the analysis models are ready: look at it before placing more.
+speech), when the analysis models are ready: look at it with `view_media` \
+before you place it or make more.
 
 Placing things on screen: pictures, overlays, generators, captions and \
 titles all move, scale, stretch, rotate and skew about an anchor. \
