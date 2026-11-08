@@ -25,6 +25,7 @@
 //! changed), is cancelled (it left the project) or the stabilizer is
 //! dropped (the window closed).
 
+use crate::engine::Claims;
 use flikk_core::ids::{JobId, MediaId};
 use flikk_core::jobs::JobQueue;
 use flikk_core::model::{Fingerprint, MediaItem, MediaKind};
@@ -33,12 +34,12 @@ use flikk_core::services::JobState;
 use flikk_core::services::{Frame, JobStatus, MediaService, ServiceError, ServiceResult};
 use flikk_core::stabilize::{CameraPath, PATH_VERSION, Stabilizer};
 use flikk_core::time::Time;
-use flikk_os::sync::{lock, panic_message, wait_timeout};
+use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Widest frame measured.
@@ -76,9 +77,8 @@ struct Shared {
     paths: Mutex<HashMap<Fingerprint, Arc<CameraPath>>>,
     /// Looked for on disk and not there.
     absent: Mutex<HashSet<Fingerprint>>,
-    /// Items being measured now, and their end announced.
-    measuring: Mutex<HashSet<Fingerprint>>,
-    measured: Condvar,
+    /// Items being measured now.
+    measuring: Claims<Fingerprint>,
     /// Items that failed: why, and when.
     failed: Mutex<HashMap<Fingerprint, (String, Instant)>>,
     /// The fingerprint each media item was last asked for under.
@@ -95,8 +95,7 @@ impl LocalStabilizer {
                 media,
                 paths: Mutex::default(),
                 absent: Mutex::default(),
-                measuring: Mutex::default(),
-                measured: Condvar::new(),
+                measuring: Claims::default(),
                 failed: Mutex::default(),
                 wanted: Mutex::default(),
                 closed: AtomicBool::new(false),
@@ -111,7 +110,7 @@ impl Drop for LocalStabilizer {
     fn drop(&mut self) {
         // The jobs hold `shared`, not this: tell them nobody is left.
         self.shared.closed.store(true, Ordering::Relaxed);
-        self.shared.measured.notify_all();
+        self.shared.measuring.wake_all();
     }
 }
 
@@ -157,26 +156,26 @@ impl Shared {
         again: bool,
         waiting: &dyn Fn(),
     ) -> ServiceResult<Arc<CameraPath>> {
-        {
-            let mut measuring = lock(&self.measuring);
-            loop {
-                if let Some(path) = self.path(fp) {
-                    return Ok(path);
-                }
-                if !again && let Some(why) = self.failed_lately(fp) {
-                    return Err(ServiceError(why));
-                }
-                if measuring.insert(fp.clone()) {
-                    break;
-                }
-                if cancel() {
-                    return Err(ServiceError("cancelled".into()));
-                }
-                waiting();
-                measuring = wait_timeout(&self.measured, measuring, WAIT_STEP);
+        let done = || {
+            if let Some(path) = self.path(fp) {
+                return Some(Ok(path));
             }
-        }
-        let _claim = Measuring(self, fp);
+            if !again && let Some(why) = self.failed_lately(fp) {
+                return Some(Err(ServiceError(why)));
+            }
+            None
+        };
+        let busy = || {
+            if cancel() {
+                return Some(Err(ServiceError("cancelled".into())));
+            }
+            waiting();
+            None
+        };
+        let _claim = match self.measuring.claim(fp, done, busy, Some(WAIT_STEP)) {
+            Ok(claim) => claim,
+            Err(answer) => return answer,
+        };
         if cancel() {
             return Err(ServiceError("cancelled".into()));
         }
@@ -208,16 +207,6 @@ impl Shared {
                 Err(e)
             }
         }
-    }
-}
-
-/// An item claimed in [`Shared::measuring`], let go when dropped.
-struct Measuring<'a>(&'a Shared, &'a Fingerprint);
-
-impl Drop for Measuring<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.measuring).remove(self.1);
-        self.0.measured.notify_all();
     }
 }
 

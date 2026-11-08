@@ -18,6 +18,7 @@
 //! model is downloaded when it was missing; renders try it again all the
 //! same.
 
+use crate::engine::Claims;
 use flikk_core::disk_cache::{DiskCache, GB, Key};
 use flikk_core::paths;
 use flikk_core::services::{Between, Frame, InterpolationService};
@@ -25,7 +26,7 @@ use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
 use flikk_os::sync::{lock, panic_message, wait};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -60,9 +61,8 @@ struct Shared {
     working: AtomicBool,
     /// Keys that failed: whether the model was there then, and when.
     failed: Mutex<HashMap<Key, (bool, Instant)>>,
-    /// Keys being made now, and their end announced.
-    making: Mutex<HashSet<Key>>,
-    finished: Condvar,
+    /// Keys being made now.
+    making: Claims<Key>,
     version: AtomicU64,
 }
 
@@ -94,8 +94,7 @@ impl LocalInterpolation {
             wake: Condvar::new(),
             working: AtomicBool::new(false),
             failed: Mutex::default(),
-            making: Mutex::default(),
-            finished: Condvar::new(),
+            making: Claims::default(),
             version: AtomicU64::new(0),
         });
         // Now, so it reads the disk's index before the first frame drawn.
@@ -283,23 +282,19 @@ impl Shared {
 
     /// Whether another thread is making `key` now.
     fn being_made(&self, key: Key) -> bool {
-        lock(&self.making).contains(&key)
+        self.making.held(&key)
     }
 
     /// The frame of `job`, made here unless it is made already. While
     /// another thread makes it, waits for that with `wait` and takes its
     /// frame (making it here when that failed), and leaves it otherwise.
     fn claim(&self, job: &Job, wait: bool) -> Option<Frame> {
-        {
-            let mut making = lock(&self.making);
-            while !making.insert(job.key) {
-                if !wait {
-                    return None;
-                }
-                making = flikk_os::sync::wait(&self.finished, making);
-            }
-        }
-        let _claim = Making(self, job.key);
+        let claimed = self
+            .making
+            .claim(&job.key, || None, || (!wait).then_some(()), None);
+        let Ok(_claim) = claimed else {
+            return None;
+        };
         // Made by the thread just waited for, or just before the claim.
         if let Some(frame) = self.find(job.key) {
             return Some(frame);
@@ -401,17 +396,6 @@ impl InterpolationService for LocalInterpolation {
 
     fn version(&self) -> u64 {
         self.shared.version.load(Ordering::SeqCst)
-    }
-}
-
-/// A key claimed in [`Shared::making`], let go when dropped, a panic
-/// included, so the threads waiting for it go on.
-struct Making<'a>(&'a Shared, Key);
-
-impl Drop for Making<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.making).remove(&self.1);
-        self.0.finished.notify_all();
     }
 }
 
