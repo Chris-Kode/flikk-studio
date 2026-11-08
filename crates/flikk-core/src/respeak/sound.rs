@@ -388,32 +388,8 @@ fn claim(part: &Path, dir: &Path, base: &str) -> std::io::Result<PathBuf> {
         if std::fs::symlink_metadata(sidecar(&path)).is_ok() {
             continue;
         }
-        match settle(part, &path) {
-            Ok(()) => return Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// `from` moved to `to`, failing with `AlreadyExists` if anything is there.
-fn settle(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(from);
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-        // A file system without links: the name reserved by creating it,
-        // then the file renamed over the reservation.
-        Err(_) => {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(to)?;
-            std::fs::rename(from, to).inspect_err(|_| {
-                let _ = std::fs::remove_file(to);
-            })
+        if flikk_os::fs::place_new(part, &path)? {
+            return Ok(path);
         }
     }
 }

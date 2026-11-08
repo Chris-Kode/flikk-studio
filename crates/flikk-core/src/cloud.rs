@@ -1144,11 +1144,11 @@ impl GenerationTask {
 
     /// The last stage the provider told of.
     fn told(&self) -> Stage {
-        *self.0.stage.lock().unwrap_or_else(|e| e.into_inner())
+        *flikk_os::sync::lock(&self.0.stage)
     }
 
     pub fn report(&self, stage: Stage) {
-        *self.0.stage.lock().unwrap_or_else(|e| e.into_inner()) = stage;
+        *flikk_os::sync::lock(&self.0.stage) = stage;
     }
 
     /// Said by a provider following it after each look at where it is:

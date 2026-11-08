@@ -48,8 +48,9 @@ pub fn mark_used(path: &Path) {
     }
 }
 
-/// Remove what nothing has used for long, scratch files left behind, and
-/// proxies made under a tone mapping no longer used.
+/// Remove what nothing has used for long, scratch files left behind,
+/// proxies made under a tone mapping no longer used, and temp files of
+/// library writes a crash left.
 pub fn sweep() {
     let cache = paths::cache();
     let now = SystemTime::now();
@@ -67,6 +68,7 @@ pub fn sweep() {
     }
     leftovers(&cache, now);
     superseded_proxies(&cache.join("proxies"));
+    library_leftovers(&paths::library(), now);
 }
 
 /// Remove the files under `dir` last modified more than `max` ago, and
@@ -110,6 +112,25 @@ fn leftovers(dir: &Path, now: SystemTime) {
                 .next()
                 .is_some_and(|e| e.starts_with("tmp-"));
         if partial && age(&entry, now).is_some_and(|a| a > DAY) {
+            let _ = fs::remove_file(&entry);
+        }
+    }
+}
+
+/// Temp files of library writes a crash left, a day old: hidden `.tmp`
+/// files under the library and its assets. Nothing else there is touched:
+/// the library is the user's data.
+fn library_leftovers(dir: &Path, now: SystemTime) {
+    for entry in read_dir(dir) {
+        if entry.is_dir() {
+            library_leftovers(&entry, now);
+            continue;
+        }
+        let temp = entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
+        if temp && age(&entry, now).is_some_and(|a| a > DAY) {
             let _ = fs::remove_file(&entry);
         }
     }

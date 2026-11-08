@@ -160,18 +160,12 @@ impl DiskCache {
     /// Keep `body` as `key`.
     pub fn write(&self, key: &Key, body: &[u8]) {
         let path = self.path(key);
-        let Some(folder) = path.parent() else {
-            return;
-        };
-        let _ = fs::create_dir_all(folder);
-        let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
-        let written = fs::File::create(&tmp).and_then(|mut f| {
+        let written = flikk_os::fs::write_atomic_with(&path, |f| {
             f.write_all(&self.magic)?;
             f.write_all(key)?;
             f.write_all(body)
         });
-        if written.is_err() || fs::rename(&tmp, &path).is_err() {
-            let _ = fs::remove_file(&tmp);
+        if written.is_err() {
             return;
         }
         let bytes = (self.magic.len() + key.len() + body.len()) as u64;
@@ -209,7 +203,7 @@ impl DiskCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Index> {
-        self.index.lock().unwrap_or_else(|e| e.into_inner())
+        flikk_os::sync::lock(&self.index)
     }
 
     fn path(&self, key: &Key) -> PathBuf {
@@ -220,13 +214,14 @@ impl DiskCache {
     }
 
     /// Index what the folder holds, oldest use first; leftovers of
-    /// interrupted writes go.
+    /// interrupted writes go: `.tmp` temp files, and `.tmp-…` ones from
+    /// before writes went through `flikk_os::fs`.
     fn scan(&self) {
         let mut found: Vec<(SystemTime, Key, u64)> = Vec::new();
         for folder in read_dir(&self.dir) {
             for file in read_dir(&folder) {
                 let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext.starts_with("tmp-") {
+                if ext == "tmp" || ext.starts_with("tmp-") {
                     let _ = fs::remove_file(&file);
                     continue;
                 }

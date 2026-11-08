@@ -331,20 +331,11 @@ fn name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Write beside the target, then rename over it.
+/// Write whole or not at all, and durably: the library is the user's data.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let fail = |e: &dyn std::fmt::Display| format!("can't save {}: {e}", name(path));
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| fail(&e))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
-    }
-    let tmp = path.with_file_name(format!(".{}.tmp", name(path)));
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            fail(&e)
-        })
+    flikk_os::fs::write_durable(path, &bytes).map_err(|e| fail(&e))
 }
 
 /// `name.ext` in the library, or `name 2.ext`… when another item has
@@ -727,15 +718,13 @@ fn copy_audio(from: &Path, to: &Path) -> Result<()> {
     if to.is_file() {
         return Ok(());
     }
-    let tmp = to.with_file_name(format!(".{}.tmp", name(to)));
-    to.parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::copy(from, &tmp))
-        .and_then(|_| std::fs::rename(&tmp, to))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("can't copy {}: {e}", name(from))
-        })
+    flikk_os::fs::write_atomic_with(to, |file| {
+        std::io::copy(&mut std::fs::File::open(from)?, file)?;
+        // On disk before it is named: sounds and samples are the user's
+        // data, which must survive a power cut.
+        file.sync_all()
+    })
+    .map_err(|e| format!("can't copy {}: {e}", name(from)))
 }
 
 /// Put audio `item` in the library: its file copied in under a folder named

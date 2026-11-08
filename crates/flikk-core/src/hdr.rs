@@ -276,15 +276,8 @@ impl Mapping {
             crate::cache_sweep::mark_used(&path);
             return Ok(path);
         }
-        std::fs::create_dir_all(&dir)?;
         let cube = Cube::from_fn(LUT_SIZE, |c| self.map(c));
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = dir.join(format!("{}.{}-{n}.tmp", self.key(), std::process::id()));
-        std::fs::write(&tmp, cube.to_text("flikk tone map"))?;
-        std::fs::rename(&tmp, &path).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })?;
+        flikk_os::fs::write_atomic(&path, cube.to_text("flikk tone map").as_bytes())?;
         Ok(path)
     }
 
