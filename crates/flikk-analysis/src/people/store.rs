@@ -98,11 +98,7 @@ fn read_varint(bytes: &[u8]) -> Option<(u32, usize)> {
 }
 
 fn dir(fp: &Fingerprint) -> PathBuf {
-    let safe: String =
-        fp.0.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-    paths::cache().join("mattes").join(safe)
+    paths::cache().join("mattes").join(fp.file_stem())
 }
 
 fn prefix(model: &str) -> String {

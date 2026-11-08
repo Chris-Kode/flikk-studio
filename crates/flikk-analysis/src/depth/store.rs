@@ -22,6 +22,8 @@ pub struct Raw {
     pub values: Vec<u8>,
 }
 
+/// `text` fit for a file name: letters, digits, `-` and `.` kept, anything
+/// else `_`: model ids have dashes, and dots (`sam2.1-…`).
 fn safe(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -37,7 +39,7 @@ fn safe(text: &str) -> String {
 pub fn path(fp: &Fingerprint, model: &str, frame: i64) -> PathBuf {
     paths::cache()
         .join("depth")
-        .join(safe(&fp.0))
+        .join(fp.file_stem())
         .join(safe(model))
         .join(format!("{frame}.depth"))
 }

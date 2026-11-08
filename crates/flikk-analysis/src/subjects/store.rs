@@ -108,11 +108,7 @@ pub struct Frames {
 }
 
 fn dir(fp: &Fingerprint) -> PathBuf {
-    let safe: String =
-        fp.0.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-    paths::cache().join("mattes").join(safe)
+    paths::cache().join("mattes").join(fp.file_stem())
 }
 
 pub fn prompt_path(fp: &Fingerprint, key: u64) -> PathBuf {

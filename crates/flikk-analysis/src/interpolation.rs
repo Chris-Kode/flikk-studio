@@ -126,7 +126,7 @@ fn runner(model: &'static flikk_models::Model) -> Option<Arc<dyn Interpolator>> 
 fn key(request: &Between<'_>) -> Key {
     let model = ModelTask::FrameInterpolation.model();
     let folder = match &request.item.fingerprint {
-        Some(fp) => fp.0.clone(),
+        Some(fp) => fp.file_stem(),
         None => {
             let mut h = Fnv::default();
             h.write(request.item.path.to_string_lossy().as_bytes());

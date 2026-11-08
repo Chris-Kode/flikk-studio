@@ -322,19 +322,9 @@ impl Stabilizer for LocalStabilizer {
 // ------------------------------------------------------------------ cache
 
 fn file(fp: &Fingerprint) -> PathBuf {
-    let name: String =
-        fp.0.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
     paths::cache()
         .join("analysis")
-        .join(format!("{name}.motion"))
+        .join(format!("{}.motion", fp.file_stem()))
 }
 
 fn load(fp: &Fingerprint) -> Option<CameraPath> {

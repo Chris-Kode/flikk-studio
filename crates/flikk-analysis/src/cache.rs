@@ -34,26 +34,13 @@ fn path(fp: &Fingerprint) -> PathBuf {
 pub fn upload(fp: &Fingerprint) -> Result<PathBuf> {
     let dir = paths::cache().join("upload");
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-    Ok(dir.join(format!("{}.flac", safe_name(fp))))
+    Ok(dir.join(format!("{}.flac", fp.file_stem())))
 }
 
 fn file(fp: &Fingerprint, extension: &str) -> PathBuf {
     paths::cache()
         .join("analysis")
-        .join(format!("{}.{extension}", safe_name(fp)))
-}
-
-/// Fingerprints are hex; anything else is kept out of file names.
-fn safe_name(fp: &Fingerprint) -> String {
-    fp.0.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+        .join(format!("{}.{extension}", fp.file_stem()))
 }
 
 /// The result and the steps it covers; `None` when missing, unreadable or
