@@ -121,7 +121,7 @@ pub fn open_dialog(state: &Entity<EditorState>, window: &mut Window, cx: &mut Ap
 }
 
 pub fn open(state: &Entity<EditorState>, path: PathBuf, window: &mut Window, cx: &mut App) {
-    if state.read(cx).file.as_ref() == Some(&path) {
+    if state.read(cx).file() == Some(path.as_path()) {
         return;
     }
     settle(state, Then::Open(path), window, cx);
@@ -179,7 +179,7 @@ fn save_then(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Some(path) = state.read(cx).file.clone() {
+    if let Some(path) = state.read(cx).file().map(|f| f.to_path_buf()) {
         let saved = state.update(cx, |s, cx| s.save_project(path, cx));
         drop(token);
         if saved && let Some(then) = then {
@@ -207,8 +207,7 @@ fn ask_path(
 ) {
     let s = state.read(cx);
     let dir = s
-        .file
-        .as_ref()
+        .file()
         .and_then(|f| f.parent())
         .map(PathBuf::from)
         .unwrap_or_else(crate::ui::deliver::default_dir);

@@ -232,7 +232,7 @@ pub fn can_save_sound(s: &EditorState, id: MediaId, cx: &App) -> bool {
     !saving
         && s.bus.project().media(id).is_some_and(|item| {
             item.kind == flikk_core::model::MediaKind::Audio
-                && !s.offline.contains(&id)
+                && !s.is_offline(id)
                 && s.library.sound_of(item).is_none()
         })
 }
@@ -394,8 +394,7 @@ pub fn apply_preset_to(
         } else {
             "Select a clip with sound"
         };
-        s.status = Some(what.into());
-        cx.notify();
+        s.say(what, cx);
         return;
     }
     s.execute_batch(commands, "apply_preset", cx);
@@ -417,6 +416,5 @@ pub fn programs_to_add(
 }
 
 fn fail(s: &mut EditorState, message: String, cx: &mut Context<EditorState>) {
-    s.status = Some(message);
-    cx.notify();
+    s.say(message, cx);
 }

@@ -14,7 +14,7 @@ use crate::ui::kit::{
     Button, Icon, IconName, Progress, ScrollableElement as _, Spinner, Tooltip, h_flex, theme as t,
     v_flex,
 };
-use crate::ui::media_pool::listen_dot;
+use crate::ui::listen::listen_dot;
 use crate::ui::voices::{self, OnKept, Start};
 use flikk_agent::PendingApproval;
 use flikk_agent::tools::ApprovalRequest;
@@ -321,19 +321,12 @@ impl ChatPanel {
         if self.render_poll.is_some() || !rendering(self.state.read(cx)) {
             return;
         }
-        self.render_poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(RENDER_POLL).await;
-                let running = this.update(cx, |this, cx| {
-                    cx.notify();
-                    rendering(this.state.read(cx))
-                });
-                if !matches!(running, Ok(true)) {
-                    break;
-                }
-            }
-            let _ = this.update(cx, |this, _| this.render_poll = None);
-        }));
+        self.render_poll = Some(crate::ui::repaint_while(
+            cx,
+            RENDER_POLL,
+            |this, cx| rendering(this.state.read(cx)),
+            |this| this.render_poll = None,
+        ));
     }
 }
 

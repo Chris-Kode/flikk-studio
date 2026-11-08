@@ -78,7 +78,7 @@ fn relink_in(
         .project()
         .media
         .iter()
-        .filter(|m| s.offline.contains(&m.id))
+        .filter(|m| s.is_offline(m.id))
         .cloned()
         .collect();
     let media = s.services.media.clone();

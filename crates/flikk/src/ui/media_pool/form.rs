@@ -11,6 +11,26 @@ use gpui_kit::base::slider::SliderState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// Puts `tag` and a space into `input` at its cursor and focuses it. With
+/// `set_off`, a space goes before it too when it would touch the word
+/// before.
+pub(crate) fn insert_tag(
+    input: &Entity<TextareaState>,
+    tag: &str,
+    set_off: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    input.update(cx, |input, cx| {
+        let value = input.value();
+        let before = value.get(..input.cursor()).unwrap_or(&value);
+        let word = before.chars().last().is_some_and(|c| !c.is_whitespace());
+        let lead = if word && set_off { " " } else { "" };
+        input.insert(format!("{lead}{tag} "), window, cx);
+        input.focus(window, cx);
+    });
+}
+
 /// `label` beside `control`.
 pub(crate) fn row(label: impl Into<SharedString>, control: impl IntoElement) -> Div {
     h_flex()

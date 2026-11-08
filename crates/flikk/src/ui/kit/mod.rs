@@ -15,6 +15,7 @@ pub mod layout;
 pub mod menu;
 pub mod number_field;
 pub mod panel;
+pub mod play;
 pub mod popover;
 pub mod progress;
 pub mod segmented;

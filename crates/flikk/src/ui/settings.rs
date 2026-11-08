@@ -502,8 +502,9 @@ impl Render for SettingsPanel {
     }
 }
 
-/// The thinking levels model `id` takes (the CLI's default for `None`).
-fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
+/// The thinking levels model `id` takes (the CLI's default model's for
+/// `None`); none when `models` does not list it.
+pub(crate) fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
     models
         .iter()
         .find(|m| match id {

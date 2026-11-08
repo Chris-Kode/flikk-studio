@@ -93,7 +93,7 @@ impl ChatPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         init(cx);
         quick::register(&state, cx);
-        let count = state.read(cx).chat.len();
+        let count = state.read(cx).chat().len();
         let list = ListState::new(count, ListAlignment::Top, px(400.));
         list.set_follow_mode(FollowMode::Tail);
         // The jump-to-latest button follows the scroll position.
@@ -172,7 +172,7 @@ impl ChatPanel {
         let (count, sig, chat, users) = {
             let s = self.state.read(cx);
             let chat = s.active_chat().to_owned();
-            (s.chat.len(), signature(s), chat, user_messages(s))
+            (s.chat().len(), signature(s), chat, user_messages(s))
         };
         let changed = sig != self.signature;
         self.signature = sig;
@@ -339,7 +339,7 @@ impl ChatPanel {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = self.state.read(cx);
-        let empty = s.chat.is_empty();
+        let empty = s.chat().is_empty();
         let backend = s.settings.backend.label();
         let title = s
             .chat_sessions()
@@ -408,7 +408,7 @@ impl ChatPanel {
     }
 
     fn render_thread(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.state.read(cx).chat.is_empty() {
+        if self.state.read(cx).chat().is_empty() {
             return h_flex()
                 .flex_1()
                 .justify_center()
@@ -465,12 +465,12 @@ impl ChatPanel {
 
     fn render_message(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
-        let Some(msg) = state.chat.get(ix).cloned() else {
+        let Some(msg) = state.chat().get(ix).cloned() else {
             return div().into_any_element();
         };
         // The user's next message answered it, even with agent rows between.
         let answer = state
-            .chat
+            .chat()
             .get(ix + 1..)
             .and_then(|rest| rest.iter().find(|m| m.role == ChatRole::User))
             .map(|m| m.text.clone());
@@ -547,7 +547,7 @@ impl ChatPanel {
         let approvals = self.render_approvals(cx);
         let state = self.state.read(cx);
         let busy = state.agent_busy();
-        let status = state.agent_error.clone();
+        let status = state.agent_error().map(str::to_owned);
         v_flex()
             .flex_none()
             .gap(px(6.))
@@ -638,7 +638,7 @@ fn text_style() -> TextViewStyle {
 }
 
 fn user_messages(s: &EditorState) -> usize {
-    s.chat.iter().filter(|m| m.role == ChatRole::User).count()
+    s.chat().iter().filter(|m| m.role == ChatRole::User).count()
 }
 
 /// Changes whenever a visible row's height may have: streamed text, card
@@ -646,8 +646,8 @@ fn user_messages(s: &EditorState) -> usize {
 fn signature(s: &EditorState) -> u64 {
     let mut h = DefaultHasher::new();
     s.active_chat().hash(&mut h);
-    s.chat.len().hash(&mut h);
-    s.chat
+    s.chat().len().hash(&mut h);
+    s.chat()
         .last()
         .map(|m| {
             let running = m.tools.iter().filter(|t| t.running.is_some()).count();

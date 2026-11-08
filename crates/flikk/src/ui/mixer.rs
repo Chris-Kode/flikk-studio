@@ -5,7 +5,6 @@
 //! meter with peak hold, and mute/solo. Meters read the playback mixer's
 //! levels ([`meter`]); every change is a `Command`.
 
-pub mod clip;
 pub mod controls;
 pub mod meter;
 pub mod stack;
@@ -666,7 +665,7 @@ impl Render for MixerPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.controls.prune();
         let state = self.state.read(cx);
-        let playing = state.playing;
+        let playing = state.is_playing();
         let project = state.bus.project();
         let rate = project.timeline.settings.sample_rate;
         let tracks: Vec<Track> = project

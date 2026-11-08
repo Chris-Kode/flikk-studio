@@ -5,6 +5,7 @@
 //! mix and speed; captions and titles get their text, timing, transform and
 //! style.
 
+use super::audio_fx::ClipAudioFx;
 use super::param::Key;
 use super::speed::SpeedRamp;
 use super::{InspectorPanel, View, group, label, row, wide};
@@ -14,7 +15,6 @@ use crate::ui::kit::{
     Button, DropdownMenu as _, IconName, Input, NumberField, PanelHeader, PopupMenuItem,
     ScrubLabel, Switch, Tab, Tabs, Textarea, h_flex, v_flex,
 };
-use crate::ui::mixer::clip::ClipAudioFx;
 use flikk_core::command::{Command, Edge};
 use flikk_core::model::{Clip, ClipColor, ClipContent, Project, Timeline, Track, TrackKind};
 use flikk_core::{ClipId, Time, TimeRange, TrackId};
@@ -721,7 +721,7 @@ pub(super) fn clip_name(clip: &Clip, project: &Project) -> String {
     match &clip.content {
         ClipContent::Media { media, .. } => project
             .media(*media)
-            .map(crate::ui::media_pool::item_name)
+            .map(crate::ui::format::item_name)
             .unwrap_or_default(),
         ClipContent::Title { template, .. } => template.clone(),
         ClipContent::Caption { text, .. } => text.lines().next().unwrap_or_default().to_owned(),

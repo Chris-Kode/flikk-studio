@@ -6,14 +6,16 @@
 //! find, design or clone another, which this form then reads with. A voice
 //! in the library starts on the stability and similarity it last read with.
 
-use super::{MediaPoolPanel, form, listen_button, play_button};
+use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
 use crate::state::voices::Listening;
+use crate::ui::kit::play::play_button;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DialogExt as _, DropdownMenu as _, IconName, PopupMenuItem, Select, SelectEvent,
     SelectItem, SelectState, Spinner, Textarea, h_flex, v_flex,
 };
+use crate::ui::listen::listen_button;
 use flikk_core::cloud::{
     self, Capability, CloudResult, GenerateRequest, Reading, SCRIPT_CHARS, Voice,
 };
@@ -391,20 +393,10 @@ impl VoiceoverForm {
         cx.notify();
     }
 
-    /// Put `tag` in at the cursor, set off from the word before it.
+    /// Put `tag` in at the cursor; a `[tag]` is set off from the word
+    /// before it.
     fn insert_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.script.update(cx, |script, cx| {
-            let value = script.value();
-            let before = value.get(..script.cursor()).unwrap_or(&value);
-            let word = before.chars().last().is_some_and(|c| !c.is_whitespace());
-            let lead = if word && tag.starts_with('[') {
-                " "
-            } else {
-                ""
-            };
-            script.insert(format!("{lead}{tag} "), window, cx);
-            script.focus(window, cx);
-        });
+        form::insert_tag(&self.script, tag, tag.starts_with('['), window, cx);
         cx.notify();
     }
 

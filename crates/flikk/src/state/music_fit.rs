@@ -11,8 +11,7 @@ impl EditorState {
         let request = match Request::new(self.bus.project(), clip, target, FitOptions::default()) {
             Ok(r) => r,
             Err(e) => {
-                self.status = Some(e);
-                cx.notify();
+                self.say(e, cx);
                 return;
             }
         };
@@ -34,8 +33,7 @@ impl EditorState {
                     }
                 }
                 Err(e) => {
-                    this.status = Some(e);
-                    cx.notify();
+                    this.say(e, cx);
                 }
             });
         })

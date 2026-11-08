@@ -3,7 +3,7 @@
 //! Preview / Review / Reject / Accept, and the outcome once resolved.
 
 use super::ChatPanel;
-use super::refs::clock;
+use crate::ui::format::clock_truncated;
 use crate::ui::kit::{
     Badge, Button, Checkbox, Icon, IconName, ScrollableElement as _, Tooltip, h_flex, theme as t,
     v_flex,
@@ -417,7 +417,7 @@ impl ChatPanel {
                             } else {
                                 t::T3
                             })
-                            .child(clock(at)),
+                            .child(clock_truncated(at)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| s.seek(at, cx))

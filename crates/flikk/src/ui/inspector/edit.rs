@@ -51,9 +51,7 @@ impl InspectorPanel {
         // Shown until another clip is selected (the timeline may keep the
         // transition picked while clips are clicked).
         let state = self.state.read(cx);
-        let transition = state.selected_transition.filter(|(clip, _)| {
-            state.selection.clips.is_empty() || state.selection.clips.contains(clip)
-        });
+        let transition = state.inspected_transition();
         if let Some((clip, edge)) = transition
             && let Some(view) = self.transition_view(clip, edge, window, cx)
         {
@@ -453,9 +451,7 @@ impl InspectorPanel {
     /// show; the Edit workspace hides it otherwise.
     pub fn has_subject(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        let transition = state.selected_transition.is_some_and(|(clip, _)| {
-            state.selection.clips.is_empty() || state.selection.clips.contains(&clip)
-        });
+        let transition = state.inspected_transition().is_some();
         transition || self.primary_on_track(cx).is_some()
     }
 

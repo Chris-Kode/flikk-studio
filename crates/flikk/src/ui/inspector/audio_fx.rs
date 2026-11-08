@@ -2,14 +2,15 @@
 //! playhead (volume automation), and its effect stack with parameters.
 //! The inspector embeds it and sets the clip each render.
 
-use super::controls::{self, ControlHost, Controls, Ctl, Range, Target};
-use super::stack;
+use super::{group, row};
 use crate::state::EditorState;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Keyframe, KeyframeNav, NumberField, PopupMenuItem,
     ScrubLabel, SectionHeader, Switch, h_flex, v_flex,
 };
+use crate::ui::mixer::controls::{self, ControlHost, Controls, Ctl, Range, Target};
+use crate::ui::mixer::stack;
 use flikk_core::audiofx::AudioFx;
 use flikk_core::command::Command;
 use flikk_core::model::{Clip, Property};
@@ -298,39 +299,6 @@ impl ClipAudioFx {
             })
             .collect()
     }
-}
-
-/// An inspector row: the 76 px label, the field, and the 54 px keyframe
-/// lane, kept empty where there is none so the fields line up.
-fn row(label: impl IntoElement, control: impl IntoElement, lane: Option<AnyElement>) -> Div {
-    h_flex()
-        .flex_none()
-        .h(px(26.))
-        .gap(px(6.))
-        .pl(px(22.))
-        .pr(px(10.))
-        .child(
-            div()
-                .w(px(76.))
-                .flex_none()
-                .min_w_0()
-                .overflow_hidden()
-                .child(label),
-        )
-        .child(div().flex_1().min_w_0().child(control))
-        .child(h_flex().w(px(54.)).flex_none().justify_end().children(lane))
-}
-
-/// A group under its header, ruled off below; folded, the header alone.
-fn group(header: SectionHeader, rows: Vec<Div>) -> Div {
-    v_flex()
-        .flex_none()
-        .border_b_1()
-        .border_color(t::LN)
-        .child(header)
-        .when(!rows.is_empty(), |g| {
-            g.child(v_flex().pb(px(6.)).children(rows))
-        })
 }
 
 impl Render for ClipAudioFx {

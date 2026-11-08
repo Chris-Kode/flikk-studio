@@ -52,7 +52,9 @@ impl Recent {
             let s = &f.project.timeline.settings;
             format!("{} · {}p", aspect(s.width, s.height), s.width.min(s.height))
         });
-        let duration = file.as_ref().map(|f| clock(f.project.timeline.duration()));
+        let duration = file
+            .as_ref()
+            .map(|f| crate::ui::format::clock_padded(f.project.timeline.duration()));
         Self {
             missing: !path.exists(),
             path,
@@ -108,7 +110,7 @@ impl Welcome {
     fn visible(&self, cx: &App) -> Vec<Row> {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let s = self.state.read(cx);
-        let recovered = s.file.is_none()
+        let recovered = s.file().is_none()
             && s.is_dirty()
             && s.bus.project().name.to_lowercase().contains(&query);
         let recent = (0..self.recent.len()).filter(|&i| {
@@ -139,7 +141,7 @@ impl Welcome {
         // The list is read once; the file can have gone since.
         if r.missing || !r.path.exists() {
             self.locate(ix, window, cx);
-        } else if self.state.read(cx).file.as_ref() == Some(&r.path) {
+        } else if self.state.read(cx).file() == Some(r.path.as_path()) {
             cx.emit(WelcomeEvent::Continue);
         } else {
             projects::open(&self.state, r.path.clone(), window, cx);
@@ -167,7 +169,7 @@ impl Welcome {
                     let _ = cx.update(|window, cx| {
                         projects::open(&state, path.clone(), window, cx);
                         // Unsaved changes ask first: the entry then stays.
-                        if state.read(cx).file.as_ref() == Some(&path) {
+                        if state.read(cx).file() == Some(path.as_path()) {
                             crate::persistence::forget_recent(&old);
                         }
                     });
@@ -656,13 +658,4 @@ fn aspect(w: u32, h: u32) -> String {
     }
     let g = gcd(w, h).max(1);
     format!("{}:{}", w / g, h / g)
-}
-
-/// "41:20", or "1:02:15" past an hour.
-fn clock(t: flikk_core::Time) -> String {
-    let s = t.as_secs_f64().max(0.) as u64;
-    match s / 3600 {
-        0 => format!("{:02}:{:02}", s / 60, s % 60),
-        h => format!("{h}:{:02}:{:02}", s / 60 % 60, s % 60),
-    }
 }

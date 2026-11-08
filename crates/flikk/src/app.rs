@@ -30,7 +30,7 @@ use crate::ui::{
 };
 use flikk_core::agent::Workspace;
 use flikk_core::changeset::ChangeSetState;
-use flikk_core::{ProjectId, Rate, TimeRange};
+use flikk_core::{ProjectId, TimeRange};
 use flikk_deliver::RenderState;
 use gpui_kit::base::{InteractiveElementExt as _, ResizablePanel};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -113,8 +113,8 @@ pub struct Flikk {
     edited: bool,
     /// The title bar was pressed: moving the pointer moves the window.
     moving: bool,
-    /// The status bar is redrawing for a running render.
-    render_poll: bool,
+    /// Redraws the status bar while a render runs.
+    render_poll: Option<Task<()>>,
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
@@ -205,7 +205,7 @@ impl Flikk {
             notices_open: false,
             edited: false,
             moving: false,
-            render_poll: false,
+            render_poll: None,
             left_tab: match crate::demo::fx_view().as_deref() {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
@@ -353,7 +353,7 @@ impl Flikk {
                     };
                 let (current, recent) = {
                     let s = state.read(cx);
-                    (s.file.clone(), s.recent_projects())
+                    (s.file().map(|f| f.to_path_buf()), s.recent_projects())
                 };
                 let mut menu = menu
                     .item(
@@ -698,7 +698,12 @@ impl Flikk {
         let format = if s.workspace == Workspace::Audio {
             format!("{} kHz", format.sample_rate as f32 / 1000.)
         } else {
-            format!("{}×{} · {} fps", format.width, format.height, fps(rate))
+            format!(
+                "{}×{} · {} fps",
+                format.width,
+                format.height,
+                crate::ui::format::fps(rate)
+            )
         };
         let rendering = s
             .render_queue
@@ -811,25 +816,15 @@ impl Flikk {
 
     /// Redraw the status bar until the running render finishes.
     fn poll_render(&mut self, cx: &mut Context<Self>) {
-        if self.render_poll {
+        if self.render_poll.is_some() {
             return;
         }
-        self.render_poll = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(RENDER_POLL).await;
-                let busy = this.update(cx, |this, cx| {
-                    let busy = this.state.read(cx).render_queue.is_busy();
-                    this.render_poll = busy;
-                    cx.notify();
-                    busy
-                });
-                if !matches!(busy, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.render_poll = Some(crate::ui::repaint_while(
+            cx,
+            RENDER_POLL,
+            |this, cx| this.state.read(cx).render_queue.is_busy(),
+            |this| this.render_poll = None,
+        ));
     }
 }
 
@@ -873,15 +868,6 @@ fn cache_fraction(s: &EditorState) -> Option<f32> {
         }
     }
     (total > 0).then(|| cached as f32 / total as f32)
-}
-
-/// "25", "29.97".
-fn fps(rate: Rate) -> String {
-    if rate.den == 1 {
-        return rate.num.to_string();
-    }
-    let text = format!("{:.3}", rate.fps());
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 impl Render for Flikk {

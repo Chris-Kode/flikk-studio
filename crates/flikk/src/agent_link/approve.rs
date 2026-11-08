@@ -434,9 +434,7 @@ pub fn file_name(path: &Path) -> String {
 }
 
 fn store<T>(f: impl FnOnce(&flikk_store::Store) -> flikk_store::Result<T>) -> Result<T> {
-    persistence::with_store(f).ok_or_else(|| {
-        anyhow!(persistence::take_notice().unwrap_or_else(|| "The store is unavailable".into()))
-    })
+    persistence::try_store(f).map_err(|e| anyhow!(e))
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
