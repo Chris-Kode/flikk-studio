@@ -517,6 +517,14 @@ impl EditorState {
         cx.notify();
     }
 
+    /// The selected transition the inspector shows: until clips are selected
+    /// that leave out the clip it sits on.
+    pub fn inspected_transition(&self) -> Option<(flikk_core::ClipId, flikk_core::command::Edge)> {
+        let clips = &self.selection.clips;
+        self.selected_transition
+            .filter(|(clip, _)| clips.is_empty() || clips.contains(clip))
+    }
+
     /// Select a transition, which deselects the clips.
     pub fn select_transition(
         &mut self,

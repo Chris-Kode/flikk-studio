@@ -754,12 +754,8 @@ impl TimelinePanel {
     }
 
     fn select_transition(&self, owner: (ClipId, Edge), cx: &mut App) {
-        self.state.update(cx, |s, cx| {
-            if !s.selection.clips.is_empty() {
-                s.select_clips(vec![], cx);
-            }
-            s.select_transition(Some(owner), cx);
-        });
+        self.state
+            .update(cx, |s, cx| s.select_transition(Some(owner), cx));
     }
 
     /// Shift-click: everything on `track` from the last selected clip there
