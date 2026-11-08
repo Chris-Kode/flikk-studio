@@ -61,7 +61,7 @@ impl Waveforms {
         };
         // Stream indices are container indices; default to the first audio stream.
         let stream = audio_stream
-            .or_else(|| item.info.as_ref()?.audio.first().map(|a| a.index))
+            .or_else(|| item.first_audio_stream())
             .unwrap_or(0);
         let key = Key {
             media: *media,

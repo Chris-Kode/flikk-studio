@@ -76,7 +76,7 @@ impl OfflineMedia {
             .media
             .iter()
             .filter(|m| self.offline.contains(&m.id))
-            .map(crate::ui::media_pool::item_name)
+            .map(crate::ui::format::item_name)
             .collect();
         let title = match items.len() {
             1 => "1 media file is offline".to_owned(),

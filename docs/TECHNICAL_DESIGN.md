@@ -48,7 +48,8 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | serde, serde_json, thiserror, uuid |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
+| `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
 | `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `flikk-analysis` | `AnalysisService`: the analysis pipeline over `flikk-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
@@ -60,8 +61,9 @@ described here, update the section in the same commit.
 | `flikk-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
 | `flikk` | GPUI app (gpui-kit): `EditorState`, workspaces and panels, agent link, persistence, playback, wiring of all of the above | all, cpal, image |
 
-Crates other than `flikk` depend only on `flikk-core`, never on each other,
-except `flikk-analysis`, which runs its models through `flikk-models`. Analysis
+Crates other than `flikk` depend only on `flikk-core` and `flikk-os`, never
+on each other, except `flikk-analysis`, which runs its models through
+`flikk-models`. Analysis
 reaches an online transcriber only through `flikk_core::cloud::SpeechService`,
 which the editor hands it (`AnalysisService::configure`).
 
@@ -443,7 +445,12 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
   day older than its newest, made for a tone map since changed. Readers
   mark files used (`mark_used`: the modified time, at most once a day).
   Mattes, analysis results and the disk caches are not swept. The pool
-  makes a video's proxy again when it is missing.
+  makes a video's proxy again when it is missing. Writes to the user's data
+  (library items, settings, credentials, the agent's stores, chats,
+  proposals, autosaves, backups) go through a uniquely named temp file
+  (`flikk_os::fs`); one a crash left is removed a day later
+  (`flikk_os::fs::sweep_temps`), as are library item names claimed and
+  never written.
 * **HDR** (`flikk-core/src/hdr.rs`): probing marks a video stream whose
   transfer is PQ (`smpte2084`: HDR10, Dolby Vision) or HLG (`arib-std-b67`:
   iPhone and Android HLG, the base layer of Dolby Vision 8.4) with an `Hdr`
@@ -1238,7 +1245,7 @@ on the UI thread and run it off it:
   `find_voices`, its stability and similarity) with the provider picked
   for it. The file goes to `paths::generated()` with a `<file>.json` of
   what was asked, and into the pool's "Music Generated", "Sound Effects
-  Generated" or "Voiceover Generated" bin as the user's edit (`CommandBus::execute_shared`, which also adds it to the
+  Generated" or "Voiceover Generated" bin as the user's edit (`CommandBus::execute_shared_as`, which also adds it to the
   drafts waiting for review), so a rejected placement keeps what was paid
   for; `MediaItem::generated` records the provider, model and prompt, and
   for a voiceover who read it, so the pool can regenerate it. With
@@ -1671,7 +1678,7 @@ there.
 | M1 import, bins, search | `ui/media_pool*`, `Command::ImportMedia` |
 | M2 inspector, M4 proxies | `flikk-media`, `ui/media_pool*` |
 | M3 analysis | `flikk-analysis`, `flikk-models` |
-| E1, E2 timeline and tools | `ui/timeline*`, `flikk-core/src/edit.rs` |
+| E1, E2 timeline and tools | `ui/timeline*`, `flikk-core/src/edit/` |
 | E3 transcript editing | `ui/transcript*`, `flikk-core/src/query.rs`, `cuts.rs`; fixing words: `flikk-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
@@ -1680,7 +1687,7 @@ there.
 | Person masks | `flikk-core/src/person.rs`, `mask.rs`, `compose.rs`, `flikk-models/src/matting/`, `flikk-analysis/src/people*`, `ui/inspector/masks.rs`, `ui/viewer.rs`, `tools/masks.rs` |
 | Depth maps, depth effects and masks | `flikk-core/src/depth.rs`, `fx/depth.rs`, `mask.rs`, `compose.rs`, `flikk-gpu` (`wrap.rs`, `batch.rs`), `flikk-models/src/depth/`, `flikk-analysis/src/depth*`, `flikk-deliver/src/composed.rs`, `ui/inspector/effects.rs`, `ui/inspector/masks.rs`, `ui/viewer/focus.rs`, `tools/depth.rs` |
 | E8 timecode readout | `Clip::to_source`, viewer |
-| Speed ramps, slow motion | `flikk-core/src/speed.rs`, `edit.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `flikk-models/src/interpolation/`, `flikk-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `flikk-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
+| Speed ramps, slow motion | `flikk-core/src/speed.rs`, `edit/retime.rs` (`set_speed_ramp`), `compose.rs`, `compose/pictures.rs`, `flikk-models/src/interpolation/`, `flikk-analysis/src/interpolation.rs`, `audiofx/stretch.rs`, `flikk-deliver/src/graph.rs`, `ui/inspector/speed.rs`, `tools/speed.rs` |
 | C1–C3, C6 | `flikk-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `flikk-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `flikk-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
@@ -1688,7 +1695,7 @@ there.
 | D1 render | `flikk-deliver`, `ui/deliver.rs`; hardware encoders `flikk-deliver/src/hw.rs` |
 | Render cache | `flikk/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `flikk-store/src/render_cache.rs` |
 | AG1–AG10 | `flikk-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
-| Online providers | `flikk-cloud`, `flikk-core/src/cloud.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
+| Online providers | `flikk-cloud`, `flikk-core/src/cloud/`, `pool.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |
 | HDR tone mapping | `flikk-core/src/hdr.rs`, `flikk-media` probe, decode, proxy, `flikk-deliver` graph, `ui/inspector/tone_map.rs`, `ui/media_pool/hdr.rs`, `set_tone_map` |
 | V1–V7 collages | `MediaService::collage`, `flikk-agent` view tools |
 | S1, S3, S4, F1, F2, F4 | `flikk-core::memory`, `flikk-store`, cut planners |

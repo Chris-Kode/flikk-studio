@@ -49,8 +49,8 @@ pub fn mark_used(path: &Path) {
 }
 
 /// Remove what nothing has used for long, scratch files left behind,
-/// proxies made under a tone mapping no longer used, and what library
-/// writes a crash left.
+/// proxies made under a tone mapping no longer used, and what writes to
+/// the user's data a crash left.
 pub fn sweep() {
     let cache = paths::cache();
     let now = SystemTime::now();
@@ -69,6 +69,18 @@ pub fn sweep() {
     leftovers(&cache, now);
     superseded_proxies(&cache.join("proxies"));
     library_leftovers(&paths::library(), now);
+    // Settings, credentials, the agent's stores, chats and proposals,
+    // autosaves and backups are written whole through a temp file.
+    let home = paths::home();
+    for dir in [
+        home.clone(),
+        home.join("agent"),
+        paths::projects(),
+        paths::autosave(),
+        paths::backups(),
+    ] {
+        flikk_os::fs::sweep_temps(&dir, DAY);
+    }
 }
 
 /// Remove the files under `dir` last modified more than `max` ago, and
@@ -131,7 +143,7 @@ fn library_leftovers(dir: &Path, now: SystemTime) {
         let temp = entry
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
+            .is_some_and(|n| flikk_os::fs::temp_owner(n).is_some());
         let claim = entry
             .extension()
             .and_then(|e| e.to_str())

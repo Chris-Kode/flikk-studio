@@ -83,11 +83,7 @@ pub(crate) fn plan(
             next.push(c);
         }
     }
-    let stream = item
-        .info
-        .as_ref()
-        .and_then(|i| i.audio.first())
-        .map(|a| a.index);
+    let stream = item.first_audio_stream();
     let mut said = Clip::new(
         range.start,
         len,

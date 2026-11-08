@@ -48,8 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thumbs::Thumbs;
 
-/// Kept at its old path for callers outside the UI.
-pub(crate) use crate::ui::format::item_name;
+use crate::ui::format::item_name;
 
 const POLL: Duration = Duration::from_millis(500);
 

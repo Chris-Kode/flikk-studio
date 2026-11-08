@@ -18,7 +18,6 @@ use flikk_store::project_file::{self, ProjectFile};
 use flikk_store::{Autosaver, Snapshot, Store};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, SystemTime};
 
 mod chats;
 mod proposals;
@@ -90,7 +89,6 @@ pub fn load_session() -> Loaded {
         });
     }
     chats::sweep_demo_chats();
-    sweep_leftover_temps();
     let untitled = || new_project("Untitled", SequenceSettings::default());
     if crate::demo::enabled() {
         return untitled();
@@ -349,27 +347,4 @@ fn call_store<T>(f: impl FnOnce(&Store) -> flikk_store::Result<T>) -> Option<Res
     let guard = session();
     let store = guard.as_ref()?.store.as_ref()?;
     Some(f(store).map_err(|e| format!("{e:#}")))
-}
-
-/// Remove the temp files a crash left beside the chats and proposals (see
-/// [`flikk_os::fs::write_durable`]), once a day old: a younger one may be
-/// another window's write under way.
-fn sweep_leftover_temps() {
-    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-    let Ok(entries) = std::fs::read_dir(flikk_core::paths::projects()) else {
-        return;
-    };
-    let now = SystemTime::now();
-    for path in entries.flatten().map(|e| e.path()) {
-        let leftover = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
-        let old = modified(&path)
-            .and_then(|at| now.duration_since(at).ok())
-            .is_some_and(|age| age > DAY);
-        if leftover && old {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
 }

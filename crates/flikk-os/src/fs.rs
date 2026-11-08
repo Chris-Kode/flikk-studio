@@ -6,12 +6,13 @@
 //! complete: a reader sees the old file or the new one, never part of one,
 //! and two writers of one file never share a temp file. The temp file is
 //! removed when the write fails; one a crash leaves ends in `.tmp`, which
-//! the cache sweep removes.
+//! [`sweep_temps`] (and, under the cache, the cache sweep) removes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 /// Write `bytes` to `path` whole or not at all, creating its folder. Not
 /// synced to disk: for caches and other data that can be made again.
@@ -54,6 +55,36 @@ pub fn temp_sibling(path: &Path) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+/// The process that made the temp file named `name` (a [`temp_sibling`]
+/// name, `.<name>.<pid>-<n>.tmp`), or `None` when `name` is not one.
+pub fn temp_owner(name: &str) -> Option<u32> {
+    let tag = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (pid, n) = tag.rsplit_once('.')?.1.split_once('-')?;
+    n.parse::<u64>().ok()?;
+    pid.parse().ok()
+}
+
+/// Remove the temp files ([`temp_sibling`]) a crash left directly in
+/// `dir`, once last modified more than `age` ago: a younger one may be a
+/// write under way in another process. Nothing else is touched, and a
+/// missing folder is nothing to sweep.
+pub fn sweep_temps(dir: &Path, age: Duration) {
+    let now = SystemTime::now();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let temp = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| temp_owner(n).is_some());
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|at| now.duration_since(at).is_ok_and(|a| a > age));
+        if temp && old && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Move the finished file `from` to `to` unless a file is already there.

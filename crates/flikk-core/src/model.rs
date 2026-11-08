@@ -67,7 +67,7 @@ impl Project {
     ///
     /// Clips keep their content and their place in time. A clip on a track
     /// whose kind does not take it (the rule every edit holds to, see
-    /// [`crate::edit`]) moves, at the same time, to the first track of its
+    /// `edit::fits_track`) moves, at the same time, to the first track of its
     /// kind that has room, made for it when needed. Then, on each track,
     /// clips are sorted by start; a clip that overlaps an earlier one moves
     /// to the first track of the same kind below it that has room, made for
@@ -163,7 +163,7 @@ impl Project {
     }
 
     /// The kind repair of [`Project::normalize`]: every clip its track does
-    /// not take ([`crate::edit::fits_track`]) moves, keeping its id, times
+    /// not take (`edit::fits_track`) moves, keeping its id, times
     /// and everything else, to the first track of its [`Self::home_kind`]
     /// that it overlaps nothing on, else to a new track of that kind. Clips
     /// move in track order, then by start, so the result is the same on
