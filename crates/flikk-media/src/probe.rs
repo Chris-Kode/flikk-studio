@@ -1,6 +1,6 @@
 //! ffprobe JSON → [`MediaInfo`].
 
-use crate::{FfmpegMedia, err, stderr_tail};
+use crate::{FfmpegMedia, err, last_stderr_line};
 use flikk_core::hdr::{Hdr, Transfer};
 use flikk_core::model::{AudioStream, MediaInfo, MediaKind, VideoStream};
 use flikk_core::services::{ServiceError, ServiceResult};
@@ -26,7 +26,7 @@ pub(crate) fn probe(media: &FfmpegMedia, path: &Path) -> ServiceResult<MediaInfo
         return Err(ServiceError(format!(
             "ffprobe {}: {}",
             path.display(),
-            stderr_tail(&out.stderr)
+            last_stderr_line(&out.stderr)
         )));
     }
     let json: Value = serde_json::from_slice(&out.stdout).map_err(|e| err("ffprobe json", e))?;

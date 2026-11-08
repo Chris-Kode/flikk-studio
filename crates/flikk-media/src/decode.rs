@@ -3,7 +3,7 @@
 //! Video comes out of FFmpeg as a stream of PAM images, whose headers carry
 //! the frame size, so rotation and pixel aspect never have to be predicted.
 
-use crate::{FfmpegMedia, err, is_still_image, proxy, secs_arg, stderr_tail};
+use crate::{FfmpegMedia, err, is_still_image, last_stderr_line, proxy, secs_arg};
 use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
@@ -146,7 +146,7 @@ fn decode_one(
         return Err(ServiceError(format!(
             "decode {}: {}",
             path.display(),
-            stderr_tail(&out.stderr)
+            last_stderr_line(&out.stderr)
         )));
     }
     read_pam(&mut out.stdout.as_slice()).map_err(|e| err("decode", e))
@@ -525,7 +525,7 @@ impl<R> Process<R> {
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) if status.success() => return None,
-                Ok(Some(_)) => return Some(self.stderr_tail()),
+                Ok(Some(_)) => return Some(self.last_stderr_line()),
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -549,10 +549,10 @@ impl<R> Process<R> {
     /// its own or wrote an error before it was stopped.
     pub fn abort(&mut self) -> Option<String> {
         if let Ok(Some(status)) = self.child.try_wait() {
-            return (!status.success()).then(|| self.stderr_tail());
+            return (!status.success()).then(|| self.last_stderr_line());
         }
         self.kill();
-        let tail = self.stderr_tail();
+        let tail = self.last_stderr_line();
         let empty = self
             .stderr
             .lock()
@@ -569,7 +569,7 @@ impl<R> Process<R> {
 
     /// The last stderr line, once the drain thread has read what the exited
     /// child left in the pipe.
-    fn stderr_tail(&mut self) -> String {
+    fn last_stderr_line(&mut self) -> String {
         if let Some(drain) = self.drain.take() {
             let deadline = Instant::now() + Duration::from_millis(200);
             while !drain.is_finished() && Instant::now() < deadline {
@@ -579,7 +579,7 @@ impl<R> Process<R> {
                 let _ = drain.join();
             }
         }
-        stderr_tail(&self.stderr.lock().unwrap())
+        crate::last_stderr_line(&self.stderr.lock().unwrap())
     }
 }
 

@@ -169,8 +169,9 @@ fn secs_arg(t: Time) -> String {
     format!("{:.6}", t.as_secs_f64().max(0.0))
 }
 
-/// Last line FFmpeg wrote to stderr, for error messages.
-fn stderr_tail(stderr: &[u8]) -> String {
+/// The last non-empty line FFmpeg wrote to stderr, for error messages;
+/// "unknown error" when it wrote none.
+fn last_stderr_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     text.lines()
         .rev()

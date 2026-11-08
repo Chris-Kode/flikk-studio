@@ -369,7 +369,7 @@ pub(crate) fn run(
     let status = child.wait()?;
     let stderr = errors.join().unwrap_or_default();
     if !status.success() || write_failed {
-        return Err(anyhow!(ffmpeg::last_error(&stderr)));
+        return Err(anyhow!(ffmpeg::last_error_lines(&stderr)));
     }
     Ok(())
 }

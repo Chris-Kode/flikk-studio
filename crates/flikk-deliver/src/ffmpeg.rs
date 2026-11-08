@@ -249,14 +249,15 @@ pub(crate) fn run(
         bail!("canceled");
     }
     if !status.success() {
-        return Err(anyhow!(last_error(&stderr)));
+        return Err(anyhow!(last_error_lines(&stderr)));
     }
     progress(1.0);
     Ok(stderr)
 }
 
-/// The most useful lines of an ffmpeg error log.
-pub(crate) fn last_error(stderr: &str) -> String {
+/// The last three non-empty lines of an ffmpeg error log, the most useful
+/// ones; "ffmpeg failed" when it has none.
+pub(crate) fn last_error_lines(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
