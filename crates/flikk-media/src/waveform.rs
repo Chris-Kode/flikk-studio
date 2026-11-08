@@ -2,11 +2,12 @@
 //! downsampled peak file, so drawing at any zoom just reads it back.
 
 use crate::decode::{Process, audio_map, pcm_output};
-use crate::{FfmpegMedia, err, write_atomic};
+use crate::{FfmpegMedia, err};
 use flikk_core::model::{Fingerprint, MediaItem};
 use flikk_core::paths;
 use flikk_core::services::{ServiceError, ServiceResult};
 use flikk_core::time::TimeRange;
+use flikk_os::fs::write_atomic;
 use flikk_os::sync::lock;
 use std::io::Read;
 use std::path::PathBuf;

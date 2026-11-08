@@ -184,29 +184,6 @@ fn err(context: &str, e: impl std::fmt::Display) -> ServiceError {
     ServiceError(format!("{context}: {e}"))
 }
 
-/// Write `bytes` to `path` via a temporary sibling and a rename, so readers
-/// never see a partial file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = tmp_sibling(path);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
-}
-
-/// `name.ext` → `name.<pid>-<n>.tmp.ext`, unique per process and call.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("tmp");
-    let name = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{stem}.{}-{n}.tmp.{ext}", std::process::id()),
-        None => format!("{stem}.{}-{n}.tmp", std::process::id()),
-    };
-    path.with_file_name(name)
-}
-
 /// Still images are decoded without seeking.
 fn is_still_image(path: &Path) -> bool {
     let ext = path
