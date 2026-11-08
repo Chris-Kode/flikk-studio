@@ -18,7 +18,7 @@ mod thumbs;
 mod waveform;
 
 use super::RefDrag;
-use crate::app::TogglePlay;
+use super::transport;
 use crate::state::EditorState;
 use crate::ui::kit::{
     Button, ContextMenuExt as _, DropdownMenu as _, Icon, IconName, Popover, PopupMenu,
@@ -135,91 +135,6 @@ fn bind_keys(cx: &mut App) {
         ]);
     }
     cx.bind_keys(bindings);
-}
-
-/// JKL, frame steps: shared by the timeline and the viewer.
-pub(crate) fn transport(state: &Entity<EditorState>, action: &dyn Action, cx: &mut App) {
-    state.update(cx, |s, cx| {
-        let any = action.as_any();
-        if any.is::<ShuttleForward>() {
-            let speed = if s.is_playing() && s.play_speed() > 0. {
-                (s.play_speed() * 2.).min(8.)
-            } else {
-                1.
-            };
-            s.shuttle(speed, cx);
-        } else if any.is::<ShuttleReverse>() {
-            let speed = if s.is_playing() && s.play_speed() < 0. {
-                (s.play_speed() * 2.).max(-8.)
-            } else {
-                -1.
-            };
-            s.shuttle(speed, cx);
-        } else if any.is::<ShuttleStop>() {
-            s.shuttle(0., cx);
-        } else if any.is::<PrevFrame>() || any.is::<NextFrame>() {
-            let frame = s.bus.project().timeline.settings.rate.frame_duration();
-            let rate = s.bus.project().timeline.settings.rate;
-            let t = s.playhead.floor_to_frame(rate);
-            let t = if any.is::<NextFrame>() {
-                t + frame
-            } else {
-                t - frame
-            };
-            s.set_playing(false, cx);
-            s.seek(t, cx);
-        } else if any.is::<PrevCut>() || any.is::<NextCut>() {
-            step_cut(s, any.is::<NextCut>(), cx);
-        } else if any.is::<TogglePlay>() {
-            s.toggle_play(cx);
-        }
-    });
-}
-
-/// Up/Down. With a clip selected, select the previous or next clip on its
-/// track; otherwise move to the previous or next cut on any track. Either
-/// way the playhead lands on the cut.
-fn step_cut(s: &mut EditorState, forward: bool, cx: &mut Context<EditorState>) {
-    let tl = &s.bus.project().timeline;
-    let selected = s.selection.clips.last().and_then(|id| tl.clip(*id));
-    if let Some((track, clip)) = selected {
-        let i = track
-            .clips
-            .iter()
-            .position(|c| c.id == clip.id)
-            .unwrap_or(0);
-        let next = if forward {
-            track.clips.get(i + 1)
-        } else {
-            i.checked_sub(1).and_then(|i| track.clips.get(i))
-        };
-        if let Some(next) = next {
-            let (id, start) = (next.id, next.start);
-            s.set_playing(false, cx);
-            s.select_clips(vec![id], cx);
-            s.seek(start, cx);
-        }
-        return;
-    }
-    let mut cuts: Vec<Time> = tl
-        .tracks
-        .iter()
-        .flat_map(|t| &t.clips)
-        .flat_map(|c| [c.start, c.end()])
-        .chain([Time::ZERO])
-        .collect();
-    cuts.sort();
-    cuts.dedup();
-    let t = s.playhead;
-    let target = if forward {
-        cuts.into_iter().find(|c| *c > t)
-    } else {
-        cuts.into_iter().rev().find(|c| *c < t)
-    };
-    if let Some(t) = target {
-        s.set_playing(false, cx);
-        s.seek(t, cx);
-    }
 }
 
 /// "Add … track" items, one per kind.
@@ -2854,32 +2769,22 @@ impl Render for TimelinePanel {
             )
             .on_action(cx.listener(|this, _: &AddMarker, _, cx| this.add_marker(false, cx)))
             .on_action(cx.listener(|this, _: &AddProtectedMarker, _, cx| this.add_marker(true, cx)))
-            .on_action(
-                cx.listener(|this, _: &MarkIn, _, cx| this.state.update(cx, |s, cx| s.mark_in(cx))),
-            )
-            .on_action(
-                cx.listener(|this, _: &MarkOut, _, cx| {
-                    this.state.update(cx, |s, cx| s.mark_out(cx))
-                }),
-            )
-            .on_action(cx.listener(|this, _: &ClearInOut, _, cx| {
-                this.state.update(cx, |s, cx| s.clear_marks(cx))
-            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.25, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(0.8, cx)))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.fit(cx)))
-            .on_action(cx.listener(|this, a: &TogglePlay, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &ShuttleForward, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &ShuttleReverse, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &ShuttleStop, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &PrevFrame, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &NextFrame, _, cx| transport(&this.state, a, cx)))
-            .on_action(cx.listener(|this, a: &PrevCut, _, cx| {
-                transport(&this.state, a, cx);
+            .map(|d| transport::with_shared_handlers(d, &self.state))
+            .on_action(
+                cx.listener(|this, _: &PrevFrame, _, cx| transport::prev_frame(&this.state, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NextFrame, _, cx| transport::next_frame(&this.state, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PrevCut, _, cx| {
+                transport::prev_cut(&this.state, cx);
                 this.reveal_playhead(cx);
             }))
-            .on_action(cx.listener(|this, a: &NextCut, _, cx| {
-                transport(&this.state, a, cx);
+            .on_action(cx.listener(|this, _: &NextCut, _, cx| {
+                transport::next_cut(&this.state, cx);
                 this.reveal_playhead(cx);
             }))
             .child(self.toolbar(cx))

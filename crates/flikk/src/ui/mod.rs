@@ -21,6 +21,7 @@ pub mod scopes;
 pub mod settings;
 pub mod timeline;
 pub mod transcript;
+pub mod transport;
 pub mod viewer;
 pub mod voices;
 pub mod welcome;

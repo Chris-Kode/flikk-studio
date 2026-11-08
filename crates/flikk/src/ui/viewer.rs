@@ -33,11 +33,8 @@ mod gizmo;
 mod masks;
 mod player;
 
-use super::timeline::{
-    ClearInOut, MarkIn, MarkOut, NextCut, NextFrame, PrevCut, PrevFrame, ShuttleForward,
-    ShuttleReverse, ShuttleStop,
-};
-use crate::app::TogglePlay;
+use super::timeline::{ClearInOut, MarkIn, MarkOut, NextCut, NextFrame, PrevCut, PrevFrame};
+use super::transport;
 use crate::render_cache::{self, Globals};
 use crate::state::EditorState;
 use crate::ui::format::item_name;
@@ -1739,11 +1736,9 @@ impl ViewerPanel {
                 .icon(icon)
                 .tooltip_kbd(tip, kbd)
         };
-        let action = |a: &'static dyn Action| {
+        let action = |f: fn(&Entity<EditorState>, &mut App)| {
             let state = self.state.clone();
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                super::timeline::transport(&state, a, cx)
-            }
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| f(&state, cx)
         };
         let (mark_in, mark_out) = (self.state.clone(), self.state.clone());
         let source_frames = source.is_some_and(|s| s.can_play());
@@ -1823,7 +1818,7 @@ impl ViewerPanel {
             )
             .child(
                 step("viewer-prev-cut", IconName::SkipBack, "Previous cut", "Up")
-                    .on_click(action(&PrevCut)),
+                    .on_click(action(transport::prev_cut)),
             )
             .child(
                 step(
@@ -1832,7 +1827,7 @@ impl ViewerPanel {
                     "Previous frame",
                     "Left",
                 )
-                .on_click(action(&PrevFrame)),
+                .on_click(action(transport::prev_frame)),
             )
             .child(play)
             .child(
@@ -1842,11 +1837,11 @@ impl ViewerPanel {
                     "Next frame",
                     "Right",
                 )
-                .on_click(action(&NextFrame)),
+                .on_click(action(transport::next_frame)),
             )
             .child(
                 step("viewer-next-cut", IconName::SkipForward, "Next cut", "Down")
-                    .on_click(action(&NextCut)),
+                    .on_click(action(transport::next_cut)),
             )
             .child(
                 step(
@@ -2167,38 +2162,16 @@ impl Render for ViewerPanel {
         div()
             .size_full()
             .key_context("Viewer")
-            .on_action(cx.listener(|this, a: &TogglePlay, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
-            .on_action(cx.listener(|this, a: &ShuttleForward, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
-            .on_action(cx.listener(|this, a: &ShuttleReverse, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
-            .on_action(cx.listener(|this, a: &ShuttleStop, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
-            .on_action(cx.listener(|this, a: &PrevFrame, _, cx| {
+            .map(|d| transport::with_shared_handlers(d, &self.state))
+            .on_action(cx.listener(|this, _: &PrevFrame, _, cx| {
                 if !this.state.update(cx, |s, cx| s.step_source(false, cx)) {
-                    super::timeline::transport(&this.state, a, cx)
+                    transport::prev_frame(&this.state, cx)
                 }
             }))
-            .on_action(cx.listener(|this, a: &NextFrame, _, cx| {
+            .on_action(cx.listener(|this, _: &NextFrame, _, cx| {
                 if !this.state.update(cx, |s, cx| s.step_source(true, cx)) {
-                    super::timeline::transport(&this.state, a, cx)
+                    transport::next_frame(&this.state, cx)
                 }
-            }))
-            .on_action(
-                cx.listener(|this, _: &MarkIn, _, cx| this.state.update(cx, |s, cx| s.mark_in(cx))),
-            )
-            .on_action(
-                cx.listener(|this, _: &MarkOut, _, cx| {
-                    this.state.update(cx, |s, cx| s.mark_out(cx))
-                }),
-            )
-            .on_action(cx.listener(|this, _: &ClearInOut, _, cx| {
-                this.state.update(cx, |s, cx| s.clear_marks(cx))
             }))
             .on_action(cx.listener(|this, _: &InsertSource, _, cx| {
                 edit_source(&this.state, InsertMode::Insert, cx)
@@ -2206,12 +2179,8 @@ impl Render for ViewerPanel {
             .on_action(cx.listener(|this, _: &OverwriteSource, _, cx| {
                 edit_source(&this.state, InsertMode::Overwrite, cx)
             }))
-            .on_action(cx.listener(|this, a: &PrevCut, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
-            .on_action(cx.listener(|this, a: &NextCut, _, cx| {
-                super::timeline::transport(&this.state, a, cx)
-            }))
+            .on_action(cx.listener(|this, _: &PrevCut, _, cx| transport::prev_cut(&this.state, cx)))
+            .on_action(cx.listener(|this, _: &NextCut, _, cx| transport::next_cut(&this.state, cx)))
             .on_action(cx.listener(|this, _: &NudgeItemLeft, _, cx| this.nudge([-1., 0.], cx)))
             .on_action(cx.listener(|this, _: &NudgeItemRight, _, cx| this.nudge([1., 0.], cx)))
             .on_action(cx.listener(|this, _: &NudgeItemUp, _, cx| this.nudge([0., -1.], cx)))
