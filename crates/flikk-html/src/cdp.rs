@@ -318,7 +318,14 @@ fn sweep_profiles(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some((page, pid)) = name.to_str().and_then(|n| {
-            let (page, rest) = match n.strip_prefix("tmp-") {
+            // A page's temp file is `.<page>.<pid>-<n>.tmp`
+            // (`flikk_os::fs::temp_sibling`), or `tmp-<pid>-<n>-<page>` as
+            // earlier versions named it.
+            let temp = || {
+                let tag = n.strip_prefix('.')?.strip_suffix(".tmp")?;
+                Some(tag.rsplit_once('.')?.1)
+            };
+            let (page, rest) = match n.strip_prefix("tmp-").or_else(temp) {
                 Some(rest) => (true, rest),
                 None => (false, n.strip_prefix("profile-")?),
             };

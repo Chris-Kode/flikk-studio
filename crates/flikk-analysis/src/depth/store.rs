@@ -6,7 +6,7 @@
 //! Reading one marks it used, so it is not swept
 //! (`flikk_core::cache_sweep`).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use flikk_core::model::Fingerprint;
 use flikk_core::paths;
 use std::path::{Path, PathBuf};
@@ -101,15 +101,6 @@ pub fn store(path: &Path, raw: &Raw) -> Result<()> {
     out.extend_from_slice(&(raw.width as u16).to_le_bytes());
     out.extend_from_slice(&(raw.height as u16).to_le_bytes());
     out.extend_from_slice(&png);
-    let dir = path.parent().expect("depth file has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &out).with_context(|| format!("could not write {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        bail!("could not write {}: {e}", path.display());
-    }
-    Ok(())
+    flikk_os::fs::write_atomic(path, &out)
+        .with_context(|| format!("could not write {}", path.display()))
 }

@@ -333,14 +333,7 @@ fn load(fp: &Fingerprint) -> Option<CameraPath> {
 }
 
 fn store(fp: &Fingerprint, path: &CameraPath) -> anyhow::Result<()> {
-    let dest = file(fp);
-    let dir = dest.parent().expect("cache file has a parent");
-    std::fs::create_dir_all(dir)?;
-    let tmp = dest.with_extension(format!("motion.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec(path)?)?;
-    std::fs::rename(&tmp, &dest).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
+    flikk_os::fs::write_atomic(&file(fp), &serde_json::to_vec(path)?)?;
     Ok(())
 }
 

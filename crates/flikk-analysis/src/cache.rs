@@ -98,14 +98,6 @@ pub fn remove_vectors(fp: &Fingerprint) -> Result<()> {
 }
 
 fn write(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = dest.parent().expect("cache file has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).with_context(|| format!("could not write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    Ok(())
+    flikk_os::fs::write_atomic(dest, bytes)
+        .with_context(|| format!("could not write {}", dest.display()))
 }

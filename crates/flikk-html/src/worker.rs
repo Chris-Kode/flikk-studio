@@ -11,7 +11,7 @@ use flikk_os::sync::lock;
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -471,13 +471,8 @@ fn write_page(path: &Path, doc: &[u8]) -> std::io::Result<()> {
     if holds(path) {
         return Ok(());
     }
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!("tmp-{}-{n}-{name}", std::process::id()));
-    let written = std::fs::write(&temp, doc).and_then(|()| std::fs::rename(&temp, path));
+    let written = flikk_os::fs::write_atomic(path, doc);
     if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
         // Another worker may have put the same page in place meanwhile
         // (Windows refuses to replace a file that is open).
         if holds(path) {
