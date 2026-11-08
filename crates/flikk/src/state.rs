@@ -382,12 +382,11 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Select clips. A clip selection and a transition selection exclude
-    /// each other, whichever panel sets them.
+    /// Select clips, none to clear the selection. A clip selection and a
+    /// transition selection exclude each other, whichever panel sets them,
+    /// so this always drops the selected transition.
     pub fn select_clips(&mut self, clips: Vec<flikk_core::ClipId>, cx: &mut Context<Self>) {
-        if !clips.is_empty() {
-            self.selected_transition = None;
-        }
+        self.selected_transition = None;
         self.selection.clips = clips;
         cx.notify();
     }

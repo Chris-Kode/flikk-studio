@@ -413,12 +413,7 @@ impl TimelinePanel {
     /// Select clips; a clip selection and a transition selection exclude
     /// each other.
     pub(super) fn select(&self, clips: Vec<ClipId>, cx: &mut App) {
-        self.state.update(cx, |s, cx| {
-            if s.selected_transition.is_some() {
-                s.select_transition(None, cx);
-            }
-            s.select_clips(clips, cx);
-        });
+        self.state.update(cx, |s, cx| s.select_clips(clips, cx));
     }
 
     pub(super) fn select_transition(&self, owner: (ClipId, Edge), cx: &mut App) {

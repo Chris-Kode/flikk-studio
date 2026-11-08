@@ -248,8 +248,13 @@ impl<K: PartialEq> Shared<K> {
                 cancel,
             };
             progress.set(0.0);
-            let result = catch_unwind(AssertUnwindSafe(|| work(&progress)))
-                .unwrap_or_else(|_| Err(format!("{} stopped unexpectedly", self.name)));
+            let result =
+                catch_unwind(AssertUnwindSafe(|| work(&progress))).unwrap_or_else(|panic| {
+                    // The user sees the short message; the cause goes to the log.
+                    let message = format!("{} stopped unexpectedly", self.name);
+                    eprintln!("{}", flikk_os::sync::panic_message(&self.name, &*panic));
+                    Err(message)
+                });
             let mut queue = lock(&self.queue);
             queue.keys.retain(|(_, k, _)| *k != id);
             // A cancelled job left the list already.

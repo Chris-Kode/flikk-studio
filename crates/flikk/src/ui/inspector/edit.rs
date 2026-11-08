@@ -48,8 +48,6 @@ impl InspectorPanel {
     /// The selected transition, the selected clip's properties for its
     /// kind, or an empty state when nothing is selected.
     pub(super) fn edit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> View {
-        // Shown until another clip is selected (the timeline may keep the
-        // transition picked while clips are clicked).
         let state = self.state.read(cx);
         let transition = state.inspected_transition();
         if let Some((clip, edge)) = transition

@@ -547,7 +547,9 @@ impl TimelinePanel {
                 return;
             };
             let clips: Vec<ClipId> = t.clips.iter().map(|c| c.id).collect();
-            if s.edit(Command::RemoveTrack { track }, cx).is_some() {
+            if s.edit(Command::RemoveTrack { track }, cx).is_some()
+                && s.selection.clips.iter().any(|c| clips.contains(c))
+            {
                 let selection = s
                     .selection
                     .clips
