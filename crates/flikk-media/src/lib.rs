@@ -30,7 +30,7 @@ use flikk_core::time::{Time, TimeRange};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// [`MediaService`] backed by the `ffmpeg` and `ffprobe` binaries.
 pub struct FfmpegMedia {
@@ -217,12 +217,6 @@ fn stderr_tail(stderr: &[u8]) -> String {
         .unwrap_or("unknown error")
         .trim()
         .to_string()
-}
-
-/// `m` locked, even after a panic while it was held: what the caches hold
-/// is still sound, so one panic does not break every later call.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn err(context: &str, e: impl std::fmt::Display) -> ServiceError {

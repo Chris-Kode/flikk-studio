@@ -11,8 +11,9 @@
 //! so the file's is always the newer. A removal the store can't make leaves
 //! an empty key in the file, which hides the store's until it can.
 
-use crate::{Provider, lock};
+use crate::Provider;
 use flikk_core::paths;
+use flikk_os::sync::lock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

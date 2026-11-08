@@ -27,9 +27,10 @@ use flikk_core::cloud::{
     GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
     SpeechService, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
+use flikk_os::sync::lock;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 /// Every provider the editor knows.
 pub const PROVIDERS: &[&Provider] = &[&elevenlabs::PROVIDER, &fal::PROVIDER, &pika::PROVIDER];
@@ -202,10 +203,6 @@ pub trait Api: Sync {
 pub struct Cloud {
     settings: Mutex<CloudSettings>,
     keys: Keys,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Cloud {

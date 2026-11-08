@@ -8,6 +8,7 @@ use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
+use flikk_os::sync::lock;
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -95,7 +96,7 @@ pub(crate) fn still(
         max_width,
         tone.map(str::to_string),
     );
-    if let Some(frame) = crate::lock(&media.frames).get(&key) {
+    if let Some(frame) = lock(&media.frames).get(&key) {
         return Ok(frame);
     }
     // FFmpeg returns the first frame at or after the seek point; aim half a
@@ -118,7 +119,7 @@ pub(crate) fn still(
             path.display()
         ))
     })?;
-    crate::lock(&media.frames).put(key, frame.clone());
+    lock(&media.frames).put(key, frame.clone());
     Ok(frame)
 }
 
@@ -266,7 +267,7 @@ pub(crate) fn playback(
     let fd = rate.frame_duration();
     let first = from.max(Time::ZERO).floor_to_frame(rate);
     let (path, tone) = video_source(media, item)?;
-    let hwaccel = !crate::lock(&media.software_only).contains(&path);
+    let hwaccel = !lock(&media.software_only).contains(&path);
     let mut stream = FfmpegFrames {
         ffmpeg: media.ffmpeg(),
         path,
@@ -350,7 +351,7 @@ impl FfmpegFrames {
     }
 
     fn software_only(&self) {
-        crate::lock(&self.software_only).insert(self.path.clone());
+        lock(&self.software_only).insert(self.path.clone());
     }
 
     fn fail(&mut self, message: String) -> ServiceError {

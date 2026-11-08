@@ -7,6 +7,7 @@ use flikk_core::model::{Fingerprint, MediaItem};
 use flikk_core::paths;
 use flikk_core::services::{ServiceError, ServiceResult};
 use flikk_core::time::TimeRange;
+use flikk_os::sync::lock;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ pub(crate) fn waveform(
 fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Arc<Peaks>> {
     let fingerprint = media.fingerprint_of(item)?;
     let key = (fingerprint.clone(), stream);
-    if let Some(p) = crate::lock(&media.peaks).get(&key) {
+    if let Some(p) = lock(&media.peaks).get(&key) {
         return Ok(p.clone());
     }
     let file = peak_path(&fingerprint, stream);
@@ -77,7 +78,7 @@ fn peaks(media: &FfmpegMedia, item: &MediaItem, stream: u32) -> ServiceResult<Ar
         }
     };
     let peaks = Arc::new(peaks);
-    let mut kept = crate::lock(&media.peaks);
+    let mut kept = lock(&media.peaks);
     // Kept to a bound: peaks let go of are read back from their file.
     let mut bytes: usize = kept.values().map(|p| p.values.len()).sum();
     while bytes + peaks.values.len() > KEPT_BYTES

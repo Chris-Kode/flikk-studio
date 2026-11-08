@@ -16,6 +16,7 @@ use flikk_core::cloud::{
     Capability, CloudError, CloudResult, Designed, GenerateRequest, GenerationTask, Heard,
     SpeechRequest, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
 };
+use flikk_os::sync::lock;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -285,13 +286,13 @@ impl Formats {
     ) -> CloudResult<(Reply, &'static str)> {
         let last = formats.len() - 1;
         for (i, &format) in formats.iter().enumerate() {
-            if i < last && crate::lock(&self.refused).contains(&format) {
+            if i < last && lock(&self.refused).contains(&format) {
                 continue;
             }
             let url = format!("{API}{endpoint}?output_format={format}");
             let reply = http::post_json(&url, &[("xi-api-key", key)], body, false, Some(task))?;
             if i < last && format_refused(&reply) {
-                crate::lock(&self.refused).push(format);
+                lock(&self.refused).push(format);
                 continue;
             }
             if !reply.ok() {
