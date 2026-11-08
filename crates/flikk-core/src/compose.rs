@@ -74,7 +74,9 @@ mod placement;
 
 pub use cpu::{blend_channel, composite_cpu};
 pub use layout::{GroupMove, Shape, group_bounds, layout};
-pub use pictures::{Pictures, Stills, Streams, frame_length, overlay_item};
+pub use pictures::{
+    Pictures, STILL_IMAGE_EXTENSIONS, Stills, Streams, frame_length, is_still_overlay, overlay_item,
+};
 pub use placement::{MAX_SKEW, Matrix3, Placement, placement, placement_from};
 
 use crate::depth::{self, DepthMap};
