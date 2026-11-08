@@ -30,6 +30,7 @@ pub(crate) mod audio;
 mod cache;
 mod focus;
 mod gizmo;
+mod latest;
 mod masks;
 mod player;
 
@@ -43,6 +44,7 @@ use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Panel, PanelHeader, PopupMenuItem, Segmented,
     Tooltip, h_flex, theme as t, v_flex,
 };
+use latest::Latest;
 
 /// What Reframe around subjects asks the agent.
 const REFRAME: &str = "Reframe the footage for this frame: fill it, and pan each clip \
@@ -230,10 +232,9 @@ pub struct ViewerPanel {
     requested: Option<Request>,
     /// The project paused frames are composed from, by key.
     snapshot: Option<(PlayKey, Arc<Project>)>,
-    /// A paused frame is being composed.
-    composing: bool,
-    /// The newest paused frame asked for while composing.
-    pending: Option<Job>,
+    /// A paused frame is being composed, with the newest one asked for
+    /// meanwhile.
+    composing: Latest<Job>,
     /// Paused frames asked for so far, which numbers them.
     frames: u64,
     /// The number of the picture on screen, and its paused frame (none
@@ -257,10 +258,9 @@ pub struct ViewerPanel {
     masks: masks::MaskEditor,
     /// The subjects' version the cached frames were composed at.
     subjects_seen: u64,
-    /// A subject preview is being found.
-    previewing: bool,
-    /// The newest one asked for meanwhile.
-    next_preview: Option<PreviewAsk>,
+    /// A subject preview is being found, with the newest one asked for
+    /// meanwhile.
+    previewing: Latest<PreviewAsk>,
     /// The mouse is over a picture with the subject tool, so a preview
     /// that arrives is shown.
     hovering: bool,
@@ -299,8 +299,7 @@ impl ViewerPanel {
             picture: None,
             requested: None,
             snapshot: None,
-            composing: false,
-            pending: None,
+            composing: Latest::Idle,
             frames: 0,
             on_screen: (0, None),
             retired: Vec::new(),
@@ -312,8 +311,7 @@ impl ViewerPanel {
             gizmo: Gizmo::default(),
             masks: masks::MaskEditor::default(),
             subjects_seen: 0,
-            previewing: false,
-            next_preview: None,
+            previewing: Latest::Idle,
             hovering: false,
             laying_out: None,
             layouts: 0,
@@ -450,14 +448,13 @@ impl ViewerPanel {
         if shown {
             return;
         }
-        if self.previewing {
-            self.next_preview = Some(ask);
+        let Some(ask) = self.previewing.queue(ask) else {
             return;
-        }
+        };
         let Some(service) = self.state.read(cx).services.subjects.clone() else {
             return;
         };
-        self.previewing = true;
+        self.previewing.start();
         cx.spawn(async move |this, cx| {
             let PreviewAsk { clip, item, prompt } = ask;
             let asked = prompt.clone();
@@ -473,7 +470,7 @@ impl ViewerPanel {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.previewing = false;
+                let next = this.previewing.finish();
                 let wanted = this.hovering && this.masks.tool == Some(masks::Tool::Subject);
                 if let Some(outlines) = outlines.filter(|_| wanted) {
                     this.masks.hover = Some(masks::Hover {
@@ -482,7 +479,7 @@ impl ViewerPanel {
                         outlines,
                     });
                 }
-                if let Some(next) = this.next_preview.take() {
+                if let Some(next) = next {
                     this.preview_subject(next, cx);
                 }
                 cx.notify();
@@ -519,7 +516,7 @@ impl ViewerPanel {
         match ask {
             Some(ask) => self.preview_subject(ask, cx),
             None => {
-                self.next_preview = None;
+                self.previewing.drop_next();
                 if self.masks.hover.take().is_some() {
                     cx.notify();
                 }
@@ -605,7 +602,7 @@ impl ViewerPanel {
         };
         self.ahead = None;
         // A paused frame still waiting is not composed once playback runs.
-        self.pending = None;
+        self.composing.drop_next();
         self.held_click = None;
         let playhead = state.monitor_time();
         // A seek while playing restarts the audio at the new position; video
@@ -694,7 +691,7 @@ impl ViewerPanel {
             .and_then(|mut c| c.get(key, request.frame));
         if let Some(picture) = cached {
             // Whatever is still composing is older: don't show it.
-            self.pending = None;
+            self.composing.drop_next();
             self.show_frame(seq, request, Some(picture));
             self.render_ahead_later(request, cx);
             self.lay_out(request, cx);
@@ -708,15 +705,13 @@ impl ViewerPanel {
             t: Time::from_frame(request.frame, rate),
             disk,
         };
-        if self.composing {
-            self.pending = Some(job);
-        } else {
+        if let Some(job) = self.composing.queue(job) {
             self.compose(job, cx);
         }
     }
 
     fn compose(&mut self, job: Job, cx: &mut Context<Self>) {
-        self.composing = true;
+        self.composing.start();
         let (request, seq) = (job.request, job.seq);
         let cache = self.cache.clone();
         cx.spawn(async move |this, cx| {
@@ -759,9 +754,8 @@ impl ViewerPanel {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.composing = false;
+                let next = this.composing.finish();
                 if this.playback.is_some() {
-                    this.pending = None;
                     return;
                 }
                 // Show progress toward the latest request, but nothing older
@@ -769,7 +763,7 @@ impl ViewerPanel {
                 let current = this.requested == Some(request);
                 this.show_frame(seq, request, picture);
                 // Latest request wins: compose the newest one asked for meanwhile.
-                if let Some(next) = this.pending.take() {
+                if let Some(next) = next {
                     this.compose(next, cx);
                 } else if current {
                     this.render_ahead_later(request, cx);
