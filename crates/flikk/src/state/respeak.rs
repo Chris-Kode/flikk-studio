@@ -31,8 +31,7 @@ impl EditorState {
         match library::link_speaker(&self.library, saved.id, who) {
             Ok(()) => self.reload_library(cx),
             Err(e) => {
-                self.status = Some(e);
-                cx.notify();
+                self.say(e, cx);
             }
         }
     }

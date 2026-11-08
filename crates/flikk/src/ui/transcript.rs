@@ -398,8 +398,7 @@ impl TranscriptPanel {
                     crate::ui::voices::open(state, start, None, window, cx);
                 }
                 Err(e) => state.update(cx, |s, cx| {
-                    s.status = Some(e);
-                    cx.notify();
+                    s.say(e, cx);
                 }),
             });
         })

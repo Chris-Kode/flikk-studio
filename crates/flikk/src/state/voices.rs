@@ -370,8 +370,7 @@ impl EditorState {
                 Some(saved.id)
             }
             Err(e) => {
-                self.status = Some(e);
-                cx.notify();
+                self.say(e, cx);
                 None
             }
         }
@@ -406,8 +405,7 @@ impl EditorState {
         match library::rename_voice(&saved, &name) {
             Ok(_) => self.reload_library(cx),
             Err(e) => {
-                self.status = Some(e);
-                cx.notify();
+                self.say(e, cx);
                 return;
             }
         }
@@ -429,8 +427,7 @@ impl EditorState {
         cx.spawn(async move |this, cx| {
             if let Err(e) = task.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.status = Some(format!("Renamed here only: {e}"));
-                    cx.notify();
+                    this.say(format!("Renamed here only: {e}"), cx);
                 });
             }
         })

@@ -186,30 +186,6 @@ impl EditorState {
         // Brings back the proposals left waiting for review too.
         let chat = ChatLog::load(persistence::load_chats(&mut bus));
         let document = Document::opened(file, recovered, &bus);
-        let pump = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(AGENT_PUMP).await;
-                if this.update(cx, |this, cx| this.pump_agent(cx)).is_err() {
-                    break;
-                }
-            }
-        });
-        let models_poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(MODELS_POLL).await;
-                if this.update(cx, |this, cx| this.poll_models(cx)).is_err() {
-                    break;
-                }
-            }
-        });
-        let subjects_poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(SUBJECTS_POLL).await;
-                if this.update(cx, |this, cx| this.poll_subjects(cx)).is_err() {
-                    break;
-                }
-            }
-        });
         let cloud = Arc::new(flikk_cloud::Cloud::new(
             persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
         ));
@@ -246,7 +222,7 @@ impl EditorState {
             editing_fx: None,
             library: flikk_core::library::Library::load(),
             agent: AgentLink::new(),
-            _pump: pump,
+            _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
             models_seen: (downloaded, 0),
@@ -254,9 +230,9 @@ impl EditorState {
             models: flikk_models::Downloads::default(),
             notices: Notices::default(),
             offline: OfflineMedia::default(),
-            _models_poll: models_poll,
+            _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),
             _offline_poll: Self::poll_offline(cx),
-            _subjects_poll: subjects_poll,
+            _subjects_poll: Self::every(cx, SUBJECTS_POLL, Self::poll_subjects),
             agent_models: HashMap::new(),
             models_asked: HashSet::new(),
             cloud,
@@ -417,6 +393,29 @@ impl EditorState {
             self.live_version += 1;
         }
         self.captions.clear_live();
+    }
+
+    /// Run `f` every `period` on the UI thread, for as long as the state
+    /// lives: the task returned stops it when dropped.
+    fn every(
+        cx: &mut Context<Self>,
+        period: Duration,
+        f: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period).await;
+                if this.update(cx, |this, cx| f(this, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// Show `text` on the status line, until the next action clears it.
+    pub fn say(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.status = Some(text.into());
+        cx.notify();
     }
 
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {

@@ -490,8 +490,7 @@ impl EditorState {
             return;
         }
         if self.agent_busy() {
-            self.status = Some("Attach once the agent has replied".into());
-            cx.notify();
+            self.say("Attach once the agent has replied", cx);
             return;
         }
         let Some(refused) = self.chat.attach(paths) else {

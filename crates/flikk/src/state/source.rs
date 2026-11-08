@@ -167,8 +167,7 @@ impl EditorState {
             return;
         };
         if self.is_offline(media) {
-            self.status = Some("That file is offline".into());
-            cx.notify();
+            self.say("That file is offline", cx);
             return;
         }
         if self.is_playing() {
@@ -401,8 +400,7 @@ impl EditorState {
             at = at + source.duration();
         }
         if commands.is_empty() {
-            self.status = Some("No track to edit into".into());
-            cx.notify();
+            self.say("No track to edit into", cx);
             return;
         }
         if self.edit_batch(commands, "insert_clip", cx).is_some() {

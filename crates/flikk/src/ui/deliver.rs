@@ -257,8 +257,7 @@ impl DeliverPanel {
     fn set_status(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         let message = message.into();
         self.state.update(cx, |s, cx| {
-            s.status = Some(message);
-            cx.notify();
+            s.say(message, cx);
         });
     }
 

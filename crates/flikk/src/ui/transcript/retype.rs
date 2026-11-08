@@ -78,8 +78,7 @@ impl TranscriptPanel {
             Ok(fix) => fix,
             Err(e) => {
                 self.state.update(cx, |s, cx| {
-                    s.status = Some(e);
-                    cx.notify();
+                    s.say(e, cx);
                 });
                 return;
             }
@@ -144,8 +143,7 @@ impl TranscriptPanel {
                     crate::ui::voices::open(state, start, Some(on_kept), window, cx);
                 }
                 Err(e) => state.update(cx, |s, cx| {
-                    s.status = Some(e);
-                    cx.notify();
+                    s.say(e, cx);
                 }),
             });
         })

@@ -110,16 +110,14 @@ impl EditorState {
         let Synced { command, results } = match synced {
             Ok(s) => s,
             Err(e) => {
-                self.status = Some(format!("Could not sync: {e}"));
-                cx.notify();
+                self.say(format!("Could not sync: {e}"), cx);
                 return;
             }
         };
         let failed: Vec<String> = results.iter().filter_map(|r| r.clone().err()).collect();
         let matched: Vec<&Measured> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
         let Some(command) = command else {
-            self.status = Some(format!("No match · {}", failed.join(" · ")));
-            cx.notify();
+            self.say(format!("No match · {}", failed.join(" · ")), cx);
             return;
         };
         if self.edit_batch(vec![command], label, cx).is_none() {
