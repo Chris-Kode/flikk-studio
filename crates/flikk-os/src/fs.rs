@@ -133,9 +133,8 @@ fn replace(
     if let Some(folder) = folder {
         fs::create_dir_all(folder)?;
     }
-    let tmp = temp_sibling(path);
+    let (tmp, mut file) = claim_temp(path, kind)?;
     let written = (|| {
-        let mut file = open_new(&tmp, kind)?;
         write(&mut file)?;
         if kind != Kind::Cache {
             file.sync_all()?;
@@ -156,6 +155,21 @@ fn replace(
         let _ = File::open(folder).and_then(|d| d.sync_all());
     }
     Ok(())
+}
+
+/// A new temp file beside `path`, created by this call. A name a crash
+/// left (its process id since reused) is passed over, never opened or
+/// removed: it is not this write's.
+fn claim_temp(path: &Path, kind: Kind) -> io::Result<(PathBuf, File)> {
+    let mut tries = 0;
+    loop {
+        let tmp = temp_sibling(path);
+        match open_new(&tmp, kind) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn open_new(path: &Path, kind: Kind) -> io::Result<File> {

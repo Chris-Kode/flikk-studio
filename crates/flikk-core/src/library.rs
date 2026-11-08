@@ -173,23 +173,30 @@ struct ProgramFile {
     fx: FxAsset,
 }
 
-/// The file of a preset, sound or voice: its `format` and `version`, then
-/// the item's own fields.
-#[derive(Serialize, Deserialize)]
-struct ItemFile<T> {
-    format: String,
-    version: u32,
-    #[serde(flatten)]
-    item: T,
+/// The files of presets, sounds and voices: their `format` and `version`,
+/// then the item's own fields. One struct per kind, so a file that does
+/// not read is named as before ("expected struct PresetFile").
+macro_rules! item_files {
+    ($($file:ident),*) => {$(
+        #[derive(Serialize, Deserialize)]
+        struct $file<T> {
+            format: String,
+            version: u32,
+            #[serde(flatten)]
+            item: T,
+        }
+
+        impl<T> Header for $file<T> {
+            fn header(&self) -> (&str, u32) {
+                (&self.format, self.version)
+            }
+        }
+    )*};
 }
+
+item_files!(PresetFile, SoundFile, VoiceFile);
 
 impl Header for ProgramFile {
-    fn header(&self) -> (&str, u32) {
-        (&self.format, self.version)
-    }
-}
-
-impl<T> Header for ItemFile<T> {
     fn header(&self) -> (&str, u32) {
         (&self.format, self.version)
     }
@@ -233,17 +240,17 @@ impl Stored for Program {
 impl Stored for Preset {
     const EXT: &'static str = PRESET_EXT;
     const FORMAT: &'static str = "flikk-preset";
-    type File = ItemFile<Self>;
+    type File = PresetFile<Self>;
 
-    fn file(&self) -> ItemFile<Self> {
-        ItemFile {
+    fn file(&self) -> PresetFile<Self> {
+        PresetFile {
             format: Self::FORMAT.into(),
             version: VERSION,
             item: self.clone(),
         }
     }
 
-    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+    fn open(file: PresetFile<Self>, path: &Path) -> Result<Self> {
         Ok(file.item.at(path.to_path_buf()))
     }
 
@@ -263,17 +270,17 @@ impl Stored for Preset {
 impl Stored for Sound {
     const EXT: &'static str = SOUND_EXT;
     const FORMAT: &'static str = "flikk-sound";
-    type File = ItemFile<Self>;
+    type File = SoundFile<Self>;
 
-    fn file(&self) -> ItemFile<Self> {
-        ItemFile {
+    fn file(&self) -> SoundFile<Self> {
+        SoundFile {
             format: Self::FORMAT.into(),
             version: VERSION,
             item: self.clone(),
         }
     }
 
-    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+    fn open(file: SoundFile<Self>, path: &Path) -> Result<Self> {
         let sound = file.item.at(path.to_path_buf());
         if !sound.audio().is_file() {
             return Err(format!("the audio of {} is missing", name(path)));
@@ -297,17 +304,17 @@ impl Stored for Sound {
 impl Stored for SavedVoice {
     const EXT: &'static str = VOICE_EXT;
     const FORMAT: &'static str = "flikk-voice";
-    type File = ItemFile<Self>;
+    type File = VoiceFile<Self>;
 
-    fn file(&self) -> ItemFile<Self> {
-        ItemFile {
+    fn file(&self) -> VoiceFile<Self> {
+        VoiceFile {
             format: Self::FORMAT.into(),
             version: VERSION,
             item: self.clone(),
         }
     }
 
-    fn open(file: ItemFile<Self>, path: &Path) -> Result<Self> {
+    fn open(file: VoiceFile<Self>, path: &Path) -> Result<Self> {
         Ok(file.item.at(path.to_path_buf()))
     }
 
@@ -836,7 +843,10 @@ fn copy_audio(from: &Path, to: &Path) -> Result<()> {
         return Ok(());
     }
     flikk_os::fs::write_atomic_with(to, |file| {
-        std::io::copy(&mut std::fs::File::open(from)?, file)?;
+        let mut source = std::fs::File::open(from)?;
+        std::io::copy(&mut source, file)?;
+        // The copy keeps the source's permissions, as a plain copy does.
+        file.set_permissions(source.metadata()?.permissions())?;
         // On disk before it is named: sounds and samples are the user's
         // data, which must survive a power cut.
         file.sync_all()
