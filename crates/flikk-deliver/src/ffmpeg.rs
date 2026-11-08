@@ -4,44 +4,15 @@
 use crate::queue::{claimed, claiming};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::JobId;
-use std::ffi::OsStr;
+use flikk_os::process::{command, ffmpeg, ffprobe};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
-
-/// `$FLIKK_FFMPEG`, else `ffmpeg` from `PATH`.
-pub fn ffmpeg() -> PathBuf {
-    binary("FLIKK_FFMPEG", "ffmpeg")
-}
-
-/// `$FLIKK_FFPROBE`, else `ffprobe` from `PATH`.
-pub fn ffprobe() -> PathBuf {
-    binary("FLIKK_FFPROBE", "ffprobe")
-}
-
-fn binary(var: &str, name: &str) -> PathBuf {
-    std::env::var_os(var)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// A command with no console window on Windows.
-pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
-    #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    cmd
-}
 
 /// Major version of the ffmpeg binary, 0 if unknown.
 fn major_version() -> u32 {

@@ -5,10 +5,10 @@
 //! output rate), resampled, and written to lossless FLAC in the job's
 //! work folder for the graph to read.
 
-use crate::ffmpeg::{command, ffmpeg};
 use anyhow::{Context as _, Result, bail};
 use flikk_core::model::MediaItem;
 use flikk_core::sync::varispeed::Varispeed;
+use flikk_os::process::{command, ffmpeg};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;

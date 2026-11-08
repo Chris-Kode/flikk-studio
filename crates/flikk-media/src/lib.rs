@@ -27,6 +27,7 @@ use flikk_core::services::{
     ServiceError, ServiceResult,
 };
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::process::command;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -47,16 +48,7 @@ pub struct FfmpegMedia {
 impl FfmpegMedia {
     /// Locates the binaries and checks that they run.
     pub fn new() -> anyhow::Result<Self> {
-        let find = |var: &str, name: &str| {
-            std::env::var_os(var)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(name))
-        };
-        Self::with_binaries(
-            find("FLIKK_FFMPEG", "ffmpeg"),
-            find("FLIKK_FFPROBE", "ffprobe"),
-        )
+        Self::with_binaries(flikk_os::process::ffmpeg(), flikk_os::process::ffprobe())
     }
 
     pub fn with_binaries(ffmpeg: PathBuf, ffprobe: PathBuf) -> anyhow::Result<Self> {
@@ -188,19 +180,6 @@ impl MediaService for FfmpegMedia {
     fn audio_picture(&self, request: &AudioPictureRequest) -> ServiceResult<Frame> {
         spectrogram::audio_picture(self, request)
     }
-}
-
-/// A child process with no console window on Windows and no stdin.
-fn command(bin: &Path) -> Command {
-    let mut c = Command::new(bin);
-    c.stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
 }
 
 /// Seconds as FFmpeg reads them, to the microsecond.

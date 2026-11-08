@@ -7,7 +7,7 @@
 //! the render worker waits for it ([`probe_until`]), the UI only peeks
 //! ([`probed`]).
 
-use crate::ffmpeg::{self, command};
+use flikk_os::process::{command, ffmpeg};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::Read as _;
@@ -306,7 +306,7 @@ fn run_probe() -> Probe {
 
 /// Encoder names from `ffmpeg -encoders`.
 fn listed_encoders() -> Vec<String> {
-    let Ok(out) = command(ffmpeg::ffmpeg())
+    let Ok(out) = command(ffmpeg())
         .args(["-hide_banner", "-encoders"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -358,7 +358,7 @@ fn trial(encoder: &HwEncoder) -> bool {
             .map(OsString::from),
     );
     args.extend(["-f", "null", "-"].map(OsString::from));
-    let Ok(mut child) = command(ffmpeg::ffmpeg())
+    let Ok(mut child) = command(ffmpeg())
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

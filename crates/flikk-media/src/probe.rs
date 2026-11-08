@@ -1,10 +1,11 @@
 //! ffprobe JSON → [`MediaInfo`].
 
-use crate::{FfmpegMedia, command, err, stderr_tail};
+use crate::{FfmpegMedia, err, stderr_tail};
 use flikk_core::hdr::{Hdr, Transfer};
 use flikk_core::model::{AudioStream, MediaInfo, MediaKind, VideoStream};
 use flikk_core::services::{ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
+use flikk_os::process::command;
 use serde_json::Value;
 use std::path::Path;
 

@@ -6,7 +6,7 @@
 //! in, see [`route`]) and builds the audio in the same process.
 
 use crate::Letterer;
-use crate::ffmpeg::{self, Process, command};
+use crate::ffmpeg::{self, Process};
 use crate::graph::{self, Graph, GraphSpec};
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_core::compose::{self, Pictures, Streams};
@@ -17,6 +17,7 @@ use flikk_core::speed::Waiting;
 use flikk_core::stabilize;
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{ClipId, Time, TimeRange};
+use flikk_os::process::{command, ffmpeg};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::process::Stdio;
@@ -330,14 +331,14 @@ pub(crate) fn run(
     cancel: &AtomicBool,
 ) -> Result<()> {
     let mut child = Process(
-        command(ffmpeg::ffmpeg())
+        command(ffmpeg())
             .arg("-hide_banner")
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("could not start {}", ffmpeg::ffmpeg().display()))?,
+            .with_context(|| format!("could not start {}", ffmpeg().display()))?,
     );
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {

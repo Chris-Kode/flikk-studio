@@ -8,6 +8,7 @@ use flikk_core::hdr::{self, Mapping};
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::{Frame, FrameStream, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::{Rate, Time};
+use flikk_os::process::command;
 use flikk_os::sync::lock;
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
@@ -609,7 +610,7 @@ fn drain(mut pipe: ChildStderr, into: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
 
 /// `Command` isn't `Clone`; rebuild it from its program and arguments.
 fn clone_command(cmd: &Command) -> Command {
-    let mut c = crate::command(Path::new(cmd.get_program()));
+    let mut c = command(cmd.get_program());
     c.args(cmd.get_args());
     c
 }
