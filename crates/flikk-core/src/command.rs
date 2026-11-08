@@ -22,6 +22,9 @@ pub enum ToolCategory {
     EditTimeline,
     Transform,
     Captions,
+    /// The caption styles of the style profile, outside the project: saved
+    /// once the user approves, or at once if they allow it.
+    CaptionStyles,
     Color,
     Audio,
     Overlays,
@@ -39,7 +42,7 @@ pub enum ToolCategory {
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 15] = [
+    pub const ALL: [ToolCategory; 16] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -47,6 +50,7 @@ impl ToolCategory {
         Self::EditTimeline,
         Self::Transform,
         Self::Captions,
+        Self::CaptionStyles,
         Self::Color,
         Self::Audio,
         Self::Overlays,
@@ -64,6 +68,12 @@ impl ToolCategory {
         )
     }
 
+    /// Whether the user may let the agent do these without asking each
+    /// time (otherwise they are asked, or off).
+    pub fn can_allow(self) -> bool {
+        matches!(self, Self::Generate | Self::CaptionStyles)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::ReadProject => "Read project",
@@ -72,6 +82,7 @@ impl ToolCategory {
             Self::EditTimeline => "Edit timeline",
             Self::Transform => "Transform",
             Self::Captions => "Captions and titles",
+            Self::CaptionStyles => "Caption styles",
             Self::Color => "Color",
             Self::Audio => "Audio",
             Self::Overlays => "Overlays",

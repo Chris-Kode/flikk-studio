@@ -136,6 +136,66 @@ fn one_of(values: &[&str], desc: &str) -> Value {
     json!({ "type": "string", "enum": values, "description": desc })
 }
 
+/// A number kept inside `range`, which the description gives.
+fn limited(desc: &str, range: std::ops::RangeInclusive<f32>) -> Value {
+    number(&format!("{desc}, {} to {}", range.start(), range.end()))
+}
+
+fn color(desc: &str) -> Value {
+    string(&format!("{desc}, #RRGGBB or #RRGGBBAA"))
+}
+
+/// Every caption style parameter, each optional: what is given changes.
+fn caption_style_props(mut props: Value) -> Value {
+    use flikk_core::memory::limits;
+    let motion = |desc: &str| {
+        json!({
+            "type": "object",
+            "description": desc,
+            "properties": {
+                "kind": one_of(&["none", "fade", "pop", "slide"], "pop grows in (shrinks out), slide rises in (sinks out)"),
+                "duration": limited("Seconds", limits::MOTION),
+            },
+        })
+    };
+    let params = json!({
+        "font": string("Font family installed on this computer, e.g. Inter, Montserrat"),
+        "size": limited("Text size in px at 1080p", limits::SIZE),
+        "bold": boolean("Bold"),
+        "italic": boolean("Italic"),
+        "uppercase": boolean("Show the text in capitals"),
+        "color": color("Text fill"),
+        "spacing": limited("Extra space after each character, px", limits::SPACING),
+        "outline": limited("Stroke width, px (0 = none)", limits::OUTLINE),
+        "outline_color": color("Stroke color"),
+        "shadow": limited("Shadow distance, px (0 = none)", limits::SHADOW),
+        "shadow_color": color("Shadow color; its alpha is the shadow's opacity"),
+        "shadow_angle": limited("Degrees clockwise from the right: 45 casts down and right", limits::SHADOW_ANGLE),
+        "background": {
+            "type": "object",
+            "description": "A box behind each line",
+            "properties": {
+                "enabled": boolean("Show the box"),
+                "color": color("Box color"),
+                "padding": limited("Space around the text, px", limits::PADDING),
+            },
+        },
+        "position": one_of(&["bottom", "middle", "top"], "Where captions sit"),
+        "offset_x": limited("Nudge right, % of the frame width", limits::OFFSET),
+        "offset_y": limited("Nudge up, % of the frame height", limits::OFFSET),
+        "highlight": one_of(&["none", "color", "box", "karaoke", "reveal"], "How the spoken word stands out: color tints it, box puts the highlight color behind it, karaoke tints words as spoken and keeps them, reveal shows words as they are spoken"),
+        "highlight_color": color("Highlight color"),
+        "intro": motion("How a caption enters"),
+        "outro": motion("How a caption leaves"),
+        "max_chars_per_line": limited("Longest line, characters", limits::LINE_LENGTH),
+        "max_lines": number("Lines per caption, 1 to 3"),
+    });
+    if let (Some(props), Some(params)) = (props.as_object_mut(), params.as_object()) {
+        props.extend(params.clone());
+    }
+    props
+}
+
 fn reason() -> Value {
     string("One line shown to the user with the change; cite the style rule that drove it, if any")
 }
@@ -994,6 +1054,59 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "reason": reason()
                 }),
                 &["template", "text", "range"],
+            ),
+        ),
+        spec(
+            "list_caption_styles",
+            Some(ReadProject),
+            "The style profile's caption styles with every parameter, the caption tracks lettered in each, the one new captions use, and the ready-made looks. Read it before creating or changing a style.",
+            object(json!({}), &[]),
+        ),
+        spec(
+            "set_caption_style",
+            Some(Captions),
+            "Propose lettering a caption track's captions in one of the profile's caption styles. The first caption track's style is also the one new captions use.",
+            object(
+                json!({
+                    "track": string("Caption track name or id"),
+                    "style": string("Caption style name"),
+                    "reason": reason()
+                }),
+                &["track", "style"],
+            ),
+        ),
+        spec(
+            "create_caption_style",
+            Some(CaptionStyles),
+            "Add a caption style to the style profile, starting from `from` (a style or a ready-made look; default: the plain default style) with the parameters given changed. Saved once the user approves (at once if they allow it); then letter a track in it with set_caption_style.",
+            object(
+                caption_style_props(json!({
+                    "name": string("Name of the new style, not used by another"),
+                    "from": string("Style or look to start from, e.g. Neon, Karaoke"),
+                })),
+                &["name"],
+            ),
+        ),
+        spec(
+            "edit_caption_style",
+            Some(CaptionStyles),
+            "Change a caption style of the style profile: every caption track lettered in it changes. `look` dresses it in a ready-made look first (keeping its name, placement and line rules), then the parameters given change; `name` renames it, and the tracks follow. Saved once the user approves, or at once if they allow it.",
+            object(
+                caption_style_props(json!({
+                    "style": string("The style to change"),
+                    "name": string("New name"),
+                    "look": string("Ready-made look to apply first"),
+                })),
+                &["style"],
+            ),
+        ),
+        spec(
+            "delete_caption_style",
+            Some(CaptionStyles),
+            "Remove a caption style from the style profile; tracks lettered in it fall back to the first style. The last style stays. Removed once the user approves, or at once if they allow it.",
+            object(
+                json!({ "style": string("The style to remove") }),
+                &["style"],
             ),
         ),
         // ---- color

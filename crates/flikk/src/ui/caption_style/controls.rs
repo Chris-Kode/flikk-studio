@@ -51,25 +51,26 @@ impl Field {
     ];
 
     pub fn spec(self) -> Spec {
-        let s = |label, min, max, step, decimals, unit| Spec {
+        use flikk_core::memory::limits;
+        let s = |label, range: std::ops::RangeInclusive<f32>, step, decimals, unit| Spec {
             label,
-            min,
-            max,
+            min: *range.start(),
+            max: *range.end(),
             step,
             decimals,
             unit,
         };
         match self {
-            Self::Size => s("Size", 12., 160., 1., 0, Some("px")),
-            Self::Spacing => s("Spacing", -5., 30., 0.5, 1, None),
-            Self::Outline => s("Width", 0., 12., 0.5, 1, Some("px")),
-            Self::Shadow => s("Distance", 0., 20., 0.5, 1, Some("px")),
-            Self::Angle => s("Angle", 0., 360., 5., 0, Some("°")),
-            Self::Padding => s("Padding", 0., 40., 1., 0, Some("px")),
-            Self::X => s("X", -50., 50., 0.5, 1, Some("%")),
-            Self::Y => s("Y", -50., 50., 0.5, 1, Some("%")),
-            Self::LineLength => s("Length", 12., 60., 1., 0, Some("ch")),
-            Self::Intro | Self::Outro => s("Duration", 0.05, 2., 0.05, 2, Some("s")),
+            Self::Size => s("Size", limits::SIZE, 1., 0, Some("px")),
+            Self::Spacing => s("Spacing", limits::SPACING, 0.5, 1, None),
+            Self::Outline => s("Width", limits::OUTLINE, 0.5, 1, Some("px")),
+            Self::Shadow => s("Distance", limits::SHADOW, 0.5, 1, Some("px")),
+            Self::Angle => s("Angle", limits::SHADOW_ANGLE, 5., 0, Some("°")),
+            Self::Padding => s("Padding", limits::PADDING, 1., 0, Some("px")),
+            Self::X => s("X", limits::OFFSET, 0.5, 1, Some("%")),
+            Self::Y => s("Y", limits::OFFSET, 0.5, 1, Some("%")),
+            Self::LineLength => s("Length", limits::LINE_LENGTH, 1., 0, Some("ch")),
+            Self::Intro | Self::Outro => s("Duration", limits::MOTION, 0.05, 2, Some("s")),
         }
     }
 

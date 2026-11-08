@@ -114,6 +114,18 @@ impl EditorState {
         }
         // A job the agent was allowed may have added what a provider made.
         self.analyze_generated(cx);
+        // Requests the user allowed are carried out without asking; their
+        // card still says what came of them.
+        let allowed: Vec<u64> = self
+            .agent
+            .pending_approvals()
+            .into_iter()
+            .filter(|p| p.request.allowed)
+            .map(|p| p.id)
+            .collect();
+        for id in allowed {
+            self.approve(id, cx);
+        }
         if events.is_empty() {
             return;
         }

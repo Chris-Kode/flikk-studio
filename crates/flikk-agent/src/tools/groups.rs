@@ -78,6 +78,7 @@ pub fn key(group: ToolCategory) -> &'static str {
         ToolCategory::EditTimeline => "edit",
         ToolCategory::Transform => "transform",
         ToolCategory::Captions => "captions",
+        ToolCategory::CaptionStyles => "caption_styles",
         ToolCategory::Color => "color",
         ToolCategory::Audio => "audio",
         ToolCategory::Effects => "effects",
@@ -108,7 +109,11 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
         }
         "find_voices" => ToolCategory::Generate,
         "get_shake" => ToolCategory::Transform,
-        _ => spec.category?,
+        "list_caption_styles" => ToolCategory::Captions,
+        _ => match spec.category? {
+            ToolCategory::CaptionStyles => ToolCategory::Captions,
+            category => category,
+        },
     })
 }
 
@@ -224,6 +229,9 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "srt ",
             "lower third",
             "on screen text",
+            "font",
+            "karaoke",
+            "text style",
         ],
     ),
     (
