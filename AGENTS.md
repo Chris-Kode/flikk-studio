@@ -46,6 +46,43 @@ Before designing, writing, refactoring or reviewing code, read
 [CODE-DESIGN.md](CODE-DESIGN.md): module depth and readability, state and
 async work, files, and the checks to run before you finish.
 
+### 5. Commits follow Conventional Commits
+
+Release notes are built from commit messages and pull request titles on
+`main` ([release-notes.sh](.github/scripts/release-notes.sh)), so write them
+for the people who use Flikk.
+
+```text
+type(scope): summary
+
+What changed for the user and why, in one short paragraph.
+
+Anything else a reviewer needs: details, trade-offs, follow-ups.
+```
+
+- **type** picks the release notes section:
+
+  | Type | Use for | Section |
+  | --- | --- | --- |
+  | `feat` | Something new the user can do or see | New features |
+  | `fix` | A bug the user could hit | Fixes |
+  | `perf` | Faster or lighter, same behaviour | Performance |
+  | `refactor` | Code change with no visible effect | Internal |
+  | `docs` | Documentation only | Internal |
+  | `build`, `ci` | Cargo, packaging, workflows | Internal |
+  | `chore` | Anything else that users won't notice | Internal |
+
+- **scope** is optional: the area touched, in lower case, such as
+  `timeline`, `agent`, `export`, `settings`, `linux`.
+- **summary** is imperative, at most 72 characters, no trailing period:
+  `feat(timeline): snap clips to the playhead`.
+- **Breaking changes** add `!` after the type or scope (`feat(export)!: …`)
+  and explain the change in a `BREAKING CHANGE:` footer.
+- **The first body paragraph** appears in the release notes under the
+  summary. Say what the user gets, not which functions moved.
+- **Pull request titles** follow the same format: a merged pull request is
+  listed under its title and the first paragraph of its description.
+
 ## Commands
 
 | Task | Command |

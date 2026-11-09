@@ -92,7 +92,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$TAG" --verify-tag --title "Flikk $VERSION" --generate-notes
+          .github/scripts/release-notes.sh "$TAG" >"$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
+          gh release create "$TAG" --verify-tag --title "Flikk $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
 
       # A release made with GITHUB_TOKEN starts no `release` workflow, so
       # Deploy is started here; releases made by hand start it themselves.
