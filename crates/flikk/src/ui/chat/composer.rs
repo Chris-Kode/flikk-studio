@@ -15,9 +15,10 @@ use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Kbd, PopupMenuItem, ScrollableElement as _,
     Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
-use crate::ui::settings::efforts_of;
 use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
-use flikk_core::agent::{Attachment, AttachmentKind, Backend, ModelChoice, effort_label};
+use flikk_core::agent::{
+    AgentModel, Attachment, AttachmentKind, Backend, ModelChoice, effort_label,
+};
 use flikk_core::skills::{self, Kind};
 use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1009,4 +1010,16 @@ fn specials(state: &EditorState, query: &str) -> Vec<Suggestion> {
         _ => true,
     });
     out
+}
+
+/// The thinking levels model `id` takes (the CLI's default model's for
+/// `None`); none when `models` does not list it.
+fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
+    models
+        .iter()
+        .find(|m| match id {
+            Some(id) => m.id == id,
+            None => m.default,
+        })
+        .map_or(&[], |m| &m.efforts)
 }

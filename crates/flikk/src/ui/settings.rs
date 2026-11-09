@@ -8,7 +8,7 @@ use crate::ui::kit::{
     h_flex, theme as t, v_flex,
 };
 use flikk_agent::tools::image;
-use flikk_core::agent::{AgentModel, AgentSettings, Backend, ModelChoice, effort_label};
+use flikk_core::agent::{AgentSettings, Backend};
 use flikk_core::bus::{Permission, Permissions};
 use flikk_core::command::ToolCategory;
 use gpui_kit::base::slider::{SliderEvent, SliderState};
@@ -36,10 +36,6 @@ const LABEL_W: f32 = 150.;
 
 pub struct SettingsPanel {
     state: Entity<EditorState>,
-    /// The current backend's models as listed in `model`: "Default" (no
-    /// pick) first.
-    models: Vec<(SharedString, Option<String>)>,
-    model: Entity<SelectState<SharedString>>,
     frames: Entity<SliderState>,
     tile: Entity<SliderState>,
     language: Entity<SelectState<SharedString>>,
@@ -57,7 +53,6 @@ pub struct SettingsPanel {
 impl SettingsPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = state.read(cx).settings.clone();
-        let model = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
         let frames = cx.new(|_| {
             SliderState::new()
                 .max(30.)
@@ -89,26 +84,6 @@ impl SettingsPanel {
         });
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
-            cx.subscribe(
-                &model,
-                |this, _, SelectEvent::Confirm(name): &SelectEvent<SharedString>, cx| {
-                    let Some((_, id)) = this.models.iter().find(|(n, _)| n == name) else {
-                        return;
-                    };
-                    let id = id.clone();
-                    this.choose(cx, |choice, models| {
-                        // A level the new model doesn't take goes back to Auto.
-                        let keep = choice
-                            .effort
-                            .as_ref()
-                            .is_some_and(|e| efforts_of(models, id.as_deref()).contains(e));
-                        choice.model = id;
-                        if !keep {
-                            choice.effort = None;
-                        }
-                    });
-                },
-            ),
             cx.subscribe(&frames, |this, _, event: &SliderEvent, cx| match event {
                 SliderEvent::Release(v) => this.update(cx, |s| {
                     s.vision.frames_per_collage = v.start().round() as u32
@@ -134,8 +109,6 @@ impl SettingsPanel {
         ];
         Self {
             state,
-            models: Vec::new(),
-            model,
             frames,
             tile,
             language,
@@ -188,102 +161,23 @@ impl SettingsPanel {
         });
     }
 
-    /// Change the current backend's model and thinking level, given the
-    /// models its CLI lists.
-    fn choose(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut ModelChoice, &[AgentModel])) {
-        let backend = self.state.read(cx).settings.backend;
-        let models = self.backend_models(cx);
-        self.update(cx, |s| f(s.models.get_mut(backend), &models));
-    }
-
-    fn backend_models(&self, cx: &App) -> Vec<AgentModel> {
-        let s = self.state.read(cx);
-        s.agent_models
-            .get(&s.settings.backend)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Keep the model list on the backend's models and its pick, asking
-    /// the CLI for them the first time a backend shows.
-    fn sync_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let s = self.state.read(cx);
-        let backend = s.settings.backend;
-        let listed = s.agent_models.contains_key(&backend);
-        let picked = s.settings.models.get(backend).model.clone();
-        if !listed {
-            let state = self.state.clone();
-            cx.defer(move |cx| state.update(cx, |s, cx| s.load_agent_models(cx)));
-        }
-        let mut models: Vec<(SharedString, Option<String>)> = vec![("Default".into(), None)];
-        models.extend(
-            self.backend_models(cx)
-                .into_iter()
-                .map(|m| (m.label.into(), Some(m.id))),
-        );
-        // A pick the CLI no longer lists still shows, by its id.
-        if let Some(id) = picked.as_ref().filter(|id| {
-            !models
-                .iter()
-                .any(|(_, m)| m.as_deref() == Some(id.as_str()))
-        }) {
-            models.push((id.clone().into(), Some(id.clone())));
-        }
-        if models != self.models {
-            let names = models.iter().map(|(n, _)| n.clone()).collect();
-            self.model
-                .update(cx, |s, cx| s.set_items(names, window, cx));
-            self.models = models;
-        }
-        let ix = self.models.iter().position(|(_, id)| *id == picked);
-        if self.model.read(cx).selected_index() != ix {
-            self.model
-                .update(cx, |s, cx| s.set_selected_index(ix, window, cx));
-        }
-    }
-
-    /// Backend, model and thinking level.
+    /// The backend; its model and thinking level are picked in the chat.
     fn render_backend(&self, settings: &AgentSettings, cx: &mut Context<Self>) -> Div {
         let backend_ix = BACKENDS
             .iter()
             .position(|b| *b == settings.backend)
             .unwrap_or(0);
-        let choice = settings.models.get(settings.backend).clone();
-        let models = self.backend_models(cx);
-        let efforts = efforts_of(&models, choice.model.as_deref()).to_vec();
-        let thinking = (!efforts.is_empty()).then(|| {
-            let selected = choice
-                .effort
-                .as_ref()
-                .and_then(|e| efforts.iter().position(|x| x == e))
-                .map_or(0, |ix| ix + 1);
-            row("Thinking", LABEL_W).child(
-                Segmented::new("thinking")
-                    .compact()
-                    .item("Auto")
-                    .items(efforts.iter().map(|e| effort_label(e)))
-                    .selected(selected)
-                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                        let effort = ix.checked_sub(1).map(|ix| efforts[ix].clone());
-                        this.choose(cx, |choice, _| choice.effort = effort);
+        v_flex().child(section_label("Backend")).child(
+            row("Runs on", LABEL_W).child(
+                Segmented::new("backend")
+                    .items(BACKENDS.iter().map(|b| b.label()))
+                    .selected(backend_ix)
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        let backend = BACKENDS[*ix];
+                        this.update(cx, |s| s.backend = backend);
                     })),
-            )
-        });
-        v_flex()
-            .child(section_label("Backend"))
-            .child(
-                row("Runs on", LABEL_W).child(
-                    Segmented::new("backend")
-                        .items(BACKENDS.iter().map(|b| b.label()))
-                        .selected(backend_ix)
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            let backend = BACKENDS[*ix];
-                            this.update(cx, |s| s.backend = backend);
-                        })),
-                ),
-            )
-            .child(row("Model", LABEL_W).child(div().w(px(220.)).child(Select::new(&self.model))))
-            .children(thinking)
+            ),
+        )
     }
 
     fn render_permissions(&self, settings: &AgentSettings, cx: &mut Context<Self>) -> Div {
@@ -422,7 +316,6 @@ impl SettingsPanel {
 
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_models(window, cx);
         self.sync_fields(window, cx);
         let settings = self.state.read(cx).settings.clone();
         let value = |state: &Entity<SliderState>| {
@@ -452,16 +345,4 @@ impl Render for SettingsPanel {
             )
             .overflow_y_scrollbar()
     }
-}
-
-/// The thinking levels model `id` takes (the CLI's default model's for
-/// `None`); none when `models` does not list it.
-pub(crate) fn efforts_of<'a>(models: &'a [AgentModel], id: Option<&str>) -> &'a [String] {
-    models
-        .iter()
-        .find(|m| match id {
-            Some(id) => m.id == id,
-            None => m.default,
-        })
-        .map_or(&[], |m| &m.efforts)
 }
