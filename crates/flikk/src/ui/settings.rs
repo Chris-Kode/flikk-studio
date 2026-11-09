@@ -320,9 +320,9 @@ impl SettingsPanel {
                         Permission::Propose => "Propose",
                     })
                     .into_any_element()
-            } else if matches!(category, ToolCategory::Generate | ToolCategory::Skills) {
-                // Generating spends the user's credits, and skills and
-                // styles are the user's own: asked each time unless allowed.
+            } else if category.can_allow() {
+                // Credits spent, or styles saved where undo can't reach:
+                // asked each time unless allowed.
                 const CHOICES: [(Permission, &str); 3] = [
                     (Permission::Off, "Off"),
                     (Permission::NeedsApproval, "Ask"),

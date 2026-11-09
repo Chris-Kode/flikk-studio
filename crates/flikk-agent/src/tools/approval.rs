@@ -28,12 +28,14 @@ pub fn ask_user(args: &Args) -> Result<Done, ToolError> {
     Ok(done)
 }
 
-/// Validate the arguments, then queue the request for the UI.
+/// Validate the arguments, then queue the request for the UI: to ask the
+/// user, or to carry out at once when they `allowed` its category.
 pub fn request(
     ctx: &mut ToolCtx,
     tool: &str,
     category: ToolCategory,
     args: &Args,
+    allowed: bool,
 ) -> Result<Done, ToolError> {
     let project = ctx.project();
     let (summary, normalized): (String, Value) = match tool {
@@ -183,6 +185,9 @@ pub fn request(
                 super::voices::design_json(&design, &name),
             )
         }
+        tool if super::caption_styles::TOOLS.contains(&tool) => {
+            super::caption_styles::request(ctx.memory, tool, args)?
+        }
         "export_otio" => ("Export OpenTimelineIO".to_owned(), json!({})),
         "export_frame" => {
             let t = args.time("t")?;
@@ -193,15 +198,20 @@ pub fn request(
         }
         other => return Err(ToolError(format!("`{other}` cannot be requested"))),
     };
-    let mut done = Done::text(
-        format!("awaiting approval: {summary}"),
-        "Waiting for the user's approval.",
-    );
+    let mut done = if allowed {
+        Done::text(summary.clone(), "Saving.")
+    } else {
+        Done::text(
+            format!("awaiting approval: {summary}"),
+            "Waiting for the user's approval.",
+        )
+    };
     done.approval = Some(ApprovalRequest {
         tool: tool.to_owned(),
         category,
         args: normalized,
         summary,
+        allowed,
     });
     Ok(done)
 }

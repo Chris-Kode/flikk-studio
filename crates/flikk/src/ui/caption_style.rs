@@ -21,6 +21,7 @@ use crate::ui::kit::{
 };
 use controls::{Field, Paint};
 use flikk_core::TrackId;
+use flikk_core::bus::Author;
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::{ClipContent, TrackKind};
 use gpui_kit::base::input::{InputEvent, InputState};
@@ -309,10 +310,9 @@ impl CaptionStylePanel {
             .map(|n| format!("Style {n}"))
             .find(|n| !names.contains(n))
             .unwrap_or_default();
-        self.state.update(cx, |s, cx| {
-            s.edit_presets(|p| p.caption_styles.push(style), cx)
-        });
-        let i = self.state.read(cx).presets().caption_styles.len() - 1;
+        let i = self
+            .state
+            .update(cx, |s, cx| s.add_caption_style(style, cx));
         self.pick(i, cx);
     }
 
@@ -320,22 +320,7 @@ impl CaptionStylePanel {
     fn delete(&mut self, i: usize, cx: &mut Context<Self>) {
         // Before indices shift under it.
         self.settle_color(cx);
-        self.state.update(cx, |s, cx| {
-            if s.presets().caption_styles.len() < 2 {
-                return;
-            }
-            s.edit_presets(
-                |p| {
-                    p.caption_styles.remove(i);
-                },
-                cx,
-            );
-            let mut active = s.caption_style();
-            if active > i || active >= s.presets().caption_styles.len() {
-                active = active.saturating_sub(1);
-            }
-            s.pick_caption_style(active, cx);
-        });
+        self.state.update(cx, |s, cx| s.remove_caption_style(i, cx));
     }
 
     fn start_rename(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -368,34 +353,9 @@ impl CaptionStylePanel {
         }
         // Before the name it is saved under changes.
         self.settle_color(cx);
-        let state = self.state.read(cx);
-        let styles = &state.presets().caption_styles;
-        let Some(old) = styles.get(i).map(|s| s.name.clone()) else {
-            return;
-        };
-        if name.is_empty() || name == old || styles.iter().any(|s| s.name == name) {
-            return;
-        }
-        let tracks: Vec<TrackId> = state
-            .bus
-            .project()
-            .timeline
-            .tracks
-            .iter()
-            .filter(|t| t.kind == TrackKind::Caption && t.caption_style.as_ref() == Some(&old))
-            .map(|t| t.id)
-            .collect();
         self.state.update(cx, |s, cx| {
-            let renamed = name.clone();
-            s.edit_caption_style(i, |style| style.name = renamed, cx);
-            let commands = tracks
-                .into_iter()
-                .map(|track| flikk_core::command::Command::SetCaptionStyle {
-                    track,
-                    style: Some(name.clone()),
-                })
-                .collect();
-            s.execute_batch(commands, "rename_caption_style", cx);
+            // A refused name just keeps the old one, as the chip shows.
+            let _ = s.rename_caption_style(i, &name, Author::User, cx);
         });
     }
 

@@ -248,6 +248,18 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         }
 
         "generate_captions" => return generate_captions(ctx, args, &reason),
+        "set_caption_style" => {
+            let p = ctx.project();
+            let track = track_id(p, args.str("track")?)?;
+            if p.timeline.track(track).map(|t| t.kind) != Some(TrackKind::Caption) {
+                return Err(ToolError(format!("{track} is not a caption track")));
+            }
+            let style = super::caption_styles::find(ctx.memory, args.str("style")?)?;
+            vec![Command::SetCaptionStyle {
+                track,
+                style: Some(style.name.clone()),
+            }]
+        }
         "edit_caption" => {
             let p = ctx.project();
             let clip = clip_id(p, args.str("clip")?)?;
@@ -1367,7 +1379,9 @@ fn generate_captions(ctx: &mut ToolCtx, args: &Args, reason: &str) -> Result<Ste
         Some(t) => Some(track_id(p, t)?),
         None => first_track(p, TrackKind::Caption).map(|t| t.id),
     };
-    let style = flikk_core::memory::CaptionStyle::default();
+    // Lines as long as the track's style lets them be.
+    let style =
+        super::caption_styles::of_track(ctx.memory, track.and_then(|t| p.timeline.track(t)));
     let max_chars = args
         .opt_f64("max_chars")?
         .map(|m| m.clamp(8.0, 200.0) as usize)

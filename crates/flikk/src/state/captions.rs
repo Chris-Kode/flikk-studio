@@ -5,7 +5,9 @@
 
 use super::EditorState;
 use crate::persistence;
+use flikk_agent::tools::caption_styles::Op as CaptionStyleOp;
 use flikk_core::TrackId;
+use flikk_core::bus::Author;
 use flikk_core::command::Command;
 use flikk_core::memory::{CaptionStyle, Presets};
 use flikk_core::model::{Project, Track, TrackKind};
@@ -211,6 +213,13 @@ impl EditorState {
         self.clear_live();
         self.captions
             .load(presets, self.bus.project(), &mut self.services.lettering);
+        self.share_caption_styles();
+    }
+
+    /// Hand the agent the caption styles as saved.
+    fn share_caption_styles(&mut self) {
+        let styles = self.captions.presets.caption_styles.clone();
+        self.agent.set_caption_styles(styles);
     }
 
     /// Change the presets and save them to the selected style profile,
@@ -219,6 +228,7 @@ impl EditorState {
         if !self.captions.edit(f, &mut self.services.lettering) {
             return;
         }
+        self.share_caption_styles();
         let profile = self
             .settings
             .style_profile
@@ -306,6 +316,91 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Add `style` to the presets and save it. Its index.
+    pub fn add_caption_style(&mut self, style: CaptionStyle, cx: &mut Context<Self>) -> usize {
+        self.edit_presets(|p| p.caption_styles.push(style), cx);
+        self.captions.presets.caption_styles.len() - 1
+    }
+
+    /// Remove caption style `index` and save; the last one stays. Tracks
+    /// styled with it fall back to the first, and new captions use the
+    /// style before it.
+    pub fn remove_caption_style(&mut self, index: usize, cx: &mut Context<Self>) {
+        let count = self.captions.presets.caption_styles.len();
+        if count < 2 || index >= count {
+            return;
+        }
+        // Its index is about to shift.
+        self.captions.clear_live();
+        self.edit_presets(
+            |p| {
+                p.caption_styles.remove(index);
+            },
+            cx,
+        );
+        let mut active = self.caption_style();
+        if active > index || active >= count - 1 {
+            active = active.saturating_sub(1);
+        }
+        self.pick_caption_style(active, cx);
+    }
+
+    /// Rename caption style `index` to `name` and save it, with the caption
+    /// tracks that use it renamed by `author`. Refused when `name` is empty
+    /// or another style has it.
+    pub fn rename_caption_style(
+        &mut self,
+        index: usize,
+        name: &str,
+        author: Author,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let name = name.trim().to_owned();
+        let styles = &self.captions.presets.caption_styles;
+        let Some(old) = styles.get(index).map(|s| s.name.clone()) else {
+            return Err("that caption style is gone".into());
+        };
+        if name == old {
+            return Ok(());
+        }
+        if name.is_empty() {
+            return Err("a caption style needs a name".into());
+        }
+        if styles.iter().any(|s| s.name == name) {
+            return Err(format!("there is a caption style “{name}” already"));
+        }
+        let commands: Vec<Command> = self
+            .bus
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Caption && t.caption_style.as_ref() == Some(&old))
+            .map(|t| Command::SetCaptionStyle {
+                track: t.id,
+                style: Some(name.clone()),
+            })
+            .collect();
+        let renamed = name.clone();
+        self.edit_caption_style(index, |style| style.name = renamed, cx);
+        if commands.is_empty() {
+            return Ok(());
+        }
+        let label = "rename_caption_style";
+        match author {
+            Author::User => {
+                self.execute_batch(commands, label, cx);
+            }
+            // Approved already: applied at once, and into the drafts of
+            // open change sets, so the agent plans on the new name.
+            agent => {
+                let result = self.bus.execute_shared_as(commands, label, agent);
+                self.finish(result, cx);
+            }
+        }
+        Ok(())
+    }
+
     /// The preset index caption `track` is styled with: its named preset,
     /// else the first.
     pub fn track_caption_style(&self, track: TrackId) -> usize {
@@ -336,5 +431,70 @@ impl EditorState {
             .get(self.captions.active)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+impl EditorState {
+    /// Make a change to the caption styles the user approved (or allowed)
+    /// the agent: on the styles as they are now, so what the user changed
+    /// meanwhile stays. The line for its card, or why it can no longer be
+    /// made.
+    pub(super) fn change_caption_styles(
+        &mut self,
+        op: CaptionStyleOp,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
+        match op {
+            CaptionStyleOp::Create { style } => {
+                if self.captions.position(&style.name).is_some() {
+                    anyhow::bail!("there is a caption style “{}” already", style.name);
+                }
+                self.add_caption_style(style, cx);
+                Ok("Saved".into())
+            }
+            CaptionStyleOp::Edit {
+                style,
+                look,
+                patch,
+                rename,
+            } => {
+                let index = self.caption_style_index(&style)?;
+                if let Some(name) = &rename
+                    && self.captions.position(name).is_some_and(|i| i != index)
+                {
+                    anyhow::bail!("there is a caption style “{name}” already");
+                }
+                self.edit_caption_style(
+                    index,
+                    |s| {
+                        if let Some(look) = &look {
+                            *s = s.with_look(look);
+                        }
+                        patch.apply(s);
+                    },
+                    cx,
+                );
+                if let Some(name) = rename {
+                    let author = self.agent_author();
+                    self.rename_caption_style(index, &name, author, cx)
+                        .map_err(anyhow::Error::msg)?;
+                }
+                Ok("Saved".into())
+            }
+            CaptionStyleOp::Delete { style } => {
+                let index = self.caption_style_index(&style)?;
+                if self.captions.presets.caption_styles.len() < 2 {
+                    anyhow::bail!("the last caption style stays");
+                }
+                self.remove_caption_style(index, cx);
+                Ok("Deleted".into())
+            }
+        }
+    }
+
+    fn caption_style_index(&self, name: &str) -> anyhow::Result<usize> {
+        self.captions
+            .position(name)
+            .ok_or_else(|| anyhow::anyhow!("there is no caption style “{name}” any more"))
     }
 }

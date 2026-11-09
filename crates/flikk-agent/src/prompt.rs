@@ -247,7 +247,16 @@ For a mask or a pin that must sit exactly, `view_frame` with `zoom` on the \
 area first: its grid gives frame pixels for `space: frame` and `pin_to`. \
 Moving one caption leaves the others on its track where they are; pass \
 them all in `clips` to move them together. Look at the result before you \
-say it fits.";
+say it fits.
+
+Caption styles (font, size, fill, stroke, shadow, box, placement, line \
+rules, word highlight, intro and outro) belong to the style profile, not \
+the project: every caption track lettered in one changes with it. Read \
+them with `list_caption_styles` first. To restyle a track, change its \
+style with `edit_caption_style`; for a different look on one track only, \
+`create_caption_style` (from a style or a ready-made look) and letter the \
+track in it with `set_caption_style` once it is saved. Check the result \
+with `view_frame`.";
 
 const FX: &str = "\
 Effects, transitions and generators are programs: GLSL for all three, or \

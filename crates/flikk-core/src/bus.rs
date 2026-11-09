@@ -72,6 +72,7 @@ impl Permissions {
             ToolCategory::ProjectMemory
             | ToolCategory::Deliver
             | ToolCategory::Generate
+            | ToolCategory::CaptionStyles
             | ToolCategory::Skills => Permission::NeedsApproval,
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
@@ -90,13 +91,11 @@ impl Permissions {
             (_, Permission::Off) => Permission::Off,
             (c, _) if c.is_read() => Permission::Allowed,
             (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
-            // Generating spends the user's credits: asked each time unless
-            // they allow it.
-            // So does changing the user's skills and styles.
-            (ToolCategory::Generate | ToolCategory::Skills, Permission::Allowed) => {
-                Permission::Allowed
-            }
-            (ToolCategory::Generate | ToolCategory::Skills, _) => Permission::NeedsApproval,
+            // Generating spends the user's credits, and caption styles,
+            // skills and styles are saved outside the project where undo
+            // can't reach: asked each time unless they allow it.
+            (c, Permission::Allowed) if c.can_allow() => Permission::Allowed,
+            (c, _) if c.can_allow() => Permission::NeedsApproval,
             _ => Permission::Propose,
         }
     }

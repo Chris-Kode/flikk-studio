@@ -1,10 +1,14 @@
-//! Long-term agent knowledge: style profile, source facts, recipes
+//! Long-term agent knowledge: style profile and source facts
 //! (PRD "Automations and memory").
 
 use crate::ids::*;
 use crate::model::{Ease, Fingerprint};
 use crate::time::TimeRange;
 use serde::{Deserialize, Serialize};
+
+mod caption_patch;
+
+pub use caption_patch::{BackgroundPatch, CaptionStylePatch, MotionPatch, limits};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]

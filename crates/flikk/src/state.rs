@@ -362,6 +362,9 @@ impl EditorState {
             self.autosave();
             self.check_offline();
             self.proposals.sync(&self.bus);
+            // An accepted set, undo or redo may restyle the first caption
+            // track, whose style new captions use.
+            self.sync_caption_style();
         }
         cx.notify();
         result.ok()
