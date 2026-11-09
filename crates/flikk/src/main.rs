@@ -1,3 +1,7 @@
+// No console window behind the editor on Windows. Debug builds keep one for
+// logs; the `mcp` subcommand still talks over the pipes its parent passes.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod agent_link;
 mod app;
 mod bundled_ffmpeg;

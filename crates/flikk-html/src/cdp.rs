@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
@@ -195,7 +195,7 @@ impl Browser {
         let profile = dir.join(format!("profile-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&profile);
         std::fs::create_dir_all(&profile)?;
-        let mut cmd = Command::new(exe);
+        let mut cmd = flikk_os::process::command(exe);
         cmd.arg("--headless")
             .arg("--remote-debugging-port=0")
             .arg(format!("--user-data-dir={}", profile.display()))

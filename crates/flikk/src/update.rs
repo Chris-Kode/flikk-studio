@@ -286,7 +286,7 @@ fn unpack(archive: &Path, into: &Path) -> Result<()> {
         Some(root) if cfg!(windows) => Path::new(&root).join("System32").join("tar.exe"),
         _ => PathBuf::from("tar"),
     };
-    let output = std::process::Command::new(&tar)
+    let output = flikk_os::process::command(&tar)
         .arg("-xf")
         .arg(archive)
         .arg("-C")
