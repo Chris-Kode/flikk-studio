@@ -4,23 +4,18 @@
 use crate::state::EditorState;
 use crate::ui::editor_settings::{page, row, section_label};
 use crate::ui::kit::{
-    Button, ScrollableElement as _, Segmented, Select, SelectEvent, SelectState, Slider, Textarea,
-    Tooltip, h_flex, theme as t, v_flex,
+    Button, ScrollableElement as _, Segmented, Select, SelectEvent, SelectState, Slider, Tooltip,
+    h_flex, theme as t, v_flex,
 };
 use flikk_agent::tools::image;
 use flikk_core::agent::{AgentModel, AgentSettings, Backend, ModelChoice, effort_label};
-use flikk_core::bus::{AgentRole, Permission, Permissions};
+use flikk_core::bus::{Permission, Permissions};
 use flikk_core::command::ToolCategory;
-use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 const BACKENDS: [Backend; 2] = [Backend::Claude, Backend::Codex];
-const ROLES: [(AgentRole, &str); 2] = [
-    (AgentRole::Editor, "Editor"),
-    (AgentRole::Builder, "Builder"),
-];
 
 /// `None` follows the source language.
 const LANGUAGES: [(&str, Option<&str>); 10] = [
@@ -45,7 +40,6 @@ pub struct SettingsPanel {
     /// pick) first.
     models: Vec<(SharedString, Option<String>)>,
     model: Entity<SelectState<SharedString>>,
-    instructions: Entity<TextareaState>,
     frames: Entity<SliderState>,
     tile: Entity<SliderState>,
     language: Entity<SelectState<SharedString>>,
@@ -64,12 +58,6 @@ impl SettingsPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = state.read(cx).settings.clone();
         let model = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
-        let instructions = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(3, 10)
-                .placeholder("Always keep the intro under 20 seconds…")
-                .default_value(settings.instructions.clone())
-        });
         let frames = cx.new(|_| {
             SliderState::new()
                 .max(30.)
@@ -121,12 +109,6 @@ impl SettingsPanel {
                     });
                 },
             ),
-            cx.subscribe(&instructions, |this, input, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let text = input.read(cx).value().to_string();
-                    this.update(cx, |s| s.instructions = text);
-                }
-            }),
             cx.subscribe(&frames, |this, _, event: &SliderEvent, cx| match event {
                 SliderEvent::Release(v) => this.update(cx, |s| {
                     s.vision.frames_per_collage = v.start().round() as u32
@@ -154,7 +136,6 @@ impl SettingsPanel {
             state,
             models: Vec::new(),
             model,
-            instructions,
             frames,
             tile,
             language,
@@ -164,21 +145,13 @@ impl SettingsPanel {
         }
     }
 
-    /// Put changes made elsewhere into the instructions, sliders and
-    /// language.
+    /// Put changes made elsewhere into the sliders and language.
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).settings.clone();
         if settings == self.shown {
             return;
         }
         let old = std::mem::replace(&mut self.shown, settings.clone());
-        if settings.instructions != old.instructions
-            && self.instructions.read(cx).value().as_ref() != settings.instructions.as_str()
-        {
-            let text = settings.instructions.clone();
-            self.instructions
-                .update(cx, |i, cx| i.set_value(text, window, cx));
-        }
         for (slider, new, old) in [
             (
                 &self.frames,
@@ -269,15 +242,11 @@ impl SettingsPanel {
         }
     }
 
-    /// Backend, model, thinking level and role.
+    /// Backend, model and thinking level.
     fn render_backend(&self, settings: &AgentSettings, cx: &mut Context<Self>) -> Div {
         let backend_ix = BACKENDS
             .iter()
             .position(|b| *b == settings.backend)
-            .unwrap_or(0);
-        let role_ix = ROLES
-            .iter()
-            .position(|(r, _)| *r == settings.role)
             .unwrap_or(0);
         let choice = settings.models.get(settings.backend).clone();
         let models = self.backend_models(cx);
@@ -315,18 +284,6 @@ impl SettingsPanel {
             )
             .child(row("Model", LABEL_W).child(div().w(px(220.)).child(Select::new(&self.model))))
             .children(thinking)
-            .child(
-                row("Role", LABEL_W).child(
-                    Segmented::new("role")
-                        .compact()
-                        .items(ROLES.iter().map(|(_, label)| *label))
-                        .selected(role_ix)
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            let role = ROLES[*ix].0;
-                            this.update(cx, |s| s.role = role);
-                        })),
-                ),
-            )
     }
 
     fn render_permissions(&self, settings: &AgentSettings, cx: &mut Context<Self>) -> Div {
@@ -363,8 +320,9 @@ impl SettingsPanel {
                         Permission::Propose => "Propose",
                     })
                     .into_any_element()
-            } else if category == ToolCategory::Generate {
-                // It spends the user's credits: asked each time unless allowed.
+            } else if matches!(category, ToolCategory::Generate | ToolCategory::Skills) {
+                // Generating spends the user's credits, and skills and
+                // styles are the user's own: asked each time unless allowed.
                 const CHOICES: [(Permission, &str); 3] = [
                     (Permission::Off, "Off"),
                     (Permission::NeedsApproval, "Ask"),
@@ -474,12 +432,6 @@ impl Render for SettingsPanel {
         page("Agent", None)
             .child(self.render_backend(&settings, cx))
             .child(self.render_permissions(&settings, cx).mt(px(20.)))
-            .child(
-                v_flex()
-                    .mt(px(20.))
-                    .child(section_label("Instructions"))
-                    .child(Textarea::new(&self.instructions)),
-            )
             .child(
                 v_flex()
                     .mt(px(20.))

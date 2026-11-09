@@ -17,7 +17,7 @@ use super::catalog::{ToolSpec, catalog};
 use super::{Done, visible};
 use crate::bridge::{Content, ToolResult};
 use flikk_core::agent::{AgentSettings, EditorContext, Workspace};
-use flikk_core::bus::{AgentRole, CommandBus};
+use flikk_core::bus::CommandBus;
 use flikk_core::command::ToolCategory;
 use flikk_core::model::{ClipContent, Project, TrackKind};
 use serde_json::{Value, json};
@@ -60,7 +60,7 @@ pub const CORE: [&str; 26] = [
 ];
 
 /// The groups `load_tools` takes, in the order it lists them.
-pub const GROUPS: [ToolCategory; 10] = [
+pub const GROUPS: [ToolCategory; 11] = [
     ToolCategory::EditTimeline,
     ToolCategory::Transform,
     ToolCategory::Captions,
@@ -70,6 +70,7 @@ pub const GROUPS: [ToolCategory; 10] = [
     ToolCategory::Overlays,
     ToolCategory::Generate,
     ToolCategory::ProjectMemory,
+    ToolCategory::Skills,
     ToolCategory::Deliver,
 ];
 
@@ -90,6 +91,7 @@ pub fn key(group: ToolCategory) -> &'static str {
         ToolCategory::View => "view",
         ToolCategory::Media => "media",
         ToolCategory::Files => "files",
+        ToolCategory::Skills => "skills",
     }
 }
 
@@ -136,7 +138,7 @@ pub fn index(tools: &[ToolSpec]) -> String {
 /// Words that suggest a group. Matched at the start of a word, so `normaliz`
 /// covers "normalize" and "normalise"; a trailing space asks for the whole
 /// word.
-const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
+const KEYWORDS: [(ToolCategory, &[&str]); 11] = [
     (
         ToolCategory::EditTimeline,
         &[
@@ -361,7 +363,6 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
         ToolCategory::ProjectMemory,
         &[
             "rule",
-            "recipe",
             "remember",
             "from now on",
             "always",
@@ -369,6 +370,10 @@ const KEYWORDS: [(ToolCategory, &[&str]); 10] = [
             "style guide",
             "preference",
         ],
+    ),
+    (
+        ToolCategory::Skills,
+        &["skill", "slash command", "style", "recipe"],
     ),
     (
         ToolCategory::Deliver,
@@ -399,13 +404,8 @@ fn words(text: &str) -> String {
 }
 
 /// Groups this turn likely needs, from what the user is looking at and
-/// what they wrote (the recipe's prompt for a `/recipe`).
-pub fn pick(
-    text: &str,
-    project: &Project,
-    ctx: &EditorContext,
-    role: AgentRole,
-) -> BTreeSet<ToolCategory> {
+/// what they wrote (the skill's instructions for a `/skill`).
+pub fn pick(text: &str, project: &Project, ctx: &EditorContext) -> BTreeSet<ToolCategory> {
     let mut out = BTreeSet::new();
     match ctx.workspace {
         Workspace::Edit => {}
@@ -444,9 +444,6 @@ pub fn pick(
             out.insert(group);
         }
     }
-    if role == AgentRole::Builder {
-        out.extend([ToolCategory::ProjectMemory, ToolCategory::Effects]);
-    }
     out
 }
 
@@ -471,7 +468,6 @@ pub fn unwrap_run(tool: String, args: Value) -> (String, Value) {
 /// only when `images` ([`super::image::offered`]).
 pub fn load(
     bus: &CommandBus,
-    role: AgentRole,
     listed: &BTreeSet<ToolCategory>,
     loaded: &mut BTreeSet<ToolCategory>,
     images: bool,
@@ -519,12 +515,12 @@ pub fn load(
         let found: Vec<_> = tools
             .iter()
             .filter(|t| !CORE.contains(&t.name) && group_of(t) == Some(g))
-            .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
+            .filter(|t| t.category.is_none_or(|c| visible(bus, c)))
             .filter(|t| images || t.name != super::image::TOOL)
             .collect();
         if found.is_empty() {
             notes.push(format!(
-                "`{}` has no tools you may use (the user turned it off, or it is not for this role).",
+                "`{}` has no tools you may use (the user turned it off).",
                 key(g)
             ));
             continue;
@@ -593,16 +589,12 @@ impl Usage {
         self.results.push((tool.to_owned(), bytes, images));
     }
 
-    pub fn log(&self, settings: &AgentSettings, role: AgentRole, ctx: &EditorContext, at: i64) {
+    pub fn log(&self, settings: &AgentSettings, ctx: &EditorContext, at: i64) {
         let keys =
             |set: &BTreeSet<ToolCategory>| -> Vec<&str> { set.iter().map(|g| key(*g)).collect() };
         let line = json!({
             "at": at,
             "backend": settings.backend.label(),
-            "role": match role {
-                AgentRole::Editor => "editor",
-                AgentRole::Builder => "builder",
-            },
             "workspace": ctx.workspace.label(),
             "picked": keys(&self.picked),
             "listed_groups": keys(&self.start),

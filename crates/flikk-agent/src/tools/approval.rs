@@ -53,21 +53,7 @@ pub fn request(
                 }),
             )
         }
-        "save_recipe" => {
-            let name = args.str("name")?.trim().trim_start_matches('/');
-            if name.is_empty() || name.contains(char::is_whitespace) {
-                return Err(ToolError("`name` is one word, like rough-cut".into()));
-            }
-            (
-                format!("Recipe /{name}"),
-                json!({
-                    "name": name,
-                    "description": args.opt_str("description")?.unwrap_or_default(),
-                    "prompt": args.str("prompt")?,
-                    "params": args.0.get("params").cloned().unwrap_or(json!([])),
-                }),
-            )
-        }
+        tool if super::skills::TOOLS.contains(&tool) => super::skills::request(tool, args)?,
         "add_source_fact" => {
             let media = media_id(project, args.str("media")?)?;
             let item = project

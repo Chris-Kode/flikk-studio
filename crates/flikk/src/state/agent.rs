@@ -1,5 +1,5 @@
-//! The agent's side of the editor: its models, its memory (role, recipes,
-//! rules and facts), its settings, and what its turns bring in, drained
+//! The agent's side of the editor: its models, its memory (rules and
+//! facts), its settings, and what its turns bring in, drained
 //! on the UI thread.
 
 use super::EditorState;
@@ -40,15 +40,13 @@ impl EditorState {
         .detach();
     }
 
-    /// Hand the agent its role, its recipes, the approved rules of the
-    /// selected style profile and the facts about this project's sources.
+    /// Hand the agent the approved rules of the selected style profile and
+    /// the facts about this project's sources.
     pub(super) fn load_agent_memory(&mut self) {
-        self.agent.set_role(self.settings.role);
         self.agent.set_chat(self.chat.active());
         self.bus.set_chat(self.chat.active());
         use flikk_core::memory::{FactStatus, RuleStatus};
         use flikk_store::{FactFilter, RuleFilter};
-        let recipes = persistence::with_store(|s| s.list_recipes()).unwrap_or_default();
         let rules = self
             .settings
             .style_profile
@@ -78,7 +76,6 @@ impl EditorState {
             })
             .filter(|f| f.status != FactStatus::Suspended)
             .collect();
-        self.agent.set_recipes(recipes);
         self.agent.set_memory(rules, facts);
     }
 
@@ -162,10 +159,5 @@ impl EditorState {
             self.reload_library(cx);
             self.refresh_voices(cx);
         }
-    }
-
-    /// The user's recipes, for `/` completion and the quick-command bar.
-    pub fn recipes(&self) -> Vec<flikk_core::memory::Recipe> {
-        persistence::with_store(|s| s.list_recipes()).unwrap_or_default()
     }
 }

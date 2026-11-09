@@ -7,7 +7,7 @@
 //! project has unsaved changes is the editor state's to track.
 //!
 //! One session per process: a store connection for the UI thread (user
-//! settings, profiles, facts, recipes, recent files) and a background
+//! settings, profiles, facts, recent files) and a background
 //! [`Autosaver`]. If the database cannot be opened the editor still opens
 //! and saves projects, and [`take_notice`] says why.
 
@@ -320,7 +320,7 @@ pub fn shutdown() {
     }
 }
 
-/// Run `f` with the UI thread's store (profiles, facts, recipes, recent
+/// Run `f` with the UI thread's store (profiles, facts, recent
 /// files). `None` if the store is unavailable or `f` failed; failures are
 /// reported through [`take_notice`].
 pub fn with_store<T>(f: impl FnOnce(&Store) -> flikk_store::Result<T>) -> Option<T> {

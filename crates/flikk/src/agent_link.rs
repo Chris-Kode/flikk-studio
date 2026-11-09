@@ -19,8 +19,8 @@ pub mod approve;
 use flikk_agent::host::TurnStatus;
 use flikk_agent::{AgentHost, PendingApproval};
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
-use flikk_core::bus::{AgentRole, CommandBus};
-use flikk_core::memory::{Recipe, SourceFact, StyleRule};
+use flikk_core::bus::CommandBus;
+use flikk_core::memory::{SourceFact, StyleRule};
 use flikk_core::services::Services;
 
 pub struct AgentLink {
@@ -53,19 +53,9 @@ impl AgentLink {
         self.host.pump(bus, services)
     }
 
-    /// Editor or Builder role; applies from the next turn.
-    pub fn set_role(&mut self, role: AgentRole) {
-        self.host.set_role(role);
-    }
-
     /// Chat session whose backend conversation the next turn continues.
     pub fn set_chat(&mut self, chat: &str) {
         self.host.set_chat(chat);
-    }
-
-    /// Recipes offered as `/name` slash commands.
-    pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
-        self.host.set_recipes(recipes);
     }
 
     /// Style rules and source facts from the store.

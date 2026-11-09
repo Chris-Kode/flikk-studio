@@ -15,20 +15,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// for the review cards that still show what came of them.
 const KEPT_RESOLVED: usize = 16;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRole {
-    #[default]
-    Editor,
-    Builder,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "author", rename_all = "snake_case")]
 pub enum Author {
     User,
-    Agent { role: AgentRole },
-    Recipe { name: String },
+    /// The editor's own agent.
+    Agent,
+    /// An outside client on the editor's MCP server.
+    External {
+        name: String,
+    },
 }
 
 impl Author {
@@ -37,7 +33,7 @@ impl Author {
     }
 
     pub fn is_agent(&self) -> bool {
-        matches!(self, Author::Agent { .. })
+        matches!(self, Author::Agent)
     }
 }
 
@@ -73,9 +69,10 @@ impl Permissions {
     pub fn default_for(category: ToolCategory) -> Permission {
         match category {
             c if c.is_read() => Permission::Allowed,
-            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Generate => {
-                Permission::NeedsApproval
-            }
+            ToolCategory::ProjectMemory
+            | ToolCategory::Deliver
+            | ToolCategory::Generate
+            | ToolCategory::Skills => Permission::NeedsApproval,
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
         }
@@ -95,8 +92,11 @@ impl Permissions {
             (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
             // Generating spends the user's credits: asked each time unless
             // they allow it.
-            (ToolCategory::Generate, Permission::Allowed) => Permission::Allowed,
-            (ToolCategory::Generate, _) => Permission::NeedsApproval,
+            // So does changing the user's skills and styles.
+            (ToolCategory::Generate | ToolCategory::Skills, Permission::Allowed) => {
+                Permission::Allowed
+            }
+            (ToolCategory::Generate | ToolCategory::Skills, _) => Permission::NeedsApproval,
             _ => Permission::Propose,
         }
     }

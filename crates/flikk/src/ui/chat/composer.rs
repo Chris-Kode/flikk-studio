@@ -1,14 +1,15 @@
 //! Message input: Enter sends, Shift+Enter breaks the line, `@` opens the
-//! reference list (inserted as chips) and `/` at the start lists recipes.
+//! reference list (inserted as chips) and `/` at the start lists skills.
+//! The style picker beside send sets the style every message is sent with.
 //! Clips, media, FX and transcript words dropped on it, and references
 //! other panels queue with "Add to chat", become chips too. Files and
 //! folders picked with the paperclip or dropped from the system are
 //! attached to the chat, for the agent to read, and shown above the input.
 
 use super::chips::{chip, mark_element};
-use super::recipes;
 use super::refs::{self, Mark, RefKind, Reference};
 use crate::state::EditorState;
+use crate::ui::editor_settings::{EditorSettings, Focus};
 use crate::ui::kit::popover::surface;
 use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Kbd, PopupMenuItem, ScrollableElement as _,
@@ -17,6 +18,7 @@ use crate::ui::kit::{
 use crate::ui::settings::efforts_of;
 use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
 use flikk_core::agent::{Attachment, AttachmentKind, Backend, ModelChoice, effort_label};
+use flikk_core::skills::{self, Kind};
 use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -57,10 +59,12 @@ enum Suggestion {
         detail: String,
         refs: Vec<(String, SharedString)>,
     },
-    Recipe {
+    Skill {
         name: String,
-        title: String,
+        description: String,
     },
+    /// Opens Settings on a new skill.
+    NewSkill,
 }
 
 impl Suggestion {
@@ -68,7 +72,7 @@ impl Suggestion {
     fn group(&self) -> Option<RefKind> {
         match self {
             Self::Reference(r) => Some(r.kind),
-            Self::Special { .. } | Self::Recipe { .. } => None,
+            Self::Special { .. } | Self::Skill { .. } | Self::NewSkill => None,
         }
     }
 
@@ -79,7 +83,7 @@ impl Suggestion {
                 let token = refs.first().map_or("", |(text, _)| text.as_str());
                 Some(kind.mark(project, token))
             }
-            Self::Recipe { .. } => None,
+            Self::Skill { .. } | Self::NewSkill => None,
         }
     }
 }
@@ -105,7 +109,7 @@ impl Composer {
             TextareaState::new(window, cx)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("Ask for an edit, @ to reference, / for recipes")
+                .placeholder("Ask for an edit, @ to reference, / for skills")
         });
         let _subscriptions = vec![
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
@@ -262,10 +266,14 @@ impl Composer {
             items
         } else {
             let query = word.strip_prefix('/').filter(|_| start == 0)?;
-            recipes::list(self.state.read(cx))
+            skills::list(Kind::Skill)
                 .into_iter()
-                .filter(|(name, _)| name.starts_with(query))
-                .map(|(name, title)| Suggestion::Recipe { name, title })
+                .filter(|e| e.name.starts_with(query))
+                .map(|e| Suggestion::Skill {
+                    name: e.name,
+                    description: e.description,
+                })
+                .chain([Suggestion::NewSkill])
                 .collect()
         };
         (!items.is_empty()).then_some(Suggestions {
@@ -282,6 +290,15 @@ impl Composer {
         let Some(item) = s.items.get(ix) else {
             return;
         };
+        if matches!(item, Suggestion::NewSkill) {
+            self.input.update(cx, |input, cx| {
+                input.set_selected_range(s.range.clone(), cx);
+                input.replace("", window, cx);
+            });
+            cx.notify();
+            EditorSettings::open_entries(Kind::Skill, Focus::New, window, cx);
+            return;
+        }
         self.input.update(cx, |input, cx| {
             match item {
                 Suggestion::Reference(r) => {
@@ -312,10 +329,11 @@ impl Composer {
                         input.insert(" ", window, cx);
                     }
                 }
-                Suggestion::Recipe { name, .. } => {
+                Suggestion::Skill { name, .. } => {
                     input.set_selected_range(s.range.clone(), cx);
                     input.replace(format!("/{name} "), window, cx);
                 }
+                Suggestion::NewSkill => {}
             }
             input.focus(window, cx);
         });
@@ -438,6 +456,64 @@ impl Composer {
             .children(effort_picker)
     }
 
+    /// The style messages are sent with: its name, or just the icon when
+    /// there is none.
+    fn render_style_picker(&self, cx: &App) -> impl IntoElement {
+        let styles = skills::list(Kind::Style);
+        let picked = self.state.read(cx).settings.style.clone();
+        let current = picked
+            .as_deref()
+            .and_then(|id| styles.iter().find(|e| e.id == id));
+        let state = self.state.clone();
+        let button = Button::new("chat-style")
+            .icon(IconName::Palette)
+            .ghost()
+            .small()
+            .tooltip("Style");
+        let button = match current {
+            Some(style) => button
+                .label(style.name.clone())
+                .trailing_icon(IconName::ChevronDown)
+                .selected(true),
+            None => button,
+        };
+        let picked = current.map(|e| e.id.clone());
+        div()
+            .flex_none()
+            .max_w(px(140.))
+            .child(
+                button.dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                    let item = |label: String, id: Option<String>| {
+                        let state = state.clone();
+                        PopupMenuItem::new(label)
+                            .checked(id == picked)
+                            .on_click(move |_, _, cx| {
+                                let id = id.clone();
+                                state.update(cx, |s, cx| {
+                                    let mut settings = s.settings.clone();
+                                    settings.style = id;
+                                    if settings != s.settings {
+                                        s.set_settings(settings, cx);
+                                    }
+                                })
+                            })
+                    };
+                    let mut menu = menu
+                        .max_h(px(360.))
+                        .item(PopupMenuItem::label("Style"))
+                        .item(item("No style".into(), None));
+                    for style in &styles {
+                        menu = menu.item(item(style.name.clone(), Some(style.id.clone())));
+                    }
+                    menu.item(PopupMenuItem::separator()).item(
+                        PopupMenuItem::new("Manage styles").on_click(|_, window, cx| {
+                            EditorSettings::open_entries(Kind::Style, Focus::Last, window, cx)
+                        }),
+                    )
+                }),
+            )
+    }
+
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggestions.as_ref()?;
         let project = self.state.read(cx).bus.project();
@@ -452,18 +528,12 @@ impl Composer {
                         .when(ix > 0, |el| {
                             el.child(div().h(px(1.)).mx(px(-4.)).my(px(4.)).bg(t::LN))
                         })
-                        .child(
-                            div()
-                                .px(px(8.))
-                                .pt(px(2.))
-                                .pb(px(3.))
-                                .text_size(px(10.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(t::T3)
-                                .child(kind.title()),
-                        )
+                        .child(group_title(kind.title()))
                         .into_any_element(),
                 );
+            }
+            if ix == 0 && matches!(item, Suggestion::Skill { .. }) {
+                rows.push(group_title("Skills").into_any_element());
             }
             let selected = ix == s.selected;
             let row = h_flex()
@@ -484,11 +554,12 @@ impl Composer {
                     }),
                 );
             let row = match item {
-                Suggestion::Recipe { name, title } => row
+                Suggestion::Skill { name, description } => row
                     .child(
                         div()
                             .flex_none()
-                            .w(px(82.))
+                            .w(px(104.))
+                            .truncate()
                             .font_family(t::mono())
                             .text_size(px(11.))
                             .child(format!("/{name}")),
@@ -499,9 +570,26 @@ impl Composer {
                             .min_w_0()
                             .truncate()
                             .text_color(t::T2)
-                            .child(title.clone()),
+                            .child(description.clone()),
                     )
                     .when(selected, |el| el.child(Kbd::new("Tab"))),
+                Suggestion::NewSkill => {
+                    if ix > 0 {
+                        rows.push(
+                            div()
+                                .flex_none()
+                                .h(px(1.))
+                                .mx(px(-4.))
+                                .my(px(4.))
+                                .bg(t::LN)
+                                .into_any_element(),
+                        );
+                    }
+                    row.text_color(t::T2)
+                        .child(Icon::new(IconName::Plus).size(px(13.)))
+                        .child(div().flex_1().child("New skill"))
+                        .when(selected, |el| el.child(Kbd::new("Enter")))
+                }
                 Suggestion::Reference(Reference { label, detail, .. })
                 | Suggestion::Special { label, detail, .. } => row
                     .children(item.mark(project).map(|m| mark_element(m, px(8.), px(12.))))
@@ -812,6 +900,7 @@ impl Render for Composer {
                             )
                             .child(self.render_model_pickers(cx))
                             .child(div().flex_1())
+                            .child(self.render_style_picker(cx))
                             .child(action),
                     )
                     .when(cx.has_active_drag(), |el| {
@@ -835,6 +924,18 @@ fn set_choice(
             s.set_settings(settings, cx);
         }
     });
+}
+
+/// The quiet title over a group of suggestions.
+fn group_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .px(px(8.))
+        .pt(px(2.))
+        .pb(px(3.))
+        .text_size(px(10.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(t::T3)
+        .child(title.into())
 }
 
 /// Whether item `ix` opens a new group (and gets a header row).

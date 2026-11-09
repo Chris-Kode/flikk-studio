@@ -41,7 +41,6 @@ id_type!(
     SpeakerId,
     RuleId,
     FactId,
-    RecipeId,
     JobId,
     // One effect on a clip's stack (video or audio), unique within the clip.
     EffectId,

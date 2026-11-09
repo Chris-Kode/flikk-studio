@@ -1,4 +1,5 @@
-//! Carrying out an approved agent request: memory goes to the store,
+//! Carrying out an approved agent request: memory goes to the store, skills
+//! and styles to their files,
 //! programs and sounds to the user's library, renders and exports to `flikk-deliver`,
 //! music, sound effects, voiceovers and videos to the provider set for them, as are
 //! voices added or designed, which then go to the library; pictures to the
@@ -11,12 +12,12 @@ use flikk_agent::tools::ApprovalRequest;
 use flikk_agent::tools::generate::{self, Placement};
 use flikk_core::agent::AgentSettings;
 use flikk_core::memory::{
-    CaptionStyle, FactKind, FactStatus, Recipe, RecipeParam, RuleScope, RuleStatus, SourceFact,
-    StyleRule,
+    CaptionStyle, FactKind, FactStatus, RuleScope, RuleStatus, SourceFact, StyleRule,
 };
 use flikk_core::model::{Fingerprint, MediaItem, Project};
 use flikk_core::services::Services;
-use flikk_core::{JobId, RecipeId, RuleId, Time, TimeRange};
+use flikk_core::skills::{self, Draft, Kind};
+use flikk_core::{JobId, RuleId, Time, TimeRange};
 use flikk_deliver::{RenderQueue, RenderRequest, RenderSettings};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -68,7 +69,8 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
     match request.tool.as_str() {
         "propose_rule" => save_rule(args, inputs.project, inputs.settings),
         "add_source_fact" => save_fact(args),
-        "save_recipe" => save_recipe(args),
+        "save_skill" | "save_style" => save_entry(args),
+        "delete_skill" | "delete_style" => delete_entry(args),
         "save_fx_to_library" => save_fx(args, inputs.project),
         "save_sound_to_library" => save_sound(args, inputs.project),
         "queue_render" => {
@@ -302,27 +304,34 @@ fn save_fact(args: &Value) -> Result<Started> {
     Ok(Started::Done("Saved".into()))
 }
 
-fn save_recipe(args: &Value) -> Result<Started> {
-    let name = str_arg(args, "name")?.to_owned();
-    let params = args
-        .get("params")
-        .and_then(Value::as_array)
-        .map(|params| params.iter().filter_map(param).collect())
-        .unwrap_or_default();
-    let recipe = Recipe {
-        id: RecipeId::new(),
-        description: args
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        params,
-        prompt: str_arg(args, "prompt")?.to_owned(),
-        builtin: false,
-        name: name.clone(),
+/// A skill or style the agent asked to save, as `tools::skills` wrote it
+/// up for the card.
+fn save_entry(args: &Value) -> Result<Started> {
+    let text = |key| args.get(key).and_then(Value::as_str).unwrap_or_default();
+    let draft = Draft {
+        name: str_arg(args, "name")?.to_owned(),
+        description: text("description").to_owned(),
+        instructions: str_arg(args, "instructions")?.to_owned(),
+        by_agent: args
+            .get("by_agent")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     };
-    store(|s| s.save_recipe(&recipe))?;
+    let previous = args.get("id").and_then(Value::as_str);
+    skills::save(entry_kind(args), previous, &draft).map_err(|e| anyhow!(e))?;
     Ok(Started::Done("Saved".into()))
+}
+
+fn delete_entry(args: &Value) -> Result<Started> {
+    skills::delete(entry_kind(args), str_arg(args, "id")?);
+    Ok(Started::Done("Deleted".into()))
+}
+
+fn entry_kind(args: &Value) -> Kind {
+    match args.get("kind").and_then(Value::as_str) {
+        Some("style") => Kind::Style,
+        _ => Kind::Skill,
+    }
 }
 
 /// Save a project program to the user's library. The editor links the
@@ -347,23 +356,6 @@ fn save_sound(args: &Value, project: &Project) -> Result<Started> {
     let lib = flikk_core::library::Library::load();
     flikk_core::library::save_sound(&lib, item).map_err(|e| anyhow!(e))?;
     Ok(Started::Done("Saved to the library".into()))
-}
-
-/// A recipe parameter, as a bare name or `{name, description, default}`.
-fn param(v: &Value) -> Option<RecipeParam> {
-    if let Some(name) = v.as_str() {
-        return Some(RecipeParam {
-            name: name.to_owned(),
-            description: String::new(),
-            default: None,
-        });
-    }
-    let text = |key| v.get(key).and_then(Value::as_str).map(str::to_owned);
-    Some(RecipeParam {
-        name: text("name")?,
-        description: text("description").unwrap_or_default(),
-        default: text("default"),
-    })
 }
 
 /// The deliver preset closest to the agent's name for it

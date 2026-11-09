@@ -458,23 +458,3 @@ pub struct SourceFact {
     pub range: Option<TimeRange>,
     pub status: FactStatus,
 }
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RecipeParam {
-    pub name: String,
-    pub description: String,
-    pub default: Option<String>,
-}
-
-/// A saved multi-step agent task; each run produces one change set.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Recipe {
-    pub id: RecipeId,
-    /// Slash name in chat, e.g. `rough-cut`.
-    pub name: String,
-    pub description: String,
-    pub params: Vec<RecipeParam>,
-    /// Prompt template; `{param}` placeholders are filled at run time.
-    pub prompt: String,
-    pub builtin: bool,
-}

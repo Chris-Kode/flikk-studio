@@ -1382,18 +1382,53 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
-            "save_recipe",
-            Some(ProjectMemory),
-            "Ask the user to approve a reusable recipe (a slash command).",
+            "list_skills",
+            Some(Skills),
+            "The user's skills (slash commands they run from the chat), with their instructions.",
+            object(json!({}), &[]),
+        ),
+        spec(
+            "list_styles",
+            Some(Skills),
+            "The user's styles (standing editing instructions picked in the chat), with their instructions; `in_chat` marks the one in use.",
+            object(json!({}), &[]),
+        ),
+        spec(
+            "save_skill",
+            Some(Skills),
+            "Create a skill the user runs as /name, or replace the one with that name. Text typed after /name reaches you as the user's input.",
             object(
                 json!({
                     "name": string("Slash name, lowercase-with-dashes"),
-                    "description": string("One line"),
-                    "prompt": string("Instructions; {param} placeholders allowed"),
-                    "params": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "default": { "type": "string" } }, "required": ["name"] } }
+                    "description": string("One line for the / list"),
+                    "instructions": string("What to do when the skill runs, as steps")
                 }),
-                &["name", "prompt"],
+                &["name", "instructions"],
             ),
+        ),
+        spec(
+            "save_style",
+            Some(Skills),
+            "Create a style, or replace the one with that name: how edits should feel (pace, music, captions, zooms), applied to every message while it is picked.",
+            object(
+                json!({
+                    "name": string("Short name, e.g. Documentary"),
+                    "instructions": string("The style's rules, as instructions")
+                }),
+                &["name", "instructions"],
+            ),
+        ),
+        spec(
+            "delete_skill",
+            Some(Skills),
+            "Ask the user to delete one of their skills.",
+            object(json!({ "name": string("Slash name") }), &["name"]),
+        ),
+        spec(
+            "delete_style",
+            Some(Skills),
+            "Ask the user to delete one of their styles.",
+            object(json!({ "name": string("Style name") }), &["name"]),
         ),
         spec(
             "save_sound_to_library",

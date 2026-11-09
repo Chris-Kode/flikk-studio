@@ -36,10 +36,12 @@ pub enum ToolCategory {
     Generate,
     /// Reading the files and folders the user attached to the chat.
     Files,
+    /// Creating, changing and deleting the user's skills and styles.
+    Skills,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 15] = [
+    pub const ALL: [ToolCategory; 16] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -52,6 +54,7 @@ impl ToolCategory {
         Self::Overlays,
         Self::Effects,
         Self::Generate,
+        Self::Skills,
         Self::ProjectMemory,
         Self::Deliver,
         Self::Media,
@@ -81,6 +84,7 @@ impl ToolCategory {
             Self::Effects => "Effects and motion graphics",
             Self::Generate => "Generate media",
             Self::Files => "Attached files",
+            Self::Skills => "Skills and styles",
         }
     }
 }

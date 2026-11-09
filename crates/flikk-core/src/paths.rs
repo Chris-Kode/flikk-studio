@@ -48,6 +48,16 @@ pub fn library() -> PathBuf {
     sub("library")
 }
 
+/// Skills the user runs from the chat as `/name`, one Markdown file each.
+pub fn skills() -> PathBuf {
+    sub("skills")
+}
+
+/// Styles the user picks in the chat composer, one Markdown file each.
+pub fn styles() -> PathBuf {
+    sub("styles")
+}
+
 /// Proxies, collages, waveforms, analysis results; keyed by fingerprint.
 pub fn cache() -> PathBuf {
     sub("cache")

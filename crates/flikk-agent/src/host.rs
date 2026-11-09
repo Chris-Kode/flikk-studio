@@ -8,7 +8,7 @@
 //!
 //! External MCP clients (Claude Code, Codex… running `flikk mcp`
 //! against the published `bridge.json`) are served between and during
-//! turns. They act as the agent's current role with the same permissions,
+//! turns. They act as the agent with the same permissions,
 //! under their own author, so their proposals collect in a separate
 //! "External agent" change set. That set is offered for review when the
 //! client disconnects or after [`EXTERNAL_IDLE`] without a call (a client
@@ -22,14 +22,15 @@ use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
 use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
-use crate::{prompt, recipes, session};
+use crate::{prompt, session};
 use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
-use flikk_core::bus::{AgentRole, Author, CommandBus};
+use flikk_core::bus::{Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::command::ToolCategory;
-use flikk_core::memory::{Recipe, SourceFact, StyleRule};
+use flikk_core::memory::{SourceFact, StyleRule};
 use flikk_core::model::MediaItem;
 use flikk_core::services::Services;
+use flikk_core::skills::{self, Kind};
 use flikk_core::{ChangeSetId, ProjectId};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -42,7 +43,7 @@ pub(crate) const EXTERNAL_IDLE: Duration = Duration::from_secs(90);
 
 /// The author external clients' proposals are made under.
 pub(crate) fn external_author() -> Author {
-    Author::Recipe {
+    Author::External {
         name: "External agent".into(),
     }
 }
@@ -185,7 +186,6 @@ struct JobResult {
 
 pub struct AgentHost {
     bridge: Option<BridgeServer>,
-    role: AgentRole,
     /// Chat session whose backend conversation the next turn continues.
     chat: String,
     memory: Memory,
@@ -226,7 +226,6 @@ impl AgentHost {
         let (jobs_tx, jobs_rx) = mpsc::channel();
         Self {
             bridge: None,
-            role: AgentRole::Editor,
             chat: session::MAIN_CHAT.to_owned(),
             memory: Memory::default(),
             queued: None,
@@ -272,20 +271,9 @@ impl AgentHost {
         }
     }
 
-    /// Editor or Builder: a different prompt, tool set and backend session.
-    /// Takes effect on the next turn.
-    pub fn set_role(&mut self, role: AgentRole) {
-        self.role = role;
-    }
-
     /// Continue chat session `chat` from the next turn on.
     pub fn set_chat(&mut self, chat: impl Into<String>) {
         self.chat = chat.into();
-    }
-
-    /// Recipes available as `/name` commands (the store seeds built-ins).
-    pub fn set_recipes(&mut self, recipes: Vec<Recipe>) {
-        self.memory.recipes = recipes;
     }
 
     /// Style rules and source facts; rules apply by scope, facts are fetched
@@ -426,7 +414,7 @@ impl AgentHost {
     // ------------------------------------------------------------- turns
 
     fn start(&mut self, q: Queued, bus: &mut CommandBus, services: &Services) {
-        let author = Author::Agent { role: self.role };
+        let author = Author::Agent;
         // A set left open by an earlier turn that never finished.
         close_open_sets(bus, &author, None, &mut self.events);
         bus.set_chat(&self.chat);
@@ -435,28 +423,24 @@ impl AgentHost {
         let carried = bus.reopen_change_set(&author);
         let project = bus.view_for(&author);
         let project_id = project.id;
-        let enabled: Vec<Recipe> = self
-            .memory
-            .recipes
-            .iter()
-            // The setting lists built-ins; the user's own recipes are on.
-            .filter(|r| {
-                !r.builtin
-                    || q.settings.enabled_recipes.is_empty()
-                    || q.settings.enabled_recipes.contains(&r.id)
-            })
-            .cloned()
-            .collect();
-        let (recipe, text) = match recipes::expand(&q.message, &enabled) {
-            Some((name, prompt)) => (Some(name), prompt),
+        let (skill, text) = match skills::invocation(&q.message) {
+            Some(run) => (Some(run.name), run.prompt),
             None => (None, q.message.clone()),
         };
+        let style = q
+            .settings
+            .style
+            .as_deref()
+            .and_then(|id| skills::get(Kind::Style, id));
         let mut message = prompt::turn_message(
             &text,
             project,
             &q.context,
             &self.memory.rules,
-            recipe.as_deref(),
+            prompt::Asked {
+                skill: skill.as_deref(),
+                style: style.as_ref(),
+            },
         );
         // What came of this chat's own requests, and no other's.
         let (ours, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.outcomes)
@@ -469,17 +453,17 @@ impl AgentHost {
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let images = tools::image::offered(&q.settings, services);
-        let system_prompt = prompt::system_prompt(self.role, &q.settings, images);
+        let system_prompt = prompt::system_prompt(&q.settings, images);
         let backend = q.settings.backend;
-        let resume = session::load(project.id, &self.chat, backend, self.role);
+        let resume = session::load(project.id, &self.chat, backend);
         // A new session doesn't have the chat's earlier messages.
         if resume.is_none() {
             message = prompt::with_recap(message, &q.context.history);
         }
-        let picked = groups::pick(&text, project, &q.context, self.role);
+        let picked = groups::pick(&text, project, &q.context);
         // A conversation keeps the list it started with, so its cached
         // prompt stays valid; a new one starts from this message's picks.
-        let key = session::key(project.id, &self.chat, backend, self.role);
+        let key = session::key(project.id, &self.chat, backend);
         let groups = resume
             .as_ref()
             .and_then(|_| groups::stored(&key))
@@ -542,7 +526,7 @@ impl AgentHost {
             }
         };
         self.events.push(AgentEvent::Progress {
-            label: recipe.map_or_else(|| "Thinking".to_owned(), |r| format!("Running /{r}")),
+            label: skill.map_or_else(|| "Thinking".to_owned(), |r| format!("Running /{r}")),
             fraction: None,
         });
         let id = self.next_turn;
@@ -592,13 +576,7 @@ impl AgentHost {
         for event in running.events.try_iter() {
             match event {
                 BackendEvent::Session(id) => {
-                    session::store(
-                        turn.project,
-                        &turn.chat,
-                        turn.backend,
-                        role_of(&turn.author),
-                        Some(&id),
-                    );
+                    session::store(turn.project, &turn.chat, turn.backend, Some(&id));
                 }
                 BackendEvent::TextDelta(text) => {
                     turn.acted = true;
@@ -665,13 +643,7 @@ impl AgentHost {
         if !lost {
             return;
         }
-        session::store(
-            turn.project,
-            &turn.chat,
-            turn.backend,
-            role_of(&turn.author),
-            None,
-        );
+        session::store(turn.project, &turn.chat, turn.backend, None);
         if turn.acted {
             turn.phase = Phase::Finished(Some(SESSION_LOST.into()));
         } else if turn.spec.resume.is_some() {
@@ -712,13 +684,7 @@ impl AgentHost {
         let held = self.held.values().any(|(o, _)| *o == Origin::Turn);
         let pending = turn.jobs > 0 || held || !turn.web_calls.is_empty();
         if turn.open_calls > 0 || (stopping && pending) {
-            session::store(
-                turn.project,
-                &turn.chat,
-                turn.backend,
-                role_of(&turn.author),
-                None,
-            );
+            session::store(turn.project, &turn.chat, turn.backend, None);
         }
         self.release_held(Origin::Turn);
         match &turn.phase {
@@ -733,8 +699,7 @@ impl AgentHost {
             Phase::Finished(None) | Phase::Running => {}
         }
         close_open_sets(bus, &turn.author, turn.carried, &mut self.events);
-        turn.usage
-            .log(&turn.settings, role_of(&turn.author), &turn.context, now());
+        turn.usage.log(&turn.settings, &turn.context, now());
         let _ = std::fs::remove_dir_all(&turn.spec.run_dir);
         self.events.push(AgentEvent::TurnDone);
     }
@@ -760,34 +725,16 @@ impl AgentHost {
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
                     Some(turn) => {
-                        let list = tools::list(
-                            bus,
-                            role_of(&turn.author),
-                            Some(&turn.groups),
-                            &turn.settings,
-                            services,
-                        );
+                        let list = tools::list(bus, Some(&turn.groups), &turn.settings, services);
                         turn.usage.listed = list.len();
                         turn.usage.listed_bytes = list.iter().map(|t| t.to_string().len()).sum();
                         reply.tools(list);
                     }
-                    None => reply.tools(tools::list(
-                        bus,
-                        self.role,
-                        None,
-                        &self.external.settings,
-                        services,
-                    )),
+                    None => reply.tools(tools::list(bus, None, &self.external.settings, services)),
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(
-                        bus,
-                        self.role,
-                        None,
-                        &self.external.settings,
-                        services,
-                    ));
+                    reply.tools(tools::list(bus, None, &self.external.settings, services));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
@@ -801,7 +748,6 @@ impl AgentHost {
                     if tool == groups::LOAD_TOOLS {
                         let done = groups::load(
                             bus,
-                            role_of(&turn.author),
                             &turn.groups,
                             &mut turn.usage.loaded,
                             tools::image::offered(&turn.settings, services),
@@ -815,7 +761,6 @@ impl AgentHost {
                         bus,
                         services,
                         author: turn.author.clone(),
-                        role: role_of(&turn.author),
                         external: false,
                         editor: &turn.context,
                         settings: &turn.settings,
@@ -842,7 +787,6 @@ impl AgentHost {
                         bus,
                         services,
                         author: external_author(),
-                        role: self.role,
                         external: true,
                         editor: &self.external.context,
                         settings: &self.external.settings,
@@ -993,7 +937,6 @@ impl AgentHost {
                                     bus: &mut *bus,
                                     services,
                                     author: turn.author.clone(),
-                                    role: role_of(&turn.author),
                                     external: false,
                                     editor: &turn.context,
                                     settings: &turn.settings,
@@ -1005,7 +948,6 @@ impl AgentHost {
                             bus: &mut *bus,
                             services,
                             author: external_author(),
-                            role: self.role,
                             external: true,
                             editor: &self.external.context,
                             settings: &self.external.settings,
@@ -1124,7 +1066,7 @@ impl AgentHost {
         let entry = ActivityEntry {
             at: now(),
             tool,
-            args,
+            args: done.recorded.map_or(args, |recorded| *recorded),
             summary: done.summary,
             images: done.images,
             excerpts: done.excerpts,
@@ -1173,13 +1115,6 @@ fn close_open_sets(
         if len > 0 && carried != Some((id, len)) {
             events.push(AgentEvent::ChangeSetReady { change_set: id });
         }
-    }
-}
-
-fn role_of(author: &Author) -> AgentRole {
-    match author {
-        Author::Agent { role } => *role,
-        _ => AgentRole::Editor,
     }
 }
 

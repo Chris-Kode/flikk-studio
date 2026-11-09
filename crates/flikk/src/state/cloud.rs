@@ -578,9 +578,7 @@ impl EditorState {
 
     /// The agent, as what it asked for is added.
     pub(super) fn agent_author(&self) -> Author {
-        Author::Agent {
-            role: self.settings.role,
-        }
+        Author::Agent
     }
 
     /// Add what was made for the project just opened while it was closed.
@@ -715,9 +713,7 @@ impl EditorState {
         cx: &mut Context<Self>,
         propose: impl FnOnce(&mut CommandBus, &Author) -> Result<T, String>,
     ) -> Result<T, String> {
-        let author = Author::Agent {
-            role: self.settings.role,
-        };
+        let author = Author::Agent;
         // A queued message has no turn yet, so its set is not open.
         let turn = self.agent.status().in_turn();
         let reopened = if turn {

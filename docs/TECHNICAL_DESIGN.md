@@ -22,8 +22,8 @@ described here, update the section in the same commit.
                                  external MCP clients  ──stdio──▶ flikk mcp ── bridge.json
 ```
 
-* **One command bus.** Every change, from a button, a shortcut, the agent or a
-  recipe, is a `flikk_core::command::Command` submitted to
+* **One command bus.** Every change, from a button, a shortcut, the agent or an
+  external MCP client, is a `flikk_core::command::Command` submitted to
   `flikk_core::bus::CommandBus`. Permissions, undo and change sets live there
   and nowhere else (PRD principles 1–3). Any UI action that changes the
   project goes through a `Command`, so the agent can do it too.
@@ -35,7 +35,7 @@ described here, update the section in the same commit.
   timeline draws a pending change set straight from its ops.
 * **Agents propose, users apply.** `Author::User` commands apply at once as
   one undo step (`execute_batch` groups several). `Author::Agent` and
-  `Author::Recipe` commands go into a change set for review (§4).
+  `Author::External` commands go into a change set for review (§4).
 * **Engines behind traits.** The UI, the compositor and the agent host call
   the traits in `flikk_core::services`: `MediaService` (`flikk-media`),
   `AnalysisService` (`flikk-analysis`), `FxService` (`flikk-gpu`), `HtmlService`
@@ -50,12 +50,12 @@ described here, update the section in the same commit.
 | --- | --- | --- |
 | `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
 | `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
-| `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints, recipes | core, rusqlite, chrono |
+| `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `flikk-analysis` | `AnalysisService`: the analysis pipeline over `flikk-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
 | `flikk-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `flikk-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
-| `flikk-agent` | Backend adapters (Claude, Codex), MCP server (`flikk-mcp` bin) and bridge, tool catalog and groups, prompt builder, recipes, backend sessions | core, base64, png |
+| `flikk-agent` | Backend adapters (Claude, Codex), MCP server (`flikk-mcp` bin) and bridge, tool catalog and groups, prompt builder, skill and style tools, backend sessions | core, base64, png |
 | `flikk-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
 | `flikk-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
 | `flikk-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
@@ -232,7 +232,7 @@ panics fails without stopping the queue.
 
 ### Change sets
 
-`Author::Agent { role }` and `Author::Recipe` commands go into the author's
+`Author::Agent` and `Author::External` commands go into the author's
 open `ChangeSet` (`flikk-core/src/changeset.rs`, `bus.rs`), planned against that
 set's *draft* (committed project + its own pending items), so the agent sees
 the effect of its earlier calls.
@@ -1134,12 +1134,11 @@ on the UI thread and run it off it:
   `$FLIKK_MCP`, else the `flikk-mcp` binary next to the editor, else
   `flikk mcp`. It connects to the editor over TCP on 127.0.0.1 with the
   turn's token (`FLIKK_BRIDGE`/`FLIKK_TOKEN`).
-* **Roles and permissions** (`flikk-core/src/bus.rs`): `AgentRole::Editor`
-  (default) or `Builder` (read tools, memory and FX authoring only), each
-  with its own prompt and backend session. Permissions are per
-  `ToolCategory`: read and view are always allowed; edit categories are Off
-  or Propose (never auto-applied); project memory (rules, recipes, facts,
-  saving to the library) and deliver (renders, exports) always need the
+* **Permissions** (`flikk-core/src/bus.rs`): one agent role, the editor.
+  Permissions are per `ToolCategory`: read and view are always allowed;
+  edit categories are Off or Propose (never auto-applied); skills and
+  styles are Off, Ask or Allow (deleting one always asks); project memory
+  (rules, facts, saving to the library) and deliver (renders, exports) always need the
   user's approval, asked with Approve/Deny cards above the composer and
   carried out by `agent_link/approve.rs`. The call waits: the host holds
   its MCP reply until the user decides and answers it with the outcome
@@ -1405,10 +1404,10 @@ on the UI thread and run it off it:
 * **Prompt** (`flikk-agent/src/prompt.rs`): the system prompt is the tool
   guidance (with or without web and images), the shared rules (seeing and hearing,
   time formats, references, cutting in pauses, protected ranges), the
-  role's part, the FX conventions, the language and the user's standing
-  instructions. Each message carries an `<editor_context>` (project
+  editor's part, the FX conventions and the language. Each message carries an `<editor_context>` (project
   summary, format, workspace, playhead, selection, in/out, selected words),
-  the approved style rules, a recipe line, `<approvals>`, and a
+  the approved style rules, the picked style as a `<style>` block, a skill
+  line, `<approvals>`, and a
   `<references>` block when the user referenced objects.
 * **Chat** (`ui/chat*`): sessions per project in
   `paths::projects()/<project>.chats.json`, each resuming its own backend
@@ -1418,9 +1417,12 @@ on the UI thread and run it off it:
   until its `ToolFinished` replaces it; one still running when the turn ends
   is marked Stopped. The change-set card sits above the composer, once per set however
   many turns grew it, and stays with its outcome until the next message;
-  it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Recipes run as
-  `/name key=value …` (seven built-ins: rough-cut, dead-time, teaser,
-  captions, zooms, music, feedback); cmd/ctrl-K opens the quick command bar.
+  it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Skills run as
+  `/name …`, the rest of the message being their input; none are built
+  in. Skills and styles are Markdown files under `paths::skills()` and
+  `paths::styles()` (`flikk-core/src/skills.rs`), managed in Settings and by
+  the agent; the style picker sits beside send. cmd/ctrl-K opens the quick
+  command bar.
 * **References:** the composer's `@` picker and drops (Alt-drag clips,
   transitions and markers from the timeline; media, effects, audio effects,
   transitions and transcript words; "Add to chat" menu items) insert chips
@@ -1476,10 +1478,10 @@ available to them.
 * **Database** (`paths::database()`, SQLite in WAL mode,
   `flikk-store/src/schema.rs`): `meta` (agent settings, model picks, analysis
   steps, the provider per capability, recent projects), `style_profiles` (caption styles), `style_rules`,
-  `source_facts`, `media_fingerprints` and `recipes`. Nothing per project.
+  `source_facts` and `media_fingerprints`. Nothing per project.
   Imported Markdown notes become proposed style rules, one per bullet or
   paragraph (S5); facts tied to a path are suspended when its media is
-  replaced (F2); the seven built-in recipes are re-added on open.
+  replaced (F2).
 * **Caption styles** (`CaptionStyle`, `flikk-core/src/memory.rs`): font,
   weight, spacing, fill, stroke, shadow, background box, position and
   nudge, a spoken-word highlight (color, box, karaoke, word-by-word reveal)

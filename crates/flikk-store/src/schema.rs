@@ -92,6 +92,10 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE projects;
     DELETE FROM meta WHERE key = 'last_project';
     "#,
+    // 3: recipes became skills, Markdown files under `paths::skills()`.
+    r#"
+    DROP TABLE recipes;
+    "#,
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {

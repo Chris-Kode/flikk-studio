@@ -4,7 +4,6 @@
 
 use flikk_core::ProjectId;
 use flikk_core::agent::Backend;
-use flikk_core::bus::AgentRole;
 use flikk_core::paths;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,16 +24,14 @@ fn file() -> PathBuf {
 pub const MAIN_CHAT: &str = "main";
 
 /// The key a backend session is stored under.
-pub(crate) fn key(project: ProjectId, chat: &str, backend: Backend, role: AgentRole) -> String {
-    let base = format!(
-        "{}/{}/{}",
-        project.0,
-        backend.label().to_lowercase(),
-        match role {
-            AgentRole::Editor => "editor",
-            AgentRole::Builder => "builder",
-        }
-    );
+pub(crate) fn key(project: ProjectId, chat: &str, backend: Backend) -> String {
+    keyed(project, chat, backend, "editor")
+}
+
+/// `role` was the agent's role when there were two; `editor` stays in the
+/// key so conversations from then still resume.
+fn keyed(project: ProjectId, chat: &str, backend: Backend, role: &str) -> String {
+    let base = format!("{}/{}/{role}", project.0, backend.label().to_lowercase(),);
     if chat == MAIN_CHAT {
         base
     } else {
@@ -49,25 +46,14 @@ fn load_all() -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn load(
-    project: ProjectId,
-    chat: &str,
-    backend: Backend,
-    role: AgentRole,
-) -> Option<String> {
-    load_all().remove(&key(project, chat, backend, role))
+pub(crate) fn load(project: ProjectId, chat: &str, backend: Backend) -> Option<String> {
+    load_all().remove(&key(project, chat, backend))
 }
 
 /// `None` forgets the session (e.g. the backend no longer knows it).
-pub(crate) fn store(
-    project: ProjectId,
-    chat: &str,
-    backend: Backend,
-    role: AgentRole,
-    session: Option<&str>,
-) {
+pub(crate) fn store(project: ProjectId, chat: &str, backend: Backend, session: Option<&str>) {
     let mut all = load_all();
-    let k = key(project, chat, backend, role);
+    let k = key(project, chat, backend);
     match session {
         Some(s) => all.insert(k, s.to_owned()),
         None => all.remove(&k),
@@ -75,14 +61,15 @@ pub(crate) fn store(
     save_all(&all);
 }
 
-/// Forget a deleted chat's sessions on every backend and role.
+/// Forget a deleted chat's sessions on every backend, the builder ones
+/// left from when the agent had two roles too.
 pub fn forget_chat(project: ProjectId, chat: &str) {
     let mut all = load_all();
     let before = all.len();
     let mut keys = Vec::new();
     for backend in [Backend::Claude, Backend::Codex] {
-        for role in [AgentRole::Editor, AgentRole::Builder] {
-            keys.push(key(project, chat, backend, role));
+        for role in ["editor", "builder"] {
+            keys.push(keyed(project, chat, backend, role));
         }
     }
     for k in &keys {
