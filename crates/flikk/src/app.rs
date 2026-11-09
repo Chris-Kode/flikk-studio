@@ -192,6 +192,8 @@ impl Flikk {
                 this.open_settings(Some(page), window, cx)
             });
         }
+        let settings = cx.new(|cx| EditorSettings::new(state.clone(), window, cx));
+        EditorSettings::register(&settings, cx);
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
             viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
@@ -206,7 +208,7 @@ impl Flikk {
             mixer: cx.new(|cx| MixerPanel::new(state.clone(), window, cx)),
             library: cx.new(|cx| LibraryPanel::new(state.clone(), window, cx)),
             code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
-            settings: cx.new(|cx| EditorSettings::new(state.clone(), window, cx)),
+            settings,
             agent_open: true,
             notices_open: false,
             edited: false,

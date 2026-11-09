@@ -7,8 +7,8 @@ mod change_set;
 mod chips;
 mod composer;
 mod context;
+mod entries;
 mod quick;
-mod recipes;
 mod refs;
 mod reveal;
 mod tools;
@@ -19,7 +19,7 @@ use crate::ui::kit::{
     Spinner, Tooltip, h_flex, theme as t, v_flex,
 };
 use composer::{Composer, ComposerEvent};
-use flikk_core::agent::ChatRole;
+use flikk_core::agent::{ChatMessage, ChatRole};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::{ChangeItemId, ChangeSetId};
 use gpui_kit::base::{TextView, TextViewStyle};
@@ -478,24 +478,7 @@ impl ChatPanel {
         // and answered ones, and any in a reopened chat, are done.
         let open = state.open_question() == Some(ix) && !state.agent_busy();
         if msg.role == ChatRole::User {
-            return h_flex()
-                .w_full()
-                .justify_end()
-                .child(
-                    div()
-                        .max_w(relative(0.9))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .rounded_t(t::RADIUS_LG)
-                        .rounded_bl(t::RADIUS_LG)
-                        .rounded_br(px(3.))
-                        .border_1()
-                        .border_color(t::LN)
-                        .bg(t::R1)
-                        .line_height(px(20.))
-                        .child(chips::message_text(ix, &msg.text, &self.state, cx)),
-                )
-                .into_any_element();
+            return self.render_user_message(ix, &msg, cx);
         }
         let text = refs::display(&msg.text, state.bus.project());
         let mut content = v_flex().w_full().gap(px(8.));
@@ -538,8 +521,64 @@ impl ChatPanel {
         }
         if !msg.tools.is_empty() {
             content = content.child(self.render_tools(ix, &msg.tools, cx));
+            for (j, entry) in msg.tools.iter().enumerate() {
+                if entries::is_entry_tool(&entry.tool) {
+                    content = content.children(self.render_saved_entry((ix, j), entry, cx));
+                }
+            }
         }
         content.into_any_element()
+    }
+
+    /// The user's bubble, a skill it runs as a chip at its start, and the
+    /// style it was sent with under it.
+    fn render_user_message(&self, ix: usize, msg: &ChatMessage, cx: &App) -> AnyElement {
+        let (skill, rest) = split_skill(&msg.text);
+        let text = (!rest.trim().is_empty())
+            .then(|| chips::message_text(ix, rest.trim_start(), &self.state, cx));
+        let body = match skill {
+            Some(name) => h_flex()
+                .flex_wrap()
+                .items_start()
+                .gap(px(6.))
+                .child(
+                    div().pt(px(1.)).child(
+                        chips::chip(Some(refs::Mark::Icon(IconName::SquareSlash, t::T2)), name)
+                            .font_family(t::mono()),
+                    ),
+                )
+                .children(text)
+                .into_any_element(),
+            None => text.unwrap_or_else(|| div().into_any_element()),
+        };
+        let style = msg.style.clone().map(|name| {
+            h_flex()
+                .gap(px(4.))
+                .text_size(px(10.))
+                .text_color(t::T3)
+                .child(Icon::new(IconName::Palette).size(px(11.)).color(t::T3))
+                .child(name)
+        });
+        v_flex()
+            .w_full()
+            .items_end()
+            .gap(px(4.))
+            .child(
+                div()
+                    .max_w(relative(0.9))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded_t(t::RADIUS_LG)
+                    .rounded_bl(t::RADIUS_LG)
+                    .rounded_br(px(3.))
+                    .border_1()
+                    .border_color(t::LN)
+                    .bg(t::R1)
+                    .line_height(px(20.))
+                    .child(body),
+            )
+            .children(style)
+            .into_any_element()
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -664,4 +703,19 @@ fn signature(s: &EditorState) -> u64 {
         }
     }
     h.finish()
+}
+
+/// A message that runs a saved skill: its slash name and the text after
+/// it. Other messages come back whole.
+fn split_skill(text: &str) -> (Option<String>, &str) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return (None, text);
+    };
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = rest[..end].to_lowercase();
+    match flikk_core::skills::get(flikk_core::skills::Kind::Skill, &name) {
+        Some(skill) => (Some(skill.name), &rest[end..]),
+        None => (None, text),
+    }
 }

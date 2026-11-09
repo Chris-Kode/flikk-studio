@@ -3,7 +3,7 @@
 //!
 //! The pieces, in the order a turn uses them:
 //!
-//! * [`host::AgentHost`] owns a turn: it expands recipes, builds the prompt
+//! * [`host::AgentHost`] owns a turn: it expands skills, builds the prompt
 //!   ([`prompt`]), starts the backend subprocess ([`backend`]) and serves the
 //!   tool calls that arrive over the [`bridge`] on the UI thread.
 //! * The backend CLI launches `flikk-mcp` (this crate's binary, [`mcp`]), a
@@ -18,7 +18,6 @@ pub mod bridge;
 pub mod host;
 pub mod mcp;
 mod prompt;
-mod recipes;
 pub mod session;
 pub mod tools;
 

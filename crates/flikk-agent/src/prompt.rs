@@ -1,11 +1,11 @@
-//! System prompts for the two roles and the context attached to every turn
+//! The system prompt and the context attached to every turn
 //! (PRD AG2).
 
 use crate::args::{kind_name, range_json, secs, short};
 use flikk_core::agent::{AgentSettings, AttachmentKind, ChatRole, EditorContext};
-use flikk_core::bus::AgentRole;
 use flikk_core::memory::{RuleScope, RuleStatus, StyleRule};
 use flikk_core::model::{ClipContent, Project};
+use flikk_core::skills::Entry;
 use serde_json::{Value, json};
 
 const TOOLS: &str = "\
@@ -83,7 +83,7 @@ timeline. When a style rule drove the change, cite it, e.g. \
 Only the tools most messages need are listed, and the list stays the same \
 for the whole conversation. `load_tools` names the other groups (edit, \
 transform, captions, color, audio, effects, overlays, generate, memory, \
-deliver) and \
+skills, deliver) and \
 their tools: load a group when you need one of them, then call its tools \
 through `run_tool`. A group you loaded earlier in this conversation stays \
 loaded: keep calling it through `run_tool` without loading it again. Do not \
@@ -95,7 +95,7 @@ user to decide, call `ask_user` with two to four short choices and end your \
 turn.";
 
 const EDITOR: &str = "\
-Role: editor. You make edits by proposing them. Edit tools never change the \
+You make edits by proposing them. Edit tools never change the \
 project directly: each call adds an item to this chat's change set, which \
 the user reviews and accepts or rejects. Until they do, the set keeps \
 growing over your turns. Every read and view tool, `view_frame` and \
@@ -104,8 +104,9 @@ in it, earlier turns' too: look at a proposal to check it, and build on it. \
 What the user rejected is gone. Never claim a change is applied; say what \
 you proposed.
 
-Some tools need the user's approval (style rules, recipes, source facts, \
-renders and exports, and generating unless the user allowed it): the call \
+Some tools need the user's approval (style rules, source facts, renders \
+and exports, and generating or changing their skills and styles unless \
+the user allowed it): the call \
 waits while they decide and returns what came of it, such as a voiceover's \
 media id, so carry on from there in the same turn. A request still open \
 when a turn ends is answered in an <approvals> block at the start of a \
@@ -295,20 +296,9 @@ also arrive as `{{name}}` (text escaped) and CSS variables `--name` on \
 clock: CSS animations, rAF and timers follow clip time too, and \
 `window.flikkRender(time)` is called per frame if defined.";
 
-const BUILDER: &str = "\
-Role: builder. You help the user shape how the editor works for them: style \
-rules, recipes and source facts. You do not edit the timeline. Read the \
-project and the transcript to ground suggestions, then propose rules or \
-recipes with `propose_rule` and `save_recipe`; each waits for the user's \
-approval. Keep rules short, testable and phrased as instructions. You may \
-also write FX programs (`create_fx`, `update_fx`), previewing each \
-before you finish, and save them to the user's library with \
-`save_fx_to_library`, and save audio from the pool to it with \
-`save_sound_to_library`.";
-
-/// The system prompt for `role`; `images` when the turn may make pictures
+/// The system prompt; `images` when the turn may make pictures
 /// ([`crate::tools::image::offered`]).
-pub fn system_prompt(role: AgentRole, settings: &AgentSettings, images: bool) -> String {
+pub fn system_prompt(settings: &AgentSettings, images: bool) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
     if images {
         out.push_str("\n\n");
@@ -317,10 +307,7 @@ pub fn system_prompt(role: AgentRole, settings: &AgentSettings, images: bool) ->
     out.push_str("\n\n");
     out.push_str(COMMON);
     out.push_str("\n\n");
-    out.push_str(match role {
-        AgentRole::Editor => EDITOR,
-        AgentRole::Builder => BUILDER,
-    });
+    out.push_str(EDITOR);
     out.push_str("\n\n");
     out.push_str(FX);
     if let Some(lang) = settings.language.as_deref().filter(|l| !l.is_empty()) {
@@ -331,11 +318,6 @@ pub fn system_prompt(role: AgentRole, settings: &AgentSettings, images: bool) ->
         out.push_str(
             "\n\nReply in the user's language. Captions follow the language of the source.",
         );
-    }
-    let instructions = settings.instructions.trim();
-    if !instructions.is_empty() {
-        out.push_str("\n\nThe user's standing instructions:\n");
-        out.push_str(instructions);
     }
     out
 }
@@ -463,7 +445,7 @@ const RECAP_CHARS: usize = 8000;
 
 /// `message` with a recap of the chat's earlier messages before it, for the
 /// first turn of a new backend session in a chat that already has some
-/// (the last one was lost, or ran on the other backend or role). Unchanged
+/// (the last one was lost, or ran on the other backend). Unchanged
 /// when there is nothing to recap.
 pub fn with_recap(message: String, history: &[(ChatRole, String)]) -> String {
     let mut lines = Vec::new();
@@ -499,13 +481,23 @@ pub fn with_recap(message: String, history: &[(ChatRole, String)]) -> String {
     )
 }
 
-/// The user message as sent to the backend: context block, then the text.
+/// What the user asked for besides the message itself.
+#[derive(Clone, Copy, Default)]
+pub struct Asked<'a> {
+    /// The skill the message runs, by slash name.
+    pub skill: Option<&'a str>,
+    /// The style picked in the composer.
+    pub style: Option<&'a Entry>,
+}
+
+/// The user message as sent to the backend: context block, the style to
+/// work in, then the text.
 pub fn turn_message(
     message: &str,
     project: &Project,
     ctx: &EditorContext,
     rules: &[StyleRule],
-    recipe: Option<&str>,
+    asked: Asked,
 ) -> String {
     let mut context = json!({
         "project": project_summary(project),
@@ -522,9 +514,16 @@ pub fn turn_message(
         "<editor_context>\n{}\n</editor_context>\n\n",
         serde_json::to_string(&context).unwrap_or_default()
     );
-    if let Some(name) = recipe {
+    if let Some(style) = asked.style.filter(|s| !s.instructions.trim().is_empty()) {
         out.push_str(&format!(
-            "Run the recipe `{name}`. Put every edit in this turn's change set.\n\n"
+            "<style name=\"{}\">\nWork in this style unless the message says otherwise.\n{}\n</style>\n\n",
+            style.name,
+            style.instructions.trim()
+        ));
+    }
+    if let Some(name) = asked.skill {
+        out.push_str(&format!(
+            "Run the skill `/{name}`. Put every edit in this turn's change set.\n\n"
         ));
     }
     out.push_str(message);

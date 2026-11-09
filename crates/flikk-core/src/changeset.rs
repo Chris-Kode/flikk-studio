@@ -62,7 +62,7 @@ pub struct ChangeSet {
     pub id: ChangeSetId,
     pub title: String,
     pub author: Author,
-    /// The chat the agent proposed it in; `None` for recipes and external
+    /// The chat the agent proposed it in; `None` for external
     /// clients.
     #[serde(default)]
     pub chat: Option<String>,

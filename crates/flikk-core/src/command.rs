@@ -1,4 +1,4 @@
-//! The command vocabulary shared by the UI, the agent's MCP tools and recipes
+//! The command vocabulary shared by the UI and the agent's MCP tools
 //! (PRD "Agent tool API"). Read and view tools are not commands: they do not
 //! change the project and are served by the agent crate from a snapshot.
 
@@ -39,10 +39,12 @@ pub enum ToolCategory {
     Generate,
     /// Reading the files and folders the user attached to the chat.
     Files,
+    /// Creating, changing and deleting the user's skills and styles.
+    Skills,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 16] = [
+    pub const ALL: [ToolCategory; 17] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -56,6 +58,7 @@ impl ToolCategory {
         Self::Overlays,
         Self::Effects,
         Self::Generate,
+        Self::Skills,
         Self::ProjectMemory,
         Self::Deliver,
         Self::Media,
@@ -71,7 +74,7 @@ impl ToolCategory {
     /// Whether the user may let the agent do these without asking each
     /// time (otherwise they are asked, or off).
     pub fn can_allow(self) -> bool {
-        matches!(self, Self::Generate | Self::CaptionStyles)
+        matches!(self, Self::Generate | Self::CaptionStyles | Self::Skills)
     }
 
     pub fn label(self) -> &'static str {
@@ -92,6 +95,7 @@ impl ToolCategory {
             Self::Effects => "Effects and motion graphics",
             Self::Generate => "Generate media",
             Self::Files => "Attached files",
+            Self::Skills => "Skills and styles",
         }
     }
 }

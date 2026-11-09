@@ -23,7 +23,7 @@ use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
 use flikk_core::agent::*;
 use flikk_core::analysis::{ANALYSIS_VERSION, Analysis, Speaker, Transcript, Word};
-use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome};
+use flikk_core::bus::{Author, CommandBus, Outcome};
 use flikk_core::command::Command;
 use flikk_core::cuts::FADE;
 use flikk_core::model::*;
@@ -577,9 +577,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let agent = Author::Agent {
-        role: AgentRole::Editor,
-    };
+    let agent = Author::Agent;
     let ids = &demo.ids;
     let mut chat = vec![msg(ChatRole::User, FIRST_ASK, now - FIRST_ASK_AGO)];
 
@@ -774,6 +772,7 @@ fn msg(role: ChatRole, text: &str, at: i64) -> ChatMessage {
         choices: vec![],
         change_set: None,
         tools: vec![],
+        style: None,
         at,
     }
 }

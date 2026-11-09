@@ -2,6 +2,7 @@
 //! from the chat panel's gear: its pages down the left, the open page on
 //! the right, and a footer to open the user-data folder or close.
 
+mod entries;
 mod integrations;
 mod on_device;
 mod storage;
@@ -9,7 +10,10 @@ mod storage;
 use crate::state::{Check, EditorState};
 use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, h_flex, theme as t, v_flex};
 use crate::ui::settings::SettingsPanel;
+use entries::EntriesTab;
+pub use entries::Focus;
 use flikk_core::paths;
+use flikk_core::skills::Kind;
 use flikk_models::Status;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,6 +23,8 @@ use storage::StorageTab;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agent,
+    Skills,
+    Styles,
     Integrations,
     Storage,
 }
@@ -31,8 +37,10 @@ impl SettingsTab {
             .find(|t| t.label().eq_ignore_ascii_case(label))
     }
 
-    const ALL: [SettingsTab; 3] = [
+    const ALL: [SettingsTab; 5] = [
         SettingsTab::Agent,
+        SettingsTab::Skills,
+        SettingsTab::Styles,
         SettingsTab::Integrations,
         SettingsTab::Storage,
     ];
@@ -40,6 +48,8 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             SettingsTab::Agent => "Agent",
+            SettingsTab::Skills => "Skills",
+            SettingsTab::Styles => "Styles",
             SettingsTab::Integrations => "Integrations",
             SettingsTab::Storage => "Storage",
         }
@@ -48,6 +58,8 @@ impl SettingsTab {
     fn icon(self) -> IconName {
         match self {
             SettingsTab::Agent => IconName::MessageSquareText,
+            SettingsTab::Skills => IconName::SquareSlash,
+            SettingsTab::Styles => IconName::Palette,
             SettingsTab::Integrations => IconName::Plug,
             SettingsTab::Storage => IconName::HardDrive,
         }
@@ -58,6 +70,8 @@ pub struct EditorSettings {
     state: Entity<EditorState>,
     tab: SettingsTab,
     agent: Entity<SettingsPanel>,
+    skills: Entity<EntriesTab>,
+    styles: Entity<EntriesTab>,
     integrations: Entity<IntegrationsTab>,
     storage: Entity<StorageTab>,
     _observe: Vec<Subscription>,
@@ -67,18 +81,57 @@ impl EditorSettings {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let integrations = cx.new(|cx| IntegrationsTab::new(state.clone(), window, cx));
         let storage = cx.new(StorageTab::new);
+        let skills = cx.new(|cx| EntriesTab::new(state.clone(), Kind::Skill, window, cx));
+        let styles = cx.new(|cx| EntriesTab::new(state.clone(), Kind::Style, window, cx));
         Self {
             // The sidebar follows the downloads and the sizes measured.
             _observe: vec![
                 cx.observe(&state, |_, _, cx| cx.notify()),
                 cx.observe(&integrations, |_, _, cx| cx.notify()),
                 cx.observe(&storage, |_, _, cx| cx.notify()),
+                cx.observe(&skills, |_, _, cx| cx.notify()),
+                cx.observe(&styles, |_, _, cx| cx.notify()),
             ],
             tab: SettingsTab::Agent,
             agent: cx.new(|cx| SettingsPanel::new(state.clone(), window, cx)),
+            skills,
+            styles,
             integrations,
             storage,
             state,
+        }
+    }
+
+    /// Open the dialog on the Skills or Styles page, at `focus`, wherever
+    /// it is asked from.
+    pub fn open_entries(kind: Kind, focus: Focus, window: &mut Window, cx: &mut App) {
+        let Some(this) = cx.try_global::<Handle>().map(|h| h.0.clone()) else {
+            return;
+        };
+        let tab = match kind {
+            Kind::Skill => SettingsTab::Skills,
+            Kind::Style => SettingsTab::Styles,
+        };
+        if !window.has_active_dialog(cx) {
+            Self::open(&this, Some(tab), window, cx);
+        }
+        this.update(cx, |this, cx| {
+            this.tab = tab;
+            this.entries(kind)
+                .update(cx, |e, cx| e.show(focus, window, cx));
+            cx.notify();
+        });
+    }
+
+    /// Makes [`Self::open_entries`] reach this dialog.
+    pub fn register(this: &Entity<Self>, cx: &mut App) {
+        cx.set_global(Handle(this.clone()));
+    }
+
+    fn entries(&self, kind: Kind) -> &Entity<EntriesTab> {
+        match kind {
+            Kind::Skill => &self.skills,
+            Kind::Style => &self.styles,
         }
     }
 
@@ -92,8 +145,16 @@ impl EditorSettings {
         this.update(cx, |this, cx| {
             this.tab = tab.unwrap_or(this.tab);
             this.storage.update(cx, |s, cx| s.measure(cx));
-            if this.tab == SettingsTab::Integrations {
-                this.integrations.update(cx, |i, cx| i.reopen(window, cx));
+            match this.tab {
+                SettingsTab::Integrations => {
+                    this.integrations.update(cx, |i, cx| i.reopen(window, cx))
+                }
+                SettingsTab::Skills | SettingsTab::Styles => {
+                    let kind = this.tab_kind().unwrap_or(Kind::Skill);
+                    this.entries(kind)
+                        .update(cx, |e, cx| e.show(Focus::Last, window, cx))
+                }
+                _ => {}
             }
             cx.notify();
         });
@@ -114,9 +175,22 @@ impl EditorSettings {
         match tab {
             SettingsTab::Storage => self.storage.update(cx, |s, cx| s.measure(cx)),
             SettingsTab::Integrations => self.integrations.update(cx, |i, cx| i.reopen(window, cx)),
-            _ => {}
+            SettingsTab::Skills | SettingsTab::Styles => {
+                let kind = self.tab_kind().unwrap_or(Kind::Skill);
+                self.entries(kind)
+                    .update(cx, |e, cx| e.show(Focus::Last, window, cx))
+            }
+            SettingsTab::Agent => {}
         }
         cx.notify();
+    }
+
+    fn tab_kind(&self) -> Option<Kind> {
+        match self.tab {
+            SettingsTab::Skills => Some(Kind::Skill),
+            SettingsTab::Styles => Some(Kind::Style),
+            _ => None,
+        }
     }
 
     /// What a page's sidebar row shows after its label: the downloads'
@@ -155,7 +229,16 @@ impl EditorSettings {
                 .read(cx)
                 .total()
                 .map(|bytes| meta(size_label(bytes)).into_any_element()),
-            _ => None,
+            SettingsTab::Skills | SettingsTab::Styles => {
+                let kind = if tab == SettingsTab::Skills {
+                    Kind::Skill
+                } else {
+                    Kind::Style
+                };
+                let count = self.entries(kind).read(cx).count();
+                (count > 0).then(|| meta(count.to_string()).into_any_element())
+            }
+            SettingsTab::Agent => None,
         }
     }
 
@@ -198,6 +281,8 @@ impl Render for EditorSettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page: AnyView = match self.tab {
             SettingsTab::Agent => self.agent.clone().into(),
+            SettingsTab::Skills => self.skills.clone().into(),
+            SettingsTab::Styles => self.styles.clone().into(),
             SettingsTab::Integrations => self.integrations.clone().into(),
             SettingsTab::Storage => self.storage.clone().into(),
         };
@@ -263,6 +348,11 @@ impl Render for EditorSettings {
             .child(footer)
     }
 }
+
+/// The app's Settings dialog, for [`EditorSettings::open_entries`].
+struct Handle(Entity<EditorSettings>);
+
+impl Global for Handle {}
 
 /// A page: its title (with `trailing` beside it) over its sections,
 /// scrolling.

@@ -212,6 +212,11 @@ impl ChatPanel {
     fn render_approval(&self, approval: &PendingApproval, cx: &mut Context<Self>) -> AnyElement {
         let id = approval.id;
         let request = &approval.request;
+        if super::entries::is_entry_tool(&request.tool)
+            && let Some(card) = self.render_entry_approval(id, &request.tool, &request.args, cx)
+        {
+            return card;
+        }
         let summary: SharedString = request.summary.clone().into();
         let approve = Button::new(("approve", id as usize))
             .label("Approve")
@@ -365,6 +370,8 @@ fn request_icon(request: &ApprovalRequest) -> IconName {
             _ => IconName::Volume2,
         },
         "replace_words" | "add_voice" | "design_voice" => IconName::Mic,
+        "save_skill" | "delete_skill" => IconName::SquareSlash,
+        "save_style" | "delete_style" => IconName::Palette,
         _ => match request.category {
             ToolCategory::Deliver => IconName::Clapperboard,
             ToolCategory::Generate => IconName::Volume2,

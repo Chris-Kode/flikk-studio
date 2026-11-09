@@ -1,7 +1,7 @@
 //! Persistence. Projects are `.flikk` files the user saves anywhere
 //! ([`project_file`]), with debounced crash-recovery snapshots through
 //! [`Autosaver`]. Everything else belongs to the user, not a project:
-//! settings, style profiles, source facts, recipes and recent files, in
+//! settings, style profiles, source facts and recent files, in
 //! SQLite under `flikk_core::paths::database()`.
 //!
 //! One [`Store`] wraps one connection. It is `Send`, so it can move to a
@@ -18,7 +18,6 @@ mod notes;
 mod profiles;
 pub mod project_file;
 mod recent;
-mod recipes;
 mod render_cache;
 mod schema;
 mod settings;
@@ -29,7 +28,6 @@ pub use facts::FactFilter;
 pub use notes::parse_notes;
 pub use profiles::{ProfileSummary, RuleFilter};
 pub use project_file::ProjectFile;
-pub use recipes::builtin_recipes;
 pub use render_cache::RenderCacheSettings;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -64,7 +62,6 @@ impl Store {
             path: path.to_path_buf(),
         };
         schema::migrate(&mut store.conn)?;
-        recipes::seed(&store.conn)?;
         Ok(store)
     }
 

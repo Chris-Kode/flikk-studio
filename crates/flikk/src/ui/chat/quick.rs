@@ -1,11 +1,11 @@
 //! Quick-command bar (PRD AG1): cmd/ctrl-K from anywhere opens a palette to
-//! type a one-off request or start a recipe. Both are sent like a message
+//! type a one-off request or run a skill. Both are sent like a message
 //! from the composer, and like it, not while the agent is busy.
 
 use super::composer::{Composer, ComposerEvent};
-use super::recipes;
 use crate::state::EditorState;
 use crate::ui::kit::{DialogExt as _, Icon, IconName, Input, Kbd, h_flex, theme as t, v_flex};
+use flikk_core::skills::{self, Kind};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -95,8 +95,8 @@ fn open(window: AnyWindowHandle, state: Entity<EditorState>, cx: &mut App) {
 enum Row {
     /// What was typed, sent as a request.
     Request(SharedString),
-    /// A recipe: its slash name and title.
-    Recipe(String, String),
+    /// A skill: its slash name and description.
+    Skill(String, String),
 }
 
 struct QuickCommand {
@@ -110,7 +110,7 @@ struct QuickCommand {
 impl QuickCommand {
     fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Ask the agent or pick a recipe"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Ask the agent or pick a skill"));
         let _subscriptions = vec![
             cx.subscribe_in(&query, window, |this, _, event, window, cx| match event {
                 InputEvent::Change => {
@@ -139,12 +139,14 @@ impl QuickCommand {
         request
             .into_iter()
             .chain(
-                recipes::list(self.state.read(cx))
+                skills::list(Kind::Skill)
                     .into_iter()
-                    .filter(|(name, title)| {
-                        q.is_empty() || name.contains(&q) || title.to_lowercase().contains(&q)
+                    .filter(|e| {
+                        q.is_empty()
+                            || e.name.contains(&q)
+                            || e.description.to_lowercase().contains(&q)
                     })
-                    .map(|(name, title)| Row::Recipe(name, title)),
+                    .map(|e| Row::Skill(e.name, e.description)),
             )
             .collect()
     }
@@ -155,7 +157,7 @@ impl QuickCommand {
         }
         let text = match self.rows(cx).into_iter().nth(ix) {
             Some(Row::Request(q)) => q.to_string(),
-            Some(Row::Recipe(name, _)) => format!("/{name}"),
+            Some(Row::Skill(name, _)) => format!("/{name}"),
             None => return,
         };
         window.close_dialog(cx);
@@ -186,16 +188,23 @@ impl Render for QuickCommand {
         let busy = self.state.read(cx).agent_busy();
         let rows = self.rows(cx);
         let selected = self.selected.min(rows.len().saturating_sub(1));
-        let first_recipe = rows.iter().position(|r| matches!(r, Row::Recipe(..)));
+        let first_skill = rows.iter().position(|r| matches!(r, Row::Skill(..)));
         let items = rows.into_iter().enumerate().map(|(ix, row)| {
             let picked = ix == selected && !busy;
             let run = cx.listener(move |this, _, window, cx| this.run(ix, window, cx));
             let (icon, label, name) = match row {
                 Row::Request(q) => (IconName::MessageSquareText, q, None),
-                Row::Recipe(name, title) => (recipes::icon(&name), title.into(), Some(name)),
+                Row::Skill(name, description) => {
+                    let label = if description.is_empty() {
+                        name.clone()
+                    } else {
+                        description
+                    };
+                    (IconName::SquareSlash, label.into(), Some(name))
+                }
             };
             v_flex()
-                .when(first_recipe == Some(ix), |el| {
+                .when(first_skill == Some(ix), |el| {
                     el.child(
                         div()
                             .px(px(10.))
@@ -203,7 +212,7 @@ impl Render for QuickCommand {
                             .text_size(px(10.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t::T3)
-                            .child("Recipes"),
+                            .child("Skills"),
                     )
                 })
                 .child(

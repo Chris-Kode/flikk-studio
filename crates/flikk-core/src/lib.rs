@@ -44,6 +44,7 @@ pub mod query;
 pub mod respeak;
 pub mod scopes;
 pub mod services;
+pub mod skills;
 pub mod speed;
 pub mod stabilize;
 pub mod subject;

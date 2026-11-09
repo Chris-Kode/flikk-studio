@@ -24,6 +24,7 @@ mod pool;
 mod preview;
 mod read;
 pub mod respeak;
+mod skills;
 mod sounds;
 mod speed;
 mod stabilize;
@@ -38,11 +39,11 @@ pub(crate) use catalog::{ToolSpec, catalog};
 use crate::args::{Args, ToolError};
 use crate::bridge::ToolResult;
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
-use flikk_core::bus::{AgentRole, Author, CommandBus, Outcome as BusOutcome, Permission, Since};
+use flikk_core::bus::{Author, CommandBus, Outcome as BusOutcome, Permission, Since};
 use flikk_core::changeset::{ChangeSetState, ItemState};
 use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
-use flikk_core::memory::{CaptionStyle, Recipe, SourceFact, StyleRule};
+use flikk_core::memory::{CaptionStyle, SourceFact, StyleRule};
 use flikk_core::model::Project;
 use flikk_core::services::Services;
 use serde_json::Value;
@@ -106,7 +107,6 @@ impl Stop {
 pub(crate) struct Memory {
     pub rules: Vec<StyleRule>,
     pub facts: Vec<SourceFact>,
-    pub recipes: Vec<Recipe>,
     /// The caption styles of the selected style profile, as saved.
     pub caption_styles: Vec<CaptionStyle>,
 }
@@ -116,9 +116,6 @@ pub(crate) struct ToolCtx<'a> {
     pub bus: &'a mut CommandBus,
     pub services: &'a Services,
     pub author: Author,
-    /// The role the calls act as (external clients act as the agent's
-    /// current role under their own author).
-    pub role: AgentRole,
     /// An external MCP client rather than this editor's own turn.
     pub external: bool,
     pub editor: &'a EditorContext,
@@ -131,10 +128,6 @@ pub(crate) struct ToolCtx<'a> {
 impl ToolCtx<'_> {
     pub(crate) fn project(&self) -> &Project {
         self.bus.view_for(&self.author)
-    }
-
-    pub(crate) fn role(&self) -> AgentRole {
-        self.role
     }
 
     /// Where [`Self::project`] is at: a job working on a snapshot of it
@@ -167,6 +160,9 @@ pub(crate) struct Done {
     pub excerpts: Vec<String>,
     pub events: Vec<AgentEvent>,
     pub approval: Option<ApprovalRequest>,
+    /// What the activity log records as the call's arguments, when not the
+    /// arguments as sent (a save records what it wrote).
+    pub recorded: Option<Box<Value>>,
 }
 
 impl Done {
@@ -257,14 +253,12 @@ impl From<Done> for Step {
     }
 }
 
-/// Tools the author may see: categories that are not `Off`, and only the
-/// role's own kinds of tools. With `groups` (the editor's own turns), only
+/// Tools the author may see: categories that are not `Off`. With `groups` (the editor's own turns), only
 /// the core tools and those groups, plus `load_tools` and `run_tool` for the
 /// rest; without (external clients), every tool. `view_web_image` only
 /// with `web`, `generate_image` only when [`image::offered`].
 pub(crate) fn list(
     bus: &CommandBus,
-    role: AgentRole,
     groups: Option<&BTreeSet<ToolCategory>>,
     settings: &AgentSettings,
     services: &Services,
@@ -272,7 +266,7 @@ pub(crate) fn list(
     let images = image::offered(settings, services);
     catalog()
         .iter()
-        .filter(|t| t.category.is_none_or(|c| visible(bus, role, c, t.name)))
+        .filter(|t| t.category.is_none_or(|c| visible(bus, c)))
         .filter(|t| settings.web || t.name != web::TOOL)
         .filter(|t| t.name != image::TOOL || images)
         .filter(|t| match groups {
@@ -288,29 +282,8 @@ pub(crate) fn list(
         .collect()
 }
 
-/// Builders write FX programs too, but don't put them on the timeline.
-const BUILDER_TOOLS: [&str; 3] = ["create_fx", "update_fx", "use_library_fx"];
-
-fn role_allows(role: AgentRole, category: ToolCategory, tool: &str) -> bool {
-    match role {
-        AgentRole::Editor => true,
-        AgentRole::Builder => {
-            category.is_read()
-                || category == ToolCategory::ProjectMemory
-                || BUILDER_TOOLS.contains(&tool)
-        }
-    }
-}
-
-pub(crate) fn visible(
-    bus: &CommandBus,
-    role: AgentRole,
-    category: ToolCategory,
-    tool: &str,
-) -> bool {
-    role_allows(role, category, tool)
-        && bus.check(&Author::Agent { role }, category).is_ok()
-        && category != ToolCategory::Media
+pub(crate) fn visible(bus: &CommandBus, category: ToolCategory) -> bool {
+    bus.check(&Author::Agent, category).is_ok() && category != ToolCategory::Media
 }
 
 /// Run one tool call.
@@ -349,24 +322,18 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         }
         return approval::ask_user(&args).map(Into::into);
     };
-    if !role_allows(ctx.role(), category, tool) {
-        return Err(ToolError(format!(
-            "`{tool}` is not available to the {} role",
-            match ctx.role() {
-                AgentRole::Editor => "editor",
-                AgentRole::Builder => "builder",
-            }
-        )));
-    }
     let permission = ctx.bus.check(&ctx.author, category).map_err(|_| {
         ToolError(format!(
             "The user turned off \"{}\" for the agent.",
             category.label()
         ))
     })?;
+    let ask = match category {
+        ToolCategory::Skills => skills::asks(tool, permission),
+        _ => permission == Permission::NeedsApproval,
+    };
     // Caption styles are saved by the UI, so even allowed ones go there
     // as a request it carries out at once.
-    let ask = permission == Permission::NeedsApproval;
     if ask || category == ToolCategory::CaptionStyles {
         return approval::request(ctx, tool, category, &args, !ask).map(Into::into);
     }
@@ -417,6 +384,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "replace_words" => respeak::serve(ctx, &args),
         "sync_audio" => sync::serve(ctx, &args),
         tool if files::TOOLS.contains(&tool) => files::serve(ctx, tool, &args),
+        tool if skills::TOOLS.contains(&tool) => skills::serve(ctx, tool, &args).map(Into::into),
         tool if fx::TOOLS.contains(&tool) => fx::serve(ctx, tool, &args),
         tool if depth::TOOLS.contains(&tool) => depth::serve(ctx, tool, &args),
         tool => edit::serve(ctx, tool, &args),

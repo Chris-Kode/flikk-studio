@@ -111,22 +111,15 @@ pub struct AgentSettings {
     #[serde(default)]
     pub models: ModelChoices,
     pub permissions: Permissions,
-    pub instructions: String,
-    /// The recipes the agent may run; empty turns every recipe on.
-    pub enabled_recipes: Vec<RecipeId>,
-    /// The built-in recipes these settings already know about, so one that
-    /// a later version adds starts on while one the user turned off stays
-    /// off (see `Store::user_settings`).
-    #[serde(default)]
-    pub known_builtins: Vec<RecipeId>,
     pub vision: VisionSettings,
     /// Language for chat replies and captions; `None` follows the source.
     pub language: Option<String>,
     pub style_profile: Option<RuleId>,
-    /// Editor (editing, captions, color, audio) or Builder (effects and
-    /// recipes in a sandbox); both run on `backend`.
+    /// The style picked in the chat composer (a [`crate::skills::Entry`]
+    /// id), sent with every message; `None`, or one that no longer exists,
+    /// is no style.
     #[serde(default)]
-    pub role: crate::bus::AgentRole,
+    pub style: Option<String>,
     /// Web search and page reading through the backend's own tools. Off by
     /// default: the agent writes the queries, and they can carry details of
     /// the project.
@@ -266,6 +259,9 @@ pub struct ChatMessage {
     /// Tool calls made in a row, shown stacked in the thread.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ActivityEntry>,
+    /// The name of the style a user message was sent with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
     /// Unix seconds.
     pub at: i64,
 }

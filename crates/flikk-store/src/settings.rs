@@ -1,11 +1,10 @@
 //! Agent settings: one set per user, for every project (PRD "Agent
 //! configuration").
 
-use crate::{Store, recipes};
+use crate::Store;
 use anyhow::Result;
 use flikk_core::agent::AgentSettings;
 use flikk_core::cloud::CloudSettings;
-use flikk_core::ids::RecipeId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -16,19 +15,12 @@ const MODEL_PICKS: &str = "model_picks";
 const CLOUD_SETTINGS: &str = "cloud_settings";
 
 impl Store {
-    /// User settings. First run: defaults with every built-in recipe on.
-    /// Built-ins added since the settings were saved are turned on too.
+    /// User settings; the defaults on first run.
     pub fn user_settings(&self) -> Result<AgentSettings> {
-        let builtins = recipes::builtin_ids();
-        let stored: Option<serde_json::Value> = self.meta(USER_SETTINGS)?;
-        Ok(match stored {
-            Some(value) => with_new_builtins(lenient(value), &builtins),
-            None => AgentSettings {
-                enabled_recipes: builtins.clone(),
-                known_builtins: builtins,
-                ..AgentSettings::default()
-            },
-        })
+        Ok(self
+            .meta::<serde_json::Value>(USER_SETTINGS)?
+            .map(lenient)
+            .unwrap_or_default())
     }
 
     pub fn save_user_settings(&self, settings: &AgentSettings) -> Result<()> {
@@ -61,24 +53,6 @@ impl Store {
     }
 }
 
-/// Turns on the built-ins that `settings` doesn't know yet and marks them
-/// known; the ones it knows keep the user's choice. Settings saved before
-/// `known_builtins` existed know none, so every built-in missing from their
-/// list was added after they were saved and is turned on. An empty list
-/// already turns every recipe on (user recipes too), so it stays empty.
-fn with_new_builtins(mut settings: AgentSettings, builtins: &[RecipeId]) -> AgentSettings {
-    for &id in builtins {
-        if settings.known_builtins.contains(&id) {
-            continue;
-        }
-        if !settings.enabled_recipes.is_empty() && !settings.enabled_recipes.contains(&id) {
-            settings.enabled_recipes.push(id);
-        }
-        settings.known_builtins.push(id);
-    }
-    settings
-}
-
 /// Deserialize over the defaults, so settings saved by an older build
 /// (missing fields) still load instead of being reset. A stored value that
 /// no longer fits (a renamed enum variant, a hand edit) falls back on its
@@ -93,9 +67,8 @@ fn lenient<T: Serialize + DeserializeOwned + Default>(stored: serde_json::Value)
 
 /// Merges `over` into `root` at `path` when the result still passes `fits`;
 /// otherwise goes down `over`'s keys and keeps each one that does. A list
-/// keeps the items that still fit, so one stale id doesn't empty
-/// `enabled_recipes` (empty turns every recipe on); with none left it keeps
-/// the default.
+/// keeps the items that still fit, so one stale id doesn't empty it; with
+/// none left it keeps the default.
 fn overlay(
     root: &mut serde_json::Value,
     path: &mut Vec<String>,

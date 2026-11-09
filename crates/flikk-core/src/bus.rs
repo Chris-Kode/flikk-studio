@@ -15,20 +15,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// for the review cards that still show what came of them.
 const KEPT_RESOLVED: usize = 16;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRole {
-    #[default]
-    Editor,
-    Builder,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "author", rename_all = "snake_case")]
 pub enum Author {
     User,
-    Agent { role: AgentRole },
-    Recipe { name: String },
+    /// The editor's own agent.
+    Agent,
+    /// An outside client on the editor's MCP server.
+    External {
+        name: String,
+    },
 }
 
 impl Author {
@@ -37,7 +33,7 @@ impl Author {
     }
 
     pub fn is_agent(&self) -> bool {
-        matches!(self, Author::Agent { .. })
+        matches!(self, Author::Agent)
     }
 }
 
@@ -76,7 +72,8 @@ impl Permissions {
             ToolCategory::ProjectMemory
             | ToolCategory::Deliver
             | ToolCategory::Generate
-            | ToolCategory::CaptionStyles => Permission::NeedsApproval,
+            | ToolCategory::CaptionStyles
+            | ToolCategory::Skills => Permission::NeedsApproval,
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
         }
@@ -94,9 +91,9 @@ impl Permissions {
             (_, Permission::Off) => Permission::Off,
             (c, _) if c.is_read() => Permission::Allowed,
             (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
-            // Generating spends the user's credits, and caption styles are
-            // saved outside the project where undo can't reach: asked each
-            // time unless they allow it.
+            // Generating spends the user's credits, and caption styles,
+            // skills and styles are saved outside the project where undo
+            // can't reach: asked each time unless they allow it.
             (c, Permission::Allowed) if c.can_allow() => Permission::Allowed,
             (c, _) if c.can_allow() => Permission::NeedsApproval,
             _ => Permission::Propose,

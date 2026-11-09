@@ -101,11 +101,13 @@ impl ChatLog {
             .collect()
     }
 
-    /// The user wrote `text`. Picked or typed, it answers the open
-    /// question, which closes with it, and the agent's error goes.
-    pub(super) fn push_user(&mut self, text: String) {
-        self.messages
-            .push(message(ChatRole::User, text, vec![], vec![]));
+    /// The user wrote `text`, sent in the style named `style`. Picked or
+    /// typed, it answers the open question, which closes with it, and the
+    /// agent's error goes.
+    pub(super) fn push_user(&mut self, text: String, style: Option<String>) {
+        let mut sent = message(ChatRole::User, text, vec![], vec![]);
+        sent.style = style;
+        self.messages.push(sent);
         self.agent_error = None;
         self.question = None;
     }
@@ -364,6 +366,7 @@ fn message(
         choices,
         change_set: None,
         tools,
+        style: None,
         at: now(),
     }
 }
@@ -448,7 +451,13 @@ impl EditorState {
             return;
         }
         let history = self.chat.history();
-        self.chat.push_user(text.clone());
+        let style = self
+            .settings
+            .style
+            .as_deref()
+            .and_then(|id| flikk_core::skills::get(flikk_core::skills::Kind::Style, id))
+            .map(|style| style.name);
+        self.chat.push_user(text.clone(), style);
         let message = match context {
             Some(context) => format!("{text}\n\n{context}"),
             None => text,
