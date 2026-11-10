@@ -139,11 +139,9 @@ pub fn request(
             (super::generate::summary(&request, placement.as_ref()), json)
         }
         "generate_video" => {
-            let generation = ctx.services.generation.as_ref();
-            let model = generation.and_then(|g| g.video_model());
-            let sound = generation.is_none_or(|g| g.video_sound());
-            let (request, grabs, placement) =
-                super::video::parse(project, model.as_ref(), sound, args)?;
+            let generation = ctx.services.generation.as_deref();
+            let setup = super::video::VideoSetup::of(generation);
+            let (request, grabs, placement) = super::video::parse(project, &setup, args)?;
             if !generation.is_some_and(|g| g.provider_for(request.capability()).is_some()) {
                 return Err(ToolError(super::generate::unavailable(&request)));
             }

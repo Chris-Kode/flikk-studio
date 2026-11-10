@@ -190,6 +190,20 @@ impl VideoModel {
         self.lengths.last().copied().unwrap_or(1)
     }
 
+    /// The resolution it makes for `preferred` ("1080p"): the largest of
+    /// its own at or below it, else its smallest; `None` when it has no
+    /// choice of resolution.
+    pub fn resolution_for(&self, preferred: &str) -> Option<&'static str> {
+        let most = resolution_lines(preferred)?;
+        let lines = |r: &&&str| resolution_lines(r).unwrap_or(0);
+        self.resolutions
+            .iter()
+            .filter(|r| lines(r) <= most)
+            .max_by_key(lines)
+            .or_else(|| self.resolutions.iter().min_by_key(lines))
+            .copied()
+    }
+
     /// The length it makes nearest `secs`.
     pub fn nearest_length(&self, secs: f64) -> u32 {
         self.lengths
@@ -317,6 +331,20 @@ impl VideoModel {
             ));
         }
         Ok(())
+    }
+}
+
+/// The resolutions a user can prefer for video, smallest first; each
+/// model makes the nearest it has ([`VideoModel::resolution_for`]).
+pub const VIDEO_RESOLUTIONS: [&str; 5] = ["480p", "720p", "1080p", "2k", "4k"];
+
+/// How many lines a resolution has on its short side: "720p" is 720,
+/// "2k" 1440 and "4k" 2160, in any case; `None` when it isn't one.
+pub fn resolution_lines(resolution: &str) -> Option<u32> {
+    match resolution.trim().to_ascii_lowercase().as_str() {
+        "2k" => Some(1440),
+        "4k" | "uhd" => Some(2160),
+        other => other.strip_suffix('p')?.parse().ok().filter(|n| *n > 0),
     }
 }
 

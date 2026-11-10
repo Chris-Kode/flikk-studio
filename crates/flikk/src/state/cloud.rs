@@ -522,6 +522,24 @@ impl EditorState {
         cx.notify();
     }
 
+    /// The resolution videos start at ("1080p"); `None` takes the model's.
+    pub fn video_resolution(&self) -> Option<String> {
+        self.cloud.settings().video_resolution
+    }
+
+    /// Make videos at `resolution` from now on, fitted to each model;
+    /// `None` takes the model's default.
+    pub fn set_video_resolution(&mut self, resolution: Option<String>, cx: &mut Context<Self>) {
+        let mut settings = self.cloud.settings();
+        if settings.video_resolution == resolution {
+            return;
+        }
+        settings.video_resolution = resolution;
+        persistence::with_store(|s| s.save_cloud_settings(&settings));
+        self.cloud.set_settings(settings);
+        cx.notify();
+    }
+
     /// Forget a generation that failed.
     pub fn dismiss_generation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.generating.retain(|g| g.id != id);

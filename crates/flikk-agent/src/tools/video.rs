@@ -10,7 +10,9 @@
 use super::generate::{Placement, unavailable};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolResultOf, fail, media_id, secs, track_id};
-use flikk_core::cloud::{CloudError, GenerateRequest, VideoModel, VideoReference};
+use flikk_core::cloud::{
+    CloudError, GenerateRequest, GenerationService, VideoModel, VideoReference,
+};
 use flikk_core::compose::{self, Stills};
 use flikk_core::model::{MediaKind, Project, TrackKind};
 use flikk_core::services::Services;
@@ -75,16 +77,38 @@ pub fn grab_all(project: &Project, services: &Services, grabs: &[FrameGrab]) -> 
         .try_for_each(|g| grab_frame(project, services, g.at, &g.path))
 }
 
+/// What the user set for video in Settings → Integrations: the model
+/// picked, and the sound and resolution videos are made with.
+#[derive(Clone, Debug)]
+pub(crate) struct VideoSetup {
+    pub model: Option<VideoModel>,
+    /// Off: videos are made silent, whatever a request says.
+    pub sound: bool,
+    /// The resolution a request without one is made at, fitted to the
+    /// model; `None` takes the model's default.
+    pub resolution: Option<String>,
+}
+
+impl VideoSetup {
+    pub(crate) fn of(generation: Option<&dyn GenerationService>) -> Self {
+        Self {
+            model: generation.and_then(|g| g.video_model()),
+            sound: generation.is_none_or(|g| g.video_sound()),
+            resolution: generation.and_then(|g| g.video_resolution()),
+        }
+    }
+}
+
 /// The request, the frames to grab for it and its placement, from the
-/// tool's arguments; checked against `model`, the one picked for video.
-/// Without `sound` (the user's setting) it is made silent, whatever the
-/// arguments say.
+/// tool's arguments; checked against the model `setup` picked, and made at
+/// its resolution and, without its sound, silent, where the arguments
+/// don't say.
 pub(crate) fn parse(
     project: &Project,
-    model: Option<&VideoModel>,
-    sound: bool,
+    setup: &VideoSetup,
     args: &Args,
 ) -> ToolResultOf<(GenerateRequest, Vec<FrameGrab>, Option<Placement>)> {
+    let (model, sound) = (setup.model.as_ref(), setup.sound);
     let prompt = args.str("prompt")?.trim().to_owned();
     if prompt.is_empty() {
         return fail("`prompt` describes what to make");
@@ -136,7 +160,15 @@ pub(crate) fn parse(
         prompt,
         length,
         aspect: args.opt_str("aspect")?.map(str::to_owned),
-        resolution: args.opt_str("resolution")?.map(str::to_owned),
+        resolution: match args.opt_str("resolution")? {
+            Some(asked) => Some(asked.to_owned()),
+            None => setup
+                .resolution
+                .as_deref()
+                .zip(model)
+                .and_then(|(preferred, m)| m.resolution_for(preferred))
+                .map(str::to_owned),
+        },
         first_frame,
         last_frame,
         references,
@@ -234,9 +266,8 @@ pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let Some(generation) = ctx.services.generation.clone() else {
         return fail("Generation is not available in this build.");
     };
-    let model = generation.video_model();
-    let sound = generation.video_sound();
-    let (request, grabs, placement) = parse(ctx.project(), model.as_ref(), sound, args)?;
+    let setup = VideoSetup::of(Some(generation.as_ref()));
+    let (request, grabs, placement) = parse(ctx.project(), &setup, args)?;
     if generation.provider_for(request.capability()).is_none() {
         return fail(unavailable(&request));
     }

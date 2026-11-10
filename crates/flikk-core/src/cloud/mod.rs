@@ -14,7 +14,8 @@ mod voice;
 pub use crate::pool::{generated_bin, image_item, media_item, pool_commands, sample_item};
 pub use request::{
     GenerateRequest, ImageMode, ImageModel, MusicSection, Reading, ReferenceLimits, SCRIPT_CHARS,
-    SpeechContext, VideoMode, VideoModel, VideoReference, VideoSound,
+    SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel, VideoReference, VideoSound,
+    resolution_lines,
 };
 pub use script::{check_script, spoken_words, without_breaks};
 pub use task::{GenerationTask, Stage};
@@ -92,6 +93,11 @@ pub struct CloudSettings {
     /// Videos are made without sound, which costs less on some models. The
     /// media pool's form starts from it; the agent keeps to it.
     pub silent_video: bool,
+    /// The resolution videos are made at ("720p", "4k"), fitted to each
+    /// model by [`VideoModel::resolution_for`]; `None` takes the model's
+    /// default. The media pool's form starts from it; the agent uses it
+    /// when it asks for none.
+    pub video_resolution: Option<String>,
 }
 
 impl CloudSettings {
@@ -243,6 +249,9 @@ pub trait GenerationService: Send + Sync {
     fn image_model(&self) -> Option<ImageModel>;
     /// Whether videos are made with sound, as the user set it.
     fn video_sound(&self) -> bool;
+    /// The resolution the user set for videos ("1080p"); `None` takes the
+    /// model's default.
+    fn video_resolution(&self) -> Option<String>;
     /// Make `request` into a new file in `dir`, reporting to `task` and
     /// stopping when it is cancelled. Slow: minutes for music and video,
     /// up to a couple for a picture.

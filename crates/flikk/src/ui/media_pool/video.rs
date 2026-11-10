@@ -126,7 +126,13 @@ impl VideoForm {
             .iter()
             .map(|r| Choice::new(*r, *r))
             .collect();
-        let resolution = picker(resolutions, 0, window, cx);
+        // The user's resolution, as this model makes it; else its default.
+        let preferred = state
+            .read(cx)
+            .video_resolution()
+            .and_then(|r| model.resolution_for(&r))
+            .and_then(|r| model.resolutions.iter().position(|m| *m == r));
+        let resolution = picker(resolutions, preferred.unwrap_or(0), window, cx);
         let _subscriptions = vec![
             cx.subscribe_in(&prompt, window, |_, prompt, _: &InputEvent, window, cx| {
                 form::mark_tags(prompt, form::Tags::References, window, cx);

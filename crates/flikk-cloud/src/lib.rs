@@ -305,6 +305,10 @@ impl GenerationService for Cloud {
         !lock(&self.settings).silent_video
     }
 
+    fn video_resolution(&self) -> Option<String> {
+        lock(&self.settings).video_resolution.clone()
+    }
+
     fn video_model(&self) -> Option<VideoModel> {
         let (provider, model) = self.picked(Capability::Video)?;
         provider.api.video_model(model.id).cloned()

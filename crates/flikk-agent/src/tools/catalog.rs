@@ -1656,7 +1656,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "range": range("The timeline range it is for: sets its length (whole seconds), and where it is proposed"),
                     "duration": number("Whole seconds, when there is no `range`; left out, the model picks"),
                     "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21", "2:1", "5:4", "4:5"], "Shape (default: the model picks, from the first frame when there is one); match the sequence"),
-                    "resolution": one_of(&["360p", "480p", "720p", "768p", "1080p", "4k"], "Default: the model's"),
+                    "resolution": one_of(&["360p", "480p", "720p", "768p", "1080p", "4k"], "Default: the one the user set in Settings, else the model's"),
                     "first_frame": string("Media id of a picture in the pool to start on"),
                     "first_frame_at": time("Or start on the program's frame at this time (to continue a shot)"),
                     "last_frame": string("Media id of a picture to end on; needs a first frame"),
