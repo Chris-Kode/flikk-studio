@@ -5,7 +5,7 @@
 use super::EditorState;
 use crate::persistence;
 use flikk_core::ChangeSetId;
-use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings};
+use flikk_core::agent::{AgentEvent, AgentSettings};
 use gpui_kit::*;
 
 impl EditorState {
@@ -104,13 +104,12 @@ impl EditorState {
         let events = self.agent.pump(&mut self.bus, &self.services);
         // Proposals and closed sets; cheap while nothing changed.
         self.proposals.sync(&self.bus);
-        // Its jobs ran with the user's leave, so they come in as its own.
+        // What its jobs brought in for a project closed meanwhile comes in
+        // as its own.
         for (project, item) in self.agent.take_orphans() {
             let author = self.agent_author();
             self.keep_for(project, item, author);
         }
-        // A job the agent was allowed may have added what a provider made.
-        self.analyze_generated(cx);
         // Requests the user allowed are carried out without asking; their
         // card still says what came of them.
         let allowed: Vec<u64> = self
@@ -131,15 +130,9 @@ impl EditorState {
                 AgentEvent::TextDelta { text } => self.chat.append_text(text),
                 AgentEvent::Question { text, choices } => self.chat.ask(text, choices),
                 AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
-                AgentEvent::Activity { entry } => {
-                    self.tool_done(&entry, cx);
-                    self.chat.push_tool(entry)
-                }
+                AgentEvent::Activity { entry } => self.chat.push_tool(entry),
                 AgentEvent::ToolStarted { entry, .. } => self.chat.push_tool(entry),
-                AgentEvent::ToolFinished { call, entry } => {
-                    self.tool_done(&entry, cx);
-                    self.chat.finish_tool(call, entry)
-                }
+                AgentEvent::ToolFinished { call, entry } => self.chat.finish_tool(call, entry),
                 AgentEvent::TurnDone => {
                     self.chat.end_turn();
                     self.save_chat()
@@ -151,7 +144,7 @@ impl EditorState {
                 }
             }
         }
-        // Generated media the agent was allowed to make went into the pool.
+        // A picture a job fetched from the web may have gone into the pool.
         self.autosave();
         cx.notify();
     }
@@ -162,14 +155,5 @@ impl EditorState {
     pub(super) fn post_change_set(&mut self, change_set: ChangeSetId) {
         self.bus.close_change_set(change_set);
         self.chat.remove_change_set(change_set);
-    }
-
-    fn tool_done(&mut self, entry: &ActivityEntry, cx: &mut Context<Self>) {
-        // A voice the agent was allowed to add or design went to the
-        // library.
-        if entry.ok && matches!(entry.tool.as_str(), "add_voice" | "design_voice") {
-            self.reload_library(cx);
-            self.refresh_voices(cx);
-        }
     }
 }

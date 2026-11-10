@@ -35,7 +35,8 @@ pub enum ToolCategory {
     /// Shader effects, transitions, generators (incl. HTML motion graphics)
     /// and the project's FX programs.
     Effects,
-    /// Music and sound effects made by a provider, which cost credits.
+    /// What a provider makes for money or credits: music, sound effects,
+    /// voiceovers and voices, pictures, videos and upscales.
     Generate,
     /// Reading the files and folders the user attached to the chat.
     Files,
@@ -72,9 +73,17 @@ impl ToolCategory {
     }
 
     /// Whether the user may let the agent do these without asking each
-    /// time (otherwise they are asked, or off).
+    /// time (otherwise they are asked, or off). Never what costs money:
+    /// see [`Self::costs`].
     pub fn can_allow(self) -> bool {
-        matches!(self, Self::Generate | Self::CaptionStyles | Self::Skills)
+        matches!(self, Self::CaptionStyles | Self::Skills)
+    }
+
+    /// Whether these spend the user's money or credits with a provider.
+    /// Each call is then theirs to approve: it is asked every time, or
+    /// off, and no setting lets it run unasked.
+    pub fn costs(self) -> bool {
+        self == Self::Generate
     }
 
     pub fn label(self) -> &'static str {

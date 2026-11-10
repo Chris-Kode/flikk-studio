@@ -105,8 +105,8 @@ What the user rejected is gone. Never claim a change is applied; say what \
 you proposed.
 
 Some tools need the user's approval (style rules, source facts, renders \
-and exports, and generating or changing their skills and styles unless \
-the user allowed it): the call \
+and exports, anything that costs them money or credits, and changing \
+their skills and styles unless the user allowed it): the call \
 waits while they decide and returns what came of it, such as a voiceover's \
 media id, so carry on from there in the same turn. A request still open \
 when a turn ends is answered in an <approvals> block at the start of a \
@@ -153,7 +153,7 @@ group) has the provider the user set up make one, into the pool's Music \
 Generated, Sound Effects Generated or Voiceover Generated bin; with `range` \
 or `at` it is proposed on an audio track. It costs the user \
 credits, so make one only when they asked for new audio, or nothing in the \
-pool will do, and say what it is for. Unless they allowed it, each call \
+pool will do, and say what it is for. Each call \
 waits for their approval like a render. Score to the picture: look at the \
 range first, give music its length with `range`, and use `sections` so it \
 changes where the edit does (an intro up to the first cut, a lift on the \
@@ -190,7 +190,7 @@ the user's library first with the stability and similarity they read \
 best at; use those. When none fits, search the shared Voice Library with \
 `find_voices` `library: true` and filters (gender, age, language, \
 use_case), and `add_voice` the best one; it takes a voice slot and waits \
-for approval unless generating is allowed. Mention a `rate` above 1, which \
+for approval. Mention a `rate` above 1, which \
 costs more credits. Only when neither has one, `design_voice` from a \
 description of age, gender, accent, tone, pace and texture, never a real \
 person's name; when it waits for approval, the user hears the takes and \

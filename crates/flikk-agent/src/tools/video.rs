@@ -1,8 +1,8 @@
 //! `generate_video`: a video made by the provider the user set for it (the
 //! Generate category), from a description, from a first frame (a picture
 //! in the pool, or the program at a time), or after references (pictures,
-//! clips and sounds in the pool). It spends the user's money, so it waits
-//! for their approval unless they allowed it. The file goes to the pool's
+//! clips and sounds in the pool). It spends the user's money, so each call
+//! waits for their approval. The file goes to the pool's
 //! Video Generated bin; with `at` (or `range`) it is also proposed on a
 //! video track, its sound on an audio track beside it. Placing and adding
 //! to the pool are `generate`'s, as for audio.
@@ -12,8 +12,7 @@
 //! 3D scene drawn here for nothing, so staging, camera and timing are
 //! settled before the provider is paid.
 
-use super::generate::{Placement, unavailable};
-use super::{Done, Job, JobDone, Step, ToolCtx};
+use super::generate::Placement;
 use crate::args::{Args, ToolResultOf, fail, media_id, secs, track_id};
 use flikk_core::blockout::Scene;
 use flikk_core::cloud::{
@@ -483,39 +482,4 @@ pub fn from_json(value: &Value) -> Option<Shot> {
         placement: value.get("place").and_then(Placement::from_json),
         blockout,
     })
-}
-
-/// With the user's leave: a job that grabs its frames, writes its
-/// blockout's clip, makes the video and comes back to the UI thread to add
-/// it to the pool and place it.
-pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let Some(generation) = ctx.services.generation.clone() else {
-        return fail("Generation is not available in this build.");
-    };
-    let setup = VideoSetup::of(Some(generation.as_ref()));
-    let shot = parse(ctx.project(), &setup, args)?;
-    if generation.provider_for(shot.request.capability()).is_none() {
-        return fail(unavailable(&shot.request));
-    }
-    let services = ctx.services.clone();
-    let project = ctx.project().clone();
-    let task = ctx.stop.task();
-    let job: Job = Box::new(move || {
-        let request = match shot.prepare(&project, &services, &|| task.cancelled()) {
-            Ok(request) => request,
-            Err(e) => return JobDone::Done(Done::error(e)),
-        };
-        match generation.generate(&request, &paths::generated(), &task) {
-            Ok(made) => JobDone::Generated {
-                item: Box::new(flikk_core::cloud::media_item(
-                    &made,
-                    services.media.as_deref(),
-                )),
-                destination: shot.placement.into(),
-                summary: shot.request.summary(),
-            },
-            Err(e) => JobDone::Done(Done::error(error_text(&e))),
-        }
-    });
-    Ok(Step::Job(job))
 }

@@ -708,7 +708,7 @@ impl EditorState {
     }
 
     /// Analyze each item a provider made as it reaches the pool, once,
-    /// however it got there (the media pool, an approval, an agent job): a
+    /// however it got there (the media pool or an approval): a
     /// video like footage, so the agent can see and hear it, once the
     /// analysis models are ready; a voiceover when transcripts are on (its
     /// words are its script, so it costs no credits). Music and sound

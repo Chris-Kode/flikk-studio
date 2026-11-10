@@ -1,16 +1,15 @@
 //! `generate_audio`: music, a sound effect or a voiceover made by the
 //! provider the user set for it (the Generate category). Each one spends the
-//! user's credits, so it waits for their approval unless they allowed it.
+//! user's credits, so each call waits for their approval.
 //! The file goes to the pool's bin for what it is; with `at` (or `range`) it
 //! is also proposed on an audio track. Voices are found and made in
 //! `voices`.
 
-use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::cloud::{self, Capability, CloudError, GenerateRequest, MusicSection, Reading};
 use flikk_core::command::{Command, InsertMode};
-use flikk_core::model::{MediaItem, MediaKind, Project, TrackKind};
+use flikk_core::model::{MediaKind, Project, TrackKind};
 use flikk_core::{MediaId, Time, TimeRange, TrackId};
 use serde_json::{Value, json};
 
@@ -185,31 +184,6 @@ pub fn from_json(value: &Value) -> Option<(GenerateRequest, Option<Placement>)> 
     Some((request, placement))
 }
 
-/// With the user's leave: a job that makes the file and comes back to the
-/// UI thread to add it to the pool and place it.
-pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let (request, placement) = parse(ctx.project(), args)?;
-    let Some(generation) = ctx.services.generation.clone() else {
-        return fail("Generation is not available in this build.");
-    };
-    if generation.provider_for(request.capability()).is_none() {
-        return fail(unavailable(&request));
-    }
-    let media = ctx.services.media.clone();
-    let task = ctx.stop.task();
-    let job: Job = Box::new(move || {
-        match generation.generate(&request, &flikk_core::paths::generated(), &task) {
-            Ok(made) => JobDone::Generated {
-                item: Box::new(flikk_core::cloud::media_item(&made, media.as_deref())),
-                destination: placement.into(),
-                summary: request.summary(),
-            },
-            Err(e) => JobDone::Done(Done::error(error_text(&e))),
-        }
-    });
-    Ok(Step::Job(job))
-}
-
 /// Why the user's settings stop it.
 pub(crate) fn unavailable(request: &GenerateRequest) -> String {
     unavailable_for(request.capability())
@@ -235,77 +209,6 @@ pub fn error_text(e: &CloudError) -> String {
         e if e.needs_settings() => format!("{e}. The user must fix it in Settings → Integrations."),
         e => e.to_string(),
     }
-}
-
-/// Back on the UI thread with what a provider made: add it to the pool,
-/// and propose it where `destination` says as `author` (none when the
-/// turn was cancelled).
-pub(crate) fn finish(
-    bus: &mut CommandBus,
-    author: Option<&Author>,
-    item: MediaItem,
-    destination: &Destination,
-    summary: &str,
-) -> Done {
-    let picture = (item.kind == MediaKind::Image).then(|| item.path.clone());
-    let length = match (&picture, item.info.as_ref()) {
-        (None, Some(info)) => format!(" ({:.1} s)", info.duration.as_secs_f64()),
-        _ => String::new(),
-    };
-    let bin = cloud::generated_bin(&item);
-    let media = match add_to_pool(bus, item, author) {
-        Ok(media) => media,
-        Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
-    };
-    let mut text = format!(
-        "Made it: media {}{length} in the {bin} bin; view_media shows it.",
-        short(media)
-    );
-    match (destination, author) {
-        (Destination::Pool, _) => {}
-        (_, None) => text.push_str(" The turn was cancelled, so it was not placed."),
-        (destination, Some(author)) => {
-            match propose_destination(bus, author, media, destination, summary) {
-                Ok(placed) => {
-                    text.push(' ');
-                    text.push_str(&placed);
-                }
-                Err(e) => text.push_str(&format!(" Could not place it: {e}")),
-            }
-        }
-    }
-    let mut done = Done::text(format!("generated {summary}"), text);
-    done.images.extend(picture);
-    done
-}
-
-/// Add `item` to the pool's bin for what it is, at once (it is paid for:
-/// rejecting a placement keeps it), and to the drafts waiting for review so
-/// a proposal can use it. As `author`'s change, so it is no edit of the
-/// user's that the agent's proposals would conflict with; the user's when
-/// the turn is gone.
-pub(crate) fn add_to_pool(
-    bus: &mut CommandBus,
-    item: MediaItem,
-    author: Option<&Author>,
-) -> Result<MediaId, String> {
-    let id = item.id;
-    let bin = cloud::generated_bin(&item);
-    let upscaled = item
-        .generated
-        .as_deref()
-        .is_some_and(|g| g.capability == Capability::Upscale);
-    let label = match item.kind {
-        MediaKind::Video if upscaled => "Upscale video",
-        MediaKind::Video => "Generate video",
-        MediaKind::Image => "Generate image",
-        _ => "Generate audio",
-    };
-    let commands = cloud::pool_commands(bus.project(), item, bin);
-    let author = author.cloned().unwrap_or(Author::User);
-    bus.execute_shared_as(commands, label, author)
-        .map(|_| id)
-        .map_err(|e| e.to_string())
 }
 
 /// Propose `media` where `destination` says, as `author`; what happened,

@@ -2,8 +2,8 @@
 //! account's voices, the user's own first, or searches the provider's shared
 //! Voice Library; both are free. `add_voice` adds a shared one to the
 //! account and `design_voice` makes one from a description; each takes a
-//! voice slot or credits, so it waits for the user's approval unless they
-//! allowed generating. Either way the voice is kept in the user's library,
+//! voice slot or credits, so it waits for the user's approval. Either way
+//! the voice is kept in the user's library,
 //! where every project finds it. Cloning a voice is the user's alone: it
 //! needs the consent of whoever it belongs to.
 //!
@@ -324,40 +324,6 @@ pub fn design(
         "voice {} (“{}”) is on the account and in the user's library; read with it in generate_audio. The user can design it again from the Voices dialog to hear other takes",
         voice.id, voice.name
     ))
-}
-
-// ------------------------------------------------------------------ jobs
-
-/// With the user's leave (generating allowed): add a shared voice.
-pub(crate) fn serve_add(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let adding = parse_add(args)?;
-    let generation = voices_service(ctx)?;
-    let media = ctx.services.media.clone();
-    let summary = add_summary(&adding);
-    let job: Job = Box::new(move || {
-        JobDone::Done(match add(generation.as_ref(), media.as_deref(), &adding) {
-            Ok(text) => Done::text(summary, text),
-            Err(e) => Done::error(e),
-        })
-    });
-    Ok(Step::Job(job))
-}
-
-/// With the user's leave (generating allowed): design a voice.
-pub(crate) fn serve_design(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let (asked, name) = parse_design(args)?;
-    let generation = voices_service(ctx)?;
-    let media = ctx.services.media.clone();
-    let summary = design_summary(&asked, &name);
-    let job: Job = Box::new(move || {
-        JobDone::Done(
-            match design(generation.as_ref(), media.as_deref(), &asked, &name) {
-                Ok(text) => Done::text(summary, text),
-                Err(e) => Done::error(e),
-            },
-        )
-    });
-    Ok(Step::Job(job))
 }
 
 /// Whether voices can be added and designed now; why not, when not.

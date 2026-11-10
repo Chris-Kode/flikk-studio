@@ -42,7 +42,6 @@ use crate::bridge::ToolResult;
 use flikk_core::agent::{AgentEvent, AgentSettings, EditorContext};
 use flikk_core::bus::{Author, CommandBus, Outcome as BusOutcome, Permission, Since};
 use flikk_core::changeset::{ChangeSetState, ItemState};
-use flikk_core::cloud::GenerationTask;
 use flikk_core::command::{Command, ToolCategory, Warning};
 use flikk_core::memory::{CaptionStyle, SourceFact, StyleRule};
 use flikk_core::model::Project;
@@ -54,32 +53,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Stops what a turn's jobs are doing when the turn is cancelled: every
-/// generation and long wait they started through it. Clones share it.
+/// long wait they started through it. Clones share it.
 #[derive(Clone, Default)]
 pub(crate) struct Stop(Arc<Mutex<Stops>>);
 
 #[derive(Default)]
 struct Stops {
     stopped: bool,
-    tasks: Vec<GenerationTask>,
     flags: Vec<Arc<AtomicBool>>,
 }
 
 impl Stop {
     fn stops(&self) -> std::sync::MutexGuard<'_, Stops> {
         flikk_os::sync::lock(&self.0)
-    }
-
-    /// A generation to follow and stop with the rest; stopped already if
-    /// they were.
-    pub(crate) fn task(&self) -> GenerationTask {
-        let task = GenerationTask::default();
-        let mut stops = self.stops();
-        if stops.stopped {
-            task.cancel();
-        }
-        stops.tasks.push(task.clone());
-        task
     }
 
     /// A flag set when they are stopped, for waits that take one.
@@ -94,9 +80,6 @@ impl Stop {
     pub(crate) fn stop(&self) {
         let mut stops = self.stops();
         stops.stopped = true;
-        for task in &stops.tasks {
-            task.cancel();
-        }
         for flag in &stops.flags {
             flag.store(true, Ordering::Relaxed);
         }
@@ -217,13 +200,6 @@ pub(crate) enum JobDone {
         /// are proposed from `since`.
         rebase: Option<Rebase>,
     },
-    /// A file a provider made, to add to the pool and place on the UI
-    /// thread.
-    Generated {
-        item: Box<flikk_core::model::MediaItem>,
-        destination: generate::Destination,
-        summary: String,
-    },
     /// A picture from the web to add to the pool on the UI thread, with
     /// what the call returns.
     Fetched {
@@ -231,13 +207,6 @@ pub(crate) enum JobDone {
         done: Box<Done>,
         /// The pool bin it goes to.
         bin: &'static str,
-    },
-    /// Words said again for a fix, to add to the pool and cut in on the UI
-    /// thread.
-    Respoken {
-        item: Box<flikk_core::model::MediaItem>,
-        fix: Box<flikk_core::respeak::Fix>,
-        summary: String,
     },
 }
 
@@ -373,17 +342,10 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "use_library_fx" => fx::use_library(ctx, &args),
         "find_sounds" => sounds::find(ctx, &args),
         "use_library_sound" => sounds::use_sound(ctx, &args),
-        "generate_audio" => generate::serve(ctx, &args),
-        "generate_video" => video::serve(ctx, &args),
-        upscale::TOOL => upscale::serve(ctx, &args),
-        image::TOOL => image::serve(ctx, &args),
         "find_voices" => voices::find_voices(ctx, &args),
-        "add_voice" => voices::serve_add(ctx, &args),
-        "design_voice" => voices::serve_design(ctx, &args),
         "stabilize" => stabilize::stabilize(ctx, &args),
         "get_shake" => stabilize::get_shake(ctx, &args),
         "fit_music" => music::fit_music(ctx, &args),
-        "replace_words" => respeak::serve(ctx, &args),
         "sync_audio" => sync::serve(ctx, &args),
         tool if files::TOOLS.contains(&tool) => files::serve(ctx, tool, &args),
         tool if skills::TOOLS.contains(&tool) => skills::serve(ctx, tool, &args).map(Into::into),

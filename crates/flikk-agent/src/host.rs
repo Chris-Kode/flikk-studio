@@ -918,30 +918,12 @@ impl AgentHost {
             };
             let done = match out {
                 JobDone::Done(done) => done,
-                JobDone::Generated {
-                    item,
-                    destination,
-                    summary,
-                } => {
-                    let author = match origin {
-                        Origin::Turn => turn_author(),
-                        Origin::External(_) => Some(external_author()),
-                    };
-                    tools::generate::finish(bus, author.as_ref(), *item, &destination, &summary)
-                }
                 JobDone::Fetched { item, done, bin } => {
                     let author = match origin {
                         Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::web::finish(bus, author.as_ref(), *item, *done, bin)
-                }
-                JobDone::Respoken { item, fix, summary } => {
-                    let author = match origin {
-                        Origin::Turn => turn_author(),
-                        Origin::External(_) => Some(external_author()),
-                    };
-                    tools::respeak::finish(bus, author.as_ref(), *item, &fix, &summary)
                 }
                 JobDone::Propose {
                     commands,
@@ -1006,10 +988,6 @@ impl AgentHost {
                     project's media pool when it is opened again.";
         match out {
             JobDone::Done(done) => done,
-            JobDone::Generated { item, .. } | JobDone::Respoken { item, .. } => {
-                self.orphans.push((project, *item));
-                Done::text("Kept for its project", kept)
-            }
             JobDone::Fetched { item, .. } => {
                 self.orphans.push((project, *item));
                 Done::text("Kept for its project", kept)

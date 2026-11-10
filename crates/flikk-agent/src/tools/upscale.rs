@@ -1,12 +1,11 @@
 //! `upscale_video`: a video in the pool made larger by the provider the
 //! user set for upscaling (the Generate category), with the source's
-//! sound. It spends the user's money, so it waits for their approval
-//! unless they allowed it. The file goes to the pool's Video Upscaled bin;
+//! sound. It spends the user's money, so each call waits for their
+//! approval. The file goes to the pool's Video Upscaled bin;
 //! with `replace` it is also proposed in place of the source in its clips
 //! on picture tracks. Adding to the pool and proposing are `generate`'s.
 
-use super::generate::{Destination, unavailable};
-use super::{Done, Job, JobDone, Step, ToolCtx};
+use super::generate::Destination;
 use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, short};
 use flikk_core::MediaId;
 use flikk_core::cloud::{CloudError, GenerateRequest, UpscaleModel, UpscaleSource};
@@ -85,31 +84,4 @@ pub fn from_json(value: &Value) -> Option<(GenerateRequest, Destination)> {
         request,
         replaces.map_or(Destination::Pool, Destination::Replace),
     ))
-}
-
-/// With the user's leave: a job that makes the video larger and comes back
-/// to the UI thread to add it to the pool and, when asked, propose it in
-/// the source's clips.
-pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let Some(generation) = ctx.services.generation.clone() else {
-        return fail("Generation is not available in this build.");
-    };
-    let model = generation.upscale_model();
-    let (request, replaces) = parse(ctx.project(), model.as_ref(), args)?;
-    if generation.provider_for(request.capability()).is_none() {
-        return fail(unavailable(&request));
-    }
-    let media = ctx.services.media.clone();
-    let task = ctx.stop.task();
-    let job: Job = Box::new(move || {
-        match generation.generate(&request, &flikk_core::paths::generated(), &task) {
-            Ok(made) => JobDone::Generated {
-                item: Box::new(flikk_core::cloud::media_item(&made, media.as_deref())),
-                destination: replaces.map_or(Destination::Pool, Destination::Replace),
-                summary: request.summary(),
-            },
-            Err(e) => JobDone::Done(Done::error(error_text(&e))),
-        }
-    });
-    Ok(Step::Job(job))
 }

@@ -1,5 +1,6 @@
 //! Tools that need the user: approval requests (project and memory,
-//! deliver, generating unless allowed) and clarifying questions.
+//! deliver, generating, and skills and caption styles unless allowed) and
+//! clarifying questions.
 
 use super::{ApprovalRequest, Done, ToolCtx};
 use crate::args::{Args, ToolError, media_id, range_json};

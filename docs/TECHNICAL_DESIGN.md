@@ -1145,15 +1145,21 @@ on the UI thread and run it off it:
   (a generated voiceover's media id, for one), so the turn carries on; an
   outcome whose call is gone (the turn ended or was cancelled) reaches the
   agent in the next turn's `<approvals>` block. Backends allow a tool call
-  an hour for this. Generate media (music, sound
-  effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
-  default) or Allow. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
+  an hour for this. Generate media (music, sound effects, voiceovers and
+  voices, pictures, videos and upscales: whatever spends the user's money
+  or credits with a provider, `ToolCategory::costs`) is Off or Ask each
+  time (the default). No setting lets it run unasked: a saved "Allow" from
+  before reads as asking (`Permissions::get`), the handlers that ran one as
+  a tool job are gone, and the only code that calls a provider for the
+  agent is `agent_link/approve.rs`, on the user's click. `Permissions::choices`
+  says what each category can be set to, and Settings → Agent draws its
+  rows from it. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
   search. Both read pages as text only, so the same switch lists the `flikk`
   tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
   25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
   the original under `paths::web()` and adds it to the pool's "Web Images"
   bin as the user's edit. The `flikk` tool `generate_image` (Generate
-  category, so it asks each time unless the user allowed generating) is
+  category, so it asks each time) is
   offered while someone can make the picture (`image::route`): the image
   provider picked in Settings → Integrations when one is set with a key,
   whatever the agent's own setting says (see "Generating pictures"), else
@@ -1249,9 +1255,9 @@ on the UI thread and run it off it:
   for; `MediaItem::generated` records the provider, model and prompt, and
   for a voiceover who read it, so the pool can regenerate it. With
   `at` or `range` it is proposed on an audio track free over its length,
-  else a new one. Asked each time, the approval runs it in the background,
-  proposes the placement into the chat's set and answers the waiting call
-  with the media id; allowed, it runs as a tool job and answers the same. A
+  else a new one. The approval runs it in the background, proposes the
+  placement into the chat's set and answers the waiting call with the
+  media id. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
 * **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
   with the provider and model picked for video (on fal: Seedance 2.0, 2.0
@@ -1282,9 +1288,8 @@ on the UI thread and run it off it:
   on a video track free over its length (else a new one on top), its sound
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
-  a generated item reaches the pool (the media pool, an approval, or an
-  agent job the editor sees on its next pump), `analyze_generated` queues it
-  once: a video like footage when the analysis models are ready, a
+  a generated item reaches the pool (the media pool or an approval),
+  `analyze_generated` queues it once: a video like footage when the analysis models are ready, a
   voiceover when transcripts are on. Items already in a project when it
   opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
@@ -1458,7 +1463,7 @@ on the UI thread and run it off it:
   the voice that read it. The agent's `find_voices` lists the user's
   library first, with how each reads, or searches the Voice Library with
   `library` and filters; `add_voice` and `design_voice` (Generate media,
-  so approved unless allowed) add or design one and keep it in the library.
+  so approved each time) add or design one and keep it in the library.
   Their approval cards are heard first: `find_voices` remembers where each
   voice listed can be heard and the request carries it, so the card of an
   `add_voice` or a voiceover plays the voice's sample (the library's copy
@@ -1480,11 +1485,10 @@ on the UI thread and run it off it:
   The agent's `replace_words` (`tools/respeak.rs`, Generate) takes the
   words by the times they start (`from`, `to`, checked against `words`),
   the new `text` and, without a linked voice, a `voice` from
-  `find_voices`; it can't clone. Asked each time, the approval card plays
-  the voice; approving makes the words off the UI thread
+  `find_voices`; it can't clone. The approval card plays the voice;
+  approving makes the words off the UI thread
   (`approve::Started::Respeak`), adds them to the pool and proposes the
-  `ReplaceSpeech` in the chat's set; allowed, it runs as a tool job
-  (`JobDone::Respoken`) and proposes the same.
+  `ReplaceSpeech` in the chat's set.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
   provider was asked) and, where analysis left vectors, by how they sound;
@@ -1809,8 +1813,7 @@ there.
 * Mouse and keyboard interactions (drags, drops, context menus, shortcuts)
   were checked by code review and screenshots of seeded states only.
 * Blockouts: only the agent's `generate_video` takes one; the media pool's
-  Video form does not. With generating allowed without asking, the video
-  is made without showing its card. The agent writes a scene without
+  Video form does not. The agent writes a scene without
   seeing it drawn (no tool returns a blockout's frames). A blockout is
   not kept in the pool or the project: it lives in the waiting request
   and its clip in the upload scratch. Making a picture for a tile was

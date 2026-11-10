@@ -1686,11 +1686,11 @@ pub fn catalog() -> Vec<ToolSpec> {
                 &["sound"],
             ),
         ),
-        // ---- generate (credits: approved each time unless allowed)
+        // ---- generate (money or credits: approved each time)
         spec(
             "generate_audio",
             Some(Generate),
-            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
+            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect", "voiceover"], "What to make"),
@@ -1727,7 +1727,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_video",
             Some(Generate),
-            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat), or after a `blockout` (a rough 3D scene you write, drawn in grey for the model to follow its camera, staging and timing). The user sees the blockout playing, the frames, the references and the prompt, and can change each, before approving. It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
+            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat), or after a `blockout` (a rough 3D scene you write, drawn in grey for the model to follow its camera, staging and timing). The user sees the blockout playing, the frames, the references and the prompt, and can change each, before approving. It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
                     "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`), whatever the model; they are renamed for it"),
@@ -1751,7 +1751,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             super::upscale::TOOL,
             Some(Generate),
-            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
+            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
             object(
                 json!({
                     "media": string("Media id of a video in the pool"),
@@ -1764,7 +1764,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             super::image::TOOL,
             Some(Generate),
-            "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
+            "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
                     "prompt": string("What to make: subject, composition, style and light, and any words that appear in it, exactly as written. With pictures to follow, name them by order: @Image1, @Image2 (`references` first, then `frames_at`), and say what to keep and what to change. With the ChatGPT plan, also say its shape (wide 16:9, portrait 9:16, square)"),
@@ -1784,7 +1784,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "replace_words",
             Some(Generate),
-            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: unless they allowed it, each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
+            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
             object(
                 json!({
                     "from": time("Start of the first word to replace, as the transcript gives it"),
@@ -1818,7 +1818,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "add_voice",
             Some(Generate),
-            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: unless they allowed generating, it waits for their approval and then returns the voice id.",
+            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: it waits for their approval and then returns the voice id.",
             object(
                 json!({
                     "voice": string("The shared voice's id from find_voices"),
@@ -1831,7 +1831,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "design_voice",
             Some(Generate),
-            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. It waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
             object(
                 json!({
                     "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),

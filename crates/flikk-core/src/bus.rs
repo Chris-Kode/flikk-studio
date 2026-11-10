@@ -43,9 +43,10 @@ pub enum Permission {
     Off,
     /// Changes land in a change set for review.
     Propose,
-    /// Read categories, and generating media once the user allows it.
+    /// Read categories, and saving styles and skills once the user allows
+    /// it.
     Allowed,
-    /// Each call waits for a dialog (memory, deliver).
+    /// Each call waits for the user (memory, deliver, generating).
     NeedsApproval,
 }
 
@@ -91,9 +92,12 @@ impl Permissions {
             (_, Permission::Off) => Permission::Off,
             (c, _) if c.is_read() => Permission::Allowed,
             (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
-            // Generating spends the user's credits, and caption styles,
-            // skills and styles are saved outside the project where undo
-            // can't reach: asked each time unless they allow it.
+            // What costs money is asked each time, whatever was saved: a
+            // setting from before this was so reads as asking.
+            (c, _) if c.costs() => Permission::NeedsApproval,
+            // Caption styles, skills and styles are saved outside the
+            // project where undo can't reach: asked each time unless they
+            // allow it.
             (c, Permission::Allowed) if c.can_allow() => Permission::Allowed,
             (c, _) if c.can_allow() => Permission::NeedsApproval,
             _ => Permission::Propose,
@@ -102,6 +106,19 @@ impl Permissions {
 
     pub fn set(&mut self, category: ToolCategory, permission: Permission) {
         self.0.insert(category, permission);
+    }
+
+    /// What the user can set `category` to, the most restrictive first;
+    /// none where no setting changes it.
+    pub fn choices(category: ToolCategory) -> &'static [Permission] {
+        use Permission::{Allowed, NeedsApproval, Off, Propose};
+        match category {
+            c if c.is_read() => &[],
+            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Media => &[],
+            c if c.costs() => &[Off, NeedsApproval],
+            c if c.can_allow() => &[Off, NeedsApproval, Allowed],
+            _ => &[Off, Propose],
+        }
     }
 }
 

@@ -4,8 +4,8 @@
 //! there is one, whatever the agent's own setting says; else with the
 //! user's ChatGPT plan, when they turned image generation on (Settings →
 //! Agent). Each picture costs the user money or counts against their plan,
-//! so it waits for their approval unless they allowed generating. It goes
-//! to the pool's Images Generated bin.
+//! so each call waits for their approval. It goes to the pool's Images
+//! Generated bin.
 //!
 //! The ChatGPT plan's pictures come from the image service Codex itself
 //! uses (`gpt-image-2`), signed in with Codex's own ChatGPT login, as Codex
@@ -15,7 +15,6 @@
 //! free plans are refused. It makes pictures from a description only.
 
 use super::video::{self, FrameGrab};
-use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, parse_time};
 use base64::Engine;
 use flikk_core::agent::AgentSettings;
@@ -239,26 +238,6 @@ pub fn from_json(value: &Value) -> Option<Request> {
 /// have no image generation.
 pub fn subscription() -> Option<String> {
     Login::load()?.paid().map(str::to_owned)
-}
-
-/// With the user's leave: a job that makes the picture and comes back to
-/// the UI thread to add it to the pool.
-pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let request = parse(ctx.project(), ctx.settings, ctx.services, args)?;
-    let services = ctx.services.clone();
-    let project = request.grabs_frames().then(|| ctx.project().clone());
-    let task = ctx.stop.task();
-    let job: Job = Box::new(
-        move || match make(&request, project.as_ref(), &services, &task) {
-            Ok(item) => JobDone::Generated {
-                item: Box::new(item),
-                destination: super::generate::Destination::Pool,
-                summary: summary(&request),
-            },
-            Err(ToolError(e)) => JobDone::Done(Done::error(e)),
-        },
-    );
-    Ok(Step::Job(job))
 }
 
 /// Make the picture and keep it with the user's data, as a pool item not
