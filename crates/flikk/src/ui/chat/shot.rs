@@ -31,6 +31,10 @@ use std::sync::Arc;
 const TILE: Pixels = px(44.);
 const GAP: Pixels = px(4.);
 const STAGE: Pixels = px(92.);
+/// A tile is this many times as wide as it is tall, whatever the video's
+/// shape: an upright video's picture is cropped to it, and its blockout
+/// shown whole inside it, so a caption always has room.
+const TILE_SHAPE: f32 = 16. / 9.;
 /// How wide the tile that adds a reference is: it sits beside a picture's
 /// tile in the narrowest chat.
 const ADD: Pixels = px(24.);
@@ -528,11 +532,6 @@ impl ShotCard {
 
     // ---------------------------------------------------------------- tiles
 
-    fn tile_width(&self, height: Pixels) -> Pixels {
-        let aspect = (self.shape.0 as f32 / self.shape.1 as f32).clamp(0.6, 1.8);
-        height * aspect
-    }
-
     /// A clip's poster, read off the UI thread the first time.
     fn poster(&mut self, item: &MediaItem, cx: &mut Context<Self>) -> Option<Arc<Image>> {
         match self.posters.get(&item.path) {
@@ -644,7 +643,7 @@ impl ShotCard {
             .group("shot-tile")
             .relative()
             .flex_none()
-            .w(self.tile_width(height))
+            .w(height * TILE_SHAPE)
             .h(height)
             .overflow_hidden()
             .rounded(t::RADIUS_SM)
@@ -653,16 +652,20 @@ impl ShotCard {
             .bg(t::SCOPE)
             .child(content)
             .children(caption.map(|caption| {
+                // A tag is what the prompt types; a slot's name is a label.
+                let tag = caption.starts_with('@');
                 div()
                     .absolute()
                     .left(px(2.))
                     .bottom(px(2.))
+                    .max_w(height * TILE_SHAPE - px(6.))
+                    .truncate()
                     .px(px(4.))
                     .rounded(t::RADIUS_XS)
                     .bg(t::alpha(t::G, 0.72))
-                    .font_family(t::mono())
+                    .when(tag, |el| el.font_family(t::mono()))
                     .text_size(px(10.))
-                    .text_color(t::T1)
+                    .text_color(if tag { t::T1 } else { t::T2 })
                     .child(caption)
             }))
             .children(corner.map(|(button, shown)| {
@@ -716,7 +719,8 @@ impl ShotCard {
                 .into_any_element()
         };
         match file {
-            None => glyph(IconName::Image),
+            // Empty: its name and the button that fills it say enough.
+            None => div().into_any_element(),
             // Named by the request, not on disk until it is grabbed.
             Some((MediaKind::Image, path)) if !path.exists() => match self.grabbing {
                 true => centred()

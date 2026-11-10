@@ -1,6 +1,7 @@
-//! `FLIKK_DEMO_SHOT=card|blockout`: a video waiting on the user in the
-//! chat, with a blockout, a first frame and a reference; `blockout` opens
-//! the blockout's dialog on it.
+//! `FLIKK_DEMO_SHOT=card|blockout|plain`: a video waiting on the user in
+//! the chat, with a blockout, a first frame and a reference; `blockout`
+//! opens the blockout's dialog on it, and `plain` is an upright video from
+//! its prompt alone, its tiles empty.
 
 use crate::state::EditorState;
 use flikk_agent::tools::ApprovalRequest;
@@ -40,8 +41,11 @@ pub fn asked() -> Option<String> {
 }
 
 pub fn seed(state: &mut EditorState) {
-    if asked().is_none() {
+    let Some(asked) = asked() else {
         return;
+    };
+    if asked == "plain" {
+        return seed_shot(state, plain());
     }
     let Ok(scene) = serde_json::from_str(SCENE)
         .map_err(|_| ())
@@ -74,6 +78,30 @@ pub fn seed(state: &mut EditorState) {
         placement: None,
         blockout: Some(blockout),
     };
+    seed_shot(state, shot);
+}
+
+/// An upright video from its prompt alone.
+fn plain() -> Shot {
+    let prompt = PROMPT.split("\n\n").next().unwrap_or(PROMPT);
+    Shot {
+        request: GenerateRequest::Video {
+            prompt: prompt.into(),
+            length: Some(Time::from_secs_f64(5.0)),
+            aspect: Some("9:16".into()),
+            resolution: None,
+            first_frame: None,
+            last_frame: None,
+            references: Vec::new(),
+            audio: true,
+        },
+        grabs: Vec::new(),
+        placement: None,
+        blockout: None,
+    }
+}
+
+fn seed_shot(state: &mut EditorState, shot: Shot) {
     state.seed_approval(ApprovalRequest {
         tool: "generate_video".into(),
         category: ToolCategory::Generate,
