@@ -93,7 +93,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Persistence | Projects are `.flikk` files (versioned JSON, atomic writes, media paths absolute and relative to the file) saved where the user picks; unsaved changes autosave to `paths::autosave()`, saved files get timed copies in `paths::backups()`. Undo history and pending change sets last the session. User data is SQLite (WAL) at `paths::database()` | Projects move between folders and machines like any pro editor's; one database per user |
 | Library | FX programs (`.flikkfx`), presets (`.flikkpreset`: effects, audio effects or a grade with their values) sounds (`.flikksound`, their audio in `paths::assets()`, `library/assets/`, a folder per content) and voices (`.flikkvoice`: the provider's voice id, how it was made, the stability and similarity it reads best at, a sample under `paths::assets()/voices/`) under `paths::library()`, shared by every project (`flikk-core::library`). A voice lives on the provider's account; its file lists it, plays it and makes it again without a request. Using a program copies it into the project with its `origin`; presets carry the project programs they use; using a sound adds a media item on its file to the pool's Library bin. Removing a sound leaves the audio. Sounds without results are analyzed when they are added and on launch, for sounds, music, beats and vectors only (`AnalysisService::analyze_sound`), so nothing reaches a provider | A `.flikk` file stays complete anywhere; library edits reach a project only when its copy is updated; audio is too heavy to copy per project, and a project using it must not go offline |
 | User data | Only under `paths::home()` (`$FLIKK_HOME` or `~/.flikk`); project files and exports go where the user saves them | AGENTS.md hard rule 2 |
-| Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video, image) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
+| Online providers | `flikk-cloud`: a catalog of providers, each a folder with its client behind `Api` and the capabilities it offers (`Capability`: transcription, music, sound effects, voiceover, video, image, upscale) on which models; the user picks one per capability in Settings → Integrations (`CloudSettings`, per user in the store). Nothing runs online unless picked, and transcription stays local by default | A new provider or capability is a catalog entry, and settings, analysis and the agent find it there |
 | API keys | In the system's credential store (Keychain, Credential Manager, Secret Service; `keyring`) under the service "flikk"; where there is none, an owner-only `credentials.json` in `paths::home()`. A provider's environment variable (`ELEVENLABS_API_KEY`, `FAL_KEY`, `PIKA_API_KEY`) wins | Never in the database, `.flikk` files or logs |
 
 | Speed ramps | Speed keys on clip time, straight between them; source time is their integral, solved in closed form both ways (`flikk-core/src/speed.rs`). A ramped clip's `speed` is its mean | Exact under trims and splits (a key is added at the cut, the shape is unchanged); every timeline → source mapping goes through `Clip::to_source` / `source_offset` |
@@ -1292,7 +1292,12 @@ on the UI thread and run it off it:
   with it off the agent's videos are made silent whatever it asks. Each
   model's `cloud::VideoSound` says whether it makes sound at all, always
   (no switch: Pika H3 Flex, Kling 4.0, Kling 3.0 Turbo on Pika), or on a
-  switch; only the last are made silent.
+  switch; only the last are made silent. Beside it, a resolution
+  (`CloudSettings::video_resolution`: Auto, 480p, 720p, 1080p, 2K, 4K):
+  `VideoModel::resolution_for` fits it to the model picked (the largest of
+  its own at or below it, else its smallest), the media pool's form starts
+  on it, and the agent's videos use it when they ask for none. Auto leaves
+  the model's default.
 * **Generating pictures:** `Capability::Image` is a row in Settings →
   Integrations like video, with fal and Pika as providers. On fal: Nano
   Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and
@@ -1327,6 +1332,28 @@ on the UI thread and run it off it:
   `references` (pictures in the pool) and `frames_at` (the program at
   those times, grabbed just before); the approval carries which way it
   goes (`via`), so an older ChatGPT request still reads.
+* **Upscaling video:** `Capability::Upscale` is a row in Settings →
+  Integrations like video. On fal: Topaz Precision (Proteus, the default)
+  and Starlight, SeedVR2, Crystal, FLUX Video Upscale and Gemini Omni
+  Flash 1.2. On Pika: Topaz Proteus (the default), Starlight Precise and
+  Starlight Fast, and Pika H3 Flex's own upscale (`draft-to-video`, for
+  sources up to 768p). A `GenerateRequest::Upscale` carries the source
+  (`cloud::UpscaleSource`: its path, name, size, length and whether it has
+  sound) and a resolution ("1080p", "2k", "4k": the lines on the short
+  side), or none for the model's default (1080p where it can, else its
+  smallest). Each model's `cloud::UpscaleModel` (its resolutions, how it
+  is told how much larger: the resolution itself, a factor in a range, or
+  whole steps such as Topaz's ×2, ×3, ×4 on Pika, the longest and largest
+  source it takes, the most pixels it makes) works out the factor and
+  refuses what it can't make before anything is spent. Each model is an
+  entry in `fal/upscale.rs` or `pika/upscale.rs` with its endpoint and a
+  function writing its input; Pika's uploads stop at 50 MB, which is
+  checked first. The source is uploaded as for video and the job followed
+  the same way. Upscalers drop or encode the sound again, so `upscaled.rs`
+  puts the picture made together with the source's own sound (copied as it
+  is, else as AAC) into `<stem>.mov`, keeping the provider's file when
+  FFmpeg can't. It lands in the "Video Upscaled" bin, named
+  `upscale-<source name>`, and is analyzed like footage.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

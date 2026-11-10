@@ -221,6 +221,7 @@ impl EditorState {
                         Capability::Voiceover,
                         Capability::Video,
                         Capability::Image,
+                        Capability::Upscale,
                     ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
@@ -573,6 +574,7 @@ impl EditorState {
             Some(Capability::SoundEffects) => "Generate sound effect",
             Some(Capability::Voiceover) => "Generate voiceover",
             Some(Capability::Video) => "Generate video",
+            Some(Capability::Upscale) => "Upscale video",
             _ => "Generate music",
         };
         let bin = flikk_core::cloud::generated_bin(&item);
@@ -671,7 +673,9 @@ impl EditorState {
         for (id, capability) in new {
             self.generated_seen.insert(id);
             let analyze = match capability {
-                Capability::Video => self.models_ready(),
+                // An upscaled video is new footage to the agent: its
+                // results are keyed by the file.
+                Capability::Video | Capability::Upscale => self.models_ready(),
                 Capability::Voiceover => true,
                 _ => false,
             };

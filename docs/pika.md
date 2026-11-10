@@ -145,8 +145,8 @@ $0.02–0.09 per second by resolution.
 
 ### Not used by the editor
 
-- `pika-h3-flex/draft-to-video` (finish a 480p/768p draft at 1080p–4K),
-  `pika-h3-flex/prompt-rewriter`, `pika-h3-flex/audio-stems`;
+- `pika-h3-flex/prompt-rewriter`, `pika-h3-flex/audio-stems`
+  (`draft-to-video` is used to upscale; see "Upscaling");
 - Pikadditions and Pikaswaps (`video-to-video`: add or swap something in a
   clip), Pikaffects (`image-to-video`, `video-to-video`: named effects);
 - Pika Dynamic Captions, Video Compose, Video Merge, and the Pika audio
@@ -185,8 +185,9 @@ video and always sends a length:
   images at 8 s), plus video extension;
 - Veo 3.1 Lite, Hailuo 2.3 Fast, Grok Imagine Video 1.5: image-to-video only;
 - Gemini Omni 1.1 Flash: no length field;
-- the other video operations: video-to-video, video extension, draft
-  finishing, motion control, avatars and lip sync, upscaling.
+- the other video operations: video-to-video, video extension, motion
+  control, avatars and lip sync. Upscaling is offered on its own (see
+  "Upscaling").
 
 Kling's omni-video references are left out: Pika states no limits for them.
 Most models' references are cited `@Image1`, `@Video1`, `@Audio1`, as Pika's
@@ -260,6 +261,25 @@ key, every model's text-to-image body (no shape, each shape, each
 resolution, transparent where offered) and image-to-image body (one
 picture, its most pictures, pictures with a shape) as `image.rs` writes it
 answers 401, which is how Recraft 4.1's refused `size` was found.
+
+## Upscaling
+
+Two operations make a video larger; both are jobs as above, take the video
+as an uploaded URL (50 MB at most) and answer `output.video.url`. Read on
+2026-11-10 from the catalog's `input_schema`.
+
+| Operation | Fields | Limits | Price |
+| --- | --- | --- | --- |
+| Topaz Video Upscale (`topaz/topaz-video-upscale/video-upscale`) | `video_url`; `upscale_factor` `x2` (default), `x3`, `x4` (`x1` only interpolates frames); `model` `proteus` (default), `starlight-mini`, `starlight-hq`, `starlight-sharp`, `starlight-fast-2`, `starlight-precise-2.6`; `h264_output` (default H.265); Proteus tuning (`compression`, `noise`, `halo`, `grain`, `recover_detail`), `target_fps`, `slowdown_factor` | output at most 4096 × 2160 pixels in all; Starlight takes sources up to 30 fps and, except Precise 2.6, never makes less than 720p | Proteus $0.19 per 1,000 output megapixels; Starlight $1.92 (Fast 2) or $3.84 per 1,000 1080p frames, $4.20 or $8.39 per 1,000 4K frames |
+| Pika H3 Flex Draft to Video (`pika/pika-h3-flex/draft-to-video`) | `video` (or `draft_job_id`, a 480p/768p H3 Flex job of the account's); `resolution` `1080p`, `2k` (default), `4k` | short side at most 768 px; 512 MiB, 1,441 frames; keeps the frames, frame rate and sound | the final resolution's price per second less the native 480p/768p price |
+
+`crates/flikk-cloud/src/pika/upscale.rs` offers Topaz Proteus (the
+default), Starlight Precise 2.6 and Starlight Fast 2, each with
+`h264_output` on and the smallest factor reaching the resolution asked
+for, and H3 Flex's `draft-to-video` with the resolution itself. Proteus
+tuning, frame interpolation and Starlight Mini, HQ and Sharp are not used.
+Topaz Image Upscale (`topaz/topaz-image-upscale/image-upscale`) is not
+used: pictures are not upscaled yet.
 
 ## Verified
 

@@ -1,7 +1,7 @@
 //! What a provider is asked to make, and what each video and image model
 //! can make, so a request is checked before it costs anything.
 
-use super::{Capability, CloudError, CloudResult};
+use super::{Capability, CloudError, CloudResult, UpscaleSource};
 use crate::model::MediaKind;
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,15 @@ pub enum GenerateRequest {
         /// A transparent background, where the model makes one.
         #[serde(default)]
         transparent: bool,
+    },
+    /// A video in the pool made again at a larger resolution, with its own
+    /// sound; see [`super::UpscaleModel`].
+    Upscale {
+        source: UpscaleSource,
+        /// "1080p", "2k", "4k"; `None` takes the model's default for the
+        /// source.
+        #[serde(default)]
+        resolution: Option<String>,
     },
 }
 
@@ -493,9 +502,12 @@ impl GenerateRequest {
             Self::Voiceover { .. } => Capability::Voiceover,
             Self::Video { .. } => Capability::Video,
             Self::Image { .. } => Capability::Image,
+            Self::Upscale { .. } => Capability::Upscale,
         }
     }
 
+    /// What it asks for: the prompt, a voiceover's script, or the name of
+    /// the video to upscale.
     pub fn prompt(&self) -> &str {
         match self {
             Self::Music { prompt, .. }
@@ -503,6 +515,7 @@ impl GenerateRequest {
             | Self::Video { prompt, .. }
             | Self::Image { prompt, .. } => prompt,
             Self::Voiceover { text, .. } => text,
+            Self::Upscale { source, .. } => &source.name,
         }
     }
 
@@ -544,6 +557,7 @@ impl GenerateRequest {
             Self::Music { length, .. }
             | Self::SoundEffect { length, .. }
             | Self::Video { length, .. } => *length,
+            Self::Upscale { source, .. } => source.length,
             Self::Voiceover { .. } | Self::Image { .. } => None,
         }
     }
@@ -555,12 +569,19 @@ impl GenerateRequest {
             let more = if start.len() < text.len() { "…" } else { "" };
             return format!("Voiceover, {}: {start}{more}", reading.voice_name);
         }
+        if let Self::Upscale { source, resolution } = self {
+            return match resolution {
+                Some(r) => format!("Upscale to {}: {}", r.to_ascii_uppercase(), source.name),
+                None => format!("Upscale: {}", source.name),
+            };
+        }
         let what = match self {
             Self::Music { .. } => "Music",
             Self::SoundEffect { .. } => "Sound effect",
             Self::Voiceover { .. } => "Voiceover",
             Self::Video { .. } => "Video",
             Self::Image { .. } => "Image",
+            Self::Upscale { .. } => "Upscale",
         };
         match self.length() {
             Some(t) => format!("{what}, {:.0} s: {}", t.as_secs_f64(), self.prompt()),

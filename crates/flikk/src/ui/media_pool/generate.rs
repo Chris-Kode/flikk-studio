@@ -411,7 +411,7 @@ fn failure(e: &CloudError) -> String {
 fn badge_icon(capability: Capability) -> IconName {
     match capability {
         Capability::Image => IconName::Image,
-        Capability::Video => IconName::Video,
+        Capability::Video | Capability::Upscale => IconName::Video,
         _ => IconName::AudioLines,
     }
 }

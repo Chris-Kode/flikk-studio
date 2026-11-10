@@ -1,23 +1,27 @@
 //! Pika (dev.pika.art): video and pictures, from the models in
-//! [`models`]. Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes)
-//! and the other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo,
-//! Wan, Happy Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from
-//! a description or from pictures: Nano Banana, GPT Image, Seedream,
-//! Ideogram, Grok Imagine, Muse, Recraft. Every call sends the key as
-//! `X-API-Key`. Both are made as media jobs ([`jobs`]); what goes in is
-//! [`video`]'s or [`image`]'s, and the files they follow are uploaded to
-//! Pika first ([`files`]). See `docs/pika.md`.
+//! [`models`], and larger videos, from the operations in [`upscale`].
+//! Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes) and the
+//! other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy
+//! Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from a
+//! description or from pictures: Nano Banana, GPT Image, Seedream,
+//! Ideogram, Grok Imagine, Muse, Recraft. Larger videos: Topaz, and Pika H3
+//! Flex's own upscale. Every call sends the key as `X-API-Key`. All are
+//! made as media jobs ([`jobs`]); what goes in is [`video`]'s, [`image`]'s
+//! or [`upscale`]'s, and the files they follow are uploaded to Pika first
+//! ([`files`]). See `docs/pika.md`.
 
 mod files;
 mod image;
 mod jobs;
 mod models;
+mod upscale;
 mod video;
 
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, VideoModel,
+    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, UpscaleModel,
+    VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -160,6 +164,28 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Upscale,
+            // The ids and order of `upscale::UPSCALE`, the default first.
+            models: &[
+                CloudModel {
+                    id: "topaz/topaz-video-upscale",
+                    name: "Topaz Proteus",
+                },
+                CloudModel {
+                    id: "topaz/topaz-video-upscale/starlight-precise-2.6",
+                    name: "Topaz Starlight Precise",
+                },
+                CloudModel {
+                    id: "topaz/topaz-video-upscale/starlight-fast-2",
+                    name: "Topaz Starlight Fast",
+                },
+                CloudModel {
+                    id: "pika/pika-h3-flex/draft-to-video",
+                    name: "Pika H3 Flex Upscale",
+                },
+            ],
+        },
     ],
     api: &Pika,
 };
@@ -206,6 +232,10 @@ impl Api for Pika {
                 let model = models::find_image(model).ok_or_else(missing)?;
                 image::run(key, model, request, stem, task)
             }
+            Capability::Upscale => {
+                let model = upscale::find(model).ok_or_else(missing)?;
+                upscale::run(key, model, request, stem, task)
+            }
             _ => {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
@@ -219,6 +249,10 @@ impl Api for Pika {
 
     fn image_model(&self, model: &str) -> Option<&'static ImageModel> {
         models::find_image(model).map(|m| &m.spec)
+    }
+
+    fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
+        upscale::find(model).map(|m| &m.spec)
     }
 }
 
