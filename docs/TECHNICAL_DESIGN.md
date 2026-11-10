@@ -1353,7 +1353,15 @@ on the UI thread and run it off it:
   puts the picture made together with the source's own sound (copied as it
   is, else as AAC) into `<stem>.mov`, keeping the provider's file when
   FFmpeg can't. It lands in the "Video Upscaled" bin, named
-  `upscale-<source name>`, and is analyzed like footage.
+  `upscale-<source name>`, and is analyzed like footage. In the media pool,
+  "Upscale…" on a video (`media_pool/upscale.rs`) offers the resolutions
+  the model can make it at (`UpscaleModel::targets_for`, starting on its
+  default) and, when a clip shows it, "Replace clips":
+  `EditorState::upscale` then runs `Command::SwapMedia` once the file
+  lands, as an undo step of its own. `SwapMedia { from, to }` points every
+  clip of `from` on an unlocked picture track at `to`, at the same source
+  times; sound clips keep `from`, whose sound the upscaled video carries
+  anyway.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

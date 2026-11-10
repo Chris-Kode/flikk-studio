@@ -15,6 +15,7 @@ use flikk_core::analysis::AnalysisSteps;
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::cloud::{Capability, CloudError, GenerateRequest, GenerationTask, ProviderChoice};
+use flikk_core::command::Command;
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::AnalysisConfig;
 use gpui_kit::*;
@@ -406,6 +407,33 @@ impl EditorState {
         grabs: Vec<FrameGrab>,
         cx: &mut Context<Self>,
     ) {
+        self.start_generation(request, grabs, None, cx);
+    }
+
+    /// Make pool video `source` larger as `request` says (an
+    /// [`GenerateRequest::Upscale`] of it), into the Video Upscaled bin;
+    /// with `replace`, its clips on picture tracks then show the upscaled
+    /// video, as a step of its own to undo.
+    pub fn upscale(
+        &mut self,
+        source: MediaId,
+        request: GenerateRequest,
+        replace: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_generation(request, Vec::new(), replace.then_some(source), cx);
+    }
+
+    /// Make `request`, after grabbing `grabs`; what it made replaces
+    /// `replaces` in the timeline when that is set and the project is still
+    /// open.
+    fn start_generation(
+        &mut self,
+        request: GenerateRequest,
+        grabs: Vec<FrameGrab>,
+        replaces: Option<MediaId>,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
@@ -438,7 +466,10 @@ impl EditorState {
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
                         if this.bus.project().id == owner {
-                            this.add_generated(item, cx);
+                            let made = this.add_generated(item, cx);
+                            if let Some((from, to)) = replaces.zip(made) {
+                                this.execute(Command::SwapMedia { from, to }, cx);
+                            }
                         } else {
                             this.keep_for(owner, item, Author::User);
                         }
