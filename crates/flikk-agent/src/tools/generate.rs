@@ -38,6 +38,24 @@ impl Placement {
     }
 }
 
+/// Where a generated file goes once it is in the pool.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Destination {
+    /// Only the pool.
+    Pool,
+    /// Proposed on the timeline as well.
+    Timeline(Placement),
+    /// Proposed in place of this video in its clips: it is a version of it
+    /// (an upscale).
+    Replace(MediaId),
+}
+
+impl From<Option<Placement>> for Destination {
+    fn from(placement: Option<Placement>) -> Self {
+        placement.map_or(Self::Pool, Self::Timeline)
+    }
+}
+
 /// The request and its placement, from the tool's arguments.
 pub(crate) fn parse(
     project: &Project,
@@ -183,7 +201,7 @@ pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         match generation.generate(&request, &flikk_core::paths::generated(), &task) {
             Ok(made) => JobDone::Generated {
                 item: Box::new(flikk_core::cloud::media_item(&made, media.as_deref())),
-                placement,
+                destination: placement.into(),
                 summary: request.summary(),
             },
             Err(e) => JobDone::Done(Done::error(error_text(&e))),
@@ -220,12 +238,13 @@ pub fn error_text(e: &CloudError) -> String {
 }
 
 /// Back on the UI thread with what a provider made: add it to the pool,
-/// and place it as `author` (none when the turn was cancelled).
+/// and propose it where `destination` says as `author` (none when the
+/// turn was cancelled).
 pub(crate) fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
     item: MediaItem,
-    placement: Option<&Placement>,
+    destination: &Destination,
     summary: &str,
 ) -> Done {
     let picture = (item.kind == MediaKind::Image).then(|| item.path.clone());
@@ -242,9 +261,11 @@ pub(crate) fn finish(
         "Made it: media {}{length} in the {bin} bin; view_media shows it.",
         short(media)
     );
-    match (placement, author) {
-        (Some(placement), Some(author)) => {
-            match propose_placement(bus, author, media, placement, summary) {
+    match (destination, author) {
+        (Destination::Pool, _) => {}
+        (_, None) => text.push_str(" The turn was cancelled, so it was not placed."),
+        (destination, Some(author)) => {
+            match propose_destination(bus, author, media, destination, summary) {
                 Ok(placed) => {
                     text.push(' ');
                     text.push_str(&placed);
@@ -252,8 +273,6 @@ pub(crate) fn finish(
                 Err(e) => text.push_str(&format!(" Could not place it: {e}")),
             }
         }
-        (Some(_), None) => text.push_str(" The turn was cancelled, so it was not placed."),
-        (None, _) => {}
     }
     let mut done = Done::text(format!("generated {summary}"), text);
     done.images.extend(picture);
@@ -272,7 +291,12 @@ pub(crate) fn add_to_pool(
 ) -> Result<MediaId, String> {
     let id = item.id;
     let bin = cloud::generated_bin(&item);
+    let upscaled = item
+        .generated
+        .as_deref()
+        .is_some_and(|g| g.capability == Capability::Upscale);
     let label = match item.kind {
+        MediaKind::Video if upscaled => "Upscale video",
         MediaKind::Video => "Generate video",
         MediaKind::Image => "Generate image",
         _ => "Generate audio",
@@ -282,6 +306,51 @@ pub(crate) fn add_to_pool(
     bus.execute_shared_as(commands, label, author)
         .map(|_| id)
         .map_err(|e| e.to_string())
+}
+
+/// Propose `media` where `destination` says, as `author`; what happened,
+/// for the model. Nothing for [`Destination::Pool`].
+pub fn propose_destination(
+    bus: &mut CommandBus,
+    author: &Author,
+    media: MediaId,
+    destination: &Destination,
+    reason: &str,
+) -> Result<String, String> {
+    match destination {
+        Destination::Pool => Ok(String::new()),
+        Destination::Timeline(placement) => {
+            propose_placement(bus, author, media, placement, reason)
+        }
+        Destination::Replace(from) => propose_replacement(bus, author, *from, media, reason),
+    }
+}
+
+/// Propose that the clips of `from` on picture tracks show `to` instead,
+/// as `author`. What happened, for the model.
+fn propose_replacement(
+    bus: &mut CommandBus,
+    author: &Author,
+    from: MediaId,
+    to: MediaId,
+    reason: &str,
+) -> Result<String, String> {
+    let clips = (bus.view_for(author).timeline)
+        .picture_clips_of(from)
+        .count();
+    if clips == 0 {
+        return Ok(format!(
+            "No clip on an unlocked picture track shows media {}, so none was replaced.",
+            short(from)
+        ));
+    }
+    bus.execute(Command::SwapMedia { from, to }, author.clone(), reason)
+        .map_err(|e| e.to_string())?;
+    let what = if clips == 1 { "clip" } else { "clips" };
+    Ok(format!(
+        "Proposed it in place of media {} in {clips} {what}; their sound stays on it.",
+        short(from)
+    ))
 }
 
 /// Propose `media` on the timeline as `placement` says, as `author`: on its

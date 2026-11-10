@@ -727,7 +727,7 @@ impl EditorState {
     ) -> ApprovalOutcome {
         let approve::Generated {
             item,
-            placement,
+            destination,
             summary,
         } = made;
         let name = approve::file_name(&item.path);
@@ -743,10 +743,14 @@ impl EditorState {
         };
         let mut outcome =
             format!("approved: {summary}; made media {media} ({name}) in the {bin} bin");
-        if let Some(placement) = placement {
+        if destination != flikk_agent::tools::generate::Destination::Pool {
             match self.with_agent_set(cx, |bus, author| {
-                flikk_agent::tools::generate::propose_placement(
-                    bus, author, media, &placement, &summary,
+                flikk_agent::tools::generate::propose_destination(
+                    bus,
+                    author,
+                    media,
+                    &destination,
+                    &summary,
                 )
             }) {
                 Ok(text) => outcome.push_str(&format!("; {text}")),

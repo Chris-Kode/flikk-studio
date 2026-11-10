@@ -252,7 +252,7 @@ pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         move || match make(&request, project.as_ref(), &services, &task) {
             Ok(item) => JobDone::Generated {
                 item: Box::new(item),
-                placement: None,
+                destination: super::generate::Destination::Pool,
                 summary: summary(&request),
             },
             Err(ToolError(e)) => JobDone::Done(Done::error(e)),

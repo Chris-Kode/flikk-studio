@@ -12,7 +12,6 @@ use crate::ui::kit::theme as t;
 use crate::ui::kit::{DialogExt as _, Select, SelectEvent, Switch, h_flex, v_flex};
 use flikk_core::MediaId;
 use flikk_core::cloud::{Capability, GenerateRequest, UpscaleModel, UpscaleSource};
-use flikk_core::model::{ClipContent, TrackKind};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -56,16 +55,10 @@ impl UpscaleForm {
             .iter()
             .map(|r| cx.subscribe(r, |_, _, _: &SelectEvent<Choice>, cx| cx.notify()))
             .collect();
-        let used = state
-            .read(cx)
-            .bus
-            .project()
-            .timeline
-            .tracks
-            .iter()
-            .filter(|t| t.kind != TrackKind::Audio)
-            .flat_map(|t| &t.clips)
-            .any(|c| matches!(&c.content, ClipContent::Media { media: m, .. } if *m == media));
+        let used = (state.read(cx).bus.project().timeline)
+            .picture_clips_of(media)
+            .next()
+            .is_some();
         Self {
             state,
             media,

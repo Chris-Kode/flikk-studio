@@ -1362,6 +1362,12 @@ on the UI thread and run it off it:
   clip of `from` on an unlocked picture track at `to`, at the same source
   times; sound clips keep `from`, whose sound the upscaled video carries
   anyway.
+  The agent's `upscale_video` (`tools/upscale.rs`, Generate) takes a pool
+  video, a resolution (default: the model's default for it) and `replace`,
+  and is approved like `generate_video`. Where a generated file goes once
+  in the pool is a `generate::Destination`: the pool only, a placement on
+  the timeline, or `Replace(media)`, which proposes `SwapMedia` in the
+  agent's change set for review.
 * **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
   the script: audio tags, ellipses and capitals, with no SSML, so
   `cloud::check_script` refuses a `<break>` before any credits are spent and

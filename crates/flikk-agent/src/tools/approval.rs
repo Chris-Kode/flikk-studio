@@ -150,6 +150,18 @@ pub fn request(
                 super::video::request_json(&request, &grabs, placement.as_ref()),
             )
         }
+        super::upscale::TOOL => {
+            let generation = ctx.services.generation.as_deref();
+            let model = generation.and_then(|g| g.upscale_model());
+            let (request, replaces) = super::upscale::parse(project, model.as_ref(), args)?;
+            if !generation.is_some_and(|g| g.provider_for(request.capability()).is_some()) {
+                return Err(ToolError(super::generate::unavailable(&request)));
+            }
+            (
+                super::upscale::summary(&request, replaces),
+                super::upscale::request_json(&request, replaces),
+            )
+        }
         super::image::TOOL => {
             let request = super::image::parse(project, ctx.settings, ctx.services, args)?;
             (

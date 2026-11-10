@@ -436,6 +436,19 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    /// The clips showing `media` on unlocked picture tracks, with their
+    /// track: what [`crate::command::Command::SwapMedia`] points at
+    /// another version of it.
+    pub fn picture_clips_of(&self, media: MediaId) -> impl Iterator<Item = (&Track, &Clip)> {
+        self.tracks
+            .iter()
+            .filter(|t| !t.locked && t.kind != TrackKind::Audio)
+            .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
+            .filter(move |(_, c)| {
+                matches!(&c.content, ClipContent::Media { media: m, .. } if *m == media)
+            })
+    }
+
     /// Where a new track of `kind` goes and its free default name:
     /// captions on top, audio below the last track, the rest above the
     /// video tracks.

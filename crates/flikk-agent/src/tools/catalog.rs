@@ -1670,6 +1670,19 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::upscale::TOOL,
+            Some(Generate),
+            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
+            object(
+                json!({
+                    "media": string("Media id of a video in the pool"),
+                    "resolution": one_of(&["720p", "1080p", "2k", "4k"], "Lines on the short side (default: 1080p where the model can make it, else the smallest above the video's own)"),
+                    "replace": boolean("Propose the upscaled video in place of this one in its clips on picture tracks (default false: it only goes to the pool)")
+                }),
+                &["media"],
+            ),
+        ),
+        spec(
             super::image::TOOL,
             Some(Generate),
             "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",

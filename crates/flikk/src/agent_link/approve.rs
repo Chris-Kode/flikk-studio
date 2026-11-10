@@ -1,7 +1,7 @@
 //! Carrying out an approved agent request: memory goes to the store, skills
 //! and styles to their files,
 //! programs and sounds to the user's library, renders and exports to `flikk-deliver`,
-//! music, sound effects, voiceovers and videos to the provider set for them, as are
+//! music, sound effects, voiceovers, videos and upscales to the provider set for them, as are
 //! voices added or designed, which then go to the library; pictures to the
 //! user's ChatGPT plan. Outputs always
 //! get a free name, so nothing here overwrites a file.
@@ -9,7 +9,7 @@
 use crate::persistence;
 use anyhow::{Context as _, Result, anyhow, bail};
 use flikk_agent::tools::ApprovalRequest;
-use flikk_agent::tools::generate::{self, Placement};
+use flikk_agent::tools::generate::{self, Destination};
 use flikk_core::agent::AgentSettings;
 use flikk_core::memory::{
     CaptionStyle, FactKind, FactStatus, RuleScope, RuleStatus, SourceFact, StyleRule,
@@ -54,7 +54,7 @@ pub struct Respoken {
 /// What an approved generation made.
 pub struct Generated {
     pub item: MediaItem,
-    pub placement: Option<Placement>,
+    pub destination: Destination,
     pub summary: String,
 }
 
@@ -113,7 +113,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     .map_err(|e| anyhow!(generate::error_text(&e)))?;
                 Ok(Generated {
                     item: flikk_core::cloud::media_item(&made, media.as_deref()),
-                    placement,
+                    destination: placement.into(),
                     summary: request.summary(),
                 })
             })))
@@ -142,7 +142,32 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     .map_err(|e| anyhow!(video::error_text(&e)))?;
                 Ok(Generated {
                     item: flikk_core::cloud::media_item(&made, services.media.as_deref()),
-                    placement,
+                    destination: placement.into(),
+                    summary: request.summary(),
+                })
+            })))
+        }
+        flikk_agent::tools::upscale::TOOL => {
+            use flikk_agent::tools::upscale;
+            let (request, destination) =
+                upscale::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
+            let generation = inputs
+                .services
+                .generation
+                .clone()
+                .ok_or_else(|| anyhow!("generation is not available"))?;
+            let media = inputs.services.media.clone();
+            Ok(Started::Generate(Box::new(move || {
+                let made = generation
+                    .generate(
+                        &request,
+                        &flikk_core::paths::generated(),
+                        &flikk_core::cloud::GenerationTask::default(),
+                    )
+                    .map_err(|e| anyhow!(upscale::error_text(&e)))?;
+                Ok(Generated {
+                    item: flikk_core::cloud::media_item(&made, media.as_deref()),
+                    destination,
                     summary: request.summary(),
                 })
             })))
@@ -158,7 +183,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     .map_err(|e| anyhow!(e.0))?;
                 Ok(Generated {
                     item,
-                    placement: None,
+                    destination: Destination::Pool,
                     summary: image::summary(&request),
                 })
             })))

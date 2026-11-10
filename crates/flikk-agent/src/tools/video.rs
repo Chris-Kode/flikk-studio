@@ -286,7 +286,7 @@ pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
                     &made,
                     services.media.as_deref(),
                 )),
-                placement,
+                destination: placement.into(),
                 summary: request.summary(),
             },
             Err(e) => JobDone::Done(Done::error(error_text(&e))),

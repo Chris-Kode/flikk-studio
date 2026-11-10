@@ -79,28 +79,20 @@ pub(super) fn swap_media(project: &Project, from: MediaId, to: MediaId) -> Resul
             "a clip can only show media of the same kind".into(),
         ));
     }
-    let mut out = Vec::new();
-    let pictures = project
+    let out = project
         .timeline
-        .tracks
-        .iter()
-        .filter(|t| !t.locked && t.kind != TrackKind::Audio);
-    for track in pictures {
-        for clip in &track.clips {
+        .picture_clips_of(from)
+        .map(|(track, clip)| {
             let mut after = clip.clone();
-            let ClipContent::Media { media, .. } = &mut after.content else {
-                continue;
-            };
-            if *media != from {
-                continue;
+            if let ClipContent::Media { media, .. } = &mut after.content {
+                *media = to;
             }
-            *media = to;
-            out.push(Op::UpdateClip {
+            Op::UpdateClip {
                 track: track.id,
                 before: Box::new(clip.clone()),
                 after: Box::new(after),
-            });
-        }
-    }
+            }
+        })
+        .collect();
     Ok(ops(out))
 }
