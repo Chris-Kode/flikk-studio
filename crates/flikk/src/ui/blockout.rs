@@ -6,7 +6,7 @@ pub mod editor;
 
 use crate::ui::kit::theme as t;
 use crate::ui::viewer::latest::Latest;
-use flikk_core::blockout::{FPS, Scene};
+use flikk_core::blockout::{Detail, FPS, Scene};
 use gpui_kit::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,8 @@ const FAST: Duration = Duration::from_millis(16);
 const NARROWEST: u32 = 192;
 
 /// A scene playing in a loop, drawn off the UI thread at the width it can
-/// keep up with. It fills the box it is given.
+/// keep up with; a frame it stops on is drawn again in full. It fills the
+/// box it is given.
 pub struct BlockoutPlayer {
     scene: Arc<Scene>,
     /// Counts the scenes shown, so a frame of an earlier one is dropped.
@@ -97,7 +98,7 @@ impl BlockoutPlayer {
         match self.playing.take() {
             Some(_) => {
                 self.clock = None;
-                cx.notify();
+                self.draw(cx);
             }
             None => self.play(cx),
         }
@@ -137,19 +138,22 @@ impl BlockoutPlayer {
     /// Draw the frame on screen now, or after the one being drawn.
     fn draw(&mut self, cx: &mut Context<Self>) {
         if let Some(at) = self.drawing.queue(self.at) {
-            self.start_drawing(at, cx);
+            self.start_drawing(at, Detail::Draft, cx);
         }
         cx.notify();
     }
 
-    fn start_drawing(&mut self, at: f64, cx: &mut Context<Self>) {
+    fn start_drawing(&mut self, at: f64, detail: Detail, cx: &mut Context<Self>) {
         self.drawing.start();
         let (scene, version) = (self.scene.clone(), self.version);
-        let width = self.width;
+        let width = match detail {
+            Detail::Draft => self.width,
+            Detail::Full => self.full_width,
+        };
         let height = (width as u64 * self.shape.1 as u64 / self.shape.0 as u64).max(1) as u32;
         let drawn = cx.background_executor().spawn(async move {
             let began = Instant::now();
-            let frame = scene.render(at, width, height);
+            let frame = scene.render(at, width, height, detail);
             // Greys read the same as RGBA and as the BGRA the GPU takes.
             let picture = image::RgbaImage::from_raw(width, height, frame.rgba.to_vec())
                 .map(|buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
@@ -163,9 +167,16 @@ impl BlockoutPlayer {
                 {
                     this.retired.extend(this.picture.replace(picture));
                 }
-                this.pace(took);
-                if let Some(next) = this.drawing.finish() {
-                    this.start_drawing(next, cx);
+                if detail == Detail::Draft {
+                    this.pace(took);
+                }
+                match this.drawing.finish() {
+                    Some(next) => this.start_drawing(next, Detail::Draft, cx),
+                    // Stopped on this frame: draw it once more, in full.
+                    None if this.playing.is_none() && detail == Detail::Draft => {
+                        this.start_drawing(at, Detail::Full, cx);
+                    }
+                    None => {}
                 }
                 cx.notify();
             });

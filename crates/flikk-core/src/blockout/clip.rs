@@ -1,6 +1,6 @@
 //! A scene as a video file: the clip a video model follows.
 
-use super::{FPS, Scene};
+use super::{Detail, FPS, Scene};
 use flikk_os::process::{ChildGuard, command, ffmpeg};
 use std::io::Write as _;
 use std::path::Path;
@@ -80,7 +80,8 @@ impl Scene {
             if cancelled() {
                 return Err("stopped".into());
             }
-            let picture = self.render(frame as f64 / FPS as f64, width, height);
+            let at = frame as f64 / FPS as f64;
+            let picture = self.render(at, width, height, Detail::Full);
             frames.write_all(&picture.rgba).map_err(|e| fail(&e))?;
         }
         drop(frames);

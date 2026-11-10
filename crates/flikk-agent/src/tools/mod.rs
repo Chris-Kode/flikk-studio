@@ -334,6 +334,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "view_audio" => audio::view_audio(ctx, &args),
         "get_scopes" => preview::get_scopes(ctx, &args),
         "preview_fx" => preview::preview_fx(ctx, &args),
+        video::PREVIEW => video::preview(ctx, &args),
         "measure_loudness" => view::measure_loudness(ctx, &args),
         web::TOOL => web::serve(ctx, &args),
 

@@ -77,7 +77,7 @@ enum Corner {
 /// A blockout being written for a shot that has none, at the user's ask.
 enum Draft {
     None,
-    Working(Reblock),
+    Working(Box<Reblock>),
     /// Why none came of it: the backend failed, or said there is nothing
     /// to block.
     Failed(String),
@@ -438,7 +438,7 @@ impl ShotCard {
         };
         let settings = self.state.read(cx).settings.clone();
         self.draft = match Reblock::draft(self.shot.look(), seconds, self.shape, &settings) {
-            Ok(drafting) => Draft::Working(drafting),
+            Ok(drafting) => Draft::Working(Box::new(drafting)),
             Err(e) => Draft::Failed(e.to_string()),
         };
         self.draft_poll = Some(cx.spawn(async move |this, cx| {

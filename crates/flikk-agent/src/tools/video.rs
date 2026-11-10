@@ -9,12 +9,17 @@
 //!
 //! A [`Shot`] is the video with what it is made from: the user sees it,
 //! and may change it, before approving. It can follow a blockout, a rough
-//! 3D scene drawn here for nothing, so staging, camera and timing are
-//! settled before the provider is paid.
+//! 3D scene drawn here for nothing, so staging, action, camera and timing
+//! are settled before the provider is paid. `preview_blockout` shows the
+//! agent a scene it wrote, drawn and in words, before it asks.
 
 use super::generate::Placement;
-use crate::args::{Args, ToolResultOf, fail, media_id, secs, track_id};
-use flikk_core::blockout::Scene;
+use super::preview::{collage, columns};
+use super::view::{image_content, save_png};
+use super::{Done, Job, JobDone, Step, ToolCtx};
+use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, secs, track_id};
+use crate::bridge::{Content, ToolResult};
+use flikk_core::blockout::{Detail, Scene};
 use flikk_core::cloud::{
     CloudError, GenerateRequest, GenerationService, VideoModel, VideoReference,
 };
@@ -28,6 +33,11 @@ use std::path::{Path, PathBuf};
 
 /// Widest frame sent as a first or last frame.
 const FRAME_WIDTH: u32 = 1920;
+/// The tool that shows a blockout before its video is asked for.
+pub const PREVIEW: &str = "preview_blockout";
+/// How many frames its collage has, and the longer side of each.
+const PREVIEW_FRAMES: usize = 8;
+const PREVIEW_SIDE: f64 = 384.0;
 
 /// A frame of the program to grab before the video is made, into `path`
 /// (which the request already names).
@@ -115,7 +125,7 @@ impl Blockout {
     pub fn still(&self, at: f64) -> Result<PathBuf, String> {
         let name = format!("{}.png", uuid::Uuid::new_v4().simple());
         let path = paths::cache().join("frames").join(name);
-        let frame = self.scene.render(at, self.size.0, self.size.1);
+        let frame = (self.scene).render(at, self.size.0, self.size.1, Detail::Full);
         super::view::write_png(&path, &frame)
             .map(|()| path)
             .map_err(|e| format!("could not write the blockout's frame: {e}"))
@@ -275,8 +285,8 @@ impl Shot {
 /// How a prompt is told what its blockout is, when it doesn't say, and
 /// what a first frame beside it is.
 const BLOCKOUT_ROLE: &str = "@Video1 is a rough 3D blockout";
-const BLOCKOUT_LINE: &str = "@Video1 is a rough 3D blockout: follow its camera move, staging \
-    and timing. Its grey shapes are stand-ins, not the look.";
+const BLOCKOUT_LINE: &str = "@Video1 is a rough 3D blockout: follow its camera move, staging, \
+    action and timing. Its grey shapes are stand-ins, not the look.";
 const FIRST_FRAME_LINE: &str = "Start on @Image1 as the first frame.";
 
 /// `prompt` saying what the blockout, and a first frame sent with it, are
@@ -342,19 +352,8 @@ pub(crate) fn parse(project: &Project, setup: &VideoSetup, args: &Args) -> ToolR
     let aspect = args.opt_str("aspect")?.map(str::to_owned);
     let blockout = match args.value("blockout") {
         Some(json) if !json.is_null() => {
-            let mut json = json.clone();
-            if let (Some(scene), Some(secs)) = (json.as_object_mut(), asked)
-                && !scene.contains_key("duration")
-            {
-                scene.insert("duration".into(), json!(secs));
-            }
-            let scene = Scene::parse(&json).map_err(crate::args::ToolError)?;
-            let settings = &project.timeline.settings;
-            let shape = aspect
-                .as_deref()
-                .and_then(aspect_ratio)
-                .unwrap_or(settings.width as f64 / settings.height.max(1) as f64);
-            Some(Blockout::new(scene, shape))
+            let scene = scene_of(json, asked)?;
+            Some(Blockout::new(scene, shape_of(project, aspect.as_deref())))
         }
         _ => None,
     };
@@ -444,8 +443,83 @@ pub(crate) fn parse(project: &Project, setup: &VideoSetup, args: &Args) -> ToolR
         placement: at.map(|at| Placement { at, track }),
         blockout,
     };
-    shot.check(model).map_err(crate::args::ToolError)?;
+    shot.check(model).map_err(ToolError)?;
     Ok(shot)
+}
+
+/// The scene `json` describes, `seconds` long when it gives no length.
+fn scene_of(json: &Value, seconds: Option<f64>) -> ToolResultOf<Scene> {
+    let mut json = json.clone();
+    if let (Some(scene), Some(secs)) = (json.as_object_mut(), seconds)
+        && !scene.contains_key("duration")
+    {
+        scene.insert("duration".into(), json!(secs));
+    }
+    Scene::parse(&json).map_err(ToolError)
+}
+
+/// The shape of a video asked for as `aspect`, width over height: the
+/// sequence's when it gives none.
+fn shape_of(project: &Project, aspect: Option<&str>) -> f64 {
+    let settings = &project.timeline.settings;
+    aspect
+        .and_then(aspect_ratio)
+        .unwrap_or(settings.width as f64 / settings.height.max(1) as f64)
+}
+
+/// `preview_blockout`: a blockout drawn at a few moments and said in
+/// words, so whoever wrote it can see it before the user does.
+pub(crate) fn preview(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
+    let Some(json) = args.value("blockout").filter(|json| !json.is_null()) else {
+        return fail("`blockout` is the scene to look at");
+    };
+    let seconds = args.opt_f64("duration")?.filter(|secs| *secs > 0.0);
+    let scene = scene_of(json, seconds)?;
+    let shape = shape_of(ctx.project(), args.opt_str("aspect")?);
+    let job: Job = Box::new(move || JobDone::Done(drawn(&scene, shape)));
+    Ok(Step::Job(job))
+}
+
+/// `scene` in a picture `shape` wide to one high, as a collage of frames
+/// across it and as what its camera sees.
+fn drawn(scene: &Scene, shape: f64) -> Done {
+    let (wide, high) = Scene::clip_size(shape);
+    let scale = PREVIEW_SIDE / wide.max(high) as f64;
+    let size = [wide, high].map(|side| ((side as f64 * scale) as u32).max(8));
+    let times: Vec<f64> = (0..PREVIEW_FRAMES)
+        .map(|i| scene.duration * i as f64 / (PREVIEW_FRAMES - 1) as f64)
+        .collect();
+    let tiles: Vec<_> = (times.iter())
+        .map(|t| {
+            let frame = scene.render(*t, size[0], size[1], Detail::Full);
+            (frame, format!("{t:.1}s"))
+        })
+        .collect();
+    let image = save_png(&collage(&tiles, (size[0], size[1])))
+        .and_then(|path| Ok((image_content(&path)?, path)));
+    let (image, path) = match image {
+        Ok(image) => image,
+        Err(ToolError(e)) => return Done::error(e),
+    };
+    let cols = columns(tiles.len());
+    let review = scene.review((wide, high)).text();
+    let text = format!(
+        "The blockout, {:.1} s, at {} moments: {cols} columns × {} rows, left to right then \
+         top to bottom, each stamped with its time. What its camera sees:\n{review}\n\nFix what is \
+         not as the shot needs and look again; then pass the scene to `generate_video`.",
+        scene.duration,
+        tiles.len(),
+        tiles.len().div_ceil(cols),
+    );
+    Done {
+        result: ToolResult {
+            content: vec![Content::Text { text }, image],
+            is_error: false,
+        },
+        summary: format!("Blockout, {:.0} s: {} frames", scene.duration, tiles.len()),
+        images: vec![path],
+        ..Default::default()
+    }
 }
 
 /// "16:9" as 1.78; `None` when it isn't two numbers.

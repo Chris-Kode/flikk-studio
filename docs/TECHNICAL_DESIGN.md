@@ -48,7 +48,7 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes, their renderer and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes with jointed figures and props, their renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
 | `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
 | `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
@@ -1307,17 +1307,55 @@ on the UI thread and run it off it:
   `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
   expensive and each take invents camera, staging and timing again, so
   `generate_video` takes a `blockout`: a rough 3D scene the agent writes
-  as JSON (`blockout::Scene`: up to 64 grey stand-ins, box, sphere,
-  cylinder, cone, capsule or figure, each with a size, a place, a turn and
-  keys; a camera with a place, a `look_at` point or object name, a field
-  of view and keys; metres, Y up, the ground at `y = 0`, at most 30 s).
-  Places follow a smooth path through their keys (a Hermite curve that
-  rests on a held key), everything else goes straight from key to key,
-  each arriving with an ease. `Scene::render` draws a frame on the CPU,
-  one ray a pixel against the solids, with one light, a shadow, metre
-  tiles on the ground and haze: about 20 ms for 960×540 on four cores,
-  with no GPU and no model. `Scene::write_clip` pipes the frames to
-  FFmpeg as a 24 fps H.264 MP4, 1280 px on the longer side.
+  as JSON (`blockout::Scene`: up to 128 grey stand-ins, a camera, an
+  optional sun direction; metres, Y up, the ground at `y = 0`, at most
+  30 s). A stand-in is a plain solid (box, sphere, cylinder, cone,
+  capsule, wedge, roof, pyramid), a prop made of a few (`kit.rs`: car,
+  bike, tree, house, chair, table) or a jointed body (`figure.rs`: a
+  person of 18 round pieces, a four-legged animal). Each has a size, a
+  place, a turn and keys, and may ride another (`parent`: its place and
+  turn are then in that object's space), face something about the
+  vertical (`face`: the way it travels, the camera, an object or a
+  point), keep spinning, and come and go (`hidden`). A person has an
+  `Action`: its pose is joint angles (`Pose`: spine, head, and two bones
+  a limb) blended between actions over half a second; under `auto` and
+  the actions of the arms its legs stand, walk or run by how fast its
+  keys move it, the stride paced by the distance travelled
+  (`Object::paced`) so feet keep up with the ground, and the lower foot
+  set on the ground gives the hips their height. Seated on a chair, a
+  bike or an animal that is its parent, it is put on the seat
+  (`Scene::seat`). The camera has a place, a `look_at` point or object,
+  a field of view, a roll, a hand-held `shake`, and may ride an object
+  too. Places follow a smooth path through their keys (`motion::Track`:
+  a Hermite curve that rests on a held key), everything else goes
+  straight from key to key, each arriving with an ease: linear, in, out,
+  in-out, `back`, `bounce`, or `cut`, which holds and then jumps (a
+  camera's cut to another set-up). `Scene::render` draws a frame on the
+  CPU, one ray a pixel against the pieces, with one light, a shadow,
+  metre tiles on the ground and haze. A ray from the camera tries only
+  the pieces listed for its 16 px tile of the picture, and a ray toward
+  the light only those listed for its cell of a grid across the light
+  (`render::Cells`); rays any other way go through a tree of boxes
+  (`render::Solids`). All three are rebuilt each frame. `Detail::Full`
+  also darkens flat surfaces where another is close (five short rays
+  for every fourth pixel that has a solid near, shared with the pixels
+  around it on the same surface; on round pieces so few rays show as
+  stripes) and draws edges again from four rays, where `Detail::Draft`
+  is what plays. With no GPU and no model, a 1280×720 frame of a market
+  street of forty-odd objects takes about 40 ms as a draft and 105 ms in
+  full on four cores, and its 8 s clip about 20 s to write.
+  `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
+  1280 px on the longer side. `Scene::review` says a scene in words for
+  a writer that can't watch it: what the camera sees at the start, the
+  middle, the end and after each cut (which objects, where across the
+  picture, how tall, hidden behind what), what looks like a mistake a
+  viewer would see (`doubts`: the subject out of the opening picture, a
+  camera inside an object or under the ground, a walker going sideways)
+  and what could be tidied (`notes`: an object never in the picture, a
+  key after the end).
+  `preview_blockout` (the Generate group, a read) gives the agent that
+  text with a collage of eight frames, so it looks at a scene and fixes
+  it before it asks for the video.
   A `video::Shot` is the request with what it is made from: the
   `GenerateRequest::Video` as the user reads it, the frames to grab, the
   placement, and the `Blockout` (scene, clip path under
@@ -1331,9 +1369,9 @@ on the UI thread and run it off it:
   before the provider is called, in the approval's job or the tool's.
   The request waiting on the user is a card of its own (`ShotCard`, one
   entity per waiting `generate_video`, kept by `ChatPanel::sync_shots`):
-  the blockout playing in a loop (`BlockoutPlayer`: frames drawn off the
-  UI thread, the newest wanted next, narrower while drawing can't keep
-  up), a tile for the first frame and each reference with the tag the
+  the blockout playing in a loop (`BlockoutPlayer`: draft frames drawn
+  off the UI thread, the newest wanted next, narrower while drawing
+  can't keep up, and the frame it stops on drawn again in full), a tile for the first frame and each reference with the tag the
   prompt calls it, and the prompt as it is sent, in a field. A tile's menu
   fills it with a picture made for it (`EditorState::generate_then`, the
   user's own generation: it runs as a row of the media pool, lands in the
@@ -1349,7 +1387,9 @@ on the UI thread and run it off it:
   written, for when the agent judged it not worth one, where the model
   picked follows clips: `Reblock::draft` is the same kind of backend run,
   given the shot's prompt without its role lines (`Shot::look`), its
-  length and its shape. What it answers becomes the shot's blockout, and
+  length and its shape. A first draft whose review has doubts is handed
+  back once with the review to be put right, and stands if the second
+  answer has no scene. What it answers becomes the shot's blockout, and
   an answer without a scene shows as why on the tile. Whenever a blockout
   or a first frame beside one comes or goes on the card,
   `Shot::settle_roles` puts the lines saying what `@Video1` and `@Image1`
@@ -1362,7 +1402,8 @@ on the UI thread and run it off it:
   should change. Each ask is one backend run without tools
   (`reblock::Reblock`: `TurnSpec::mcp` is `None`, so Claude gets an empty
   MCP config and no allowed tools, Codex no MCP server) given the scene,
-  the earlier asks and the format's schema; it answers with a sentence
+  its review, the earlier asks and the format's schema; it answers with
+  a sentence
   and the whole scene changed, read from the reply's outermost braces
   and checked by `Scene::parse`. Save puts the scene into the shot under
   a new clip path. Nothing in the dialog reaches a video provider.
@@ -1825,8 +1866,11 @@ there.
 * Mouse and keyboard interactions (drags, drops, context menus, shortcuts)
   were checked by code review and screenshots of seeded states only.
 * Blockouts: only the agent's `generate_video` takes one; the media pool's
-  Video form does not. The agent writes a scene without
-  seeing it drawn (no tool returns a blockout's frames). A blockout is
+  Video form does not. A scene asked for on the card or changed in the
+  dialog is written without being seen: that run has no tools, and reads
+  the scene's review instead. People have set actions, not free poses,
+  and their feet are placed by the stride, not solved against the ground,
+  so they slip a little on turns and slopes. A blockout is
   not kept in the pool or the project: it lives in the waiting request
   and its clip in the upload scratch. Making a picture for a tile was
   checked by code review only, as it needs an image provider's key. In a

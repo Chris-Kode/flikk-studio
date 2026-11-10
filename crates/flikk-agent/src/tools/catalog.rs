@@ -70,34 +70,42 @@ fn curve(desc: &str) -> Value {
 
 /// A blockout as `generate_video` takes it (`flikk_core::blockout::Scene`).
 pub(crate) fn blockout() -> Value {
+    use flikk_core::blockout::{Action, Ease, Shape};
     let point = |d: &str| numbers(3, d);
     let ease = || {
         one_of(
-            &["linear", "in", "out", "in_out"],
-            "How the move arrives here (default linear)",
+            &Ease::NAMES,
+            "How it arrives here (default linear): `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces",
         )
     };
+    let target = |d: &str| json!({ "type": ["array", "string"], "description": d });
     json!({
         "type": "object",
-        "description": "A rough 3D scene for the video to follow, when camera, staging or timing matter: grey stand-ins and a moving camera, drawn by Flikk for nothing and shown to the user, who can change it by asking, before anything is spent. Metres; X is right, Y up, +Z toward a camera placed at +Z; the ground is y 0. Keep it rough: a few stand-ins, one clear camera idea, everything that matters in view at the start, moves a body could make. It needs a model that follows clips (Seedance, Kling, Wan). In the prompt the blockout is @Video1, and a first frame given with it @Image1 (then `references` count on from @Image2 and @Video2); say what each stand-in is (\"the figure is the runner, the dark box the car\") and describe the look, which the blockout does not carry",
+        "description": "A rough 3D scene for the video to follow, when camera, staging, action or timing matter: grey stand-ins, people who walk, run and act, props, and a moving camera, drawn by Flikk for nothing and shown to the user, who can change it by asking, before anything is spent. Metres; X is right, Y up, +Z toward a camera placed at +Z; the ground is y 0; everything faces +Z until turned. Block what the shot needs: the people and things that matter and the set they move through, where they go and when, one clear camera idea a shot, everything that matters in view at the start. A key gives a time and what is different then; each thing a key gives moves there from the key before that gave it. It needs a model that follows clips (Seedance, Kling, Wan). In the prompt the blockout is @Video1, and a first frame given with it @Image1 (then `references` count on from @Image2 and @Video2); say what each stand-in is (\"the figure is the runner, the dark car the taxi\") and describe the look, which the blockout does not carry",
         "properties": {
             "duration": number("Seconds, at most 30 (default: the video's)"),
             "ground": boolean("A floor at y 0 (default true); false in the air or in space"),
+            "sun": numbers(2, "Where the light comes from: degrees around the vertical (0 from +Z, 90 from +X) and above the horizon (default 47, 55). Low for long shadows; behind the subject for a backlit shot"),
             "objects": {
                 "type": "array",
-                "description": "The stand-ins, at most 64",
+                "description": "The stand-ins, at most 128",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": string("What it stands for: \"runner\", \"car\""),
-                        "shape": one_of(&flikk_core::blockout::Shape::NAMES, "`figure` is a person, facing +Z until turned"),
-                        "size": point("Width, height, depth (default 1 1 1; a figure 0.5 1.75 0.5)"),
+                        "name": string("What it stands for: \"runner\", \"taxi\""),
+                        "shape": one_of(&Shape::NAMES, "Solids: box, sphere, cylinder, cone, capsule, wedge (a ramp, low at +Z), roof (a gable, its ridge along Z), pyramid. Bodies: `figure` is a person with joints; `animal` has four legs (a horse; size it down for a dog). Props: car, bike, tree, house, chair, table. Build anything else from solids"),
+                        "size": point("Width, height, depth. Defaults: solids 1 1 1, figure 0.5 1.75 0.5, animal 0.55 1.6 2.3, car 1.8 1.45 4.3, bike 0.6 1.1 1.9, tree 3.5 6 3.5, house 7 6 9, chair 0.45 0.9 0.48, table 1.5 0.75 0.85"),
                         "at": point("The middle of its base: y 0 stands it on the ground"),
                         "rotate": point("Degrees about X, Y and Z; Y turns it about the vertical"),
-                        "shade": number("Its grey, 0 dark to 1 light (default 0.62): tell the subject from the set"),
+                        "face": target("What it turns to about the vertical, on top of `rotate`: \"path\" (the way it travels: give it to whatever walks, runs, rides or drives), \"camera\", an object's name, or a point [x, y, z]"),
+                        "action": one_of(&Action::NAMES, "What a figure does. Its legs work by themselves: under `auto` (the default) and the actions of the arms (wave, point, talk, carry, push, reach, fight) it stands while still and walks or runs as fast as its keys move it (a walk is about 1.4 m/s, a run 3 to 6). `walk` and `run` also go on the spot; `stand` keeps it still while it is moved. Of the whole body: sit, ride, crouch, lie, jump (its keys lift it), dance, cheer. An animal walks and gallops as fast as it moves, whatever this says"),
+                        "parent": string("The object it rides: `at` and `rotate` are then in that object's own space, and it moves and turns with it (a load on a truck, a hat on a head). A figure that sits or rides, whose parent is a chair, a bike or an animal, is put on its seat"),
+                        "spin": point("Degrees a second it keeps turning about X, Y and Z: a rotor, a turntable"),
+                        "shade": number("Its grey, 0 dark to 1 light (default 0.62): tell the subject from the set, and keep people light (0.75 or more) so their limbs read"),
+                        "hidden": boolean("Not there at the start; a key with `hidden` false brings it in"),
                         "keys": {
                             "type": "array",
-                            "description": "Where it is later; it moves along a smooth path through them",
+                            "description": "What it is later; it moves along a smooth path through the places",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -105,6 +113,9 @@ pub(crate) fn blockout() -> Value {
                                     "at": point("Its place then"),
                                     "rotate": point("Its turn then"),
                                     "size": point("Its size then"),
+                                    "shade": number("Its grey then"),
+                                    "action": one_of(&Action::NAMES, "What it does from here on"),
+                                    "hidden": boolean("Gone (true) or there (false) from here on"),
                                     "ease": ease()
                                 },
                                 "required": ["t"]
@@ -118,21 +129,22 @@ pub(crate) fn blockout() -> Value {
                 "type": "object",
                 "properties": {
                     "at": point("Where it is; 1.6 high is eye level"),
-                    "look_at": {
-                        "type": ["array", "string"],
-                        "description": "A point [x, y, z], or an object's name, which it then follows"
-                    },
+                    "look_at": target("A point [x, y, z], or an object's name, which it then follows"),
                     "fov": number("Degrees across the longer side: 74 is a 24 mm lens, 54 a 35 mm (the default), 40 a 50 mm, 24 an 85 mm"),
+                    "roll": number("Degrees it is rolled: a Dutch angle"),
+                    "shake": number("How much a hand holds it, 0 (locked off, the default) to 1 (running with it)"),
+                    "parent": string("The object it rides: `at`, and a point it looks at, are then in that object's own space: a dashboard, a shoulder, a chase behind a car"),
                     "keys": {
                         "type": "array",
-                        "description": "Its move: a dolly, an orbit (a few keys around the subject), a crane, a zoom",
+                        "description": "Its move: a dolly, an orbit (a few keys around the subject), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "t": number("Seconds"),
                                 "at": point("Where it is then"),
-                                "look_at": { "type": ["array", "string"], "description": "What it looks at then" },
+                                "look_at": target("What it looks at then"),
                                 "fov": number("Its field of view then"),
+                                "roll": number("Its roll then"),
                                 "ease": ease()
                             },
                             "required": ["t"]
@@ -1727,7 +1739,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_video",
             Some(Generate),
-            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat), or after a `blockout` (a rough 3D scene you write, drawn in grey for the model to follow its camera, staging and timing). The user sees the blockout playing, the frames, the references and the prompt, and can change each, before approving. It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
+            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat), or after a `blockout` (a rough 3D scene you write, drawn in grey for the model to follow its camera, staging, action and timing; look at it first with `preview_blockout`). The user sees the blockout playing, the frames, the references and the prompt, and can change each, before approving. It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
                     "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`), whatever the model; they are renamed for it"),
@@ -1746,6 +1758,19 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "track": string("Video track to put it on (default: one with nothing there, else a new one)")
                 }),
                 &["prompt"],
+            ),
+        ),
+        spec(
+            super::video::PREVIEW,
+            Some(View),
+            "Look at a blockout before asking for its video: one collage of frames across it, and in words what its camera sees and what looks like a mistake. It costs nothing. Use it on every blockout you write, fix what is off (a subject out of frame or hidden, a figure sliding sideways, a camera inside a wall, timing that doesn't read), and only then call `generate_video` with the scene.",
+            object(
+                json!({
+                    "blockout": { "type": "object", "description": "The scene, as `generate_video` takes its `blockout`" },
+                    "duration": number("Seconds, when the scene gives none"),
+                    "aspect": string("The video's shape, as generate_video takes it (default: the sequence's)")
+                }),
+                &["blockout"],
             ),
         ),
         spec(

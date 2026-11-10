@@ -109,7 +109,7 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
         "view_audio" | "measure_loudness" | "get_music" | "search_sounds" | "find_sounds" => {
             ToolCategory::Audio
         }
-        "find_voices" => ToolCategory::Generate,
+        "find_voices" | super::video::PREVIEW => ToolCategory::Generate,
         "get_shake" => ToolCategory::Transform,
         "list_caption_styles" => ToolCategory::Captions,
         _ => match spec.category? {

@@ -52,6 +52,8 @@ pub struct BlockoutEditor {
     /// The scene as it stands, and as it was opened.
     scene: Scene,
     opened: Scene,
+    /// The picture's shape, width to height.
+    shape: (u32, u32),
     /// The scene before each change made here, newest last.
     before: Vec<Scene>,
     thread: Vec<Turn>,
@@ -73,7 +75,8 @@ impl BlockoutEditor {
     ) -> Self {
         let player = cx.new(|cx| BlockoutPlayer::new(scene.clone(), shape, WIDTH, window, cx));
         let ask = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Lower the camera, bring the car in later…")
+            InputState::new(window, cx)
+                .placeholder("Lower the camera, have her wave, cut closer at 3 s…")
         });
         let _subscriptions = vec![
             cx.observe(&player, |_, _, cx| cx.notify()),
@@ -92,6 +95,7 @@ impl BlockoutEditor {
             player,
             opened: scene.clone(),
             scene,
+            shape,
             before: Vec::new(),
             thread: demo_thread(),
             asking: None,
@@ -129,7 +133,7 @@ impl BlockoutEditor {
             })
             .collect();
         let settings = self.state.read(cx).settings.clone();
-        let answer = match Reblock::start(&self.scene, &earlier, &ask, &settings) {
+        let answer = match Reblock::start(&self.scene, self.shape, &earlier, &ask, &settings) {
             Ok(asking) => {
                 self.asking = Some(asking);
                 self.follow(cx);
