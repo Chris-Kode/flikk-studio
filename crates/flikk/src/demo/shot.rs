@@ -1,7 +1,8 @@
-//! `FLIKK_DEMO_SHOT=card|blockout|plain`: a video waiting on the user in
-//! the chat, with a blockout, a first frame and a reference; `blockout`
-//! opens the blockout's dialog on it, and `plain` is an upright video from
-//! its prompt alone, its tiles empty.
+//! `FLIKK_DEMO_SHOT=card|blockout|upright|plain`: a video waiting on the
+//! user in the chat, with a blockout, a first frame and a reference;
+//! `blockout` opens the blockout's dialog on it, `upright` is the same in
+//! a 9:16 picture, and `plain` is an upright video from its prompt alone,
+//! its tiles empty.
 
 use crate::state::EditorState;
 use flikk_agent::tools::ApprovalRequest;
@@ -53,7 +54,12 @@ pub fn seed(state: &mut EditorState) {
     else {
         return;
     };
-    let blockout = Blockout::new(scene, 16.0 / 9.0);
+    // `upright` is the same shot in a 9:16 picture.
+    let (aspect, shape) = match asked.as_str() {
+        "upright" => ("9:16", 9.0 / 16.0),
+        _ => ("16:9", 16.0 / 9.0),
+    };
+    let blockout = Blockout::new(scene, shape);
     // Stills of the blockout stand in for the pictures a project would have.
     let picture = |at: f64| blockout.still(at).ok();
     let (first, reference) = (picture(0.0), picture(4.5));
@@ -61,7 +67,7 @@ pub fn seed(state: &mut EditorState) {
         request: GenerateRequest::Video {
             prompt: PROMPT.into(),
             length: Some(Time::from_secs_f64(6.0)),
-            aspect: Some("16:9".into()),
+            aspect: Some(aspect.into()),
             resolution: Some("720p".into()),
             first_frame: first,
             last_frame: None,

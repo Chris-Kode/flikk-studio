@@ -1345,6 +1345,18 @@ on the UI thread and run it off it:
   change is written into the waiting request
   (`AgentHost::revise_approval`), so Approve makes what the card shows;
   it is off while the model can't make the shot, with why beside it.
+  A request without a blockout has a Blockout tile whose button has one
+  written, for when the agent judged it not worth one, where the model
+  picked follows clips: `Reblock::draft` is the same kind of backend run,
+  given the shot's prompt without its role lines (`Shot::look`), its
+  length and its shape. What it answers becomes the shot's blockout, and
+  an answer without a scene shows as why on the tile. Whenever a blockout
+  or a first frame beside one comes or goes on the card,
+  `Shot::settle_roles` puts the lines saying what `@Video1` and `@Image1`
+  are into the prompt, or takes its own lines out again. Tiles have one
+  size whatever the video's shape; the player paints its frame fitted
+  inside its box (`paint_image` on a canvas: an image element takes its
+  height from its width, so an upright frame overflowed a wide box).
   Clicking the blockout opens its dialog (`blockout::editor`): the scene
   large with play, seek and Undo, and a thread where the user says what
   should change. Each ask is one backend run without tools
@@ -1759,7 +1771,7 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
-| `FLIKK_DEMO_SHOT` | `card`, `blockout`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `plain` is an upright video from its prompt alone, its tiles empty |
+| `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh
 FLIKK_DEMO=1 FLIKK_HOME=/tmp/flikk-demo cargo run -p flikk

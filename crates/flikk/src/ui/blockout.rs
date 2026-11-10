@@ -189,10 +189,34 @@ impl Render for BlockoutPlayer {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
-        div().size_full().bg(t::SCOPE).children(
-            self.picture
-                .clone()
-                .map(|picture| img(picture).size_full().object_fit(ObjectFit::Contain)),
-        )
+        let (picture, shape) = (self.picture.clone(), self.shape);
+        // Painted by hand: an image element takes its height from its
+        // width and its own shape, so an upright picture overflowed a
+        // wide box instead of fitting inside it.
+        let paint = move |bounds: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App| {
+            if let Some(picture) = picture.clone() {
+                let inside = fitted(bounds, shape);
+                let _ = window.paint_image(inside, inside, Corners::default(), picture, 0, false);
+            }
+        };
+        div()
+            .relative()
+            .size_full()
+            .bg(t::SCOPE)
+            .child(canvas(|_, _, _| (), paint).absolute().inset_0())
+    }
+}
+
+/// The largest box of `shape` (width to height) inside `bounds`, centred.
+fn fitted(bounds: Bounds<Pixels>, shape: (u32, u32)) -> Bounds<Pixels> {
+    let (wide, high) = (shape.0 as f32, shape.1 as f32);
+    let scale = (bounds.size.width / wide).min(bounds.size.height / high);
+    let inside = size(scale * wide, scale * high);
+    Bounds {
+        origin: point(
+            bounds.origin.x + (bounds.size.width - inside.width) / 2.,
+            bounds.origin.y + (bounds.size.height - inside.height) / 2.,
+        ),
+        size: inside,
     }
 }

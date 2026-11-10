@@ -14,6 +14,7 @@ use crate::ui::kit::{
     Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
 use crate::ui::media_pool::{form, thumbs};
+use flikk_agent::reblock::{Reblock, Reblocked};
 use flikk_agent::tools::video::{self, Blockout, FrameGrab, Shot};
 use flikk_core::MediaId;
 use flikk_core::cloud::{Capability, GenerateRequest, VideoReference};
@@ -25,6 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How tall a picture's tile is, and the blockout's: two tiles and the gap
 /// between them.
@@ -72,6 +74,18 @@ enum Corner {
     OnHover,
 }
 
+/// A blockout being written for a shot that has none, at the user's ask.
+enum Draft {
+    None,
+    Working(Reblock),
+    /// Why none came of it: the backend failed, or said there is nothing
+    /// to block.
+    Failed(String),
+}
+
+/// How often a blockout being written is looked at.
+const DRAFT_POLL: Duration = Duration::from_millis(150);
+
 /// A clip's poster frame.
 enum Poster {
     Reading,
@@ -85,7 +99,13 @@ pub struct ShotCard {
     id: u64,
     shot: Shot,
     prompt: Entity<TextareaState>,
+    /// The shot's prompt changed here, not in its field, which shows it on
+    /// the next paint.
+    prompt_stale: bool,
+    /// The blockout playing; made on the next paint after it changed.
     player: Option<Entity<BlockoutPlayer>>,
+    draft: Draft,
+    draft_poll: Option<Task<()>>,
     /// The picture's shape: width to height.
     shape: (u32, u32),
     busy: Vec<(Slot, Busy)>,
@@ -103,12 +123,14 @@ impl ShotCard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let shape = match &shot.blockout {
-            Some(blockout) => blockout.size,
-            None => {
-                let settings = &state.read(cx).bus.project().timeline.settings;
-                (settings.width.max(1), settings.height.max(1))
+        let settings = &state.read(cx).bus.project().timeline.settings;
+        let sequence = (settings.width.max(1), settings.height.max(1));
+        let shape = match (&shot.blockout, &shot.request) {
+            (Some(blockout), _) => blockout.size,
+            (None, GenerateRequest::Video { aspect, .. }) => {
+                (aspect.as_deref().and_then(shape_of)).unwrap_or(sequence)
             }
+            _ => sequence,
         };
         let text = shot.prompt().to_owned();
         let prompt = cx.new(|cx| {
@@ -117,7 +139,6 @@ impl ShotCard {
                 .default_value(text)
         });
         form::mark_tags(&prompt, form::Tags::References, window, cx);
-        let player = (shot.blockout.as_ref()).map(|b| Self::player(&b.scene, shape, window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(
@@ -140,7 +161,10 @@ impl ShotCard {
             id,
             shot,
             prompt,
-            player,
+            prompt_stale: false,
+            player: None,
+            draft: Draft::None,
+            draft_poll: None,
             shape,
             busy: Vec::new(),
             grabbing: false,
@@ -151,14 +175,32 @@ impl ShotCard {
         this
     }
 
-    fn player(
-        scene: &flikk_core::blockout::Scene,
-        shape: (u32, u32),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<BlockoutPlayer> {
-        let scene = scene.clone();
-        cx.new(|cx| BlockoutPlayer::new(scene, shape, STAGE_WIDTH, window, cx))
+    /// Bring what is painted in step with the shot: its blockout playing,
+    /// and its prompt in the field. Both need the window, which a change
+    /// that lands from a background job doesn't have.
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.player.is_none()
+            && let Some(blockout) = &self.shot.blockout
+        {
+            let (scene, shape) = (blockout.scene.clone(), self.shape);
+            self.player =
+                Some(cx.new(|cx| BlockoutPlayer::new(scene, shape, STAGE_WIDTH, window, cx)));
+        }
+        if std::mem::take(&mut self.prompt_stale) {
+            let text = self.shot.prompt().to_owned();
+            self.prompt
+                .update(cx, |prompt, cx| prompt.set_value(text, window, cx));
+            form::mark_tags(&self.prompt, form::Tags::References, window, cx);
+        }
+    }
+
+    /// The shot follows `blockout` now, or none: the prompt says so, and
+    /// the next paint plays it.
+    fn set_blockout(&mut self, blockout: Option<Blockout>, cx: &mut Context<Self>) {
+        self.shot.set_blockout(blockout);
+        self.player = None;
+        self.prompt_stale = true;
+        self.save(cx);
     }
 
     /// Put the card's shot into the waiting request.
@@ -241,7 +283,17 @@ impl ShotCard {
                 Slot::Reference(_) | Slot::Added => references.push(reference),
             }
         }
+        self.frame_changed(slot);
         self.save(cx);
+    }
+
+    /// `slot` was filled or emptied: beside a blockout the prompt says
+    /// what the first frame is, or stops saying it.
+    fn frame_changed(&mut self, slot: Slot) {
+        if slot == Slot::First && self.shot.blockout.is_some() {
+            self.shot.settle_roles();
+            self.prompt_stale = true;
+        }
     }
 
     fn put_picture(&mut self, slot: Slot, path: PathBuf, cx: &mut Context<Self>) {
@@ -283,12 +335,7 @@ impl ShotCard {
                 Slot::Reference(_) | Slot::Added => {}
             }
         }
-        self.save(cx);
-    }
-
-    fn remove_blockout(&mut self, cx: &mut Context<Self>) {
-        self.shot.blockout = None;
-        self.player = None;
+        self.frame_changed(slot);
         self.save(cx);
     }
 
@@ -337,7 +384,7 @@ impl ShotCard {
         let on_its_way = |(slot, _): &(Slot, Busy)| {
             matches!(self.busy(*slot, cx), Some(Busy::Grabbing | Busy::Making(_)))
         };
-        self.grabbing || self.busy.iter().any(on_its_way)
+        self.grabbing || self.busy.iter().any(on_its_way) || matches!(self.draft, Draft::Working(_))
     }
 
     // -------------------------------------------------------- the blockout
@@ -347,8 +394,8 @@ impl ShotCard {
             return;
         };
         let card = cx.entity().downgrade();
-        let on_save: blockout::editor::OnSave = Rc::new(move |scene, window, cx| {
-            let _ = card.update(cx, |card, cx| card.set_scene(scene, window, cx));
+        let on_save: blockout::editor::OnSave = Rc::new(move |scene, _, cx| {
+            let _ = card.update(cx, |card, cx| card.set_scene(scene, cx));
         });
         blockout::editor::open(
             self.state.clone(),
@@ -362,16 +409,79 @@ impl ShotCard {
 
     /// The user saved the blockout changed: the shot follows the new one,
     /// written to a clip of its own.
-    fn set_scene(
-        &mut self,
-        scene: flikk_core::blockout::Scene,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_scene(&mut self, scene: flikk_core::blockout::Scene, cx: &mut Context<Self>) {
         let aspect = self.shape.0 as f64 / self.shape.1 as f64;
-        self.player = Some(Self::player(&scene, self.shape, window, cx));
-        self.shot.blockout = Some(Blockout::new(scene, aspect));
-        self.save(cx);
+        self.set_blockout(Some(Blockout::new(scene, aspect)), cx);
+    }
+
+    /// Whether the model picked can follow a blockout; one not known yet
+    /// is taken to.
+    fn follows_clips(&self, cx: &App) -> bool {
+        let generation = self.state.read(cx).services.generation.clone();
+        let model = generation.and_then(|g| g.video_model());
+        model.is_none_or(|m| m.references.is_some_and(|limits| limits.videos > 0))
+    }
+
+    /// Have the agent's backend write a blockout for the shot from its
+    /// prompt, at the user's ask: one run without tools, which spends
+    /// nothing with the video provider.
+    fn draft_blockout(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.draft, Draft::Working(_)) || self.shot.blockout.is_some() {
+            return;
+        }
+        let seconds = match &self.shot.request {
+            GenerateRequest::Video {
+                length: Some(length),
+                ..
+            } => length.as_secs_f64(),
+            _ => 5.0,
+        };
+        let settings = self.state.read(cx).settings.clone();
+        self.draft = match Reblock::draft(self.shot.look(), seconds, self.shape, &settings) {
+            Ok(drafting) => Draft::Working(drafting),
+            Err(e) => Draft::Failed(e.to_string()),
+        };
+        self.draft_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DRAFT_POLL).await;
+                let working = this.update(cx, |this, cx| this.look_at_draft(cx));
+                if !matches!(working, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Take what the blockout being written came to; whether it is still
+    /// being written.
+    fn look_at_draft(&mut self, cx: &mut Context<Self>) -> bool {
+        let Draft::Working(drafting) = &mut self.draft else {
+            return false;
+        };
+        match drafting.poll() {
+            Reblocked::Working => return true,
+            Reblocked::Done {
+                scene: Some(scene), ..
+            } => {
+                self.draft = Draft::None;
+                self.set_scene(scene, cx);
+            }
+            Reblocked::Done {
+                scene: None,
+                answer,
+            } => self.draft = Draft::Failed(answer),
+            Reblocked::Failed(e) => self.draft = Draft::Failed(e),
+        }
+        cx.notify();
+        false
+    }
+
+    /// Stop the blockout being written; stopped, it didn't fail.
+    fn stop_draft(&mut self, cx: &mut Context<Self>) {
+        self.draft = Draft::None;
+        self.draft_poll = None;
+        cx.notify();
     }
 
     // ------------------------------------------------------- making pictures
@@ -753,7 +863,12 @@ impl ShotCard {
             .tooltip(tooltip)
     }
 
+    /// The blockout playing; without one, the tile that has one written,
+    /// where the model picked can follow it.
     fn render_blockout(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.shot.blockout.is_none() {
+            return self.follows_clips(cx).then(|| self.render_no_blockout(cx));
+        }
         let player = self.player.clone()?;
         let card = cx.entity();
         let menu = Self::menu_button(usize::MAX, IconName::Ellipsis, "Blockout").dropdown_menu(
@@ -764,7 +879,7 @@ impl ShotCard {
                 }))
                 .separator()
                 .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
-                    remove.update(cx, |card, cx| card.remove_blockout(cx))
+                    remove.update(cx, |card, cx| card.set_blockout(None, cx))
                 }))
             },
         );
@@ -778,6 +893,42 @@ impl ShotCard {
         Some(
             tile.cursor_pointer()
                 .on_click(cx.listener(|this, _, window, cx| this.edit_blockout(window, cx))),
+        )
+    }
+
+    /// The blockout's tile while the shot has none: the button that has one
+    /// written, or how the writing stands.
+    fn render_no_blockout(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let centred = || h_flex().size_full().justify_center();
+        let write = |tooltip| {
+            Self::menu_button(usize::MAX, IconName::Plus, tooltip)
+                .on_click(cx.listener(|this, _, _, cx| this.draft_blockout(cx)))
+        };
+        let (content, button) = match &self.draft {
+            Draft::None => (div().into_any_element(), write("Generate blockout")),
+            Draft::Working(_) => (
+                centred()
+                    .child(Spinner::new().color(t::T2))
+                    .into_any_element(),
+                Self::menu_button(usize::MAX, IconName::Square, "Stop")
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_draft(cx))),
+            ),
+            Draft::Failed(why) => (
+                centred()
+                    .id("shot-draft-failed")
+                    .text_color(t::ERR)
+                    .child(Icon::new(IconName::CircleAlert))
+                    .tooltip(Tooltip::text(why.clone()))
+                    .into_any_element(),
+                write("Generate blockout"),
+            ),
+        };
+        self.tile(
+            usize::MAX,
+            TILE,
+            content,
+            Some("Blockout".into()),
+            Some((button.into_any_element(), Corner::Always)),
         )
     }
 
@@ -888,6 +1039,14 @@ impl ShotCard {
     }
 }
 
+/// "9:16" as a shape, width to height; `None` when it isn't two numbers.
+fn shape_of(aspect: &str) -> Option<(u32, u32)> {
+    let (wide, high) = aspect.split_once(':')?;
+    let (wide, high): (f64, f64) = (wide.trim().parse().ok()?, high.trim().parse().ok()?);
+    // Whole numbers that keep a ratio such as 2.39:1.
+    (wide > 0.0 && high > 0.0).then_some(((wide * 100.0) as u32, (high * 100.0) as u32))
+}
+
 /// A key for the elements of `slot`'s tile.
 fn slot_key(slot: Slot) -> usize {
     match slot {
@@ -899,7 +1058,8 @@ fn slot_key(slot: Slot) -> usize {
 }
 
 impl Render for ShotCard {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync(window, cx);
         let id = self.id;
         let problem = self.problem(cx);
         let blocked =

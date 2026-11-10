@@ -233,6 +233,37 @@ impl Shot {
         prompt[..end].trim()
     }
 
+    /// Follow `blockout`, or none, and have the prompt say so
+    /// ([`Self::settle_roles`]).
+    pub fn set_blockout(&mut self, blockout: Option<Blockout>) {
+        self.blockout = blockout;
+        self.settle_roles();
+    }
+
+    /// Make the prompt say what the blockout, and a first frame beside it,
+    /// are for, and stop saying it once they are gone. Call it when either
+    /// came or went. Only the lines put in here are taken out, and a prompt
+    /// that names `@Video1` or `@Image1` its own way is left as it is.
+    pub fn settle_roles(&mut self) {
+        let first_frame = matches!(
+            &self.request,
+            GenerateRequest::Video {
+                first_frame: Some(_),
+                ..
+            }
+        );
+        let mut prompt = self.prompt().to_owned();
+        if self.blockout.is_none() || !first_frame {
+            prompt = without_line(&prompt, FIRST_FRAME_LINE);
+        }
+        if self.blockout.is_none() {
+            prompt = without_line(&prompt, BLOCKOUT_LINE);
+        } else {
+            prompt = with_blockout_roles(prompt, first_frame);
+        }
+        self.set_prompt(prompt);
+    }
+
     /// Replace the shot's prompt.
     pub fn set_prompt(&mut self, text: String) {
         if let GenerateRequest::Video { prompt, .. } = &mut self.request {
@@ -241,8 +272,12 @@ impl Shot {
     }
 }
 
-/// How a prompt is told what its blockout is, when it doesn't say.
+/// How a prompt is told what its blockout is, when it doesn't say, and
+/// what a first frame beside it is.
 const BLOCKOUT_ROLE: &str = "@Video1 is a rough 3D blockout";
+const BLOCKOUT_LINE: &str = "@Video1 is a rough 3D blockout: follow its camera move, staging \
+    and timing. Its grey shapes are stand-ins, not the look.";
+const FIRST_FRAME_LINE: &str = "Start on @Image1 as the first frame.";
 
 /// `prompt` saying what the blockout, and a first frame sent with it, are
 /// for, unless it names them itself: models read a clip as something to
@@ -251,16 +286,18 @@ fn with_blockout_roles(prompt: String, first_frame: bool) -> String {
     let mut prompt = prompt;
     if !prompt.contains("@Video1") {
         prompt.push_str("\n\n");
-        prompt.push_str(BLOCKOUT_ROLE);
-        prompt.push_str(
-            ": follow its camera move, staging and timing. \
-             Its grey shapes are stand-ins, not the look.",
-        );
+        prompt.push_str(BLOCKOUT_LINE);
     }
     if first_frame && !prompt.contains("@Image1") {
-        prompt.push_str("\nStart on @Image1 as the first frame.");
+        prompt.push('\n');
+        prompt.push_str(FIRST_FRAME_LINE);
     }
     prompt
+}
+
+/// `prompt` without `line` as [`with_blockout_roles`] added it.
+fn without_line(prompt: &str, line: &str) -> String {
+    prompt.replace(line, "").trim_end().to_owned()
 }
 
 /// What the user set for video in Settings → Integrations: the model
