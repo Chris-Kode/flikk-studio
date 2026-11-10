@@ -68,3 +68,31 @@ pub(super) fn insert_new(
         clip: Box::new(clip),
     }]))
 }
+
+/// Every clip of `from` on an unlocked picture track showing `to` instead
+/// (see [`crate::command::Command::SwapMedia`]).
+pub(super) fn swap_media(project: &Project, from: MediaId, to: MediaId) -> Result<Plan> {
+    let source = project.media(from).ok_or(CoreError::MediaNotFound(from))?;
+    let version = project.media(to).ok_or(CoreError::MediaNotFound(to))?;
+    if source.kind != version.kind {
+        return Err(CoreError::Invalid(
+            "a clip can only show media of the same kind".into(),
+        ));
+    }
+    let out = project
+        .timeline
+        .picture_clips_of(from)
+        .map(|(track, clip)| {
+            let mut after = clip.clone();
+            if let ClipContent::Media { media, .. } = &mut after.content {
+                *media = to;
+            }
+            Op::UpdateClip {
+                track: track.id,
+                before: Box::new(clip.clone()),
+                after: Box::new(after),
+            }
+        })
+        .collect();
+    Ok(ops(out))
+}

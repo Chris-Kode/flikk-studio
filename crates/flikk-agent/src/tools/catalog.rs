@@ -1656,7 +1656,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "range": range("The timeline range it is for: sets its length (whole seconds), and where it is proposed"),
                     "duration": number("Whole seconds, when there is no `range`; left out, the model picks"),
                     "aspect": one_of(&["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21", "2:1", "5:4", "4:5"], "Shape (default: the model picks, from the first frame when there is one); match the sequence"),
-                    "resolution": one_of(&["360p", "480p", "720p", "768p", "1080p", "4k"], "Default: the model's"),
+                    "resolution": one_of(&["360p", "480p", "720p", "768p", "1080p", "4k"], "Default: the one the user set in Settings, else the model's"),
                     "first_frame": string("Media id of a picture in the pool to start on"),
                     "first_frame_at": time("Or start on the program's frame at this time (to continue a shot)"),
                     "last_frame": string("Media id of a picture to end on; needs a first frame"),
@@ -1667,6 +1667,19 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "track": string("Video track to put it on (default: one with nothing there, else a new one)")
                 }),
                 &["prompt"],
+            ),
+        ),
+        spec(
+            super::upscale::TOOL,
+            Some(Generate),
+            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
+            object(
+                json!({
+                    "media": string("Media id of a video in the pool"),
+                    "resolution": one_of(&["720p", "1080p", "2k", "4k"], "Lines on the short side (default: 1080p where the model can make it, else the smallest above the video's own)"),
+                    "replace": boolean("Propose the upscaled video in place of this one in its clips on picture tracks (default false: it only goes to the pool)")
+                }),
+                &["media"],
             ),
         ),
         spec(

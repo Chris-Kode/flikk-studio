@@ -12,7 +12,7 @@ use crate::ui::kit::{
     SelectState, Spinner, Switch, Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_cloud::{KeySource, PROVIDERS, Provider};
-use flikk_core::cloud::Capability;
+use flikk_core::cloud::{Capability, VIDEO_RESOLUTIONS};
 use flikk_models::Task as ModelTask;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,7 +24,7 @@ use std::time::Duration;
 const PROGRESS_POLL: Duration = Duration::from_millis(200);
 
 /// The label column of the page's rows.
-const LABEL_W: f32 = 140.;
+const LABEL_W: f32 = 120.;
 /// The actions after a key: Replace and remove, or Save, end on one edge.
 const ACTIONS_W: f32 = 96.;
 
@@ -39,6 +39,9 @@ pub struct IntegrationsTab {
     doers: Vec<(Capability, Entity<SelectState<SharedString>>)>,
     /// Per capability, the models of the provider picked (by its id).
     models: HashMap<Capability, (&'static str, Entity<SelectState<SharedString>>)>,
+    /// The resolution videos are made at: Auto, then
+    /// [`VIDEO_RESOLUTIONS`].
+    resolution: Entity<SelectState<SharedString>>,
     /// A model download was running at the last poll.
     busy: bool,
     _subscriptions: Vec<Subscription>,
@@ -52,6 +55,23 @@ fn no_provider(capability: Capability) -> &'static str {
     } else {
         "Off"
     }
+}
+
+/// The resolution choices as the list shows them: Auto (`None`), then each
+/// of [`VIDEO_RESOLUTIONS`].
+fn resolutions() -> impl Iterator<Item = (SharedString, Option<&'static str>)> {
+    std::iter::once(("Auto".into(), None)).chain(
+        VIDEO_RESOLUTIONS
+            .iter()
+            .map(|r| (r.replace('k', "K").into(), Some(*r))),
+    )
+}
+
+/// Where `resolution` is in [`resolutions`]; Auto for one it doesn't list.
+fn resolution_index(resolution: Option<&str>) -> usize {
+    resolutions()
+        .position(|(_, r)| r == resolution)
+        .unwrap_or(0)
 }
 
 /// Who can do `capability`, in the order its list shows them.
@@ -117,6 +137,20 @@ impl IntegrationsTab {
                 (capability, select)
             })
             .collect();
+        let resolution = cx.new(|cx| {
+            let names = resolutions().map(|(name, _)| name).collect();
+            let picked = resolution_index(settings.video_resolution.as_deref());
+            SelectState::new(names, Some(picked), window, cx)
+        });
+        subscriptions.push(cx.subscribe(
+            &resolution,
+            |this, _, SelectEvent::Confirm(name): &SelectEvent<SharedString>, cx| {
+                let picked = resolutions().find(|(n, _)| n == name).and_then(|(_, r)| r);
+                this.state.update(cx, |s, cx| {
+                    s.set_video_resolution(picked.map(str::to_owned), cx)
+                });
+            },
+        ));
         let _poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(PROGRESS_POLL).await;
@@ -131,6 +165,7 @@ impl IntegrationsTab {
             keys,
             doers,
             models: HashMap::new(),
+            resolution,
             busy: false,
             _subscriptions: subscriptions,
             _poll,
@@ -259,6 +294,12 @@ impl IntegrationsTab {
             if select.read(cx).selected_index() != Some(ix) {
                 select.update(cx, |s, cx| s.set_selected_index(Some(ix), window, cx));
             }
+        }
+        let resolution = resolution_index(settings.video_resolution.as_deref());
+        if self.resolution.read(cx).selected_index() != Some(resolution) {
+            self.resolution.update(cx, |s, cx| {
+                s.set_selected_index(Some(resolution), window, cx)
+            });
         }
         for &capability in &Capability::ALL {
             let choice = settings.choice(capability);
@@ -534,7 +575,7 @@ impl Render for IntegrationsTab {
                 let model = self.models.get(&capability).map(|(_, m)| m.clone());
                 row(capability.label(), LABEL_W)
                     .h(px(36.))
-                    .child(div().w(px(160.)).flex_none().child(Select::new(select)))
+                    .child(div().w(px(140.)).flex_none().child(Select::new(select)))
                     .children(model.map(|m| {
                         let single = self
                             .models
@@ -553,9 +594,17 @@ impl Render for IntegrationsTab {
                     .when(capability == Capability::Video && picked, |el| {
                         let state = self.state.clone();
                         el.child(
+                            div()
+                                .id("video-resolution")
+                                .w(px(80.))
+                                .flex_none()
+                                .child(Select::new(&self.resolution))
+                                .tooltip(Tooltip::text("Resolution")),
+                        )
+                        .child(
                             Switch::new("video-sound")
                                 .checked(sound)
-                                .label("With sound")
+                                .label("Sound")
                                 .on_click(move |on: &bool, _, cx| {
                                     state.update(cx, |s, cx| s.set_video_sound(*on, cx))
                                 }),

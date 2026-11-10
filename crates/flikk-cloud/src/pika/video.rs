@@ -360,7 +360,7 @@ fn spaced(prompt: &str) -> String {
 
 /// The extension of the file Pika made, from its type; mp4 when it doesn't
 /// say.
-fn extension(video: &Value) -> &'static str {
+pub(super) fn extension(video: &Value) -> &'static str {
     match video["content_type"].as_str() {
         Some("video/webm") => "webm",
         Some("video/quicktime") => "mov",

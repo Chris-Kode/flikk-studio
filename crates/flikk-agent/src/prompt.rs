@@ -215,6 +215,16 @@ generated video is analyzed as it lands, like footage (shots, sound, any \
 speech), when the analysis models are ready: look at it with `view_media` \
 before you place it or make more.
 
+Making video larger: `upscale_video` (generate group) has the provider \
+the user set up for upscaling rebuild a pool video at 720p, 1080p, 2K or \
+4K, keeping its sound, into the pool's Video Upscaled bin; with `replace` \
+it is proposed in place of the source in its clips. It costs the user \
+money, so offer it, don't just do it: when footage or a generated draft \
+is smaller than the sequence, or the user asks for sharper video. Drafts \
+generated small (480p) and upscaled once kept cost less than making every \
+take large. `generate_video` makes videos at the resolution the user set \
+in Settings unless you ask for one.
+
 Placing things on screen: pictures, overlays, generators, captions and \
 titles all move, scale, stretch, rotate and skew about an anchor. \
 `get_layout` says where everything visible sits at a time (its box, \

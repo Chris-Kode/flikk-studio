@@ -1,6 +1,6 @@
 //! Work an online provider does instead of this machine: transcription (in
 //! place of the local speech models), music, sound effects, voiceovers,
-//! video and pictures.
+//! video, pictures and larger videos (upscaling).
 //! What can be done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
 //! and the interfaces the editor calls ([`SpeechService`],
 //! [`GenerationService`]). `flikk-cloud` implements them for each provider it
@@ -9,15 +9,18 @@
 mod request;
 mod script;
 mod task;
+mod upscale;
 mod voice;
 
 pub use crate::pool::{generated_bin, image_item, media_item, pool_commands, sample_item};
 pub use request::{
     GenerateRequest, ImageMode, ImageModel, MusicSection, Reading, ReferenceLimits, SCRIPT_CHARS,
-    SpeechContext, VideoMode, VideoModel, VideoReference, VideoSound,
+    SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel, VideoReference, VideoSound,
+    resolution_lines,
 };
 pub use script::{check_script, spoken_words, without_breaks};
 pub use task::{GenerationTask, Stage};
+pub use upscale::{Scale, UpscaleModel, UpscaleSource, Upscaling};
 pub use voice::{
     DESIGN_DESCRIPTION, DESIGN_TEXT, Designed, VOICE_AGES, VOICE_GENDERS, VOICE_LANGUAGES,
     VOICE_USES, Voice, VoiceClone, VoiceDesign, VoiceOrigin, VoicePage, VoicePreview, VoiceQuery,
@@ -42,16 +45,19 @@ pub enum Capability {
     Video,
     /// Pictures, from a description or from pictures to edit or follow.
     Image,
+    /// A video in the pool made again at a larger resolution.
+    Upscale,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 7] = [
         Self::Transcription,
         Self::Music,
         Self::SoundEffects,
         Self::Voiceover,
         Self::Video,
         Self::Image,
+        Self::Upscale,
     ];
 
     pub fn label(self) -> &'static str {
@@ -62,6 +68,7 @@ impl Capability {
             Self::Voiceover => "Voiceover",
             Self::Video => "Video",
             Self::Image => "Image",
+            Self::Upscale => "Upscale",
         }
     }
 
@@ -92,6 +99,11 @@ pub struct CloudSettings {
     /// Videos are made without sound, which costs less on some models. The
     /// media pool's form starts from it; the agent keeps to it.
     pub silent_video: bool,
+    /// The resolution videos are made at ("720p", "4k"), fitted to each
+    /// model by [`VideoModel::resolution_for`]; `None` takes the model's
+    /// default. The media pool's form starts from it; the agent uses it
+    /// when it asks for none.
+    pub video_resolution: Option<String>,
 }
 
 impl CloudSettings {
@@ -241,8 +253,13 @@ pub trait GenerationService: Send + Sync {
     fn video_model(&self) -> Option<VideoModel>;
     /// What the model picked for pictures can make, when one is.
     fn image_model(&self) -> Option<ImageModel>;
+    /// What the model picked for upscaling can do, when one is.
+    fn upscale_model(&self) -> Option<UpscaleModel>;
     /// Whether videos are made with sound, as the user set it.
     fn video_sound(&self) -> bool;
+    /// The resolution the user set for videos ("1080p"); `None` takes the
+    /// model's default.
+    fn video_resolution(&self) -> Option<String>;
     /// Make `request` into a new file in `dir`, reporting to `task` and
     /// stopping when it is cancelled. Slow: minutes for music and video,
     /// up to a couple for a picture.

@@ -137,6 +137,9 @@ impl Api for ElevenLabs {
             GenerateRequest::Image { .. } => Err(CloudError::Unavailable(format!(
                 "{NAME} doesn't make pictures"
             ))),
+            GenerateRequest::Upscale { .. } => Err(CloudError::Unavailable(format!(
+                "{NAME} doesn't upscale video"
+            ))),
         }
     }
 

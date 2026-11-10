@@ -15,6 +15,7 @@ use flikk_core::analysis::AnalysisSteps;
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::cloud::{Capability, CloudError, GenerateRequest, GenerationTask, ProviderChoice};
+use flikk_core::command::Command;
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::AnalysisConfig;
 use gpui_kit::*;
@@ -221,6 +222,7 @@ impl EditorState {
                         Capability::Voiceover,
                         Capability::Video,
                         Capability::Image,
+                        Capability::Upscale,
                     ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
@@ -405,6 +407,33 @@ impl EditorState {
         grabs: Vec<FrameGrab>,
         cx: &mut Context<Self>,
     ) {
+        self.start_generation(request, grabs, None, cx);
+    }
+
+    /// Make pool video `source` larger as `request` says (an
+    /// [`GenerateRequest::Upscale`] of it), into the Video Upscaled bin;
+    /// with `replace`, its clips on picture tracks then show the upscaled
+    /// video, as a step of its own to undo.
+    pub fn upscale(
+        &mut self,
+        source: MediaId,
+        request: GenerateRequest,
+        replace: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_generation(request, Vec::new(), replace.then_some(source), cx);
+    }
+
+    /// Make `request`, after grabbing `grabs`; what it made replaces
+    /// `replaces` in the timeline when that is set and the project is still
+    /// open.
+    fn start_generation(
+        &mut self,
+        request: GenerateRequest,
+        grabs: Vec<FrameGrab>,
+        replaces: Option<MediaId>,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
@@ -437,7 +466,10 @@ impl EditorState {
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
                         if this.bus.project().id == owner {
-                            this.add_generated(item, cx);
+                            let made = this.add_generated(item, cx);
+                            if let Some((from, to)) = replaces.zip(made) {
+                                this.execute(Command::SwapMedia { from, to }, cx);
+                            }
                         } else {
                             this.keep_for(owner, item, Author::User);
                         }
@@ -522,6 +554,24 @@ impl EditorState {
         cx.notify();
     }
 
+    /// The resolution videos start at ("1080p"); `None` takes the model's.
+    pub fn video_resolution(&self) -> Option<String> {
+        self.cloud.settings().video_resolution
+    }
+
+    /// Make videos at `resolution` from now on, fitted to each model;
+    /// `None` takes the model's default.
+    pub fn set_video_resolution(&mut self, resolution: Option<String>, cx: &mut Context<Self>) {
+        let mut settings = self.cloud.settings();
+        if settings.video_resolution == resolution {
+            return;
+        }
+        settings.video_resolution = resolution;
+        persistence::with_store(|s| s.save_cloud_settings(&settings));
+        self.cloud.set_settings(settings);
+        cx.notify();
+    }
+
     /// Forget a generation that failed.
     pub fn dismiss_generation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.generating.retain(|g| g.id != id);
@@ -555,6 +605,7 @@ impl EditorState {
             Some(Capability::SoundEffects) => "Generate sound effect",
             Some(Capability::Voiceover) => "Generate voiceover",
             Some(Capability::Video) => "Generate video",
+            Some(Capability::Upscale) => "Upscale video",
             _ => "Generate music",
         };
         let bin = flikk_core::cloud::generated_bin(&item);
@@ -653,7 +704,9 @@ impl EditorState {
         for (id, capability) in new {
             self.generated_seen.insert(id);
             let analyze = match capability {
-                Capability::Video => self.models_ready(),
+                // An upscaled video is new footage to the agent: its
+                // results are keyed by the file.
+                Capability::Video | Capability::Upscale => self.models_ready(),
                 Capability::Voiceover => true,
                 _ => false,
             };
@@ -674,7 +727,7 @@ impl EditorState {
     ) -> ApprovalOutcome {
         let approve::Generated {
             item,
-            placement,
+            destination,
             summary,
         } = made;
         let name = approve::file_name(&item.path);
@@ -690,10 +743,14 @@ impl EditorState {
         };
         let mut outcome =
             format!("approved: {summary}; made media {media} ({name}) in the {bin} bin");
-        if let Some(placement) = placement {
+        if destination != flikk_agent::tools::generate::Destination::Pool {
             match self.with_agent_set(cx, |bus, author| {
-                flikk_agent::tools::generate::propose_placement(
-                    bus, author, media, &placement, &summary,
+                flikk_agent::tools::generate::propose_destination(
+                    bus,
+                    author,
+                    media,
+                    &destination,
+                    &summary,
                 )
             }) {
                 Ok(text) => outcome.push_str(&format!("; {text}")),

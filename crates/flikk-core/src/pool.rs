@@ -16,6 +16,7 @@ pub fn generated_bin(item: &MediaItem) -> &'static str {
         Some(Capability::SoundEffects) => "Sound Effects Generated",
         Some(Capability::Voiceover) => "Voiceover Generated",
         Some(Capability::Video) => "Video Generated",
+        Some(Capability::Upscale) => "Video Upscaled",
         _ => "Music Generated",
     }
 }
@@ -27,7 +28,7 @@ pub fn media_item(
     media: Option<&dyn crate::services::MediaService>,
 ) -> MediaItem {
     let kind = match generated.info.capability {
-        Capability::Video => MediaKind::Video,
+        Capability::Video | Capability::Upscale => MediaKind::Video,
         Capability::Image => MediaKind::Image,
         _ => MediaKind::Audio,
     };

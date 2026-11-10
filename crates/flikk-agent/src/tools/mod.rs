@@ -29,6 +29,7 @@ mod sounds;
 mod speed;
 mod stabilize;
 mod sync;
+pub mod upscale;
 pub mod video;
 mod view;
 pub mod voices;
@@ -220,7 +221,7 @@ pub(crate) enum JobDone {
     /// thread.
     Generated {
         item: Box<flikk_core::model::MediaItem>,
-        placement: Option<generate::Placement>,
+        destination: generate::Destination,
         summary: String,
     },
     /// A picture from the web to add to the pool on the UI thread, with
@@ -374,6 +375,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "use_library_sound" => sounds::use_sound(ctx, &args),
         "generate_audio" => generate::serve(ctx, &args),
         "generate_video" => video::serve(ctx, &args),
+        upscale::TOOL => upscale::serve(ctx, &args),
         image::TOOL => image::serve(ctx, &args),
         "find_voices" => voices::find_voices(ctx, &args),
         "add_voice" => voices::serve_add(ctx, &args),

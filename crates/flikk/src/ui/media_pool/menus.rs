@@ -157,6 +157,28 @@ pub(super) fn item_menu(
         }
         None => menu,
     };
+    // A video whose size is known can be made larger by the upscale model.
+    let video = panel
+        .read(cx)
+        .state
+        .read(cx)
+        .bus
+        .project()
+        .media(id)
+        .and_then(flikk_core::cloud::UpscaleSource::of)
+        .is_some();
+    let menu = match panel.read(cx).upscale_model(cx).filter(|_| video) {
+        Some(model) => {
+            let p = panel.clone();
+            menu.item(
+                PopupMenuItem::new("Upscale…").on_click(move |_, window, cx| {
+                    let model = model.clone();
+                    p.update(cx, |this, cx| this.open_upscale(model, id, window, cx))
+                }),
+            )
+        }
+        None => menu,
+    };
     menu.separator().item(
         PopupMenuItem::new("Remove from project")
             .icon(IconName::Trash)

@@ -19,13 +19,15 @@ mod http;
 mod keys;
 mod picture;
 mod pika;
+mod upscaled;
 
 pub use keys::{KeySource, Keys};
 
 use flikk_core::cloud::{
     Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest, Generated,
     GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
-    SpeechService, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
+    SpeechService, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage,
+    VoicePreview, VoiceQuery,
 };
 use flikk_os::sync::lock;
 use std::collections::BTreeSet;
@@ -144,6 +146,12 @@ pub trait Api: Sync {
     /// What image model `model` can make; only for providers offering
     /// pictures.
     fn image_model(&self, _model: &str) -> Option<&'static ImageModel> {
+        None
+    }
+
+    /// What upscale model `model` can do; only for providers offering
+    /// upscaling.
+    fn upscale_model(&self, _model: &str) -> Option<&'static UpscaleModel> {
         None
     }
 
@@ -305,6 +313,10 @@ impl GenerationService for Cloud {
         !lock(&self.settings).silent_video
     }
 
+    fn video_resolution(&self) -> Option<String> {
+        lock(&self.settings).video_resolution.clone()
+    }
+
     fn video_model(&self) -> Option<VideoModel> {
         let (provider, model) = self.picked(Capability::Video)?;
         provider.api.video_model(model.id).cloned()
@@ -313,6 +325,11 @@ impl GenerationService for Cloud {
     fn image_model(&self) -> Option<ImageModel> {
         let (provider, model) = self.picked(Capability::Image)?;
         provider.api.image_model(model.id).cloned()
+    }
+
+    fn upscale_model(&self) -> Option<UpscaleModel> {
+        let (provider, model) = self.picked(Capability::Upscale)?;
+        provider.api.upscale_model(model.id).cloned()
     }
 
     fn generate(
@@ -335,15 +352,23 @@ impl GenerationService for Cloud {
                     image.check(request)?;
                 }
             }
+            Capability::Upscale => {
+                if let Some(upscale) = provider.api.upscale_model(model.id) {
+                    upscale.check(request)?;
+                }
+            }
             _ => {}
         }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;
         // Held until its file and sidecar are written, or it failed.
         let stem = free_stem(dir, request);
-        let (path, cost) = provider
+        let (mut path, cost) = provider
             .api
             .generate(&key, model.id, request, &stem.path, task)?;
+        if let GenerateRequest::Upscale { source, .. } = request {
+            path = upscaled::with_source_sound(path, source, &stem.path);
+        }
         let info = GenerationInfo {
             capability,
             provider: provider.id.to_owned(),
@@ -471,6 +496,7 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> Stem {
         GenerateRequest::Voiceover { .. } => "voiceover",
         GenerateRequest::Video { .. } => "video",
         GenerateRequest::Image { .. } => "image",
+        GenerateRequest::Upscale { .. } => "upscale",
     };
     let words: Vec<String> = request
         .prompt()
@@ -526,7 +552,7 @@ fn hold(reserved: &mut BTreeSet<PathBuf>, path: PathBuf, placeholder: Option<Pat
 }
 
 /// What [`free_stem`] names its stems after.
-const KINDS: [&str; 5] = ["music", "sfx", "voiceover", "video", "image"];
+const KINDS: [&str; 6] = ["music", "sfx", "voiceover", "video", "image", "upscale"];
 
 /// How old a placeholder or part must be to count as left by a run that
 /// ended: a generation is followed for a couple of hours at most, and a

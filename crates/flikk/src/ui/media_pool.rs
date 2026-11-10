@@ -13,6 +13,7 @@ mod look;
 mod menus;
 mod selection;
 mod thumbs;
+mod upscale;
 mod video;
 pub(crate) mod voiceover;
 

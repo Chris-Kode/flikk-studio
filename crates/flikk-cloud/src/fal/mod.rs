@@ -1,21 +1,26 @@
-//! fal (fal.ai): video and pictures, from the models in [`models`]. Video:
-//! Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX.
-//! Pictures, from a description or from pictures: Nano Banana, GPT Image,
-//! FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea, Recraft.
-//! Every call sends the key as `Authorization: Key <key>`. Both are made on
-//! fal's queue ([`queue`]); what goes in is [`video`]'s or [`image`]'s, and
-//! the files they follow are uploaded to fal's storage first ([`files`]).
+//! fal (fal.ai): video and pictures, from the models in [`models`], and
+//! larger videos, from those in [`upscale`]. Video: Seedance, Kling,
+//! MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX. Pictures, from
+//! a description or from pictures: Nano Banana, GPT Image, FLUX 3,
+//! Seedream, Ideogram, Grok Imagine, Qwen Image, Krea, Recraft. Larger
+//! videos: Topaz, SeedVR2, Crystal, FLUX, Gemini Omni Flash. Every call
+//! sends the key as `Authorization: Key <key>`. All are made on fal's
+//! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s or
+//! [`upscale`]'s, and the files they follow are uploaded to fal's storage
+//! first ([`files`]).
 
 mod files;
 mod image;
 mod models;
 mod queue;
+mod upscale;
 mod video;
 
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, VideoModel,
+    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, UpscaleModel,
+    VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -136,6 +141,36 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Upscale,
+            // The ids and order of `upscale::UPSCALE`, the default first.
+            models: &[
+                CloudModel {
+                    id: "topaz/upscale/video/precision",
+                    name: "Topaz Precision",
+                },
+                CloudModel {
+                    id: "topaz/upscale/video/generative",
+                    name: "Topaz Starlight",
+                },
+                CloudModel {
+                    id: "fal-ai/seedvr/upscale/video",
+                    name: "SeedVR2",
+                },
+                CloudModel {
+                    id: "clarityai/crystal-video-upscaler",
+                    name: "Crystal",
+                },
+                CloudModel {
+                    id: "blackforestlabs/flux-video-upscale",
+                    name: "FLUX Video Upscale",
+                },
+                CloudModel {
+                    id: "google/gemini-omni-flash/v1.2/upscale",
+                    name: "Gemini Omni Flash",
+                },
+            ],
+        },
     ],
     api: &Fal,
 };
@@ -184,6 +219,10 @@ impl Api for Fal {
                 let model = models::find_image(model).ok_or_else(missing)?;
                 image::run(key, model, request, stem, task)
             }
+            Capability::Upscale => {
+                let model = upscale::find(model).ok_or_else(missing)?;
+                upscale::run(key, model, request, stem, task)
+            }
             _ => {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
@@ -197,6 +236,10 @@ impl Api for Fal {
 
     fn image_model(&self, model: &str) -> Option<&'static ImageModel> {
         models::find_image(model).map(|m| &m.spec)
+    }
+
+    fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
+        upscale::find(model).map(|m| &m.spec)
     }
 }
 

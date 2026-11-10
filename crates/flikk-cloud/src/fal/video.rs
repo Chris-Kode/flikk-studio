@@ -195,7 +195,7 @@ fn retag(prompt: &str, tags: Tags) -> String {
 
 /// The extension of the file fal made, from its type or name; mp4 when it
 /// says neither.
-fn extension(video: &Value) -> &'static str {
+pub(super) fn extension(video: &Value) -> &'static str {
     let named = video["file_name"]
         .as_str()
         .and_then(|n| n.rsplit_once('.'))

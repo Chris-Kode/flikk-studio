@@ -448,6 +448,15 @@ pub enum Command {
         effects: Vec<AudioFx>,
     },
 
+    /// Every clip showing `from` on a picture track shows `to` instead, at
+    /// the same source times: another version of the same footage, such as
+    /// an upscaled one. Sound clips keep `from`, and locked tracks are left
+    /// as they are; with no such clip it does nothing.
+    SwapMedia {
+        from: MediaId,
+        to: MediaId,
+    },
+
     // ---- media pool (user only)
     ImportMedia {
         media: MediaItem,
@@ -626,7 +635,8 @@ impl Command {
             | SetRates { .. }
             | ReplaceSpeech { .. }
             | SyncClips { .. }
-            | PlaceSynced { .. } => ToolCategory::EditTimeline,
+            | PlaceSynced { .. }
+            | SwapMedia { .. } => ToolCategory::EditTimeline,
             SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }
@@ -693,6 +703,7 @@ impl Command {
             | ReplaceSpeech { .. }
             | SyncClips { .. }
             | PlaceSynced { .. }
+            | SwapMedia { .. }
             | SetTransform { .. }
             | AddZoom { .. }
             | SetKeyframe { .. }

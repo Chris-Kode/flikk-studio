@@ -897,20 +897,14 @@ impl AgentHost {
                 JobDone::Done(done) => done,
                 JobDone::Generated {
                     item,
-                    placement,
+                    destination,
                     summary,
                 } => {
                     let author = match origin {
                         Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
-                    tools::generate::finish(
-                        bus,
-                        author.as_ref(),
-                        *item,
-                        placement.as_ref(),
-                        &summary,
-                    )
+                    tools::generate::finish(bus, author.as_ref(), *item, &destination, &summary)
                 }
                 JobDone::Fetched { item, done, bin } => {
                     let author = match origin {

@@ -37,7 +37,7 @@ use protect::warn_protected;
 use retime::{set_speed, set_speed_ramp};
 use target::{editable_track, find_clip, locked};
 use trim::{roll, slide, slip, trim};
-use update::{insert_new, update_clip, update_clips, update_track};
+use update::{insert_new, swap_media, update_clip, update_clips, update_track};
 
 /// The plan for `command` on `project`, which stays unchanged. Refused when
 /// it would change a locked track; carries protected-range warnings when
@@ -297,6 +297,7 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             }]))
         }
 
+        Command::SwapMedia { from, to } => swap_media(project, *from, *to),
         Command::ImportMedia { media } => Ok(ops(vec![Op::AddMedia {
             media: media.clone(),
         }])),
