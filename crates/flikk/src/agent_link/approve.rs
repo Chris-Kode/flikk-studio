@@ -120,19 +120,21 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         }
         "generate_video" => {
             use flikk_agent::tools::video;
-            let (request, grabs, placement) =
+            let shot =
                 video::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
             let generation = inputs
                 .services
                 .generation
                 .clone()
                 .ok_or_else(|| anyhow!("generation is not available"))?;
+            shot.check(generation.video_model().as_ref())
+                .map_err(|e| anyhow!(e))?;
             let services = inputs.services.clone();
-            let project = (!grabs.is_empty()).then(|| inputs.project.clone());
+            let project = inputs.project.clone();
             Ok(Started::Generate(Box::new(move || {
-                if let Some(project) = &project {
-                    video::grab_all(project, &services, &grabs).map_err(|e| anyhow!(e))?;
-                }
+                let request = shot
+                    .prepare(&project, &services, &|| false)
+                    .map_err(|e| anyhow!(e))?;
                 let made = generation
                     .generate(
                         &request,
@@ -142,8 +144,8 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     .map_err(|e| anyhow!(video::error_text(&e)))?;
                 Ok(Generated {
                     item: flikk_core::cloud::media_item(&made, services.media.as_deref()),
-                    destination: placement.into(),
-                    summary: request.summary(),
+                    destination: shot.placement.into(),
+                    summary: shot.request.summary(),
                 })
             })))
         }

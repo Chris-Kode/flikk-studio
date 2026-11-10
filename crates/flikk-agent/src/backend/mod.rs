@@ -48,7 +48,8 @@ pub(crate) struct TurnSpec {
     pub resume: Option<String>,
     /// Model and thinking level; `None` fields keep the CLI default.
     pub model: ModelChoice,
-    pub mcp: McpLaunch,
+    /// The editor's tools; `None` for a turn that only answers in text.
+    pub mcp: Option<McpLaunch>,
     /// Let the backend search the web and read pages with its own tools.
     pub web: bool,
     /// Empty working directory under `paths::home()`, so no project file of

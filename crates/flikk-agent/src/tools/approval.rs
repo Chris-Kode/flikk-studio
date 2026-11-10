@@ -141,13 +141,14 @@ pub fn request(
         "generate_video" => {
             let generation = ctx.services.generation.as_deref();
             let setup = super::video::VideoSetup::of(generation);
-            let (request, grabs, placement) = super::video::parse(project, &setup, args)?;
-            if !generation.is_some_and(|g| g.provider_for(request.capability()).is_some()) {
-                return Err(ToolError(super::generate::unavailable(&request)));
+            let shot = super::video::parse(project, &setup, args)?;
+            let capability = shot.request.capability();
+            if !generation.is_some_and(|g| g.provider_for(capability).is_some()) {
+                return Err(ToolError(super::generate::unavailable(&shot.request)));
             }
             (
-                super::video::summary(&request, placement.as_ref()),
-                super::video::request_json(&request, &grabs, placement.as_ref()),
+                super::video::summary(&shot),
+                super::video::request_json(&shot),
             )
         }
         super::upscale::TOOL => {

@@ -30,11 +30,40 @@ use std::time::Duration;
 const RENDER_POLL: Duration = Duration::from_millis(250);
 /// Tallest the waiting cards get before they scroll: five cards.
 const PENDING_MAX: Pixels = px(204.);
+/// Tallest they get with a video's card among them, which shows what the
+/// video is made from.
+const PENDING_MAX_SHOT: Pixels = px(300.);
 /// Tallest the answered stack's list gets before it scrolls: four and a
 /// half rows, so the cut-off row shows there is more.
 const SETTLED_MAX: Pixels = px(162.);
 
 impl ChatPanel {
+    /// Keep a card for each video waiting on the user, and none for those
+    /// they answered.
+    pub(super) fn sync_shots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = self.state.read(cx).pending_approvals();
+        self.shots
+            .retain(|id, _| pending.iter().any(|p| p.id == *id));
+        for approval in pending {
+            if approval.request.tool != "generate_video" || self.shots.contains_key(&approval.id) {
+                continue;
+            }
+            let Some(shot) = flikk_agent::tools::video::from_json(&approval.request.args) else {
+                continue;
+            };
+            let state = self.state.clone();
+            let card =
+                cx.new(|cx| super::shot::ShotCard::new(state, approval.id, shot, window, cx));
+            if crate::demo::shot::asked().as_deref() == Some("blockout") {
+                let card = card.clone();
+                cx.defer_in(window, move |_, window, cx| {
+                    card.update(cx, |card, cx| card.edit_blockout(window, cx))
+                });
+            }
+            self.shots.insert(approval.id, card);
+        }
+    }
+
     pub(super) fn render_approvals(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let state = self.state.read(cx);
         let settled = state.settled.clone();
@@ -53,7 +82,11 @@ impl ChatPanel {
                     .child(
                         v_flex()
                             .id("approvals-pending")
-                            .max_h(PENDING_MAX)
+                            .max_h(if self.shots.is_empty() {
+                                PENDING_MAX
+                            } else {
+                                PENDING_MAX_SHOT
+                            })
                             .gap(px(6.))
                             .children(rows)
                             .track_scroll(&self.pending_scroll)
@@ -212,6 +245,9 @@ impl ChatPanel {
     fn render_approval(&self, approval: &PendingApproval, cx: &mut Context<Self>) -> AnyElement {
         let id = approval.id;
         let request = &approval.request;
+        if let Some(card) = self.shots.get(&id) {
+            return card.clone().into_any_element();
+        }
         if super::entries::is_entry_tool(&request.tool)
             && let Some(card) = self.render_entry_approval(id, &request.tool, &request.args, cx)
         {

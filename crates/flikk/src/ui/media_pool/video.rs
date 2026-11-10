@@ -455,7 +455,7 @@ pub(super) fn picker(
 }
 /// The aspect ratio a `width` × `height` sequence has, when it is a common
 /// one.
-pub(super) fn shape_of(width: u32, height: u32) -> Option<&'static str> {
+pub(crate) fn shape_of(width: u32, height: u32) -> Option<&'static str> {
     let ratio = width as f64 / height.max(1) as f64;
     [
         ("16:9", 16. / 9.),

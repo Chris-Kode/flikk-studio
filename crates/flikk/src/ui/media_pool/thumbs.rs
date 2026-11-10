@@ -165,7 +165,7 @@ fn key(item: &MediaItem) -> String {
 }
 
 /// RGBA8 → 32-bit top-down BMP, which GPUI decodes without extra crates.
-fn bmp(frame: &Frame) -> Vec<u8> {
+pub(crate) fn bmp(frame: &Frame) -> Vec<u8> {
     let (w, h) = (frame.width, frame.height);
     let data = w as usize * h as usize * 4;
     let mut out = Vec::with_capacity(54 + data);

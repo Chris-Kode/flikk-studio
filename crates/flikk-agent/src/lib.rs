@@ -11,6 +11,9 @@
 //!   `127.0.0.1` with a per-session token.
 //! * [`tools`] is the catalog (one JSON schema per PRD tool) and the code that
 //!   runs each tool against the `CommandBus` as `Author::Agent`.
+//!
+//! Beside the turns, [`reblock`] changes a blockout by asking: one backend
+//! run without tools.
 
 mod args;
 pub mod backend;
@@ -18,6 +21,7 @@ pub mod bridge;
 pub mod host;
 pub mod mcp;
 mod prompt;
+pub mod reblock;
 pub mod session;
 pub mod tools;
 

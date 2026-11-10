@@ -210,7 +210,17 @@ camera move, lens and light, style. To continue a shot, start on the \
 program's frame (`first_frame_at`, the last frame before the cut); to animate \
 a still, start on it (`first_frame`). To keep a character, product or look \
 consistent, pass pool items as `references` and name them in the prompt as \
-@Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`. A \
+@Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`. When \
+the camera move, the staging or the timing matter (a chase, an orbit, a \
+reveal, two people crossing), give it a `blockout`: a rough 3D scene of \
+grey stand-ins and a keyed camera that Flikk draws at no cost. The user \
+watches it play on the request's card, asks for changes there, and only \
+then approves the spend, so what they pay for moves as they meant. Keep it \
+rough and physically plausible; the model copies stiff moves, so block \
+where things go, not how limbs move, and let the prompt carry the \
+performance and the look. A first frame given with a blockout sets the \
+look of the opening frame: use the program's frame, or a picture made with \
+`generate_image`, when one fits. A \
 generated video is analyzed as it lands, like footage (shots, sound, any \
 speech), when the analysis models are ready: look at it with `view_media` \
 before you place it or make more.

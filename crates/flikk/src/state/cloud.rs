@@ -93,6 +93,9 @@ pub struct Generating {
     pub failed: Option<CloudError>,
 }
 
+/// What becomes of the pool item a generation made.
+type Then = Box<dyn FnOnce(&mut EditorState, MediaId, &mut Context<EditorState>)>;
+
 impl Generating {
     /// Stopped by the user and not over yet: its row stays until the
     /// provider says. What the provider made by then is kept, as it is paid
@@ -410,6 +413,19 @@ impl EditorState {
         self.start_generation(request, grabs, None, cx);
     }
 
+    /// [`Self::generate_with_frames`], then `then` with the pool item it
+    /// made, when its project is still open. The generation's id, as in
+    /// [`Self::generating`] while it runs or shows its failure.
+    pub fn generate_then(
+        &mut self,
+        request: GenerateRequest,
+        grabs: Vec<FrameGrab>,
+        then: impl FnOnce(&mut Self, MediaId, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.start_generation(request, grabs, Some(Box::new(then)), cx)
+    }
+
     /// Make pool video `source` larger as `request` says (an
     /// [`GenerateRequest::Upscale`] of it), into the Video Upscaled bin;
     /// with `replace`, its clips on picture tracks then show the upscaled
@@ -421,19 +437,23 @@ impl EditorState {
         replace: bool,
         cx: &mut Context<Self>,
     ) {
-        self.start_generation(request, Vec::new(), replace.then_some(source), cx);
+        let swap: Option<Then> = replace.then(|| -> Then {
+            Box::new(move |this, to, cx| {
+                this.execute(Command::SwapMedia { from: source, to }, cx);
+            })
+        });
+        self.start_generation(request, Vec::new(), swap, cx);
     }
 
-    /// Make `request`, after grabbing `grabs`; what it made replaces
-    /// `replaces` in the timeline when that is set and the project is still
-    /// open.
+    /// Make `request`, after grabbing `grabs`; `then` gets the pool item it
+    /// made when the project is still open. The generation's id.
     fn start_generation(
         &mut self,
         request: GenerateRequest,
         grabs: Vec<FrameGrab>,
-        replaces: Option<MediaId>,
+        then: Option<Then>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
         let id = self.next_generation;
         self.next_generation += 1;
         let task = GenerationTask::default();
@@ -467,8 +487,8 @@ impl EditorState {
                         this.generating.retain(|g| g.id != id);
                         if this.bus.project().id == owner {
                             let made = this.add_generated(item, cx);
-                            if let Some((from, to)) = replaces.zip(made) {
-                                this.execute(Command::SwapMedia { from, to }, cx);
+                            if let Some((then, made)) = then.zip(made) {
+                                then(this, made, cx);
                             }
                         } else {
                             this.keep_for(owner, item, Author::User);
@@ -509,6 +529,7 @@ impl EditorState {
         })
         .detach();
         cx.notify();
+        id
     }
 
     /// Ask the provider to stop generation `id`; its row goes when it has.

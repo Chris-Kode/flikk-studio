@@ -12,6 +12,7 @@
 pub mod agent;
 pub mod analysis;
 pub mod audiofx;
+pub mod blockout;
 pub mod bus;
 pub mod cache_sweep;
 pub mod captions;

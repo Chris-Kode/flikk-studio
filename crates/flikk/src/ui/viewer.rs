@@ -32,7 +32,7 @@ mod chrome;
 mod focus;
 mod frames;
 mod gizmo;
-mod latest;
+pub(crate) mod latest;
 mod masks;
 mod player;
 mod pointer;
