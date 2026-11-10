@@ -24,7 +24,7 @@ use std::time::Duration;
 const PROGRESS_POLL: Duration = Duration::from_millis(200);
 
 /// The label column of the page's rows.
-const LABEL_W: f32 = 140.;
+const LABEL_W: f32 = 120.;
 /// The actions after a key: Replace and remove, or Save, end on one edge.
 const ACTIONS_W: f32 = 96.;
 
@@ -575,7 +575,7 @@ impl Render for IntegrationsTab {
                 let model = self.models.get(&capability).map(|(_, m)| m.clone());
                 row(capability.label(), LABEL_W)
                     .h(px(36.))
-                    .child(div().w(px(160.)).flex_none().child(Select::new(select)))
+                    .child(div().w(px(140.)).flex_none().child(Select::new(select)))
                     .children(model.map(|m| {
                         let single = self
                             .models
@@ -596,7 +596,7 @@ impl Render for IntegrationsTab {
                         el.child(
                             div()
                                 .id("video-resolution")
-                                .w(px(90.))
+                                .w(px(80.))
                                 .flex_none()
                                 .child(Select::new(&self.resolution))
                                 .tooltip(Tooltip::text("Resolution")),
@@ -604,7 +604,7 @@ impl Render for IntegrationsTab {
                         .child(
                             Switch::new("video-sound")
                                 .checked(sound)
-                                .label("With sound")
+                                .label("Sound")
                                 .on_click(move |on: &bool, _, cx| {
                                     state.update(cx, |s, cx| s.set_video_sound(*on, cx))
                                 }),
