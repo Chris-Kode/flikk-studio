@@ -1,16 +1,34 @@
 //! The welcome page the app opens on: New project, Open…, a drop zone that
-//! starts a project from footage, and the recent projects.
+//! starts a project from footage, and the recent projects. While a model
+//! is missing, the setup list takes the recent projects' place and no
+//! project opens: the models to download as one, the transcription size,
+//! the agent CLIs found, and FFmpeg and a browser when they are not.
 
 use crate::projects;
-use crate::state::EditorState;
-use crate::ui::kit::{Button, Icon, IconName, Input, Kbd, h_flex, theme as t, v_flex};
+use crate::state::{EditorState, SetupStatus};
+use crate::ui::kit::{
+    Button, Icon, IconName, Input, Kbd, Progress, Segmented, Spinner, Tooltip, h_flex, theme as t,
+    v_flex,
+};
+use flikk_core::agent::Backend;
+use flikk_models::Task as ModelTask;
 use flikk_store::project_file::{self, EXTENSION};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// How often the setup list redraws while the models download.
+const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
+
+/// Where Claude Code is installed from, when no agent CLI is found.
+const AGENT_INSTALL: &str = "https://code.claude.com/docs/en/setup";
+/// Where FFmpeg is downloaded from.
+const FFMPEG_INSTALL: &str = "https://ffmpeg.org/download.html";
+/// Where a browser for HTML titles is downloaded from.
+const BROWSER_INSTALL: &str = "https://www.google.com/chrome/";
 
 /// What the page asks the window to do.
 pub enum WelcomeEvent {
@@ -66,8 +84,21 @@ impl Recent {
     }
 }
 
+/// The agent CLIs looked for on the setup list.
+enum Agents {
+    /// Asked under this number; a later ask drops its answer.
+    Checking(u64),
+    /// Those found, with the version each reports.
+    Found(Vec<(Backend, String)>),
+}
+
 pub struct Welcome {
     state: Entity<EditorState>,
+    agents: Agents,
+    /// Numbers each look for the agent CLIs.
+    agents_asked: u64,
+    /// Redraws the setup list while the models download.
+    download_poll: Option<Task<()>>,
     search: Entity<InputState>,
     recent: Vec<Recent>,
     /// Index into the visible rows, for Up, Down and Enter.
@@ -76,6 +107,7 @@ pub struct Welcome {
     dropping: Option<Vec<PathBuf>>,
     focus: FocusHandle,
     _search: Subscription,
+    _state: Subscription,
 }
 
 impl EventEmitter<WelcomeEvent> for Welcome {}
@@ -95,21 +127,57 @@ impl Welcome {
             .collect();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self {
+        let _state = cx.observe(&state, |_, _, cx| cx.notify());
+        let mut this = Self {
             state,
+            agents: Agents::Checking(0),
+            agents_asked: 0,
+            download_poll: None,
             search,
             recent,
             selected: 0,
             dropping: None,
             focus,
             _search,
+            _state,
+        };
+        if this.state.read(cx).projects_wait() {
+            this.check_agents(cx);
         }
+        this
+    }
+
+    /// Look for Claude and Codex, and their versions, off the UI thread.
+    fn check_agents(&mut self, cx: &mut Context<Self>) {
+        self.agents_asked += 1;
+        let asked = self.agents_asked;
+        self.agents = Agents::Checking(asked);
+        cx.notify();
+        let found = cx.background_executor().spawn(async move {
+            [Backend::Claude, Backend::Codex]
+                .into_iter()
+                .filter_map(|b| Some((b, flikk_agent::backend::installed_version(b)?)))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            let _ = this.update(cx, |this, cx| {
+                if matches!(this.agents, Agents::Checking(at) if at == asked) {
+                    this.agents = Agents::Found(found);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The rows matching the search, in order.
     fn visible(&self, cx: &App) -> Vec<Row> {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let s = self.state.read(cx);
+        if s.projects_wait() {
+            return Vec::new();
+        }
         let recovered = s.file().is_none()
             && s.is_dirty()
             && s.bus.project().name.to_lowercase().contains(&query);
@@ -180,6 +248,10 @@ impl Welcome {
 
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         self.dropping = None;
+        if self.state.read(cx).projects_wait() {
+            cx.notify();
+            return;
+        }
         let paths = paths.paths().to_vec();
         if let [file] = paths.as_slice()
             && file.extension().is_some_and(|e| e == EXTENSION)
@@ -217,7 +289,8 @@ impl Welcome {
         cx.notify();
     }
 
-    fn actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// New project and Open…, held while the models are missing.
+    fn actions(&self, waiting: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let big = |b: Button| {
             b.h(px(38.))
                 .w_full()
@@ -228,7 +301,8 @@ impl Welcome {
         v_flex()
             .gap(px(8.))
             .child(big(Button::new("welcome-new")
-                .primary()
+                .when(!waiting, |b| b.primary())
+                .disabled(waiting)
                 .icon(IconName::Plus)
                 .label("New project")
                 .child(div().flex_1())
@@ -238,6 +312,7 @@ impl Welcome {
                     projects::new_project(&this.state, window, cx)
                 }))))
             .child(big(Button::new("welcome-open")
+                .disabled(waiting)
                 .icon(IconName::FolderOpen)
                 .label("Open…")
                 .child(div().flex_1())
@@ -248,8 +323,8 @@ impl Welcome {
                 }))))
     }
 
-    fn drop_zone(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let dropping = self.dropping.as_ref();
+    fn drop_zone(&self, waiting: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let dropping = self.dropping.as_ref().filter(|_| !waiting);
         let (title, hint): (SharedString, SharedString) = match dropping {
             Some(paths) => {
                 let hint = match paths.as_slice() {
@@ -292,11 +367,11 @@ impl Welcome {
             } else {
                 pattern_slash(t::alpha(t::T1, 0.012), 8., 8.)
             })
+            .when(waiting, |zone| zone.opacity(0.5))
             .on_drag_move(
                 cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let over = ev
-                        .bounds
-                        .contains(&ev.event.position)
+                    let waiting = this.state.read(cx).projects_wait();
+                    let over = (!waiting && ev.bounds.contains(&ev.event.position))
                         .then(|| ev.drag(cx).paths().to_vec());
                     if over != this.dropping {
                         this.dropping = over;
@@ -538,12 +613,200 @@ impl Welcome {
                 list
             })
     }
+
+    /// The setup list: one row each for the models, the transcription
+    /// size and the agent, then FFmpeg and a browser when missing.
+    fn setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.state.read(cx);
+        let ffmpeg = s
+            .services
+            .media
+            .is_none()
+            .then(|| setup_row("FFmpeg", install_button("welcome-ffmpeg", FFMPEG_INSTALL)));
+        let browser = s.services.html.is_none().then(|| {
+            setup_row(
+                "Browser",
+                install_button("welcome-browser", BROWSER_INSTALL),
+            )
+            .id("welcome-browser-row")
+            .tooltip(Tooltip::text("For HTML titles"))
+            .into_any_element()
+        });
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(8.))
+            .child(
+                h_flex().h(px(32.)).px(px(10.)).child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Setup"),
+                ),
+            )
+            .child(
+                v_flex()
+                    .px(px(10.))
+                    .child(self.models_row(cx))
+                    .child(self.transcription_row(cx))
+                    .child(self.agent_row(cx))
+                    .children(ffmpeg.map(IntoElement::into_any_element))
+                    .children(browser),
+            )
+    }
+
+    /// Every model as one download: its total size and Download, then its
+    /// progress with Cancel, or why it failed with Retry.
+    fn models_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.state.read(cx);
+        let labels: Vec<&str> = ModelTask::ALL.iter().map(|t| t.label()).collect();
+        let count = div()
+            .id("welcome-models-count")
+            .font_family(t::mono())
+            .text_size(px(11.))
+            .text_color(t::T3)
+            .child(format!("{} models", labels.len()))
+            .tooltip(Tooltip::text(labels.join(", ")));
+        let state = self.state.clone();
+        let control = match s.setup_status() {
+            SetupStatus::Complete => Icon::new(IconName::CircleCheck)
+                .size(px(14.))
+                .color(t::OK)
+                .into_any_element(),
+            SetupStatus::Missing { bytes } => h_flex()
+                .gap(px(10.))
+                .child(meta(crate::ui::format::size(bytes)))
+                .child(
+                    Button::new("welcome-download")
+                        .primary()
+                        .icon(IconName::Download)
+                        .label("Download")
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.download_setup(cx))),
+                )
+                .into_any_element(),
+            SetupStatus::Downloading { fraction } => h_flex()
+                .gap(px(8.))
+                .child(Progress::new().value(fraction).w(px(160.)))
+                .child(
+                    meta(format!("{:.0} %", fraction * 100.))
+                        .w(px(32.))
+                        .flex()
+                        .justify_end(),
+                )
+                .child(
+                    Button::new("welcome-cancel")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::X)
+                        .tooltip("Cancel")
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.cancel_setup(cx))),
+                )
+                .into_any_element(),
+            SetupStatus::Failed { message } => h_flex()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .id("welcome-download-failed")
+                        .min_w_0()
+                        .max_w(px(240.))
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(t::T2)
+                        .child(Icon::new(IconName::CircleAlert).size(px(14.)).color(t::ERR))
+                        .child(div().min_w_0().truncate().child(message.clone()))
+                        .tooltip(Tooltip::text(message)),
+                )
+                .child(
+                    Button::new("welcome-retry")
+                        .primary()
+                        .label("Retry")
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.download_setup(cx))),
+                )
+                .into_any_element(),
+        };
+        setup_row("Models", h_flex().gap(px(12.)).child(count).child(control))
+    }
+
+    /// Whisper small or large, each with its size. Held while the models
+    /// download, so the total stays what is fetched.
+    fn transcription_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.state.read(cx);
+        let downloading = matches!(s.setup_status(), SetupStatus::Downloading { .. });
+        let picked = ModelTask::Transcription.model();
+        let sizes: Vec<_> = crate::ui::editor_settings::transcription_sizes().collect();
+        let selected = sizes
+            .iter()
+            .position(|(_, m)| m.id == picked.id)
+            .unwrap_or(0);
+        let items = sizes.iter().map(|(label, model)| {
+            let bytes = model.files.iter().map(|f| f.size).sum();
+            format!("{label} · {}", crate::ui::format::size(bytes))
+        });
+        let mut choice = Segmented::new("welcome-transcription")
+            .field()
+            .items(items)
+            .selected(selected);
+        for ix in 0..sizes.len() {
+            choice = choice.disabled_item(ix, downloading && ix != selected);
+        }
+        let state = self.state.clone();
+        setup_row(
+            "Transcription",
+            choice.on_click(move |ix, _, cx| {
+                if let Some((_, model)) = crate::ui::editor_settings::transcription_sizes().nth(*ix)
+                {
+                    state.update(cx, |s, cx| {
+                        s.pick_model(ModelTask::Transcription, model, cx)
+                    });
+                }
+            }),
+        )
+    }
+
+    /// The agent CLIs found and their versions; when neither is, where to
+    /// install one and Check again. It holds no project back.
+    fn agent_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let control = match &self.agents {
+            Agents::Checking(_) => Spinner::new().size(px(12.)).into_any_element(),
+            Agents::Found(found) if found.is_empty() => h_flex()
+                .gap(px(8.))
+                .child(install_button("welcome-agent", AGENT_INSTALL))
+                .child(
+                    Button::new("welcome-agent-check")
+                        .label("Check again")
+                        .on_click(cx.listener(|this, _, _, cx| this.check_agents(cx))),
+                )
+                .into_any_element(),
+            Agents::Found(found) => h_flex()
+                .gap(px(12.))
+                .children(found.iter().map(|(backend, version)| {
+                    h_flex()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(t::T2)
+                        .child(backend.label())
+                        .child(meta(version.clone()))
+                }))
+                .child(Icon::new(IconName::CircleCheck).size(px(14.)).color(t::OK))
+                .into_any_element(),
+        };
+        setup_row("Agent", control)
+    }
 }
 
 impl Render for Welcome {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.dropping.is_some() && !cx.has_active_drag() {
             self.dropping = None;
+        }
+        let waiting = self.state.read(cx).projects_wait();
+        if waiting && self.download_poll.is_none() && self.state.read(cx).models.busy() {
+            self.download_poll = Some(crate::ui::repaint_while(
+                cx,
+                DOWNLOAD_POLL,
+                |this, cx| this.state.read(cx).models.busy(),
+                |this| this.download_poll = None,
+            ));
         }
         let version = env!("CARGO_PKG_VERSION");
         div()
@@ -582,10 +845,16 @@ impl Render for Welcome {
                                     .text_color(t::T3)
                                     .child(version),
                             )
-                            .child(div().mt(px(32.)).child(self.actions(cx)))
-                            .child(self.drop_zone(cx)),
+                            .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
+                            .child(self.drop_zone(waiting, cx)),
                     )
-                    .child(self.recent(cx)),
+                    .map(|page| {
+                        if waiting {
+                            page.child(self.setup(cx))
+                        } else {
+                            page.child(self.recent(cx))
+                        }
+                    }),
             )
     }
 }
@@ -658,4 +927,41 @@ fn aspect(w: u32, h: u32) -> String {
     }
     let g = gcd(w, h).max(1);
     format!("{}:{}", w / g, h / g)
+}
+
+/// A row of the setup list: its label on the left, `control` on the right.
+fn setup_row(label: &'static str, control: impl IntoElement) -> Stateful<Div> {
+    h_flex()
+        .id(label)
+        .h(px(44.))
+        .gap(px(12.))
+        .border_b_1()
+        .border_color(t::LN)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.))
+                .child(label),
+        )
+        .child(control)
+}
+
+/// "Install…", which opens `url` in the browser.
+fn install_button(id: &'static str, url: &'static str) -> Button {
+    Button::new(id)
+        .icon(IconName::ExternalLink)
+        .label("Install…")
+        .on_click(move |_, _, cx| cx.open_url(url))
+}
+
+/// Quiet mono meta text: sizes, percentages, versions.
+fn meta(text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .font_family(t::mono())
+        .text_size(px(11.))
+        .text_color(t::T3)
+        .child(text.into())
 }

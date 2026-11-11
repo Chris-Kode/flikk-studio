@@ -618,6 +618,19 @@ transcript, and results made already stay. A new model is a folder under
 its task, its `MODEL` in `MODELS` and an arm in `runner`; a model in several
 sizes (Whisper) has a `MODEL` for each in one folder.
 
+Every model is needed: each task of `Task::ALL` on the model picked for
+it (`EditorState::required_models`). While one is missing, the welcome
+page shows a setup list in place of Recent (`state/setup.rs`,
+`ui/welcome.rs`): one row for the whole set, with its total size and one
+Download that starts each missing model at once, its progress counted
+against the bytes missing when it started, Cancel, and a failed download
+in place with Retry; Whisper small or large, each with its size, held
+while the set downloads; the agent CLIs found and their versions
+(`flikk_agent::backend::installed_version` runs `--version` off the UI
+thread; with neither, Install… and Check again); and FFmpeg and a browser,
+only when they are not found. After an update that adds a task, the list
+comes back with only its files to fetch. `FLIKK_DEMO_SETUP` seeds it.
+
 Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more
 than one (saved per user in the store), and downloads one or all of them,
@@ -1842,6 +1855,7 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
+| `FLIKK_DEMO_SETUP` | `missing`, `downloading`, `failed` | The welcome page's setup list in that state, whatever is on disk; needs no `FLIKK_DEMO` |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh

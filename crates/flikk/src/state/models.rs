@@ -39,7 +39,8 @@ impl EditorState {
     }
 
     /// Run `task` on `model` from now on: the user picked it. Media
-    /// analyzed already keeps its results.
+    /// analyzed already keeps its results. Once the setup is done, a model
+    /// not on disk downloads at once: every model is needed.
     pub fn pick_model(
         &mut self,
         task: flikk_models::Task,
@@ -49,7 +50,11 @@ impl EditorState {
         if task.model().id == model.id {
             return;
         }
+        let set_up = !self.projects_wait();
         task.pick(model);
+        if set_up && !model.is_downloaded() {
+            self.download_model(model, cx);
+        }
         persistence::with_store(|s| s.save_model_picks(&flikk_models::picked()));
         self.poll_models(cx);
         self.refresh_model_notices();

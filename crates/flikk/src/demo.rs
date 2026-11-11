@@ -11,6 +11,8 @@
 //! on that file (see [`person`]); `FLIKK_DEMO_STABILIZE=<seconds>` a
 //! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
 //! a video waiting on the user with its blockout (see [`shot`]).
+//! `FLIKK_DEMO_SETUP=missing|downloading|failed` opens on the welcome
+//! page's setup list in that state (see [`setup`]).
 
 mod compose;
 mod depth;
@@ -102,6 +104,33 @@ pub fn generate_form() -> Option<String> {
         .then(|| std::env::var("FLIKK_DEMO_GENERATE").ok())
         .flatten()
         .map(|v| v.to_lowercase())
+}
+
+/// `FLIKK_DEMO_SETUP=missing|downloading|failed`: the welcome page's
+/// setup list in that state, whatever is on disk. Needs no `FLIKK_DEMO`.
+pub fn setup() -> Option<crate::state::SetupStatus> {
+    use crate::state::SetupStatus;
+    let every_file = || {
+        flikk_models::Task::ALL
+            .iter()
+            .flat_map(|t| t.model().files)
+            .map(|f| f.size)
+            .sum()
+    };
+    match std::env::var("FLIKK_DEMO_SETUP")
+        .ok()?
+        .to_lowercase()
+        .as_str()
+    {
+        "missing" => Some(SetupStatus::Missing {
+            bytes: every_file(),
+        }),
+        "downloading" => Some(SetupStatus::Downloading { fraction: 0.42 }),
+        "failed" => Some(SetupStatus::Failed {
+            message: "speaker embedder download stalled: the server sent nothing for 60 s".into(),
+        }),
+        _ => None,
+    }
 }
 
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {

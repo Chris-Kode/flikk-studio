@@ -15,6 +15,7 @@ mod music_fit;
 mod offline;
 mod playback;
 mod respeak;
+mod setup;
 mod source;
 mod sync;
 mod update;
@@ -22,6 +23,7 @@ pub mod voices;
 
 pub use approvals::ApprovalOutcome;
 pub use cloud::{Check, Generating, ProviderStatus};
+pub use setup::SetupStatus;
 pub use source::Source;
 
 use crate::agent_link::AgentLink;
@@ -121,6 +123,8 @@ pub struct EditorState {
     pub model_tasks: Vec<flikk_models::Task>,
     /// Model downloads, started only by the user. Clones share them.
     pub models: flikk_models::Downloads,
+    /// The download of every model at once, from the welcome page.
+    setup: setup::Setup,
     /// Warnings and errors under the top bar's notice button.
     pub notices: Notices,
     /// Media whose source file is missing.
@@ -226,6 +230,7 @@ impl EditorState {
             models_seen: (downloaded, 0),
             model_tasks,
             models: flikk_models::Downloads::default(),
+            setup: setup::Setup::new(),
             notices: Notices::default(),
             offline: OfflineMedia::default(),
             _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),

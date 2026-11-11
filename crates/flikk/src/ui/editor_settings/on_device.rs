@@ -26,7 +26,7 @@ pub(super) const THIS_MACHINE: &str = if cfg!(target_os = "macos") {
 };
 
 /// Transcription's sizes as "Use for" offers them, smallest first.
-pub(super) fn transcription_sizes() -> impl Iterator<Item = (&'static str, &'static Model)> {
+pub(crate) fn transcription_sizes() -> impl Iterator<Item = (&'static str, &'static Model)> {
     ["Small", "Large"]
         .into_iter()
         .zip(ModelTask::Transcription.models().iter().copied())
