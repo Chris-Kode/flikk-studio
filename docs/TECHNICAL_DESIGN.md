@@ -576,7 +576,8 @@ analyzed, and items already in a project when it opens are left as they
 were; an import undone and done again is new again. Automatic analysis
 never spends money unasked: while a provider is picked to transcribe, an
 item whose sound it would hear (one without a voiceover's script standing
-in for its words) waits in `EditorState::provider_asks`, and a dialog
+in for its words, and not heard only, below) waits in
+`EditorState::provider_asks`, and a dialog
 (`ui/provider_ask.rs`, opened and closed by the window with the list, which
 it follows as more arrive) lists them under "Analyze with <provider>?".
 Analyze queues them as asked for, so they go to the provider; Cancel,
@@ -588,7 +589,16 @@ about those items the same way; going back to this machine queues the
 items asked about, as they cost nothing then. As a last guard, a job
 queued in the background and not asked for since skips itself, leaving the
 item unanalyzed, when a provider transcribes by the time it runs
-(`JobProgress::asked`). The library's sounds are
+(`JobProgress::asked`). Music and sound effects a provider made are heard
+only, whoever asks and whatever is picked to transcribe
+(`MediaItem::heard_only`, applied in `LocalAnalysis::analyze_with`, the
+rule the library's sounds follow): sounds and music, beats and sound
+search, with no voice activity, transcript, speakers or shot changes, so
+they never reach a provider and are never asked about. Their result is
+whole when it covers those steps (`coverage` works out what a plain
+request wants for speech, a script or sound only), and the job's key
+carries the steps, so it is told apart from a full one. Imported audio
+can't be told to be music, so it is analyzed in full. The library's sounds are
 analyzed on their own without speech or shots, on local models only, so
 that it costs nothing. The models are on
 disk before a project opens (see Models), so "Analyze" is disabled only
@@ -1350,9 +1360,10 @@ on the UI thread and run it off it:
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
   a generated item reaches the pool (the media pool or an approval),
-  `analyze_new` queues it once like any new item (see §7): music, sound
-  effects and videos are asked about first while a provider is picked to
-  transcribe; a voiceover, whose script stands in for its words, never is.
+  `analyze_new` queues it once like any new item (see §7): a video is
+  asked about first while a provider is picked to transcribe; a
+  voiceover, whose script stands in for its words, never is, nor are
+  music and sound effects, which are heard only.
   Items already in a project when it opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
   some models): the media pool's form starts its Sound switch from it, and

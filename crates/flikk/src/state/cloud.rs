@@ -728,12 +728,13 @@ impl EditorState {
     }
 
     /// Whether analyzing `item` now would send its sound to the provider
-    /// picked to transcribe: it has sound, and no script stands in for its
-    /// words.
+    /// picked to transcribe: it has sound, it may hold speech (it is not
+    /// music or a sound effect, [`MediaItem::heard_only`]), and no script
+    /// stands in for its words.
     fn would_pay(&self, item: &MediaItem) -> bool {
         let script = item.generated.as_deref().and_then(|g| g.script());
         let heard = item.info.as_ref().is_none_or(|i| !i.audio.is_empty());
-        self.online_transcription().is_some() && script.is_none() && heard
+        self.online_transcription().is_some() && script.is_none() && heard && !item.heard_only()
     }
 
     /// The user said yes: analyze the items in [`Self::provider_asks`]

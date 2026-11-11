@@ -348,6 +348,17 @@ impl Fingerprint {
 }
 
 impl MediaItem {
+    /// Analyzed for its sound only (sounds and music, beats, sound search),
+    /// never for speech, whoever asks: music or a sound effect a provider
+    /// made, which has no words to find. It never goes to a provider to
+    /// transcribe. Imported audio can't be told apart, so it is not.
+    pub fn heard_only(&self) -> bool {
+        use crate::cloud::Capability;
+        self.generated
+            .as_deref()
+            .is_some_and(|g| matches!(g.capability, Capability::Music | Capability::SoundEffects))
+    }
+
     /// A pool item for the file at `path`, of `kind`, with a new id and
     /// nothing else known yet: no name of its own, fingerprint, probe
     /// results, bin, tags, proxy or generation, and HDR mapped the default

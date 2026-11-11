@@ -162,9 +162,9 @@ struct Shared {
     /// that asking again reads nothing. A job's result goes to `results`,
     /// which is asked first.
     absent: Mutex<HashSet<Fingerprint>>,
-    /// The steps a plain request asks for, without a script and with one,
-    /// and when they were worked out: it looks for the models on disk.
-    wanted: Mutex<[Option<(Instant, AnalysisSteps)>; 2]>,
+    /// The steps a request asks for, by [`Hearing`], and when they were
+    /// worked out: it looks for the models on disk.
+    wanted: Mutex<[Option<(Instant, AnalysisSteps)>; Hearing::COUNT]>,
     #[cfg(feature = "whisper")]
     voice: Box<dyn flikk_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
@@ -325,6 +325,9 @@ impl LocalAnalysis {
             );
             return self.queue.finished(label, Some(item.id), Err(message));
         };
+        let mut options = options;
+        // Music and sound effects are heard only, whoever asks.
+        options.sound_only |= item.heard_only();
         let wanted = Plan::for_item(&self.shared, item, options.sound_only).ran();
         if !options.refresh && self.shared.covers(&fp, &wanted) {
             return self.queue.finished(label, Some(item.id), Ok(()));
@@ -390,7 +393,7 @@ impl AnalysisService for LocalAnalysis {
 
     fn configure(&self, config: AnalysisConfig) {
         *lock(&self.shared.config) = config;
-        *lock(&self.shared.wanted) = [None, None];
+        *lock(&self.shared.wanted) = Default::default();
     }
 
     fn cancel_background_speech(&self) -> Vec<Fingerprint> {
@@ -429,7 +432,7 @@ impl AnalysisService for LocalAnalysis {
         else {
             return Coverage::None;
         };
-        match cached.steps.covers(&self.shared.wanted(has_script(item))) {
+        match cached.steps.covers(&self.shared.wanted(Hearing::of(item))) {
             true => Coverage::Full,
             false => Coverage::Partial,
         }
@@ -497,16 +500,23 @@ impl Shared {
         self.entry(fp).map(|c| c.analysis)
     }
 
-    /// What [`Plan::for_item`] runs for an item that is not sound only,
-    /// worked out again after [`WANTED_FOR`], as models come and go.
-    fn wanted(&self, script: bool) -> AnalysisSteps {
+    /// What [`Plan::for_item`] runs for a plain request about an item
+    /// heard as `hearing` says, worked out again after [`WANTED_FOR`], as
+    /// models come and go.
+    fn wanted(&self, hearing: Hearing) -> AnalysisSteps {
         let now = Instant::now();
         let fresh = |(at, _): &(Instant, AnalysisSteps)| now.duration_since(*at) < WANTED_FOR;
-        if let Some((_, steps)) = lock(&self.wanted)[script as usize].filter(fresh) {
+        let slot = hearing as usize;
+        if let Some((_, steps)) = lock(&self.wanted)[slot].filter(fresh) {
             return steps;
         }
-        let steps = Plan::new(&lock(&self.config), false, script).ran();
-        lock(&self.wanted)[script as usize] = Some((now, steps));
+        let (sound_only, script) = match hearing {
+            Hearing::Speech => (false, false),
+            Hearing::Script => (false, true),
+            Hearing::SoundOnly => (true, false),
+        };
+        let steps = Plan::new(&lock(&self.config), sound_only, script).ran();
+        lock(&self.wanted)[slot] = Some((now, steps));
         steps
     }
 
@@ -529,6 +539,31 @@ impl Shared {
         // A job may have finished while the disk was read.
         let mut results = lock(&self.results);
         Some(results.entry(fp.clone()).or_insert(loaded).clone())
+    }
+}
+
+/// How an item is heard, which decides the steps a plain request runs.
+#[derive(Clone, Copy)]
+enum Hearing {
+    /// Speech found by transcribing.
+    Speech,
+    /// Speech whose words a voiceover's script gives.
+    Script,
+    /// No speech: music and sound effects ([`MediaItem::heard_only`]).
+    SoundOnly,
+}
+
+impl Hearing {
+    const COUNT: usize = 3;
+
+    fn of(item: &MediaItem) -> Self {
+        if item.heard_only() {
+            Hearing::SoundOnly
+        } else if has_script(item) {
+            Hearing::Script
+        } else {
+            Hearing::Speech
+        }
     }
 }
 
