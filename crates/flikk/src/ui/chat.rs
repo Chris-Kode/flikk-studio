@@ -121,6 +121,13 @@ impl ChatPanel {
                 ComposerEvent::Submit(text) => this.send(text.clone(), cx),
             }),
         ];
+        // The timeline check's demo shows its findings in Review.
+        let mut reviews = change_set::Reviews::default();
+        if crate::demo::check::enabled() {
+            for set in state.read(cx).bus.chat_change_sets() {
+                reviews.entry(set.id).or_default().open = true;
+            }
+        }
         let signature = signature(state.read(cx));
         let chat = state.read(cx).active_chat().to_owned();
         let user_messages = user_messages(state.read(cx));
@@ -128,7 +135,7 @@ impl ChatPanel {
             state,
             composer,
             list,
-            reviews: Default::default(),
+            reviews,
             shown: HashSet::new(),
             user_messages,
             tools_open: HashSet::new(),

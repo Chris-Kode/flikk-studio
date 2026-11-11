@@ -10,8 +10,10 @@
 //! media (see [`compose`]); `FLIKK_DEMO_PERSON=<file>` a person mask
 //! on that file (see [`person`]); `FLIKK_DEMO_STABILIZE=<seconds>` a
 //! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
-//! a video waiting on the user with its blockout (see [`shot`]).
+//! a video waiting on the user with its blockout (see [`shot`]);
+//! `FLIKK_DEMO_CHECK=1` mistakes for the timeline check (see [`check`]).
 
+pub mod check;
 mod compose;
 mod depth;
 mod engines;
@@ -107,6 +109,7 @@ pub fn generate_form() -> Option<String> {
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
+    check::seed_project(&mut demo.project, demo.ids.main, demo.ids.titles);
     let picks = timeline_fx(&mut demo.project);
     hdr::seed(&mut demo.project, demo.ids.selected);
     speed::seed(&mut demo.project, demo.ids.selected);
@@ -674,6 +677,7 @@ fn agent_history(bus: &mut CommandBus, demo: &Demo) -> Vec<ChatMessage> {
     for (command, reason) in items {
         pending = proposed(bus.execute(command, agent.clone(), reason)).or(pending);
     }
+    check::seed_set(bus, ids.main);
     chat.push(ChatMessage {
         tools: tools(now),
         ..msg(ChatRole::Agent, "", now - 402)

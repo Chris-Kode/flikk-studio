@@ -1907,6 +1907,7 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
+| `FLIKK_DEMO_CHECK` | `1` | Mistakes for the timeline check: in the project (a flash of black, a two-frame clip, a title out of title-safe, a caption past the end) for Deliver's list, and in the pending change set (cuts on words, a new flash) for its card, with Review open |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh
