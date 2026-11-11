@@ -213,10 +213,13 @@ consistent, pass pool items as `references` and name them in the prompt as \
 @Image1, @Video1, @Audio1. Match the sequence's shape with `aspect`. When \
 the camera move, the staging, the action or the timing matter (a chase, an \
 orbit, a reveal, two people crossing, someone sitting down as a car pulls \
-up), give it a `blockout`: a rough 3D scene that Flikk draws at no cost, \
-with jointed figures that walk, run and act, props, and a keyed camera \
-that can ride its subject, shake and cut. Block it as a director would: \
-who is where, what each does and when, the set they move through, and one \
+up), give it a `blockout`: a rough 3D scene that Flikk draws at no cost. \
+Nothing in it is ready-made: you build the characters, creatures, vehicles \
+and set from plain solids with joints, and give them motion of your own \
+(keys for what happens once, cycles for what repeats, by the clock or by \
+the ground covered), with a keyed camera that can ride its subject, shake \
+and cut. Block it as a director would: who is where, what each does and \
+when, the set they move through, and one \
 clear camera idea a shot. You can't watch it play, so look at it with \
 `preview_blockout` and fix what is off before you ask for the video. The \
 user then watches it on the request's card, asks for changes there, and \

@@ -8,17 +8,21 @@
 //! [`Scene::write_clip`] writes it as a video file, and [`Scene::review`]
 //! says in words what its camera sees, for a writer that can't look.
 //!
-//! Stand-ins are plain solids, props made of a few (`kit`), and jointed
-//! people and animals that walk, run and act (`figure`). Where each is at
-//! a time, and what the camera sees, is worked out in `motion`.
+//! Nothing in a scene is ready-made. Its writer builds every thing from
+//! plain solids, hung from one another at their joints (`parent`,
+//! `anchor`), and moves them with keys and with motion that repeats
+//! ([`Cycle`]): by the clock, or by the ground covered, so that feet and
+//! wheels keep up with it. A thing built once is a model, placed as many
+//! times as the shot needs, each copy free to differ. `build` writes the
+//! copies out into the parts that are drawn, and `motion` says where each
+//! is at a time.
 //!
 //! Space is in metres: X to the right, Y up, the ground at `y = 0`. An
-//! object's `at` is the middle of its base, so `y = 0` stands it on the
-//! ground. Angles are degrees.
+//! object's `at` is the middle of its base unless it says otherwise, so
+//! `y = 0` stands it on the ground. Angles are degrees.
 
+mod build;
 mod clip;
-mod figure;
-mod kit;
 mod motion;
 mod render;
 mod review;
@@ -27,53 +31,97 @@ mod space;
 pub use render::Detail;
 pub use review::Review;
 
+use build::Part;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Frames a second a blockout's clip runs at.
 pub const FPS: u32 = 24;
 /// The longest a blockout runs, in seconds: what video models follow.
 pub const MAX_SECONDS: f64 = 30.0;
-/// The most objects a scene holds.
-pub const MAX_OBJECTS: usize = 128;
+/// The most objects a scene is written with, and the most parts it has
+/// once every copy of a model is written out.
+pub const MAX_OBJECTS: usize = 256;
+pub const MAX_PARTS: usize = 1200;
 
 /// A rough 3D scene over a few seconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "Written")]
 pub struct Scene {
     /// How long it runs, in seconds.
     pub duration: f64,
-    #[serde(default)]
+    /// Things built once, by name, each a list of parts written as
+    /// objects are; an object with `model` is a copy of one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, Vec<Object>>,
     pub objects: Vec<Object>,
     pub camera: Camera,
     /// A floor at `y = 0`; off for a scene in the air or in space.
-    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    #[serde(skip_serializing_if = "is_true")]
     pub ground: bool,
     /// Where the light comes from: degrees around the vertical (0 from
     /// +Z, 90 from +X) and degrees above the horizon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sun: Option<[f64; 2]>,
+    /// What is drawn: the objects, with every copy of a model written out.
+    #[serde(skip)]
+    parts: Vec<Part>,
 }
 
-/// One stand-in: a shape with a size, a place and a turn, which keys move.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A scene as its JSON has it, before it is checked and built.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Written {
+    duration: f64,
+    #[serde(default)]
+    models: BTreeMap<String, Vec<Object>>,
+    #[serde(default)]
+    objects: Vec<Object>,
+    camera: Camera,
+    #[serde(default = "yes")]
+    ground: bool,
+    #[serde(default)]
+    sun: Option<[f64; 2]>,
+}
+
+/// One thing in a scene: a solid, a joint that only carries others, or a
+/// copy of a model. Keys and a cycle move it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
-    /// What it stands for ("runner", "car"); a camera can look at it by
-    /// this name.
+    /// What it stands for ("runner", "left shin"); others ride, face and
+    /// look at it by this name. A part of a copy is `copy/part`.
     pub name: String,
-    pub shape: Shape,
-    /// Width (X), height (Y) and depth (Z); the shape's own when left out.
+    /// The solid it is. None for a joint, and for a copy of a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Shape>,
+    /// The model it is a copy of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// How large a copy is against its model.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub scale: f64,
+    /// What a copy does its own way: for a part of the model by name,
+    /// the fields that replace the model's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Width (X), height (Y) and depth (Z) of a solid; a metre each when
+    /// left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f64; 3]>,
-    /// The middle of its base.
-    #[serde(default)]
+    /// Where its anchor is.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub at: [f64; 3],
-    /// Turns about X, Y (the vertical) and Z, about the middle of its base.
+    /// Turns about X, Y (the vertical) and Z, about its anchor.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rotate: [f64; 3],
-    /// How light its grey is, 0 (dark) to 1 (light).
-    #[serde(default = "mid_grey", skip_serializing_if = "is_mid_grey")]
-    pub shade: f64,
+    /// The point of a solid that `at` places and `rotate` turns about.
+    #[serde(default, skip_serializing_if = "Anchor::is_base")]
+    pub anchor: Anchor,
+    /// How light its grey is, 0 (dark) to 1 (light). On a copy, how light
+    /// the copy is against its model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shade: Option<f64>,
     /// The object it rides: `at` and `rotate` are then in that object's
     /// own space, and it moves and turns with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,16 +130,15 @@ pub struct Object {
     /// (the way it travels), `"camera"`, an object by name, or a point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<Target>,
-    /// Degrees a second it keeps turning about X, Y and Z: a rotor, a
-    /// turntable.
+    /// Degrees a second it keeps turning about X, Y and Z.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spin: [f64; 3],
-    /// What a person does (animals only walk and run).
-    #[serde(default, skip_serializing_if = "Action::is_auto")]
-    pub action: Action,
-    /// Not there at the start; a key shows it.
+    /// Not there at the start; a key shows it. What rides it goes with it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    /// Motion that repeats, on top of what the keys make of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<Cycle>,
     /// What it is later; between keys it moves along a smooth path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<ObjectKey>,
@@ -110,9 +157,6 @@ pub struct ObjectKey {
     pub size: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shade: Option<f64>,
-    /// What it does from here on, taken up over a moment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<Action>,
     /// Gone (true) or there (false) from here on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
@@ -121,18 +165,62 @@ pub struct ObjectKey {
     pub ease: Ease,
 }
 
-/// What stand-ins are: plain solids, props made of a few, and jointed
-/// bodies. All face +Z until turned.
+/// Motion that repeats: a swing, a step, a turn of a wheel, a breath. Its
+/// keys are added to where the object's own keys have it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cycle {
+    /// How long one round takes, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    /// Or the ground one round covers, in metres: the round then follows
+    /// how far the thing it is part of has travelled, and comes to rest
+    /// when that stands still.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metres: Option<f64>,
+    /// How far into its round it starts, 0..1: half a round for the
+    /// other leg.
+    #[serde(default, skip_serializing_if = "is_nothing")]
+    pub shift: f64,
+    pub keys: Vec<CycleKey>,
+}
+
+/// What a cycle adds `t` of the way through a round (0..1). After the
+/// last key it goes on to the first, unless a key at 1 ends the round.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleKey {
+    pub t: f64,
+    /// Metres added to its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 3]>,
+    /// Degrees added to its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<[f64; 3]>,
+    /// Metres added to its size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f64; 3]>,
+    /// How it arrives at this key: starting and ending slowly unless said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<Ease>,
+}
+
+/// The solids things are built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
     #[serde(alias = "cube")]
     Box,
-    #[serde(alias = "ball")]
+    #[serde(alias = "ball", alias = "ellipsoid")]
     Sphere,
     Cylinder,
+    /// Its point up.
     Cone,
+    /// A rod with round ends, upright.
     Capsule,
+    /// The upper half of a sphere, flat underneath.
+    #[serde(alias = "hemisphere")]
+    Dome,
     /// A ramp: low at +Z, as high as it is at -Z.
     #[serde(alias = "ramp")]
     Wedge,
@@ -140,103 +228,37 @@ pub enum Shape {
     #[serde(alias = "prism")]
     Roof,
     Pyramid,
-    /// A person with joints, who walks, runs and acts ([`Action`]).
-    #[serde(alias = "person")]
-    Figure,
-    /// A four-legged animal, a horse until sized otherwise, which walks
-    /// and gallops as fast as it moves.
-    #[serde(alias = "horse", alias = "dog")]
-    Animal,
-    Car,
-    /// A bicycle or a motorbike.
-    #[serde(alias = "motorbike", alias = "bicycle")]
-    Bike,
-    Tree,
-    #[serde(alias = "building")]
-    House,
-    Chair,
-    Table,
 }
 
 impl Shape {
     /// The names a scene's JSON takes.
-    pub const NAMES: [&'static str; 16] = [
-        "box", "sphere", "cylinder", "cone", "capsule", "wedge", "roof", "pyramid", "figure",
-        "animal", "car", "bike", "tree", "house", "chair", "table",
+    pub const NAMES: [&'static str; 9] = [
+        "box", "sphere", "cylinder", "cone", "capsule", "dome", "wedge", "roof", "pyramid",
     ];
-
-    /// Its size when an object gives none.
-    fn size(self) -> [f64; 3] {
-        match self {
-            Self::Capsule => [0.5, 1.8, 0.5],
-            Self::Figure => [0.5, 1.75, 0.5],
-            Self::Animal => [0.55, 1.6, 2.3],
-            Self::Car => [1.8, 1.45, 4.3],
-            Self::Bike => [0.6, 1.1, 1.9],
-            Self::Tree => [3.5, 6.0, 3.5],
-            Self::House => [7.0, 6.0, 9.0],
-            Self::Chair => [0.45, 0.9, 0.48],
-            Self::Table => [1.5, 0.75, 0.85],
-            _ => [1.0, 1.0, 1.0],
-        }
-    }
 }
 
-/// What a person does. Legs carry it by themselves: under [`Action::Auto`]
-/// and under the actions of the arms, it stands while it is still and
-/// walks or runs as fast as its keys move it.
+/// The point of a solid that its `at` places and its `rotate` turns
+/// about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Action {
-    /// Stands, walks or runs as fast as it moves.
+pub enum Anchor {
+    /// The middle of its underside: it stands there.
     #[default]
-    #[serde(alias = "idle", alias = "move")]
-    Auto,
-    /// Stands still even while it moves: on a board, a lift, a walkway.
-    Stand,
-    /// Walks, on the spot when it is not moved.
-    Walk,
-    /// Runs, on the spot when it is not moved.
-    #[serde(alias = "sprint", alias = "jog")]
-    Run,
-    /// Seated; the seat is 0.26 of its height above `at`.
-    Sit,
-    /// Astride a bike or a horse, or at a wheel: seated, hands forward.
-    #[serde(alias = "drive")]
-    Ride,
-    Crouch,
-    /// On its back on the ground.
-    Lie,
-    /// In the air, legs tucked, arms up; its keys carry it up and down.
-    Jump,
-    Dance,
-    /// Both arms up, bouncing.
-    Cheer,
-    Wave,
-    /// One arm out ahead.
-    Point,
-    /// Hands moving as it speaks.
-    Talk,
-    /// Arms holding something in front of it.
-    Carry,
-    /// Leaning on something with both hands.
-    Push,
-    /// One arm up high.
-    Reach,
-    /// Guard up, jabbing.
-    #[serde(alias = "punch", alias = "box")]
-    Fight,
+    #[serde(alias = "bottom")]
+    Base,
+    #[serde(alias = "centre", alias = "center")]
+    Middle,
+    /// The middle of its top: it hangs from there, as a limb from its
+    /// joint.
+    Top,
 }
 
-impl Action {
+impl Anchor {
     /// The names a scene's JSON takes.
-    pub const NAMES: [&'static str; 18] = [
-        "auto", "stand", "walk", "run", "sit", "ride", "crouch", "lie", "jump", "dance", "cheer",
-        "wave", "point", "talk", "carry", "push", "reach", "fight",
-    ];
+    pub const NAMES: [&'static str; 3] = ["base", "middle", "top"];
 
-    fn is_auto(&self) -> bool {
-        *self == Self::Auto
+    fn is_base(&self) -> bool {
+        *self == Self::Base
     }
 }
 
@@ -345,13 +367,16 @@ fn is_nothing(value: &f64) -> bool {
     *value == 0.0
 }
 
-fn mid_grey() -> f64 {
-    0.62
+fn one() -> f64 {
+    1.0
 }
 
-fn is_mid_grey(shade: &f64) -> bool {
-    *shade == mid_grey()
+fn is_one(value: &f64) -> bool {
+    *value == 1.0
 }
+
+/// The grey of a solid that gives none.
+const MID_GREY: f64 = 0.62;
 
 fn normal_fov() -> f64 {
     54.0
@@ -367,126 +392,116 @@ impl Scene {
     /// whoever wrote it. Sizes, shades, the field of view and the length
     /// are brought into range rather than refused.
     pub fn parse(json: &serde_json::Value) -> Result<Self, String> {
-        let mut scene: Self =
-            serde_json::from_value(json.clone()).map_err(|e| format!("blockout: {e}"))?;
-        scene.settle()?;
-        Ok(scene)
-    }
-
-    /// Bring values into range and keys into order; refuse what can't be
-    /// drawn.
-    fn settle(&mut self) -> Result<(), String> {
-        if !self.duration.is_finite() || self.duration <= 0.0 {
-            return Err("blockout: `duration` is in seconds, more than 0".into());
-        }
-        self.duration = self.duration.min(MAX_SECONDS);
-        if self.objects.len() > MAX_OBJECTS {
-            return Err(format!(
-                "blockout: at most {MAX_OBJECTS} objects; this has {}. Keep it rough",
-                self.objects.len()
-            ));
-        }
-        if let Some(sun) = self.sun.as_mut() {
-            finite("`sun`", sun)?;
-            sun[1] = sun[1].clamp(5.0, 90.0);
-        }
-        for (i, object) in self.objects.iter_mut().enumerate() {
-            if object.name.trim().is_empty() {
-                return Err(format!("blockout: objects[{i}] needs a `name`"));
-            }
-            object.settle()?;
-        }
-        for object in &self.objects {
-            self.check_ties(object)?;
-        }
-        self.camera.settle()?;
-        if let Some(parent) = &self.camera.parent
-            && self.index(parent).is_none()
-        {
-            return Err(format!(
-                "blockout: the camera rides `{parent}`, which is no object's name"
-            ));
-        }
-        let targets = std::iter::once(&self.camera.look_at)
-            .chain(self.camera.keys.iter().filter_map(|k| k.look_at.as_ref()));
-        for target in targets {
-            match target {
-                Target::Point(p) => finite("the camera's `look_at`", p)?,
-                Target::Object(name) if self.index(name).is_none() => {
-                    return Err(format!(
-                        "blockout: the camera looks at `{name}`, which is no object's name"
-                    ));
-                }
-                Target::Object(_) => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Refuse an object that rides or faces what isn't there, or rides
-    /// itself by way of others.
-    fn check_ties(&self, object: &Object) -> Result<(), String> {
-        let name = &object.name;
-        match &object.face {
-            Some(Target::Point(p)) => finite(&format!("object `{name}`'s `face`"), p)?,
-            Some(Target::Object(faced))
-                if faced != PATH && faced != CAMERA && self.index(faced).is_none() =>
-            {
-                return Err(format!(
-                    "blockout: `{name}` faces `{faced}`, which is no object's name, \
-                     `{PATH}` or `{CAMERA}`"
-                ));
-            }
-            _ => {}
-        }
-        let mut above = object.parent.as_deref();
-        for _ in 0..=self.objects.len() {
-            let Some(parent) = above else {
-                return Ok(());
-            };
-            let Some(index) = self.index(parent) else {
-                return Err(format!(
-                    "blockout: `{name}` rides `{parent}`, which is no object's name"
-                ));
-            };
-            above = self.objects[index].parent.as_deref();
-        }
-        Err(format!(
-            "blockout: `{name}` rides itself by way of its `parent`"
-        ))
-    }
-
-    /// Where the object called `name` is in `objects`.
-    fn index(&self, name: &str) -> Option<usize> {
-        self.objects.iter().position(|o| o.name == name)
+        serde_json::from_value(json.clone()).map_err(|e| format!("blockout: {e}"))
     }
 
     /// How many frames its clip has.
     pub fn frames(&self) -> u32 {
         ((self.duration * FPS as f64).round() as u32).max(1)
     }
+
+    /// Where the part called `name` is among the parts drawn.
+    fn find(&self, name: &str) -> Option<usize> {
+        self.parts.iter().position(|part| part.object.name == name)
+    }
+}
+
+impl TryFrom<Written> for Scene {
+    type Error = String;
+
+    /// Bring values into range and keys into order, write the copies of
+    /// models out, and refuse what can't be drawn.
+    fn try_from(written: Written) -> Result<Self, String> {
+        let Written {
+            duration,
+            models,
+            objects,
+            camera,
+            ground,
+            sun,
+        } = written;
+        let mut scene = Self {
+            duration,
+            models,
+            objects,
+            camera,
+            ground,
+            sun,
+            parts: Vec::new(),
+        };
+        if !scene.duration.is_finite() || scene.duration <= 0.0 {
+            return Err("`duration` is in seconds, more than 0".into());
+        }
+        scene.duration = scene.duration.min(MAX_SECONDS);
+        if scene.objects.len() > MAX_OBJECTS {
+            return Err(format!(
+                "at most {MAX_OBJECTS} objects; this has {}. Build what repeats as a model",
+                scene.objects.len()
+            ));
+        }
+        if let Some(sun) = scene.sun.as_mut() {
+            finite("`sun`", sun)?;
+            sun[1] = sun[1].clamp(5.0, 90.0);
+        }
+        let written = (scene.objects.iter_mut()).chain(scene.models.values_mut().flatten());
+        for object in written {
+            object.settle()?;
+        }
+        scene.camera.settle()?;
+        scene.build()?;
+        if let Some(parent) = &scene.camera.parent
+            && scene.find(parent).is_none()
+        {
+            return Err(format!(
+                "the camera rides `{parent}`, which is no object's name"
+            ));
+        }
+        let targets = std::iter::once(&scene.camera.look_at)
+            .chain(scene.camera.keys.iter().filter_map(|k| k.look_at.as_ref()));
+        for target in targets {
+            match target {
+                Target::Point(p) => finite("the camera's `look_at`", p)?,
+                Target::Object(name) if scene.find(name).is_none() => {
+                    return Err(format!(
+                        "the camera looks at `{name}`, which is no object's name"
+                    ));
+                }
+                Target::Object(_) => {}
+            }
+        }
+        Ok(scene)
+    }
 }
 
 fn finite(what: &str, v: &[f64]) -> Result<(), String> {
     match v.iter().all(|n| n.is_finite()) {
         true => Ok(()),
-        false => Err(format!("blockout: {what} has a number that is not finite")),
+        false => Err(format!("{what} has a number that is not finite")),
     }
 }
 
 /// A size no smaller or larger than can be drawn.
 fn in_range(size: &mut [f64; 3]) {
-    size.iter_mut().for_each(|n| *n = n.clamp(0.01, 1000.0));
+    size.iter_mut().for_each(|n| *n = n.clamp(0.005, 1000.0));
 }
 
 impl Object {
     fn settle(&mut self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("every object needs a `name`".into());
+        }
         let what = format!("object `{}`", self.name);
+        if self.shape.is_some() && self.model.is_some() {
+            return Err(format!(
+                "{what} has a `shape` and a `model`: it is a solid or a copy, not both"
+            ));
+        }
         finite(&what, &self.at)?;
         finite(&what, &self.rotate)?;
         finite(&what, &self.spin)?;
-        finite(&what, &[self.shade])?;
-        self.shade = self.shade.clamp(0.0, 1.0);
+        finite(&what, &[self.scale, self.shade.unwrap_or(0.0)])?;
+        self.scale = self.scale.clamp(0.01, 100.0);
+        self.shade = self.shade.map(|s| s.clamp(0.0, 1.0));
         if let Some(size) = self.size.as_mut() {
             finite(&what, size)?;
             in_range(size);
@@ -499,6 +514,35 @@ impl Object {
             key.shade = key.shade.map(|s| s.clamp(0.0, 1.0));
             if let Some(size) = key.size.as_mut() {
                 in_range(size);
+            }
+        }
+        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        if let Some(cycle) = self.cycle.as_mut() {
+            cycle.settle(&what)?;
+        }
+        Ok(())
+    }
+}
+
+impl Cycle {
+    fn settle(&mut self, what: &str) -> Result<(), String> {
+        let round = match (self.seconds, self.metres) {
+            (Some(round), None) | (None, Some(round)) => round,
+            _ => {
+                return Err(format!(
+                    "{what}'s `cycle` needs how long a round is: `seconds`, or `metres` travelled"
+                ));
+            }
+        };
+        if !round.is_finite() || round <= 0.0 {
+            return Err(format!("{what}'s `cycle` has a round of no length"));
+        }
+        finite(what, &[self.shift])?;
+        for key in &mut self.keys {
+            finite(what, &[key.t])?;
+            key.t = key.t.clamp(0.0, 1.0);
+            for v in [&key.at, &key.rotate, &key.size].into_iter().flatten() {
+                finite(what, v)?;
             }
         }
         self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));

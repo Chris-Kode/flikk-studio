@@ -1,11 +1,11 @@
-//! Drawing a scene: one ray a pixel against the pieces its objects are
-//! made of, lit by one light with a shadow, so depth, contact and the
+//! Drawing a scene: one ray a pixel against its solids, lit by one light
+//! with a shadow, so depth, contact and the
 //! camera's move read at a glance. Greys only: the look is the video
 //! model's to make.
 
 use super::motion::View;
-use super::space::{Place, Turn, Vec3};
-use super::{Object, Scene, Shape, figure, kit};
+use super::space::{Turn, Vec3};
+use super::{Anchor, Scene, Shape};
 use crate::services::Frame;
 
 /// Pictures smaller than this are drawn on the calling thread.
@@ -127,119 +127,23 @@ fn in_bands<T: Send>(values: &mut [T], row: usize, draw: impl Fn(usize, &mut [T]
     });
 }
 
-/// The convex solids pieces are.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Form {
-    Box,
-    /// A sphere stretched to its half size.
-    Ellipsoid,
-    Cylinder,
-    /// Its point up.
-    Cone,
-    /// Upright, as thick as its width.
-    Capsule,
-    /// A ramp: low at +Z, full height at -Z.
-    Wedge,
-    /// A gable: its ridge along Z.
-    Roof,
-    Pyramid,
-}
-
-impl Form {
+impl Shape {
     /// Whether every side of it is flat.
     fn is_flat(self) -> bool {
         matches!(self, Self::Box | Self::Wedge | Self::Roof | Self::Pyramid)
     }
 }
 
-/// One convex piece of an object, in the object's own space: metres from
-/// the middle of its base.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Piece {
-    pub form: Form,
-    pub centre: Vec3,
-    pub turn: Turn,
-    /// Half its width, height and depth.
-    pub half: Vec3,
-    /// Its grey, as a share of the object's.
-    pub tone: f32,
-}
-
-impl Piece {
-    pub fn new(form: Form, centre: Vec3, half: Vec3) -> Self {
-        Self {
-            form,
-            centre,
-            turn: Turn::NONE,
-            half,
-            tone: 1.0,
-        }
-    }
-
-    /// A round bar from `from` to `to`.
-    pub fn limb(from: Vec3, to: Vec3, radius: f32) -> Self {
-        let along = to - from;
-        Self {
-            turn: Turn::along(along, Vec3::AHEAD),
-            ..Self::new(
-                Form::Capsule,
-                (from + to) * 0.5,
-                Vec3::new(radius, along.length() * 0.5 + radius, radius),
-            )
-        }
-    }
-
-    pub fn turned(self, turn: Turn) -> Self {
-        Self { turn, ..self }
-    }
-
-    pub fn toned(self, tone: f32) -> Self {
-        Self { tone, ..self }
-    }
-
-    /// As it is when the object it belongs to stands at `place`.
-    pub fn moved(self, place: &Place) -> Self {
-        Self {
-            centre: place.point(self.centre),
-            turn: place.turn.then(self.turn),
-            ..self
-        }
-    }
-}
-
-/// The pieces `object` is made of at `t`, in its own space. `seat` is
-/// where a seat it rides is, in that space.
-fn pieces(object: &Object, t: f64, seat: Option<Vec3>, out: &mut Vec<Piece>) {
-    let size = Vec3::of(object.size_now(t));
-    let half = size * 0.5;
-    let solid = |form| Piece::new(form, Vec3::new(0.0, half.y, 0.0), half);
-    match object.shape {
-        Shape::Box => out.push(solid(Form::Box)),
-        Shape::Sphere => out.push(solid(Form::Ellipsoid)),
-        Shape::Cylinder => out.push(solid(Form::Cylinder)),
-        Shape::Cone => out.push(solid(Form::Cone)),
-        Shape::Capsule => out.push(solid(Form::Capsule)),
-        Shape::Wedge => out.push(solid(Form::Wedge)),
-        Shape::Roof => out.push(solid(Form::Roof)),
-        Shape::Pyramid => out.push(solid(Form::Pyramid)),
-        Shape::Figure => figure::person(object, size, t, seat, out),
-        Shape::Animal => figure::animal(object, size, t, out),
-        Shape::Car | Shape::Bike | Shape::Tree | Shape::House | Shape::Chair | Shape::Table => {
-            kit::prop(object.shape, size, out);
-        }
-    }
-}
-
-/// One piece placed in the scene.
+/// One solid placed in the scene.
 struct Solid {
-    form: Form,
+    shape: Shape,
     centre: Vec3,
     turn: Turn,
     half: Vec3,
     /// A sphere about `centre` holding it, for a quick miss.
     reach: f32,
     shade: f32,
-    /// The object it is a piece of, as its place in the scene's list.
+    /// The thing a viewer would name it as: its place among the parts.
     owner: u16,
 }
 
@@ -277,13 +181,14 @@ impl Solid {
             self.turn.inward(dir),
         );
         let h = self.half;
-        let (t, normal) = match self.form {
-            Form::Box => hit_box(o, d, h),
-            Form::Ellipsoid => hit_ellipsoid(o, d, h),
-            Form::Cylinder => hit_cylinder(o, d, h),
-            Form::Cone => hit_cone(o, d, h),
-            Form::Capsule => hit_capsule(o, d, h),
-            Form::Wedge => {
+        let (t, normal) = match self.shape {
+            Shape::Box => hit_box(o, d, h),
+            Shape::Sphere => hit_ellipsoid(o, d, h),
+            Shape::Cylinder => hit_cylinder(o, d, h),
+            Shape::Cone => hit_cone(o, d, h),
+            Shape::Capsule => hit_capsule(o, d, h),
+            Shape::Dome => hit_dome(o, d, h),
+            Shape::Wedge => {
                 let slope = (Vec3::new(0.0, h.z, h.y), 0.0);
                 hit_hull(
                     o,
@@ -291,11 +196,11 @@ impl Solid {
                     &[base(h), back(h), side(h, 1.0), side(h, -1.0), slope],
                 )
             }
-            Form::Roof => {
+            Shape::Roof => {
                 let faces = [base(h), back(h), front(h), pitch(h, 1.0), pitch(h, -1.0)];
                 hit_hull(o, d, &faces)
             }
-            Form::Pyramid => {
+            Shape::Pyramid => {
                 let ahead = (Vec3::new(0.0, h.z, 2.0 * h.y), h.z * h.y);
                 let behind = (Vec3::new(0.0, h.z, -2.0 * h.y), h.z * h.y);
                 hit_hull(
@@ -403,6 +308,23 @@ fn hit_ellipsoid(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
     let (o, d) = (o.over(half), d.over(half));
     let (t, _) = roots(d.dot(d), o.dot(d), o.dot(o) - 1.0)?;
     (t > NEAR).then(|| (t, (o + d * t).over(half)))
+}
+
+/// The upper half of an ellipsoid twice as high as `half`, standing on
+/// the underside of its box.
+fn hit_dome(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
+    let o = Vec3::new(o.x, o.y + half.y, o.z);
+    let radii = Vec3::new(half.x, half.y * 2.0, half.z);
+    let (os, ds) = (o.over(radii), d.over(radii));
+    let (enter, leave) = roots(ds.dot(ds), os.dot(ds), os.dot(os) - 1.0)?;
+    if enter > NEAR && o.y + d.y * enter >= 0.0 {
+        let at = os + ds * enter;
+        return Some((enter, at.over(radii)));
+    }
+    // Under the round part: in through the flat underside, if at all.
+    let under = -o.y / d.y;
+    (d.y > 1e-9 && under > NEAR && under >= enter && under <= leave)
+        .then_some((under, Vec3::new(0.0, -1.0, 0.0)))
 }
 
 fn hit_cylinder(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
@@ -607,7 +529,7 @@ impl Solids {
                         normal,
                         shade: solid.shade,
                         owner: Some(solid.owner),
-                        flat: solid.form.is_flat(),
+                        flat: solid.shape.is_flat(),
                     });
                 }
             }
@@ -828,27 +750,29 @@ pub(super) struct World {
 impl World {
     pub fn of(scene: &Scene, t: f64, width: u32, height: u32, detail: Detail) -> Self {
         let mut solids = Vec::new();
-        let mut made = Vec::new();
-        for (index, object) in scene.objects.iter().enumerate() {
-            if object.hidden_now(t) {
+        for (index, part) in scene.parts.iter().enumerate() {
+            let Some(shape) = part.object.shape else {
+                continue;
+            };
+            if scene.hidden(index, t) {
                 continue;
             }
-            let place = scene.place(index, t);
-            made.clear();
-            pieces(object, t, scene.seat(index, &place, t), &mut made);
-            let shade = object.shade_now(t) as f32;
-            solids.extend(made.iter().map(|piece| {
-                let piece = piece.moved(&place);
-                Solid {
-                    form: piece.form,
-                    centre: piece.centre,
-                    turn: piece.turn,
-                    half: piece.half,
-                    reach: piece.half.length(),
-                    shade: (shade * piece.tone).min(1.0),
-                    owner: index as u16,
-                }
-            }));
+            let (place, size) = scene.placed(index, t, 0);
+            let half = size * 0.5;
+            let above = match part.object.anchor {
+                Anchor::Base => half.y,
+                Anchor::Middle => 0.0,
+                Anchor::Top => -half.y,
+            };
+            solids.push(Solid {
+                shape,
+                centre: place.point(Vec3::new(0.0, above, 0.0)),
+                turn: place.turn,
+                half,
+                reach: half.length(),
+                shade: part.object.shade_now(t) as f32,
+                owner: part.thing as u16,
+            });
         }
         let View {
             eye,
@@ -940,6 +864,11 @@ impl World {
         (hit.owner != Some(index)).then_some(hit.owner)
     }
 
+    /// What shows at pixel (`x`, `y`): `None` for the sky and the ground.
+    pub fn thing_at(&self, x: f32, y: f32) -> Option<u16> {
+        self.seen(x, y, self.ray(x, y))?.owner
+    }
+
     /// Whether the camera is inside an object, and which.
     pub fn inside(&self) -> Option<u16> {
         // From inside a closed solid, every way out meets it from behind.
@@ -995,7 +924,7 @@ impl World {
                     normal,
                     shade: solid.shade,
                     owner: Some(solid.owner),
-                    flat: solid.form.is_flat(),
+                    flat: solid.shape.is_flat(),
                 });
             }
         }

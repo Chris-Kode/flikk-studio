@@ -191,11 +191,6 @@ impl Place {
     }
 }
 
-/// `a` to `b`, `u` of the way.
-pub(super) fn mix(a: f32, b: f32, u: f32) -> f32 {
-    a + (b - a) * u
-}
-
 /// 0 below `from`, 1 above `to`, a smooth rise between.
 pub(super) fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
     let u = ((x - from) / (to - from)).clamp(0.0, 1.0);

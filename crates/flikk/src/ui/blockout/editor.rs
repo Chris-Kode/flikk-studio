@@ -170,7 +170,7 @@ impl BlockoutEditor {
         let answer = match asking.poll() {
             Reblocked::Working => return true,
             Reblocked::Done { scene, answer } => {
-                if let Some(scene) = scene.filter(|scene| *scene != self.scene) {
+                if let Some(scene) = scene.map(|scene| *scene).filter(|s| *s != self.scene) {
                     self.before
                         .push(std::mem::replace(&mut self.scene, scene.clone()));
                     self.player.update(cx, |p, cx| p.set_scene(scene, cx));

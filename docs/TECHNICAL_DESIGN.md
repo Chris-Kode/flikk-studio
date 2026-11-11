@@ -48,7 +48,7 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes with jointed figures and props, their renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes built from plain solids, their models and cycles, renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
 | `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
 | `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
@@ -1307,39 +1307,47 @@ on the UI thread and run it off it:
   `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
   expensive and each take invents camera, staging and timing again, so
   `generate_video` takes a `blockout`: a rough 3D scene the agent writes
-  as JSON (`blockout::Scene`: up to 128 grey stand-ins, a camera, an
-  optional sun direction; metres, Y up, the ground at `y = 0`, at most
-  30 s). A stand-in is a plain solid (box, sphere, cylinder, cone,
-  capsule, wedge, roof, pyramid), a prop made of a few (`kit.rs`: car,
-  bike, tree, house, chair, table) or a jointed body (`figure.rs`: a
-  person of 18 round pieces, a four-legged animal). Each has a size, a
-  place, a turn and keys, and may ride another (`parent`: its place and
-  turn are then in that object's space), face something about the
-  vertical (`face`: the way it travels, the camera, an object or a
-  point), keep spinning, and come and go (`hidden`). A person has an
-  `Action`: its pose is joint angles (`Pose`: spine, head, and two bones
-  a limb) blended between actions over half a second; under `auto` and
-  the actions of the arms its legs stand, walk or run by how fast its
-  keys move it, the stride paced by the distance travelled
-  (`Object::paced`) so feet keep up with the ground, and the lower foot
-  set on the ground gives the hips their height. Seated on a chair, a
-  bike or an animal that is its parent, it is put on the seat
-  (`Scene::seat`). The camera has a place, a `look_at` point or object,
-  a field of view, a roll, a hand-held `shake`, and may ride an object
-  too. Places follow a smooth path through their keys (`motion::Track`:
-  a Hermite curve that rests on a held key), everything else goes
-  straight from key to key, each arriving with an ease: linear, in, out,
+  as JSON (`blockout::Scene`: objects, models, a camera, an optional sun
+  direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
+  in it is ready-made: there are no built-in people, props or actions,
+  so the agent is not held to what Flikk thought of. An object is a
+  plain solid (box, sphere, cylinder, cone, capsule, dome, wedge, roof,
+  pyramid), a joint with no shape that only carries others, or a copy of
+  a model. Things are built by hanging solids from one another
+  (`parent`: a part's place and turn are in its parent's space) at the
+  point they turn about (`anchor`: base, middle, or top for a limb hung
+  from its joint). They move by keys, for what happens once, and by a
+  `Cycle`, for what repeats: a few keys over one round, added to what
+  the keys make of the object, running by the clock (`seconds`) or by
+  the ground covered (`metres`: the round follows how far the thing the
+  part belongs to has travelled, so feet and wheels keep up with the
+  ground at any speed, and a round that returns to its start eases to
+  rest when the thing stands still). A thing built once goes under
+  `models` and is placed with `model`; a copy can be scaled and shaded,
+  and its `parts` give, by part name, the fields that replace the
+  model's (another pose, no walk). `build.rs` writes every copy out into
+  `Part`s named `copy/part`, swaps names for places in the list, gives
+  each joint the box its parts fill, and tabulates the ground each
+  moving thing has covered; `motion.rs` poses each part at a time. An
+  object may also face something about the vertical (`face`: the way it
+  travels, the camera, an object or a point), keep spinning, and come
+  and go (`hidden`). The camera has a place, a `look_at` point or
+  object, a field of view, a roll, a hand-held `shake`, and may ride an
+  object. Places follow a smooth path through their keys
+  (`motion::Track`: a Hermite curve that rests on a held key),
+  everything else goes straight from key to key, each arriving with an
+  ease: linear, in, out,
   in-out, `back`, `bounce`, or `cut`, which holds and then jumps (a
   camera's cut to another set-up). `Scene::render` draws a frame on the
-  CPU, one ray a pixel against the pieces, with one light, a shadow,
+  CPU, one ray a pixel against the solids, with one light, a shadow,
   metre tiles on the ground and haze. A ray from the camera tries only
-  the pieces listed for its 16 px tile of the picture, and a ray toward
+  the solids listed for its 16 px tile of the picture, and a ray toward
   the light only those listed for its cell of a grid across the light
   (`render::Cells`); rays any other way go through a tree of boxes
   (`render::Solids`). All three are rebuilt each frame. `Detail::Full`
   also darkens flat surfaces where another is close (five short rays
   for every fourth pixel that has a solid near, shared with the pixels
-  around it on the same surface; on round pieces so few rays show as
+  around it on the same surface; on round solids so few rays show as
   stripes) and draws edges again from four rays, where `Detail::Draft`
   is what plays. With no GPU and no model, a 1280×720 frame of a market
   street of forty-odd objects takes about 40 ms as a draft and 105 ms in
@@ -1347,12 +1355,14 @@ on the UI thread and run it off it:
   `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
   1280 px on the longer side. `Scene::review` says a scene in words for
   a writer that can't watch it: what the camera sees at the start, the
-  middle, the end and after each cut (which objects, where across the
-  picture, how tall, hidden behind what), what looks like a mistake a
-  viewer would see (`doubts`: the subject out of the opening picture, a
-  camera inside an object or under the ground, a walker going sideways)
-  and what could be tidied (`notes`: an object never in the picture, a
-  key after the end).
+  middle, the end and after each cut (which things, where across the
+  picture, how tall, hidden behind what: found from spots on each thing
+  and from a spread of rays through the picture), what looks like a
+  mistake a viewer would see (`doubts`: the subject out of the opening
+  picture, a camera inside an object or under the ground, a walker
+  going sideways) and what could be tidied (`notes`: a thing never in
+  the picture, a key after the end). A thing is what a viewer would
+  name: what stands by itself, and each copy, not their parts.
   `preview_blockout` (the Generate group, a read) gives the agent that
   text with a collage of eight frames, so it looks at a scene and fixes
   it before it asks for the video.
@@ -1868,9 +1878,12 @@ there.
 * Blockouts: only the agent's `generate_video` takes one; the media pool's
   Video form does not. A scene asked for on the card or changed in the
   dialog is written without being seen: that run has no tools, and reads
-  the scene's review instead. People have set actions, not free poses,
-  and their feet are placed by the stride, not solved against the ground,
-  so they slip a little on turns and slopes. A blockout is
+  the scene's review instead, which says where things are but not
+  whether a limb bends the right way. Feet are moved by the cycle their
+  writer gave, not solved against the ground, so they slip where the
+  cycle's round doesn't match the stride. A scene with built characters
+  is long to write: a shot with a creature of twenty-odd parts took the
+  backend over three minutes. A blockout is
   not kept in the pool or the project: it lives in the waiting request
   and its clip in the upload scratch. Making a picture for a tile was
   checked by code review only, as it needs an image provider's key. In a

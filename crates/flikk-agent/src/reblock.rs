@@ -37,7 +37,7 @@ pub struct Reblock {
     shape: (u32, u32),
     /// A first draft handed back to be put right: what stands if the
     /// second answer has no scene.
-    draft: Option<(Scene, String)>,
+    draft: Option<(Box<Scene>, String)>,
     /// Whether a draft that looks mistaken is handed back.
     checks: bool,
 }
@@ -49,7 +49,7 @@ pub enum Reblocked {
     /// The answer, and the scene changed; `None` when the answer is that
     /// it can't be done, or a question.
     Done {
-        scene: Option<Scene>,
+        scene: Option<Box<Scene>>,
         answer: String,
     },
     Failed(String),
@@ -150,7 +150,7 @@ impl Reblock {
 
     /// Hand a first draft that looks mistaken back to be put right; one
     /// that looks sound is the answer.
-    fn check(&mut self, scene: Scene, answer: String) -> Reblocked {
+    fn check(&mut self, scene: Box<Scene>, answer: String) -> Reblocked {
         self.checks = false;
         let review = scene.review(self.shape);
         let done = |scene, answer| Reblocked::Done {
@@ -229,28 +229,29 @@ impl Drop for Reblock {
 
 /// What a blockout is, to whoever writes or changes one.
 const BLOCKOUT: &str = "a blockout for the Flikk video editor: a rough 3D scene of grey stand-ins, \
-    people who walk, run and act, props and a moving camera, which a video model will follow for \
-    its camera move, staging, action and timing";
+    built and moved by you, and a moving camera, which a video model will follow for its camera \
+    move, staging, action and timing";
 
 /// How a scene is written well, whoever writes it.
-const CRAFT: &str = "Write it as a director blocks a shot. People are `figure`s: give each what \
-    it does (`action`), key where it goes, and give whatever travels `\"face\": \"path\"`, so it \
-    walks or runs there by itself at the speed its keys set (a walk is about 1.4 m/s, a run 3 to \
-    6). Use the props (car, bike, tree, house, chair, table, animal) and build the rest of the \
-    set from solids: the walls, the street, the furniture the action touches or the camera \
-    passes, enough for depth and for the move to read against, in shades that tell the subject \
-    from the set: people light (0.75 or more) so their limbs read, the set darker. Time the beats with keys, ease the moves that start or stop, and give the \
-    camera one clear idea a shot: a dolly, an orbit, a crane, a camera that rides its subject \
-    (`parent`), hand-held (`shake`), or cuts between set-ups (`ease` \"cut\"). Keep sizes, speeds \
-    and moves physically plausible, and everything that matters in view at the start. The look \
-    is not yours to show.";
+const CRAFT: &str = "Write it as a director blocks a shot. Design the characters and things the \
+    shot is about yourself, as models of a few solids with joints where they bend, and give them \
+    the motion the description asks for: a gait of their own by the ground they cover, a gesture \
+    in keys, a breath or a sway by the clock. Give whatever travels `\"face\": \"path\"` and keys \
+    for where it goes and when (a walk is about 1.4 m/s, a run 3 to 6). Build the set too: the \
+    walls, the street, the furniture the action touches or the camera passes, enough for depth \
+    and for the move to read against, in shades that tell the subject from the set: characters \
+    light (0.75 or more) so their limbs read, the set darker. Time the beats with keys, ease the \
+    moves that start or stop, and give the camera one clear idea a shot: a dolly, an orbit, a \
+    crane, a camera that rides its subject (`parent`), hand-held (`shake`), or cuts between \
+    set-ups (`ease` \"cut\"). Keep sizes, speeds and moves physically plausible, and everything \
+    that matters in view at the start. The look is not yours to show.";
 
 /// What a run that changes a scene is asked to do.
 const CHANGING: &str = "The user watches the blockout play and tells you what should be \
     different. You get the scene as JSON, what its camera sees in words (you can't watch it), \
     and what they ask. Answer with one short sentence saying what you changed, in the language \
     they write in, then the whole scene, changed, in one ```json block. Change only what they \
-    ask for and keep the objects' names. When what they ask can't be shown in this format, or \
+    ask for and keep the names of objects, models and parts. When what they ask can't be shown in this format, or \
     you need to know more, say so in one or two sentences and give no JSON.";
 
 /// What a run that writes a scene from a shot's description is asked to do.
@@ -310,7 +311,7 @@ fn read_reply(reply: &str) -> Reblocked {
         .trim();
     match json {
         Ok(scene) => Reblocked::Done {
-            scene: Some(scene),
+            scene: Some(Box::new(scene)),
             answer: match answer {
                 "" => "Changed".to_owned(),
                 answer => answer.to_owned(),

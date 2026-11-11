@@ -4,14 +4,14 @@
 
 use super::render::{Detail, World};
 use super::space::Vec3;
-use super::{Ease, Scene, Shape, Target};
+use super::{Ease, Scene, Target};
 
 /// The most moments described, and the most objects named at each.
 const MOMENTS: usize = 6;
 const NAMED: usize = 8;
-/// Where on an object it is looked for: across its width from its middle
-/// and up its height, as shares of its size. Up its middle, and out to
-/// each side where a tree's crown or a car's ends are.
+/// Where on a thing it is looked for: across its width from its middle
+/// and up its height, as shares of the box it fills. Up its middle, and
+/// out to each side where a tree's crown or a car's ends are.
 const SPOTS: [(f32, f32); 5] = [
     (0.0, 0.2),
     (0.0, 0.5),
@@ -19,9 +19,6 @@ const SPOTS: [(f32, f32); 5] = [
     (-0.4, 0.65),
     (0.4, 0.65),
 ];
-/// Metres a second no person runs at.
-const SPRINT: f32 = 11.0;
-
 /// What a blockout's camera sees, said for its writer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Review {
@@ -61,7 +58,12 @@ struct Sight {
     /// nothing in front, and what is in front of the others.
     clear: usize,
     behind: Option<Option<u16>>,
+    /// Whether some of it shows somewhere in the picture.
+    glimpsed: bool,
 }
+
+/// How many rays across and down the picture look for what shows in it.
+const LOOKS: (usize, usize) = (32, 18);
 
 impl Scene {
     /// What the camera sees over the scene, in a picture `shape` (width
@@ -79,10 +81,10 @@ impl Scene {
         moments.sort_by(f64::total_cmp);
         moments.dedup_by(|a, b| (*a - *b).abs() < 0.05);
 
-        let mut ever = vec![false; self.objects.len()];
-        let mut largest = vec![0f32; self.objects.len()];
+        let mut ever = vec![false; self.parts.len()];
+        let mut largest = vec![0f32; self.parts.len()];
         let mut note = |sights: &[Sight]| {
-            for sight in sights.iter().filter(|s| s.clear > 0) {
+            for sight in sights.iter().filter(|s| s.clear > 0 || s.glimpsed) {
                 ever[sight.index] = true;
                 largest[sight.index] = largest[sight.index].max(sight.share);
             }
@@ -93,7 +95,7 @@ impl Scene {
             note(&sights);
             review.seen.push(self.line(*t, &sights));
             if let Some(inside) = world.inside() {
-                let name = &self.objects[inside as usize].name;
+                let name = &self.parts[inside as usize].object.name;
                 review
                     .doubts
                     .push(format!("At {t:.1} s the camera is inside `{name}`."));
@@ -116,21 +118,38 @@ impl Scene {
         review
     }
 
-    /// How each object that stands by itself shows at `t`.
+    /// How each thing a viewer would name shows at `t`: what stands by
+    /// itself, and each copy of a model, not their parts.
     fn sights(&self, world: &World, t: f64, size: [u32; 2]) -> Vec<Sight> {
         let (wide, high) = (size[0] as f32, size[1] as f32);
+        // What a spread of rays through the picture meets: a thing too
+        // large or too far to one side for its spots still shows.
+        let mut glimpsed = vec![false; self.parts.len()];
+        for look in 0..LOOKS.0 * LOOKS.1 {
+            let across = (look % LOOKS.0) as f32 + 0.5;
+            let down = (look / LOOKS.0) as f32 + 0.5;
+            let met = world.thing_at(across * wide / LOOKS.0 as f32, down * high / LOOKS.1 as f32);
+            if let Some(thing) = met {
+                glimpsed[thing as usize] = true;
+            }
+        }
         let mut sights = Vec::new();
-        for (index, object) in self.objects.iter().enumerate() {
-            // What rides something shows with it, but for a person.
-            let rides = object.parent.is_some() && object.shape != Shape::Figure;
-            if rides || object.hidden_now(t) {
+        for (index, part) in self.parts.iter().enumerate() {
+            if part.thing != index || self.hidden(index, t) {
                 continue;
             }
             let place = self.place(index, t);
-            let size = Vec3::of(object.size_now(t));
+            let (low, high_corner) = (Vec3::of(part.bounds.0), Vec3::of(part.bounds.1));
+            let reach = high_corner - low;
             // A spot on it: across its width from the middle, and up it.
-            let spot =
-                |across: f32, up: f32| place.point(Vec3::new(size.x * across, size.y * up, 0.0));
+            let spot = |across: f32, up: f32| {
+                let middle = (low + high_corner) * 0.5;
+                place.point(Vec3::new(
+                    middle.x + reach.x * across,
+                    low.y + reach.y * up,
+                    middle.z,
+                ))
+            };
             let ends = (
                 world.pixel_of(spot(0.0, 0.0)),
                 world.pixel_of(spot(0.0, 1.0)),
@@ -147,6 +166,7 @@ impl Scene {
                 share: (foot.0 - head.0).hypot(foot.1 - head.1) / high,
                 clear: 0,
                 behind: None,
+                glimpsed: glimpsed[index],
             };
             for (across, up) in SPOTS {
                 let point = spot(across, up);
@@ -159,17 +179,29 @@ impl Scene {
                     front => sight.behind = front,
                 }
             }
-            if sight.clear > 0 || sight.behind.is_some() {
+            if sight.clear > 0 || sight.behind.is_some() || sight.glimpsed {
                 sights.push(sight);
             }
         }
-        sights.sort_by(|a, b| b.share.total_cmp(&a.share));
+        // What the camera looks at first, then what was built of parts
+        // (the shot's characters and things), then the plain set; the
+        // larger first among each.
+        let looked_at = match &self.camera.look_at {
+            Target::Object(name) => self.find(name).map(|found| self.parts[found].thing),
+            Target::Point(_) => None,
+        };
+        let rank = |sight: &Sight| match self.parts[sight.index].object.shape {
+            _ if Some(sight.index) == looked_at => 2,
+            None => 1,
+            Some(_) => 0,
+        };
+        sights.sort_by(|a, b| (rank(b).cmp(&rank(a))).then(b.share.total_cmp(&a.share)));
         sights
     }
 
     /// One line saying what `sights` show at `t`.
     fn line(&self, t: f64, sights: &[Sight]) -> String {
-        let name = |index: usize| self.objects[index].name.as_str();
+        let name = |index: usize| self.parts[index].object.name.as_str();
         let said: Vec<String> = (sights.iter().take(NAMED))
             .map(|sight| {
                 let across = match sight.at.0 {
@@ -178,7 +210,9 @@ impl Scene {
                     _ => "centre",
                 };
                 let hidden = match (sight.clear, sight.behind) {
+                    (0, None) => ", at the edge".to_owned(),
                     (_, None) => String::new(),
+                    (0, Some(_)) if sight.glimpsed => ", partly hidden".to_owned(),
                     (clear, Some(front)) => format!(
                         ", {} behind {}",
                         if clear == 0 { "hidden" } else { "partly" },
@@ -208,14 +242,16 @@ impl Scene {
         let Target::Object(name) = &self.camera.look_at else {
             return None;
         };
-        let index = self.index(name)?;
+        let index = self.parts[self.find(name)?].thing;
         match sights.iter().find(|s| s.index == index) {
             Some(sight) if sight.clear > 0 => None,
             Some(Sight {
                 behind: Some(front),
                 ..
             }) => {
-                let front = front.map_or("the ground", |i| self.objects[i as usize].name.as_str());
+                let front = front.map_or("the ground", |i| {
+                    self.parts[i as usize].object.name.as_str()
+                });
                 Some(format!(
                     "At the start `{name}`, which the camera looks at, is hidden behind {front}."
                 ))
@@ -231,20 +267,26 @@ impl Scene {
     /// moment, `largest` how tall each got there.
     fn doubts(&self, ever: &[bool], largest: &[f32], review: &mut Review) {
         let Review { doubts, notes, .. } = review;
-        let unseen: Vec<_> = (self.objects.iter().zip(ever))
-            .filter(|(o, seen)| {
-                !**seen
-                    && o.parent.is_none()
-                    && !o.hidden
-                    && o.keys.iter().all(|k| k.hidden.is_none())
+        let things =
+            || (self.parts.iter().enumerate()).filter(|(index, part)| part.thing == *index);
+        let shown_later = |index: usize| {
+            (self.parts.iter())
+                .any(|p| p.thing == index && p.object.keys.iter().any(|k| k.hidden.is_some()))
+        };
+        let unseen: Vec<_> = things()
+            .filter(|(index, part)| {
+                !ever[*index]
+                    && part.parent.is_none()
+                    && !self.hidden(*index, 0.0)
+                    && !shown_later(*index)
             })
-            .map(|(o, _)| format!("`{}`", o.name))
+            .map(|(_, part)| format!("`{}`", part.object.name))
             .collect();
         if !unseen.is_empty() {
             notes.push(format!("Never in the picture: {}.", unseen.join(", ")));
         }
         if let Target::Object(name) = &self.camera.look_at
-            && let Some(index) = self.index(name)
+            && let Some(index) = self.find(name).map(|found| self.parts[found].thing)
             && ever[index]
             && largest[index] < 0.04
         {
@@ -254,22 +296,25 @@ impl Scene {
                 (largest[index] * 100.0).ceil()
             ));
         }
-        for object in &self.objects {
-            let name = &object.name;
+        for (index, part) in self.parts.iter().enumerate() {
+            let (name, object) = (&part.object.name, &part.object);
             if let Some(late) = object.keys.iter().find(|k| k.t > self.duration + 1e-6) {
                 notes.push(format!(
                     "`{name}` has a key at {:.1} s, after the end at {:.1} s: it is never reached.",
                     late.t, self.duration
                 ));
             }
-            if self.ground && object.parent.is_none() && object.at[1] < -0.05 {
+            if part.thing != index {
+                continue;
+            }
+            if self.ground && part.parent.is_none() && object.at[1] + part.bounds.1[1] < -0.05 {
                 notes.push(format!("`{name}` starts below the ground."));
             }
-            let goes = matches!(
-                object.shape,
-                Shape::Figure | Shape::Animal | Shape::Car | Shape::Bike
-            );
-            if goes
+            // What steps or rolls with the ground it covers has a front.
+            let paced = (self.parts.iter()).any(|p| {
+                p.whole == index && p.object.cycle.as_ref().is_some_and(|c| c.metres.is_some())
+            });
+            if paced
                 && object
                     .off_course(self.duration)
                     .is_some_and(|off| off > 50.0)
@@ -278,15 +323,6 @@ impl Scene {
                     "`{name}` travels sideways or backwards: give it `\"face\": \"path\"` unless \
                      that is meant."
                 ));
-            }
-            if object.shape == Shape::Figure {
-                let tall = object.size_now(0.0)[1] as f32;
-                let speed = object.top_speed(self.duration);
-                if speed * 1.75 / tall.max(0.01) > SPRINT {
-                    doubts.push(format!(
-                        "`{name}` goes at {speed:.0} m/s, faster than anyone runs."
-                    ));
-                }
             }
         }
         if let Some(late) = self.camera.keys.iter().find(|k| k.t > self.duration + 1e-6) {

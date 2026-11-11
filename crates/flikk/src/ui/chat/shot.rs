@@ -465,7 +465,7 @@ impl ShotCard {
                 scene: Some(scene), ..
             } => {
                 self.draft = Draft::None;
-                self.set_scene(scene, cx);
+                self.set_scene(*scene, cx);
             }
             Reblocked::Done {
                 scene: None,
