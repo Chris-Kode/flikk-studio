@@ -498,9 +498,15 @@ impl EditorState {
     /// Stop the background analysis and camera path measuring of those of
     /// `items` that left the project, unless an item of the project or a
     /// library sound still has the same file. One that comes back (an
-    /// undo) is asked for again as usual; renders measure for themselves.
-    fn cancel_left(&self, items: &[flikk_core::model::MediaItem]) {
+    /// undo or a redo) is new again, analyzed as it lands; renders measure
+    /// for themselves.
+    fn cancel_left(&mut self, items: &[flikk_core::model::MediaItem]) {
         let project = self.bus.project();
+        for item in items {
+            if project.media(item.id).is_none() {
+                self.media_seen.remove(&item.id);
+            }
+        }
         let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
         let kept: HashSet<_> = project
             .media
