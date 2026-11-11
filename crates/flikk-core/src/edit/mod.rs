@@ -596,6 +596,23 @@ fn plan_command(command: &Command, project: &Project) -> Result<Plan> {
             }
             update_clip(tl, *clip, |c| c.audio.effects = effects.clone())
         }
+        Command::SetVoiceCleanup { clips, cleanup } => {
+            for id in clips {
+                let (_, c) = find_clip(tl, *id)?;
+                let sound = c
+                    .media()
+                    .and_then(|m| project.media(m))
+                    .is_some_and(crate::cleanup::has_sound);
+                if !sound {
+                    return Err(CoreError::Invalid(format!("{id} has no sound")));
+                }
+            }
+            let cleanup = crate::cleanup::VoiceCleanup {
+                enabled: cleanup.enabled,
+                amount: cleanup.amount.clamp(0.0, 1.0),
+            };
+            update_clips(tl, clips, |c| c.audio.voice_cleanup = Some(cleanup))
+        }
         Command::SetStabilization {
             clips,
             stabilization,

@@ -1472,6 +1472,9 @@ pub struct ClipAudio {
     /// Clip audio effects in order (EQ, dynamics, cleanup, space).
     #[serde(default)]
     pub effects: Vec<AudioFx>,
+    /// Clean voice ([`crate::cleanup`]); left out of files until set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_cleanup: Option<crate::cleanup::VoiceCleanup>,
 }
 
 /// Music under dialogue (PRD A3).

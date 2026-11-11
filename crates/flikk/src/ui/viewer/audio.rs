@@ -23,7 +23,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use flikk_core::audiofx::dsp::{self, Chain, Curve};
 use flikk_core::audiofx::stretch::Stretch;
 use flikk_core::audiofx::{self, Ramp};
-use flikk_core::cleanup::{self, Cleanup, SoundFile};
+use flikk_core::cleanup::{self, Blend, Cleanup, SoundFile};
 use flikk_core::model::{Clip, ClipContent, MediaItem, Project, Property};
 use flikk_core::services::{CleanupService, MediaService, PcmStream};
 use flikk_core::speed::RampAudio;
@@ -447,8 +447,8 @@ impl Mixer {
         })
     }
 
-    /// `source`'s sound from source time `from`: its cleaned copy when it
-    /// is made, else the recording.
+    /// `source`'s sound from source time `from`, cleaned as far as its
+    /// copies are made (`flikk_core::cleanup`).
     fn sound(&self, source: &Source, from: Time) -> Option<Box<dyn PcmStream>> {
         let sound = source.cleanup.sound(&source.clip, |treatment| {
             let service = self.engines.cleanup.as_ref()?;
@@ -457,13 +457,20 @@ impl Mixer {
                 .made()
         });
         let media = &self.engines.media;
-        match sound.file {
+        let base = match sound.file {
             SoundFile::Recording { .. } => {
                 media.audio(&source.item, source.stream, from, self.rate)
             }
             SoundFile::Copy(path) => media.audio_file(&path, from, self.rate),
         }
-        .ok()
+        .ok()?;
+        Some(match sound.cleaned {
+            None => base,
+            Some((path, amount)) => match media.audio_file(&path, from, self.rate) {
+                Ok(cleaned) => Box::new(Blend::new(base, cleaned, amount)),
+                Err(_) => base,
+            },
+        })
     }
 
     /// Mix the next block into `out` (interleaved stereo).

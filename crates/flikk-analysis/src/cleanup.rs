@@ -77,6 +77,9 @@ impl LocalCleanup {
     }
 }
 
+/// What Noise Reduction's copies are named after.
+const DENOISER: &str = "afftdn";
+
 /// The file `treatment` keeps its copy of `stream` of `item` in, or why
 /// it has none.
 fn file_of(item: &MediaItem, stream: u32, treatment: &Treatment) -> Result<PathBuf, String> {
@@ -84,7 +87,11 @@ fn file_of(item: &MediaItem, stream: u32, treatment: &Treatment) -> Result<PathB
         .fingerprint
         .as_ref()
         .ok_or_else(|| format!("{} is not fingerprinted yet", item.path.display()))?;
-    Ok(treatment.file(fingerprint, stream))
+    let model = match treatment {
+        Treatment::Denoise(_) => DENOISER,
+        Treatment::CleanVoice => return Err("Clean voice is not in this build".into()),
+    };
+    Ok(treatment.file(fingerprint, stream, model))
 }
 
 impl Shared {
@@ -220,9 +227,12 @@ fn write(
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> ServiceResult<()> {
-    let Treatment::Denoise(settings) = &job.treatment;
+    let filters = match &job.treatment {
+        Treatment::Denoise(settings) => denoise_filters(settings),
+        Treatment::CleanVoice => String::new(),
+    };
     let mut source = media.audio(&job.item, job.stream, Time::ZERO, cleanup::RATE)?;
-    let mut encoder = Encoder::start(part, &denoise_filters(settings))?;
+    let mut encoder = Encoder::start(part, &filters)?;
     let total = job
         .item
         .info

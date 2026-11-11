@@ -3,6 +3,7 @@
 //! change the project and are served by the agent crate from a snapshot.
 
 use crate::audiofx::AudioFx;
+use crate::cleanup::VoiceCleanup;
 use crate::error::Result;
 use crate::fx::{FxAsset, FxInstance, ParamValue, Transition};
 use crate::ids::*;
@@ -456,6 +457,11 @@ pub enum Command {
         clip: ClipId,
         effects: Vec<AudioFx>,
     },
+    /// Turn Clean voice on or off on each clip, at its amount (0..1).
+    SetVoiceCleanup {
+        clips: Vec<ClipId>,
+        cleanup: VoiceCleanup,
+    },
 
     /// Every clip showing `from` on a picture track shows `to` instead, at
     /// the same source times: another version of the same footage, such as
@@ -664,6 +670,7 @@ impl Command {
             | SetDucking { .. }
             | SetPlaylist { .. }
             | SetAudioEffects { .. }
+            | SetVoiceCleanup { .. }
             | FitMusic { .. } => ToolCategory::Audio,
             AddOverlay { .. } => ToolCategory::Overlays,
             AddEffect { .. }
@@ -761,6 +768,7 @@ impl Command {
             | SetFxAsset { .. }
             | RemoveFxAsset { .. }
             | SetAudioEffects { .. }
+            | SetVoiceCleanup { .. }
             | SetToneMap { .. } => false,
         }
     }

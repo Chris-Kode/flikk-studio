@@ -444,7 +444,8 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
   sentence, until the words are cut out of them), `voice-sources/`
   (speech cut as FLAC for a provider to clone or match, removed with the
   voices dialog), `denoised/<fp>-<stream>-afftdn-<settings>.flac` (Noise
-  Reduction's copies, §5). An HDR item's proxy is
+  Reduction's copies, §5), `clean-voice/<fp>-<stream>-<model>.flac` (Clean
+  voice's, §5). An HDR item's proxy is
   `proxies/<fp>-<mapping>.mp4` (below).
 * **Disk caches** (`flikk-core/src/disk_cache.rs`): the render cache and
   optical flow frames are files named by a 16-byte key under
@@ -457,7 +458,8 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 * **Sweep** (`flikk-core/src/cache_sweep.rs`): at startup, off the UI
   thread, files unused for 30 days go from `proxies/`, `depth/`,
   `collages/`, `waveforms/`, `frames/`, `agent/`, `voices/`,
-  `voice-previews/`, `hdr/`, `denoised/` and the pages in `html/`; scratch
+  `voice-previews/`, `hdr/`, `denoised/`, `clean-voice/` and the pages in
+  `html/`; scratch
   (`voice-sources/`, `upload/`, `respeak/`, `render/`) and partial writes
   (`.part`, `.tmp`, `.tmp-…`) a day old; and proxies of a fingerprint a
   day older than its newest, made for a tone map since changed. Readers

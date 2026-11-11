@@ -29,7 +29,7 @@ use crate::preset::{LoudnessTarget, RenderSettings};
 use crate::{audio_fx, captions};
 use anyhow::{Context as _, Result, bail};
 use flikk_core::audiofx::{self, Span};
-use flikk_core::cleanup::{self, Cleanup, Sound, SoundFile};
+use flikk_core::cleanup::{self, Cleanup, Copies, Sound, SoundFile};
 use flikk_core::compose::is_still_overlay;
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::{
@@ -63,6 +63,9 @@ pub struct GraphSpec {
     /// The piped frames already have captions and titles lettered on them
     /// (see [`crate::composed::route`]); the graph leaves them out.
     pub lettered: bool,
+    /// The cleaned copies the clips play ([`cleanup`]), made before the
+    /// graph is built; a clip whose copy is missing fails the build.
+    pub copies: Copies,
 }
 
 impl GraphSpec {
@@ -84,6 +87,7 @@ impl GraphSpec {
             loudnorm: None,
             piped: false,
             lettered: false,
+            copies: Copies::default(),
         }
     }
 }
@@ -730,38 +734,59 @@ impl Builder<'_> {
             ramp_tempo(clip, start + Time::from_secs_f64(lead), end, s0)
         });
         let vary = !clip.is_ramped() && flikk_core::sync::varispeed::is_varispeed(speed);
-        let sound = sound_of(clip, track, item)?;
-        let mut f = if vary {
-            // Drift correction: resampled as the preview does it.
-            let file = work_dir.join(format!("{}.flac", self.label("vary")));
-            crate::varispeed::render(
-                item,
-                &sound.file,
-                s0,
-                (length - lead).max(0.0),
-                speed,
-                sr,
-                &file,
-            )?;
-            vec![
-                format!("amovie={}", escape_path(&file)),
-                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
-            ]
-        } else {
-            let (path, si) = match &sound.file {
-                SoundFile::Recording { stream } => (
-                    item.path.as_path(),
-                    stream.map(|i| format!(":si={i}")).unwrap_or_default(),
-                ),
-                SoundFile::Copy(path) => (path.as_path(), String::new()),
+        let sound = sound_of(clip, track, item, &self.spec.copies)?;
+        let open = |b: &mut Self, file: &SoundFile| -> Result<String> {
+            let f = if vary {
+                // Drift correction: resampled as the preview does it.
+                let out = work_dir.join(format!("{}.flac", b.label("vary")));
+                crate::varispeed::render(
+                    item,
+                    file,
+                    s0,
+                    (length - lead).max(0.0),
+                    speed,
+                    sr,
+                    &out,
+                )?;
+                vec![format!("amovie={}", escape_path(&out))]
+            } else {
+                let (path, si) = match file {
+                    SoundFile::Recording { stream } => (
+                        item.path.as_path(),
+                        stream.map(|i| format!(":si={i}")).unwrap_or_default(),
+                    ),
+                    SoundFile::Copy(path) => (path.as_path(), String::new()),
+                };
+                vec![
+                    format!("amovie={}:seek_point={}{si}", escape_path(path), num(s0)),
+                    format!("atrim=start={}:end={}", num(s0), num(s1)),
+                    "asetpts=PTS-STARTPTS".into(),
+                ]
             };
-            vec![
-                format!("amovie={}:seek_point={}{si}", escape_path(path), num(s0)),
-                format!("atrim=start={}:end={}", num(s0), num(s1)),
-                "asetpts=PTS-STARTPTS".into(),
-                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
-            ]
+            let label = b.label("asnd");
+            b.chains.push(format!(
+                "{},aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo[{label}]",
+                f.join(",")
+            ));
+            Ok(label)
         };
+        let base = open(self, &sound.file)?;
+        let heard = match &sound.cleaned {
+            None => base,
+            Some((path, amount)) => {
+                let cleaned = open(self, &SoundFile::Copy(path.clone()))?;
+                // amerge keeps the two sample-aligned; pan mixes them at
+                // the mixer's own gains (cleanup::mix).
+                let (keep, gain) = cleanup::gains(*amount);
+                let (k, g) = (num(keep as f64), num(gain as f64));
+                let out = self.label("voice");
+                self.chains.push(format!(
+                    "[{base}][{cleaned}]amerge=inputs=2,pan=stereo|c0={k}*c0+{g}*c2|c1={k}*c1+{g}*c3[{out}]"
+                ));
+                out
+            }
+        };
+        let mut f = vec![format!("[{heard}]anull")];
         match ramp {
             Some(steps) => f.extend(self.ramp_atempo(&steps, work_dir)?),
             None if vary => {}
@@ -841,24 +866,18 @@ impl Builder<'_> {
 
 /// Every 50 ms of timeline from `from` to `to`, where the ramped `clip`'s
 /// source is then (seconds from `s0`) and its speed.
-/// What `clip` on `track` plays from: its cleaned copies must be made
-/// already (the queue makes them first, `crate::queue`).
-fn sound_of(clip: &Clip, track: &Track, item: &MediaItem) -> Result<Sound> {
+/// What `clip` on `track` plays from: its cleaned copies must be in
+/// `copies` (the queue makes them first, `crate::queue`).
+fn sound_of(clip: &Clip, track: &Track, item: &MediaItem, copies: &Copies) -> Result<Sound> {
     let cleanup = Cleanup::of(clip, track);
     let stream = cleanup::stream_of(clip, item);
-    let mut missing = None;
+    let mut missing = false;
     let sound = cleanup.sound(clip, |treatment| {
-        let file = item
-            .fingerprint
-            .as_ref()
-            .map(|fp| treatment.file(fp, stream))
-            .filter(|file| file.is_file());
-        if file.is_none() {
-            missing = Some(treatment.clone());
-        }
+        let file = copies.get(item, stream, treatment);
+        missing |= file.is_none();
         file
     });
-    if missing.is_some() {
+    if missing {
         bail!("the cleaned sound of {} is not made", item.path.display());
     }
     Ok(sound)

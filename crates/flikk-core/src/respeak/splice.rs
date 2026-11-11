@@ -98,6 +98,7 @@ pub(crate) fn plan(
         fade_in: fade.min(len),
         fade_out: fade.min(len),
         effects: replaced.audio.effects.clone(),
+        voice_cleanup: replaced.audio.voice_cleanup,
     };
     next.push(said);
     ops.extend(diff_track(target, next));

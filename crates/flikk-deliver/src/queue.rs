@@ -9,7 +9,7 @@ use crate::hw::{self, Encoder, HwEncoder};
 use crate::preset::RenderSettings;
 use anyhow::{Context as _, Result, anyhow};
 use flikk_core::audiofx;
-use flikk_core::cleanup::{self, Cleanup, Treatment};
+use flikk_core::cleanup::{self, Cleanup, Copies, Treatment};
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::{MediaItem, Project};
 use flikk_core::paths;
@@ -357,15 +357,14 @@ const CLEANUP_SHARE: f32 = 0.3;
 const LOUDNESS_SHARE: f32 = 0.2;
 
 /// Make every cleaned copy the clips heard over `range` play
-/// ([`flikk_core::cleanup`]), so the graph reads them. Whether there were
-/// any.
+/// ([`flikk_core::cleanup`]), for the graph to read.
 fn clean_sound(
     project: &Project,
     range: TimeRange,
     services: &Services,
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
-) -> Result<bool> {
+) -> Result<Copies> {
     let tl = &project.timeline;
     let mut wanted: Vec<(&MediaItem, u32, Treatment)> = Vec::new();
     for track in tl.tracks.iter().filter(|t| tl.audible(t)) {
@@ -391,8 +390,9 @@ fn clean_sound(
             }
         }
     }
+    let mut copies = Copies::default();
     if wanted.is_empty() {
-        return Ok(false);
+        return Ok(copies);
     }
     let service = services
         .cleanup
@@ -400,7 +400,7 @@ fn clean_sound(
         .ok_or_else(|| anyhow!("cleaning sound needs the media engine"))?;
     let n = wanted.len() as f32;
     for (i, (item, stream, treatment)) in wanted.iter().enumerate() {
-        service
+        let file = service
             .complete(
                 item,
                 *stream,
@@ -409,8 +409,9 @@ fn clean_sound(
                 cancel,
             )
             .map_err(|e| anyhow!("cleaning the sound of {}: {e}", item.path.display()))?;
+        copies.insert(item, *stream, treatment, file);
     }
-    Ok(true)
+    Ok(copies)
 }
 
 /// How long [`RenderQueue::shutdown`] waits for the running job to stop.
@@ -483,14 +484,14 @@ fn render(
     // Cleaned sound: made before the graph reads it.
     if spec.audio {
         let (from, part) = (share, (1.0 - share) * CLEANUP_SHARE);
-        let made = clean_sound(
+        spec.copies = clean_sound(
             &request.project,
             spec.range,
             &request.services,
             &|p| progress(from + p * part),
             cancel,
         )?;
-        if made {
+        if !spec.copies.is_empty() {
             share = from + part;
         }
     }
