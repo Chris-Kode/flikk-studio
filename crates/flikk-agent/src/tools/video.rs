@@ -11,8 +11,11 @@
 //! and may change it, before approving. It can follow a blockout, a rough
 //! 3D scene drawn here for nothing, so staging, action, camera and timing
 //! are settled before the provider is paid. `preview_blockout` shows the
-//! agent a scene it wrote, drawn and in words, before it asks.
+//! agent a scene it wrote, drawn and in words, before it asks. A blockout
+//! is kept under an id ([`drafts`]) and changed there, so no one writes
+//! a scene twice.
 
+use super::drafts;
 use super::generate::Placement;
 use super::preview::{collage, columns};
 use super::view::{image_content, save_png};
@@ -102,18 +105,40 @@ pub struct Blockout {
     pub clip: PathBuf,
     /// The clip's size in pixels: the video's shape.
     pub size: (u32, u32),
+    /// What it is kept as ([`drafts`]), so it is changed where it is, by
+    /// the agent and on the card, and outlives the request.
+    #[serde(default)]
+    pub id: String,
 }
 
 impl Blockout {
-    /// `scene` for a video `aspect` wide to one high, its clip a new file
-    /// among what providers are handed.
+    /// `scene` for a video `aspect` wide to one high, kept from now on,
+    /// its clip a new file among what providers are handed.
     pub fn new(scene: Scene, aspect: f64) -> Self {
+        let id = drafts::keep(&scene, aspect);
+        Self::kept(id, scene, aspect)
+    }
+
+    /// `scene` as the blockout kept as `id`.
+    fn kept(id: String, scene: Scene, aspect: f64) -> Self {
         let name = format!("blockout-{}.mp4", uuid::Uuid::new_v4().simple());
         Self {
             scene,
             clip: paths::cache().join("upload").join(name),
             size: Scene::clip_size(aspect),
+            id,
         }
+    }
+
+    /// The same blockout with `scene` in its place, there and where it is
+    /// kept, and a clip of its own.
+    pub fn with_scene(&self, scene: Scene) -> Self {
+        let aspect = self.size.0 as f64 / self.size.1.max(1) as f64;
+        if self.id.is_empty() {
+            return Self::new(scene, aspect);
+        }
+        drafts::put(&self.id, &scene, aspect);
+        Self::kept(self.id.clone(), scene, aspect)
     }
 
     fn length(&self) -> Time {
@@ -350,12 +375,21 @@ pub(crate) fn parse(project: &Project, setup: &VideoSetup, args: &Args) -> ToolR
         (None, None) => None,
     };
     let aspect = args.opt_str("aspect")?.map(str::to_owned);
-    let blockout = match args.value("blockout") {
-        Some(json) if !json.is_null() => {
+    let written = args.value("blockout").filter(|json| !json.is_null());
+    let blockout = match (written, args.opt_str("blockout_id")?) {
+        (Some(_), Some(_)) => return fail("give `blockout` or `blockout_id`, not both"),
+        (Some(json), None) => {
             let scene = scene_of(json, asked)?;
             Some(Blockout::new(scene, shape_of(project, aspect.as_deref())))
         }
-        _ => None,
+        (None, Some(id)) => {
+            let draft = drafts::find(id).map_err(ToolError)?;
+            let shape = (aspect.as_deref())
+                .and_then(aspect_ratio)
+                .unwrap_or(draft.shape);
+            Some(Blockout::kept(id.to_owned(), draft.scene, shape))
+        }
+        (None, None) => None,
     };
     let seconds = asked.or_else(|| {
         let secs = blockout.as_ref()?.scene.duration;
@@ -468,21 +502,47 @@ fn shape_of(project: &Project, aspect: Option<&str>) -> f64 {
 }
 
 /// `preview_blockout`: a blockout drawn at a few moments and said in
-/// words, so whoever wrote it can see it before the user does.
+/// words, so whoever wrote it can see it before the user does. The scene
+/// is kept, and a later call changes the one kept instead of writing it
+/// again.
 pub(crate) fn preview(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
-    let Some(json) = args.value("blockout").filter(|json| !json.is_null()) else {
-        return fail("`blockout` is the scene to look at");
+    let written = args.value("blockout").filter(|json| !json.is_null());
+    let changes = args.value("changes").filter(|json| !json.is_null());
+    let asked = args.opt_str("aspect")?;
+    let (id, scene, shape) = match (written, args.opt_str("id")?) {
+        (Some(_), Some(_)) => {
+            return fail("give `blockout`, a scene to keep, or `id`, one kept: not both");
+        }
+        (Some(_), None) if changes.is_some() => {
+            return fail("`changes` are made to a blockout kept earlier: give its `id`");
+        }
+        (Some(json), None) => {
+            let seconds = args.opt_f64("duration")?.filter(|secs| *secs > 0.0);
+            let scene = scene_of(json, seconds)?;
+            let shape = shape_of(ctx.project(), asked);
+            (drafts::keep(&scene, shape), scene, shape)
+        }
+        (None, Some(id)) => {
+            let draft = drafts::find(id).map_err(ToolError)?;
+            let shape = asked.and_then(aspect_ratio).unwrap_or(draft.shape);
+            let scene = match changes {
+                Some(changes) => draft.scene.changed(changes).map_err(ToolError)?,
+                None => draft.scene,
+            };
+            drafts::put(id, &scene, shape);
+            (id.to_owned(), scene, shape)
+        }
+        (None, None) => {
+            return fail("give `blockout`, the scene to look at, or the `id` of one kept");
+        }
     };
-    let seconds = args.opt_f64("duration")?.filter(|secs| *secs > 0.0);
-    let scene = scene_of(json, seconds)?;
-    let shape = shape_of(ctx.project(), args.opt_str("aspect")?);
-    let job: Job = Box::new(move || JobDone::Done(drawn(&scene, shape)));
+    let job: Job = Box::new(move || JobDone::Done(drawn(&id, &scene, shape)));
     Ok(Step::Job(job))
 }
 
-/// `scene` in a picture `shape` wide to one high, as a collage of frames
-/// across it and as what its camera sees.
-fn drawn(scene: &Scene, shape: f64) -> Done {
+/// `scene`, kept as `id`, in a picture `shape` wide to one high: as a
+/// collage of frames across it and as what its camera sees.
+fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
     let (wide, high) = Scene::clip_size(shape);
     let scale = PREVIEW_SIDE / wide.max(high) as f64;
     let size = [wide, high].map(|side| ((side as f64 * scale) as u32).max(8));
@@ -504,9 +564,10 @@ fn drawn(scene: &Scene, shape: f64) -> Done {
     let cols = columns(tiles.len());
     let review = scene.review((wide, high)).text();
     let text = format!(
-        "The blockout, {:.1} s, at {} moments: {cols} columns × {} rows, left to right then \
-         top to bottom, each stamped with its time. What its camera sees:\n{review}\n\nFix what is \
-         not as the shot needs and look again; then pass the scene to `generate_video`.",
+        "Blockout `{id}`, {:.1} s, at {} moments: {cols} columns × {} rows, left to right then \
+         top to bottom, each stamped with its time. What its camera sees:\n{review}\n\nIt is kept \
+         as `{id}`. To fix what is not as the shot needs, call this again with `id` and `changes` \
+         (only what differs), not the whole scene; then ask for the video with `blockout_id`.",
         scene.duration,
         tiles.len(),
         tiles.len().div_ceil(cols),
@@ -549,8 +610,12 @@ pub fn summary(shot: &Shot) -> String {
         ..
     } = &shot.request
     {
-        if shot.blockout.is_some() {
-            text.push_str(" (after a blockout)");
+        if let Some(blockout) = &shot.blockout {
+            // Its id, so the agent can go on from it after the user decides.
+            match blockout.id.as_str() {
+                "" => text.push_str(" (after a blockout)"),
+                id => text.push_str(&format!(" (after blockout {id})")),
+            }
         } else if first_frame.is_some() {
             text.push_str(" (from a frame)");
         } else if !references.is_empty() {

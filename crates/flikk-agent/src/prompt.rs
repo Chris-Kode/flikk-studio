@@ -221,7 +221,12 @@ the ground covered), with a keyed camera that can ride its subject, shake \
 and cut. Block it as a director would: who is where, what each does and \
 when, the set they move through, and one \
 clear camera idea a shot. You can't watch it play, so look at it with \
-`preview_blockout` and fix what is off before you ask for the video. The \
+`preview_blockout` and fix what is off before you ask for the video. A \
+scene is long to write: write it once, then change the one that is kept \
+(`id` and `changes`, only what differs) and ask for the video with \
+`blockout_id`. It stays kept after the user decides, with what they \
+changed on the card: for another take, or after a denial, change that \
+one instead of writing a new scene. The \
 user then watches it on the request's card, asks for changes there, and \
 only then approves the spend, so what they pay for moves as they meant. \
 Let the prompt carry the performance and the look, which grey stand-ins \

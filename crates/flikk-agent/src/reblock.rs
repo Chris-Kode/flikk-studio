@@ -4,8 +4,11 @@
 //! reads the scene, or the shot's description, and answers with the scene.
 //! The run can't watch what it writes, so it is told in words what the
 //! camera sees ([`Scene::review`]), and a first draft that looks mistaken
-//! is handed back to it once to put right. It costs what a short chat
-//! message costs, and nothing of the video provider's.
+//! is handed back to it once to put right. A scene is written whole only
+//! once: every answer after that is a change, saying only what differs
+//! ([`Scene::changed`]), which is quick to write and leaves the rest as it
+//! was. It costs what a short chat message costs, and nothing of the video
+//! provider's.
 
 use crate::backend::{self, BackendEvent, RunningTurn, TurnSpec};
 use crate::session;
@@ -35,6 +38,9 @@ pub struct Reblock {
     settings: AgentSettings,
     /// The picture's shape, width to height.
     shape: (u32, u32),
+    /// The scene an answer changes: the one being changed, or a first
+    /// draft handed back. None while a scene is written from nothing.
+    base: Option<Box<Scene>>,
     /// A first draft handed back to be put right: what stands if the
     /// second answer has no scene.
     draft: Option<(Box<Scene>, String)>,
@@ -68,7 +74,9 @@ impl Reblock {
         settings: &AgentSettings,
     ) -> std::io::Result<Self> {
         let brief = change_message(scene, shape, earlier, ask);
-        Self::run(CHANGING, brief, shape, false, settings)
+        let mut changing = Self::run(CHANGING, brief, shape, false, settings)?;
+        changing.base = Some(Box::new(scene.clone()));
+        Ok(changing)
     }
 
     /// Start writing a blockout for the video `shot` describes, `seconds`
@@ -103,6 +111,7 @@ impl Reblock {
             brief,
             settings: settings.clone(),
             shape,
+            base: None,
             draft: None,
             checks,
         })
@@ -127,7 +136,7 @@ impl Reblock {
     fn finished(&mut self, error: Option<String>) -> Reblocked {
         let read = match error {
             Some(e) => Reblocked::Failed(e),
-            None => read_reply(&self.reply),
+            None => read_reply(&self.reply, self.base.as_deref()),
         };
         match (read, self.draft.take()) {
             // The second look came to nothing: the first draft stands.
@@ -163,10 +172,13 @@ impl Reblock {
         let written = serde_json::to_string(&scene).unwrap_or_default();
         let message = format!(
             "{}\n\nYou answered with this scene:\n```json\n{written}\n```\n\nFlikk drew it. What \
-             its camera sees:\n{}\n\nPut right what is not as the shot needs, and answer again the \
-             same way with the whole scene. What is meant (a subject hidden for a reveal) stays.",
+             its camera sees:\n{}\n\nPut right what is not as the shot needs. Answer with one \
+             short sentence, then a change to that scene in one ```json block: only what \
+             differs, not the whole scene. What is meant (a subject hidden for a reveal) stays; \
+             when nothing is to change, the block is {{}}.\n\n{}",
             self.brief,
-            review.text()
+            review.text(),
+            crate::tools::catalog::BLOCKOUT_CHANGES
         );
         match launch(self.task, message, &self.settings) {
             Ok((running, run_dir)) => {
@@ -174,6 +186,7 @@ impl Reblock {
                 let _ = std::fs::remove_dir_all(&self.run_dir);
                 (self.running, self.run_dir) = (running, run_dir);
                 self.reply.clear();
+                self.base = Some(scene.clone());
                 self.draft = Some((scene, answer));
                 Reblocked::Working
             }
@@ -250,9 +263,10 @@ const CRAFT: &str = "Write it as a director blocks a shot. Design the characters
 const CHANGING: &str = "The user watches the blockout play and tells you what should be \
     different. You get the scene as JSON, what its camera sees in words (you can't watch it), \
     and what they ask. Answer with one short sentence saying what you changed, in the language \
-    they write in, then the whole scene, changed, in one ```json block. Change only what they \
-    ask for and keep the names of objects, models and parts. When what they ask can't be shown in this format, or \
-    you need to know more, say so in one or two sentences and give no JSON.";
+    they write in, then the change in one ```json block: only what differs, never the whole \
+    scene. Change only what they ask for and keep the names of objects, models and parts. When \
+    what they ask can't be shown in this format, or you need to know more, say so in one or \
+    two sentences and give no JSON.";
 
 /// What a run that writes a scene from a shot's description is asked to do.
 const DRAFTING: &str = "You get the description of one video shot, how long it runs and its \
@@ -264,9 +278,14 @@ const DRAFTING: &str = "You get the description of one video shot, how long it r
 
 fn system_prompt(task: &str) -> String {
     let format = crate::tools::catalog::blockout();
+    // Only a run that changes a scene is told how a change is written.
+    let changes = match task == CHANGING {
+        true => format!("\n\n{}", crate::tools::catalog::BLOCKOUT_CHANGES),
+        false => String::new(),
+    };
     format!(
-        "You work on {BLOCKOUT}.\n\n{task}\n\n{CRAFT}\n\nThe scene's format, as a JSON \
-         schema:\n{format}"
+        "You work on {BLOCKOUT}.\n\n{task}{changes}\n\n{CRAFT}\n\nThe scene's format, as a \
+         JSON schema:\n{format}"
     )
 }
 
@@ -289,8 +308,9 @@ fn change_message(scene: &Scene, shape: (u32, u32), earlier: &[Exchange], ask: &
 }
 
 /// The answer and the scene in a reply: the JSON is its outermost braces,
-/// the answer the text before them.
-fn read_reply(reply: &str) -> Reblocked {
+/// the answer the text before them. With a `base`, the JSON is a change
+/// to it; a scene written whole all the same is taken as one.
+fn read_reply(reply: &str, base: Option<&Scene>) -> Reblocked {
     let braces = reply.find('{').zip(reply.rfind('}')).filter(|(a, b)| a < b);
     let Some((start, end)) = braces else {
         return match reply.trim() {
@@ -301,15 +321,24 @@ fn read_reply(reply: &str) -> Reblocked {
             },
         };
     };
-    let json = serde_json::from_str(&reply[start..=end])
+    let scene = serde_json::from_str::<serde_json::Value>(&reply[start..=end])
         .map_err(|e| e.to_string())
-        .and_then(|json| Scene::parse(&json));
+        .and_then(|json| match base {
+            Some(base)
+                if !json
+                    .get("objects")
+                    .is_some_and(|objects| objects.is_array()) =>
+            {
+                base.changed(&json)
+            }
+            _ => Scene::parse(&json),
+        });
     let answer = reply[..start]
         .trim()
         .trim_end_matches("```json")
         .trim_end_matches("```")
         .trim();
-    match json {
+    match scene {
         Ok(scene) => Reblocked::Done {
             scene: Some(Box::new(scene)),
             answer: match answer {

@@ -407,11 +407,14 @@ impl ShotCard {
         );
     }
 
-    /// The user saved the blockout changed: the shot follows the new one,
-    /// written to a clip of its own.
+    /// The shot follows `scene` from now on: in place of the blockout it
+    /// had, where that is kept, or as a new one. Its clip is its own.
     fn set_scene(&mut self, scene: flikk_core::blockout::Scene, cx: &mut Context<Self>) {
-        let aspect = self.shape.0 as f64 / self.shape.1 as f64;
-        self.set_blockout(Some(Blockout::new(scene, aspect)), cx);
+        let blockout = match &self.shot.blockout {
+            Some(blockout) => blockout.with_scene(scene),
+            None => Blockout::new(scene, self.shape.0 as f64 / self.shape.1 as f64),
+        };
+        self.set_blockout(Some(blockout), cx);
     }
 
     /// Whether the model picked can follow a blockout; one not known yet

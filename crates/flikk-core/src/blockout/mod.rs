@@ -5,8 +5,9 @@
 //!
 //! A [`Scene`] is plain data the agent writes as JSON ([`Scene::parse`])
 //! and the user changes by asking. [`Scene::render`] draws it at a time,
-//! [`Scene::write_clip`] writes it as a video file, and [`Scene::review`]
-//! says in words what its camera sees, for a writer that can't look.
+//! [`Scene::write_clip`] writes it as a video file, [`Scene::review`]
+//! says in words what its camera sees, for a writer that can't look, and
+//! [`Scene::changed`] makes a change that says only what differs.
 //!
 //! Nothing in a scene is ready-made. Its writer builds every thing from
 //! plain solids, hung from one another at their joints (`parent`,
@@ -22,6 +23,7 @@
 //! `y = 0` stands it on the ground. Angles are degrees.
 
 mod build;
+mod change;
 mod clip;
 mod motion;
 mod render;

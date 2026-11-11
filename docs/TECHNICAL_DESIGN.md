@@ -1366,6 +1366,21 @@ on the UI thread and run it off it:
   `preview_blockout` (the Generate group, a read) gives the agent that
   text with a collage of eight frames, so it looks at a scene and fixes
   it before it asks for the video.
+  A scene is long to write and quick to change, so it is written whole
+  only once. `Scene::changed` (`change.rs`) makes a change that says
+  only what differs: the scene's JSON with `objects`, and each model's
+  parts, held by name; a name that is there has the fields given put in
+  place of its own, a new name is added, `null` removes. Every blockout
+  is kept on disk under a short id (`tools/drafts.rs`, the newest 40 in
+  `paths::cache()/blockouts`): `preview_blockout` keeps a scene given as
+  `blockout` and from then on takes `id` and `changes`, `generate_video`
+  takes `blockout_id`, and the request's summary names the id, so the
+  outcome the agent is told carries it. What the user changes on the
+  card goes into the same kept scene (`Blockout::with_scene`), and it
+  stays after they approve or deny, so another take, or the next try
+  after a denial, starts from the scene as it was left. The backend runs
+  that change a scene in the dialog, and the second look at a drafted
+  one, answer with a change too.
   A `video::Shot` is the request with what it is made from: the
   `GenerateRequest::Video` as the user reads it, the frames to grab, the
   placement, and the `Blockout` (scene, clip path under
@@ -1414,9 +1429,9 @@ on the UI thread and run it off it:
   MCP config and no allowed tools, Codex no MCP server) given the scene,
   its review, the earlier asks and the format's schema; it answers with
   a sentence
-  and the whole scene changed, read from the reply's outermost braces
-  and checked by `Scene::parse`. Save puts the scene into the shot under
-  a new clip path. Nothing in the dialog reaches a video provider.
+  and a change to the scene, read from the reply's outermost braces and
+  made by `Scene::changed`. Save puts the scene into the shot, and into
+  the kept blockout, under a new clip path. Nothing in the dialog reaches a video provider.
 * **Generating pictures:** `Capability::Image` is a row in Settings →
   Integrations like video, with fal and Pika as providers. On fal: Nano
   Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and

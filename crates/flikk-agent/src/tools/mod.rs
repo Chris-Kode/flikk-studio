@@ -11,6 +11,7 @@ mod audio;
 pub mod caption_styles;
 pub(crate) mod catalog;
 mod depth;
+pub mod drafts;
 mod edit;
 mod files;
 mod fx;

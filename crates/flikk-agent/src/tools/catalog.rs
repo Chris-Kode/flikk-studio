@@ -76,6 +76,10 @@ Moving: `keys` say what an object is at given seconds, for what happens once (it
 Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
 An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"leg l\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0],\"cycle\":{\"metres\":1.4,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}},{\"name\":\"leg r\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0],\"cycle\":{\"metres\":1.4,\"shift\":0.5,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"leg l\":{\"cycle\":null,\"rotate\":[-80,0,0]}}}],\"camera\":{\"at\":[0,1.5,7],\"look_at\":\"guard\"}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
 
+/// How a change to a blockout is written (`Scene::changed`): what its
+/// writer is told, whoever it is.
+pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ; `duration`, `ground` and `sun` are given as they should be.";
+
 /// A blockout as `generate_video` takes it (`flikk_core::blockout::Scene`).
 pub(crate) fn blockout() -> Value {
     use flikk_core::blockout::{Anchor, Ease, Shape};
@@ -1799,6 +1803,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "last_frame_at": time("Or end on the program's frame at this time"),
                     "references": strings("Media ids of pictures, clips and sounds in the pool for it to follow; not with a first frame, unless there is a `blockout`"),
                     "blockout": blockout(),
+                    "blockout_id": string("Or the id of a blockout kept by `preview_blockout`, in place of `blockout`: the scene as it is kept now"),
                     "audio": boolean("Make sound with it, where the model makes sound (default true). The user can turn video sound off in Settings; then it is made silent whatever this says"),
                     "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
                     "track": string("Video track to put it on (default: one with nothing there, else a new one)")
@@ -1809,14 +1814,16 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             super::video::PREVIEW,
             Some(View),
-            "Look at a blockout before asking for its video: one collage of frames across it, and in words what its camera sees and what looks like a mistake. It costs nothing. Use it on every blockout you write, fix what is off (a limb that swings the wrong way, a part off its joint, a subject out of frame or hidden, a walker sliding sideways, a camera inside a wall, timing that doesn't read), and only then call `generate_video` with the scene.",
+            "Look at a blockout before asking for its video: one collage of frames across it, and in words what its camera sees and what looks like a mistake. It costs nothing. The scene is kept under an id, given in the answer. Write a scene once, as `blockout`; from then on change the one kept, with `id` and `changes`, which is far quicker than writing it again and loses nothing. Use it on every blockout you write, fix what is off (a limb that swings the wrong way, a part off its joint, a subject out of frame or hidden, a walker sliding sideways, a camera inside a wall, timing that doesn't read), and only then call `generate_video` with `blockout_id`. A blockout stays kept after the user decides, as they left it on the card: when they deny a video or want another take, look at the kept one with `id` and change that.",
             object(
                 json!({
-                    "blockout": { "type": "object", "description": "The scene, as `generate_video` takes its `blockout`" },
-                    "duration": number("Seconds, when the scene gives none"),
-                    "aspect": string("The video's shape, as generate_video takes it (default: the sequence's)")
+                    "blockout": { "type": "object", "description": "A new scene to keep and look at, as `generate_video` takes its `blockout`" },
+                    "id": string("Or the id of a blockout kept earlier: looks at it as it is now, or with `changes` made"),
+                    "changes": { "type": "object", "description": BLOCKOUT_CHANGES },
+                    "duration": number("Seconds, when a new scene gives none"),
+                    "aspect": string("The video's shape, as generate_video takes it (default: the sequence's, or the one it was kept for)")
                 }),
-                &["blockout"],
+                &[],
             ),
         ),
         spec(
