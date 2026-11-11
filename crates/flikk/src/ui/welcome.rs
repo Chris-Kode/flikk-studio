@@ -86,6 +86,8 @@ impl Recent {
 
 /// The agent CLIs looked for on the setup list.
 enum Agents {
+    /// Not looked for yet: the setup list has not shown.
+    Unchecked,
     /// Asked under this number; a later ask drops its answer.
     Checking(u64),
     /// Those found, with the version each reports.
@@ -128,9 +130,9 @@ impl Welcome {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let _state = cx.observe(&state, |_, _, cx| cx.notify());
-        let mut this = Self {
+        Self {
             state,
-            agents: Agents::Checking(0),
+            agents: Agents::Unchecked,
             agents_asked: 0,
             download_poll: None,
             search,
@@ -140,11 +142,7 @@ impl Welcome {
             focus,
             _search,
             _state,
-        };
-        if this.state.read(cx).projects_wait() {
-            this.check_agents(cx);
         }
-        this
     }
 
     /// Look for Claude and Codex, and their versions, off the UI thread.
@@ -732,14 +730,14 @@ impl Welcome {
     fn transcription_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = self.state.read(cx);
         let downloading = matches!(s.setup_status(), SetupStatus::Downloading { .. });
-        let picked = ModelTask::Transcription.model();
+        let picked = s.picked_model(ModelTask::Transcription);
         let sizes: Vec<_> = crate::ui::editor_settings::transcription_sizes().collect();
         let selected = sizes
             .iter()
             .position(|(_, m)| m.id == picked.id)
             .unwrap_or(0);
         let items = sizes.iter().map(|(label, model)| {
-            let bytes = model.files.iter().map(|f| f.size).sum();
+            let bytes = crate::state::full_size(model);
             format!("{label} · {}", crate::ui::format::size(bytes))
         });
         let mut choice = Segmented::new("welcome-transcription")
@@ -767,7 +765,9 @@ impl Welcome {
     /// install one and Check again. It holds no project back.
     fn agent_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let control = match &self.agents {
-            Agents::Checking(_) => Spinner::new().size(px(12.)).into_any_element(),
+            Agents::Unchecked | Agents::Checking(_) => {
+                Spinner::new().size(px(12.)).into_any_element()
+            }
             Agents::Found(found) if found.is_empty() => h_flex()
                 .gap(px(8.))
                 .child(install_button("welcome-agent", AGENT_INSTALL))
@@ -800,6 +800,9 @@ impl Render for Welcome {
             self.dropping = None;
         }
         let waiting = self.state.read(cx).projects_wait();
+        if waiting && matches!(self.agents, Agents::Unchecked) {
+            self.check_agents(cx);
+        }
         if waiting && self.download_poll.is_none() && self.state.read(cx).models.busy() {
             self.download_poll = Some(crate::ui::repaint_while(
                 cx,

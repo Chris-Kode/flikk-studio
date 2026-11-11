@@ -23,7 +23,7 @@ pub mod voices;
 
 pub use approvals::ApprovalOutcome;
 pub use cloud::{Check, Generating, ProviderStatus};
-pub use setup::SetupStatus;
+pub use setup::{SetupStatus, full_size};
 pub use source::Source;
 
 use crate::agent_link::AgentLink;
@@ -125,6 +125,9 @@ pub struct EditorState {
     pub models: flikk_models::Downloads,
     /// The download of every model at once, from the welcome page.
     setup: setup::Setup,
+    /// A model picked for a task while it downloads, the one on disk
+    /// staying in use until then (see `pick_model`).
+    switching: Option<(flikk_models::Task, &'static flikk_models::Model)>,
     /// Warnings and errors under the top bar's notice button.
     pub notices: Notices,
     /// Media whose source file is missing.
@@ -231,6 +234,7 @@ impl EditorState {
             model_tasks,
             models: flikk_models::Downloads::default(),
             setup: setup::Setup::new(),
+            switching: None,
             notices: Notices::default(),
             offline: OfflineMedia::default(),
             _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),

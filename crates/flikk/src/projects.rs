@@ -68,8 +68,8 @@ fn begin_settling(cx: &mut App) -> Rc<()> {
 }
 
 /// Whether projects wait for the models (see `EditorState::projects_wait`),
-/// saying so on the status line: in a project, a size of transcription
-/// picked in Settings is still downloading.
+/// saying so on the status line: a shortcut on the welcome page, or in a
+/// project whose model files went missing.
 fn waiting(state: &Entity<EditorState>, cx: &mut App) -> bool {
     let waiting = state.read(cx).projects_wait();
     if waiting {

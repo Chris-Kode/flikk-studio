@@ -226,6 +226,12 @@ impl Model {
             .sum()
     }
 
+    /// Whether a download stopped part way through left any of its files
+    /// behind, to go on from.
+    pub fn partly_downloaded(&self) -> bool {
+        self.files.iter().any(|f| f.fetched() > 0)
+    }
+
     /// Delete its files, and what a download left of them, from
     /// `paths::models()`. Copies an environment variable points at, and
     /// files another model also uses, stay.

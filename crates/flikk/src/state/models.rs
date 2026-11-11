@@ -9,12 +9,18 @@ use gpui_kit::*;
 impl EditorState {
     /// Download `model`: the user asked for it.
     pub fn download_model(&mut self, model: &'static flikk_models::Model, cx: &mut Context<Self>) {
+        self.setup_download_started(model);
         self.models.start(model);
         cx.notify();
     }
 
+    /// Stop `model`'s download; what it fetched stays for the next one. A
+    /// switch to it is given up: the model in use stays.
     pub fn cancel_download(&mut self, model: &flikk_models::Model, cx: &mut Context<Self>) {
         self.models.cancel(model);
+        if self.switching.is_some_and(|(_, to)| to.id == model.id) {
+            self.switching = None;
+        }
         cx.notify();
     }
 
@@ -28,26 +34,48 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Run `task` on `model` from now on: the user picked it. Media
-    /// analyzed already keeps its results. Once the setup is done, a model
-    /// not on disk downloads at once: every model is needed.
+    /// Run `task` on `model`: the user picked it. Media analyzed already
+    /// keeps its results. A model on disk, or any during the setup, takes
+    /// over at once. Otherwise it downloads, and the model in use stays
+    /// until it is on disk ([`Self::picked_model`] shows the pick): every
+    /// model is needed, and analysis on a missing one would leave its step
+    /// out. Picking again gives up a switch under way, and its download.
     pub fn pick_model(
         &mut self,
         task: flikk_models::Task,
         model: &'static flikk_models::Model,
         cx: &mut Context<Self>,
     ) {
-        if task.model().id == model.id {
-            return;
+        if let Some((_, to)) = self.switching.take_if(|(t, _)| *t == task)
+            && to.id != model.id
+        {
+            self.models.cancel(to);
         }
-        let set_up = !self.projects_wait();
-        task.pick(model);
-        if set_up && !model.is_downloaded() {
-            self.download_model(model, cx);
+        if task.model().id != model.id {
+            if model.is_downloaded() || self.projects_wait() {
+                self.use_model(task, model);
+            } else {
+                self.switching = Some((task, model));
+                self.download_model(model, cx);
+            }
         }
-        persistence::with_store(|s| s.save_model_picks(&flikk_models::picked()));
         self.poll_models(cx);
         cx.notify();
+    }
+
+    /// The model the user picked for `task`: the one downloading to take
+    /// over, else the one in use.
+    pub fn picked_model(&self, task: flikk_models::Task) -> &'static flikk_models::Model {
+        match self.switching {
+            Some((t, to)) if t == task => to,
+            _ => task.model(),
+        }
+    }
+
+    /// Run `task` on `model` from now on, and remember it.
+    fn use_model(&mut self, task: flikk_models::Task, model: &'static flikk_models::Model) {
+        task.pick(model);
+        persistence::with_store(|s| s.save_model_picks(&flikk_models::picked()));
     }
 
     /// Media can be analyzed: unless a provider is picked to transcribe
@@ -110,6 +138,9 @@ impl EditorState {
             return;
         }
         self.models_seen = seen;
+        if let Some((task, to)) = self.switching.take_if(|(_, to)| to.is_downloaded()) {
+            self.use_model(task, to);
+        }
         self.analyze_sounds(cx);
         cx.notify();
     }

@@ -139,11 +139,7 @@ impl Flikk {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(EditorState::new);
         if crate::demo::enabled() {
-            state.update(cx, |s, cx| {
-                crate::demo::seed(s, cx);
-                // The seed's media is there when the project opens.
-                s.mark_media_seen();
-            });
+            state.update(cx, crate::demo::seed);
         }
         let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
         // Every launch starts on the welcome page, unless the app was
@@ -860,8 +856,9 @@ impl Flikk {
 }
 
 /// Change sets the agent closed for review.
-/// The status bar under the welcome page.
-fn welcome_status() -> impl IntoElement {
+/// The status bar under the welcome page: the status line when it says
+/// something (why a project did not open), else that none is open.
+fn welcome_status(status: Option<String>) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(t::STATUS_BAR)
@@ -872,7 +869,10 @@ fn welcome_status() -> impl IntoElement {
         .bg(t::P)
         .text_size(px(11.))
         .text_color(t::T3)
-        .child("No project open")
+        .child(match status {
+            Some(status) => div().min_w_0().truncate().text_color(t::T2).child(status),
+            None => div().child("No project open"),
+        })
         .child(div().flex_1())
         .child(Kbd::new(format!("{MOD} ,")))
         .child("settings")
@@ -963,7 +963,7 @@ impl Render for Flikk {
                 |root| match self.welcome.as_ref().map(|(page, _)| page.clone()) {
                     Some(page) => root
                         .child(div().flex_1().min_h_0().child(page))
-                        .child(welcome_status()),
+                        .child(welcome_status(self.state.read(cx).status.clone())),
                     None => root
                         .child(div().flex_1().min_h_0().child(self.workspace(cx)))
                         .child(self.status_bar(cx)),

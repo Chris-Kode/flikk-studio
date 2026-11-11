@@ -23,7 +23,8 @@ pub enum SetupStatus {
 /// The set's download as the editor follows it.
 #[derive(Default)]
 pub struct Setup {
-    /// Bytes missing when the set's download started: what its progress
+    /// Bytes the set's downloads under way were missing when each
+    /// started, from the welcome page or Settings: what its progress
     /// counts against.
     baseline: u64,
     /// `FLIKK_DEMO_SETUP`: the status shown instead of the real one.
@@ -58,7 +59,6 @@ impl EditorState {
         }
         let remaining: u64 = models.iter().map(|m| m.missing_bytes()).sum();
         if statuses.iter().any(|s| matches!(s, Status::Downloading(_))) {
-            // Downloads started from Settings count too.
             let baseline = self.setup.baseline.max(remaining).max(1);
             let fraction = 1.0 - remaining as f32 / baseline as f32;
             return SetupStatus::Downloading { fraction };
@@ -84,15 +84,18 @@ impl EditorState {
     /// Download every model of the set that is missing, at once: the user
     /// asked, from the welcome page. A failed one starts again; a stopped
     /// one goes on from where it stopped.
+    /// A seeded setup only pretends to.
     pub fn download_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(seeded) = &mut self.setup.seeded {
+            *seeded = SetupStatus::Downloading { fraction: 0.42 };
+            cx.notify();
+            return;
+        }
         let missing: Vec<&'static Model> = self
             .required_models()
             .into_iter()
             .filter(|m| !matches!(self.models.status(m), Status::Downloaded))
             .collect();
-        if !self.models.busy() {
-            self.setup.baseline = missing.iter().map(|m| m.missing_bytes()).sum();
-        }
         for model in missing {
             self.download_model(model, cx);
         }
@@ -102,9 +105,40 @@ impl EditorState {
     /// Stop every download of the set; what they fetched stays for the
     /// next one.
     pub fn cancel_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(seeded) = &mut self.setup.seeded {
+            *seeded = SetupStatus::Missing {
+                bytes: Task::ALL.iter().map(|t| full_size(t.model())).sum(),
+            };
+            cx.notify();
+            return;
+        }
         for model in self.required_models() {
             self.models.cancel(model);
         }
         cx.notify();
     }
+
+    /// `model` starts downloading: when the set needs it, its missing
+    /// bytes join what the set's progress counts against, from zero when
+    /// none of the set was downloading.
+    pub(super) fn setup_download_started(&mut self, model: &Model) {
+        let required = self.required_models();
+        if !required.iter().any(|m| m.id == model.id)
+            || matches!(self.models.status(model), Status::Downloading(_))
+        {
+            return;
+        }
+        let under_way = required
+            .iter()
+            .any(|m| matches!(self.models.status(m), Status::Downloading(_)));
+        if !under_way {
+            self.setup.baseline = 0;
+        }
+        self.setup.baseline += model.missing_bytes();
+    }
+}
+
+/// The bytes of all of `model`'s files.
+pub fn full_size(model: &Model) -> u64 {
+    model.files.iter().map(|f| f.size).sum()
 }

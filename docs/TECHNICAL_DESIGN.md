@@ -639,7 +639,8 @@ it (`EditorState::required_models`). While one is missing, the welcome
 page shows a setup list in place of Recent (`state/setup.rs`,
 `ui/welcome.rs`): one row for the whole set, with its total size and one
 Download that starts each missing model at once, its progress counted
-against the bytes missing when it started, Cancel, and a failed download
+against the bytes missing when each of the set's downloads started (from
+here or Settings), Cancel, and a failed download
 in place with Retry; Whisper small or large, each with its size, held
 while the set downloads; the agent CLIs found and their versions
 (`flikk_agent::backend::installed_version` runs `--version` off the UI
@@ -650,9 +651,9 @@ while it shows, however it is asked for (`EditorState::projects_wait`,
 checked in `projects.rs`): the app opens on it whatever way it was
 started, and a `.flikk` file it was started for opens once the set is
 complete. New project, Open… and the drop zone are held meanwhile; a
-shortcut that asks says why on the status line (in a project, while the
-transcription size picked in Settings downloads). The demo opens without
-the models. `FLIKK_DEMO_SETUP` seeds it.
+shortcut that asks says why on the status line, which the welcome page
+shows too. The demo opens without the models. `FLIKK_DEMO_SETUP` seeds
+it, its buttons only pretending.
 
 Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more
@@ -667,8 +668,13 @@ first. `LocalAnalysis::model_tasks` says which tasks a build
 runs. A runner whose files are missing (deleted by hand) fails ("… is not
 downloaded") and its step is left out; nothing warns about a missing
 model, as the welcome page covers it. A model the editor needs can't be
-deleted there: only the transcription size not picked has Delete, and
-picking the other size downloads it at once. The top bar's notices
+deleted there: only the transcription size not in use has Delete, whole
+or part downloaded. Picking the other size downloads it while the size on
+disk stays in use (`EditorState::picked_model` is the pick, `Task::model`
+the size analysis runs on), and switches once it is on disk; so the set
+stays complete and projects open meanwhile. A failed download shows on
+its row with Retry, the old size still in use; Cancel, or picking again,
+gives the switch up and stops its download. The top bar's notices
 (warnings such as offline media or a provider without its key) can be
 dismissed for the session.
 
@@ -1879,7 +1885,7 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
-| `FLIKK_DEMO_SETUP` | `missing`, `downloading`, `failed` | The welcome page's setup list in that state, whatever is on disk; needs no `FLIKK_DEMO` |
+| `FLIKK_DEMO_SETUP` | `missing`, `downloading`, `failed` | The welcome page's setup list in that state, whatever is on disk (Download, Cancel and Retry only pretend); needs no `FLIKK_DEMO` |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh

@@ -181,18 +181,27 @@ impl IntegrationsTab {
         self.busy = busy;
     }
 
-    /// Transcription on this computer: its size, where its model stands,
-    /// and Delete for the other size when it is on disk: the only model
-    /// the editor can do without.
+    /// Transcription on this computer: the size picked, where its model
+    /// stands (a size picked keeps the one on disk in use while it
+    /// downloads), and Delete for the other size when it is on disk, whole
+    /// or in part: the only model the editor can do without.
     fn render_transcription_size(&self, cx: &App) -> impl IntoElement {
-        let model = ModelTask::Transcription.model();
+        let s = self.state.read(cx);
+        let (model, in_use) = (
+            s.picked_model(ModelTask::Transcription),
+            ModelTask::Transcription.model(),
+        );
         let selected = transcription_sizes()
             .position(|(_, m)| m.id == model.id)
             .unwrap_or(0);
         let state = self.state.clone();
-        let status = self.state.read(cx).models.status(model);
+        let status = s.models.status(model);
         let other = transcription_sizes()
-            .find(|(_, m)| m.id != model.id && m.is_downloaded())
+            .find(|(_, m)| {
+                m.id != model.id
+                    && m.id != in_use.id
+                    && (m.is_downloaded() || m.partly_downloaded())
+            })
             .map(|(label, other)| {
                 let state = self.state.clone();
                 Button::new("transcription-delete-other")
