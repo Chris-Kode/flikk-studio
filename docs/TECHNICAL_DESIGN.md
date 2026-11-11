@@ -1362,7 +1362,10 @@ on the UI thread and run it off it:
   or the program at a time, grabbed with `compose::program` into
   `paths::cache()/frames` just before) to an optional last one, or after
   references (pictures, clips and sounds in the pool, which the prompt names
-  `@Image1`, `@Video1`, `@Audio1`). Each model's `cloud::VideoModel` (its
+  `@Image1`, `@Video1`, `@Audio1`). The agent writes the prompt as a brief
+  (`catalog::VIDEO_PROMPT`: what each reference is for, the clip in a
+  sentence, timed shots of one action and one camera move, the sound, and
+  limits last), the shape video models follow best. Each model's `cloud::VideoModel` (its
   lengths, shapes, resolutions and reference limits) refuses what it can't
   make before anything is spent. Models name their endpoints and fields
   differently (`duration` as text or a number, `image_url` or
