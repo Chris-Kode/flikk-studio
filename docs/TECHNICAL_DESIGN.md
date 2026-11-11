@@ -241,16 +241,19 @@ panics fails without stopping the queue.
   in `Sources::offline` (one finding per file). With the analysis already
   cached (`AnalysisService::analysis`, never started or waited on): an
   audio clip's edge on a word, by `cuts::on_word`, the rule `Speech::snap`
-  moves cuts by (only edges where the source goes on); a caption shown
+  moves cuts by (only edges where the source goes on, and not a split the
+  source plays on through); a caption shown
   more than 0.5 s before its first word or left 1.5 s after its last
   (its first and last words matched by text among those heard within 2 s);
   a hard join is not reported when both sides are at or below −45 dBFS
   within 30 ms of it (a pause); a jump of more than 10 dB between the mean
   levels of the 0.4 s either side of a join, frames under −50 dBFS left
-  out, gain included. With the lettering engine: a caption or title whose
-  box at its middle leaves title-safe (`compose::safe_area`, `TITLE_SAFE`
-  10 %, `ACTION_SAFE` 5 %, shared with `get_layout`; the box from
-  `compose::lettering_shape`, as the viewer letters it). A check whose data
+  out, gain included. With the lettering engine: a title whose box at its
+  middle leaves title-safe, or a caption whose box leaves action-safe
+  (caption styles sit 7 % from the edge by design, so title-safe would
+  report every caption); `compose::safe_area`, `TITLE_SAFE` 10 %,
+  `ACTION_SAFE` 5 %, shared with `get_layout`; the box from
+  `compose::lettering_shape`, as the viewer letters it. A check whose data
   is missing for an item leaves it out and names its kind in
   `Report::skipped`. Thresholds are fixed. `introduced(before, after)`
   keeps the findings of `after` that `before` lacks, a finding being its

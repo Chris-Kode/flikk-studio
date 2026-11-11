@@ -432,7 +432,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "check_timeline",
             Some(ReadProject),
-            "Look for the mistakes a viewer notices, in the project as you see it (your pending changes included): gaps of black under half a second, clips under three frames, hard audio joins outside a pause, captions or titles past the end or two captions at once, clips on offline media, cuts on a word, captions shown well before or after their words, captions and titles outside title-safe, and jumps in level at a join. Checks that need analysis skip media without it and say so in `skipped`. What your change set brings in is also added to the result of the call that brought it in.",
+            "Look for the mistakes a viewer notices, in the project as you see it (your pending changes included): gaps of black under half a second, clips under three frames, hard audio joins outside a pause, captions or titles past the end or two captions at once, clips on offline media, cuts on a word, captions shown well before or after their words, titles outside title-safe and captions outside action-safe, and jumps in level at a join. Checks that need analysis skip media without it and say so in `skipped`. What your change set brings in is also added to the result of the call that brought it in.",
             object(
                 json!({ "range": range("Timeline range (default: whole timeline)") }),
                 &[],

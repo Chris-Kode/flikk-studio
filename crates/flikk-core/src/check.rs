@@ -1,7 +1,7 @@
 //! Mistakes a viewer notices, found before they are: a flash of black
 //! between two clips, a clip too short to see, a hard audio join, a caption
 //! past the end or over another, a clip on offline media, a cut on a word,
-//! a caption out of step with its words, lettering outside title-safe and a
+//! a caption out of step with its words, lettering off the safe area and a
 //! jump in level at a join. [`check`] reads a project and what is already
 //! known about its media (cached analysis, the lettering engine, which files
 //! are missing) and never waits on a job; a check whose data is missing for
@@ -12,7 +12,7 @@
 //! the mix's [`loudness`] measured as a job of its own.
 
 use crate::analysis::{Analysis, Levels, Loudness};
-use crate::compose::{self, TITLE_SAFE};
+use crate::compose::{self, ACTION_SAFE, TITLE_SAFE};
 use crate::cuts;
 use crate::ids::{ClipId, MediaId};
 use crate::model::{Clip, ClipContent, MediaKind, Project, Track, TrackKind};
@@ -67,8 +67,8 @@ pub enum Kind {
     CutOnWord,
     /// A caption that shows well before its words or stays well after.
     CaptionTiming,
-    /// A caption or title outside title-safe.
-    TitleSafe,
+    /// A title outside title-safe, or a caption outside action-safe.
+    SafeArea,
     /// A jump in level across a join on one track.
     LevelJump,
     /// Programme loudness away from the target (Deliver only).
@@ -89,7 +89,7 @@ impl Kind {
             Kind::Offline => "offline",
             Kind::CutOnWord => "cut_on_word",
             Kind::CaptionTiming => "caption_timing",
-            Kind::TitleSafe => "title_safe",
+            Kind::SafeArea => "safe_area",
             Kind::LevelJump => "level_jump",
             Kind::Loudness => "loudness",
             Kind::TruePeak => "true_peak",
@@ -188,7 +188,7 @@ pub fn check(project: &Project, range: Option<TimeRange>, sources: &Sources) -> 
     c.offline();
     c.cuts_on_words();
     c.caption_timing();
-    c.title_safe();
+    c.safe_area();
     let mut report = c.report;
     report.findings.retain(|f| touches(range, f.range));
     report
@@ -574,20 +574,22 @@ impl Checker<'_> {
     /// where its source still speaks.
     fn cuts_on_words(&mut self) {
         let tl = &self.project.timeline;
-        let edges: Vec<(&Clip, Time)> = tl
-            .tracks
-            .iter()
-            .filter(|t| tl.audible(t))
-            .flat_map(|t| self.live(t))
-            .filter(|c| c.media().is_some())
-            .flat_map(|c| {
-                let starts_in = c.source_range().is_some_and(|s| s.start > Time::ZERO);
-                let ends_in = self.source_continues(c);
-                let start = starts_in.then_some((c, c.start));
-                let end = ends_in.then_some((c, c.end()));
-                start.into_iter().chain(end)
-            })
-            .collect();
+        let mut edges: Vec<(&Clip, Time)> = Vec::new();
+        for track in tl.tracks.iter().filter(|t| tl.audible(t)) {
+            let clips: Vec<&Clip> = self.live(track).filter(|c| c.media().is_some()).collect();
+            for (i, &c) in clips.iter().enumerate() {
+                // A split the source plays on through is not a cut.
+                let joined = |a: &Clip, b: &Clip| a.end() == b.start && continues(a, b);
+                let after_split = i > 0 && joined(clips[i - 1], c);
+                let before_split = clips.get(i + 1).is_some_and(|&next| joined(c, next));
+                if !after_split && c.source_range().is_some_and(|s| s.start > Time::ZERO) {
+                    edges.push((c, c.start));
+                }
+                if !before_split && self.source_continues(c) {
+                    edges.push((c, c.end()));
+                }
+            }
+        }
         let mut found = Vec::new();
         for (clip, at) in edges {
             let words: Vec<TimelineWord> = self
@@ -685,13 +687,13 @@ impl Checker<'_> {
         }
     }
 
-    /// Captions and titles whose box at their middle is outside
-    /// title-safe.
-    fn title_safe(&mut self) {
+    /// Titles whose box at their middle is outside title-safe, and
+    /// captions outside action-safe: caption styles sit lower by design
+    /// (7 % from the edge), and every caption would be reported.
+    fn safe_area(&mut self) {
         let project = self.project;
         let s = &project.timeline.settings;
         let canvas = (s.width.max(1), s.height.max(1));
-        let area = compose::safe_area(canvas, TITLE_SAFE);
         let services = &self.sources.services;
         let mut found = Vec::new();
         let mut unlettered = false;
@@ -701,6 +703,11 @@ impl Checker<'_> {
             .iter()
             .filter(|t| matches!(t.kind, TrackKind::Caption | TrackKind::Title) && !t.mix.mute)
         {
+            let (area, note) = match track.kind {
+                TrackKind::Title => (TITLE_SAFE, "Title outside title-safe"),
+                _ => (ACTION_SAFE, "Caption outside action-safe"),
+            };
+            let area = compose::safe_area(canvas, area);
             for clip in self.live(track).filter(|c| compose::is_lettering(track, c)) {
                 if services.lettering.is_none() {
                     unlettered = true;
@@ -712,20 +719,15 @@ impl Checker<'_> {
                     continue;
                 };
                 if !compose::inside(shape.bounds(), area) {
-                    let what = if track.kind == TrackKind::Title {
-                        "Title"
-                    } else {
-                        "Caption"
-                    };
-                    found.push((clip.range(), clip.id, format!("{what} outside title-safe")));
+                    found.push((clip.range(), clip.id, note.to_owned()));
                 }
             }
         }
         if unlettered {
-            self.skip(Kind::TitleSafe);
+            self.skip(Kind::SafeArea);
         }
         for (range, clip, note) in found {
-            self.push(Kind::TitleSafe, Severity::Warning, range, vec![clip], note);
+            self.push(Kind::SafeArea, Severity::Warning, range, vec![clip], note);
         }
     }
 

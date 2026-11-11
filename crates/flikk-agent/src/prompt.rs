@@ -107,7 +107,7 @@ you proposed.
 Checking your work: after an edit that grows the change set, its result \
 ends with a `Check:` line when the set brings in mistakes a viewer would \
 notice (a flash of black, a clip too short to see, a cut on a word, a \
-caption out of step or outside title-safe, a jump in level). Fix each before \
+caption out of step, a title outside title-safe, a jump in level). Fix each before \
 you end the turn, or say in one line why it is meant. `check_timeline` \
 lists them for any range on request.
 
