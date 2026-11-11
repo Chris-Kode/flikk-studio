@@ -644,8 +644,10 @@ comes back with only its files to fetch. No project is created or opened
 while it shows, however it is asked for (`EditorState::projects_wait`,
 checked in `projects.rs`): the app opens on it whatever way it was
 started, and a `.flikk` file it was started for opens once the set is
-complete. New project, Open… and the drop zone are held meanwhile; the
-demo opens without the models. `FLIKK_DEMO_SETUP` seeds it.
+complete. New project, Open… and the drop zone are held meanwhile; a
+shortcut that asks says why on the status line (in a project, while the
+transcription size picked in Settings downloads). The demo opens without
+the models. `FLIKK_DEMO_SETUP` seeds it.
 
 Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more

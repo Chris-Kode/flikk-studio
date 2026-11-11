@@ -67,9 +67,17 @@ fn begin_settling(cx: &mut App) -> Rc<()> {
     token
 }
 
-/// Whether projects wait for the models (see `EditorState::projects_wait`).
-fn waiting(state: &Entity<EditorState>, cx: &App) -> bool {
-    state.read(cx).projects_wait()
+/// Whether projects wait for the models (see `EditorState::projects_wait`),
+/// saying so on the status line: in a project, a size of transcription
+/// picked in Settings is still downloading.
+fn waiting(state: &Entity<EditorState>, cx: &mut App) -> bool {
+    let waiting = state.read(cx).projects_wait();
+    if waiting {
+        state.update(cx, |s, cx| {
+            s.say("Projects open once every model is downloaded", cx)
+        });
+    }
+    waiting
 }
 
 /// Ask for the new project's name, folder and sequence.
