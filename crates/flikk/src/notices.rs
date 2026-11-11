@@ -1,4 +1,4 @@
-//! Updates, warnings and errors listed under the title bar's bell, kept
+//! Updates and warnings listed under the title bar's bell, kept
 //! until the user dismisses them or what they say stops being true. An
 //! update can't be dismissed and is listed first.
 
@@ -9,14 +9,11 @@ pub enum Level {
     /// A new version of Flikk.
     Update,
     Warning,
-    Error,
 }
 
 /// What a notice's button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeAction {
-    /// Open Settings on the Integrations tab, where models download.
-    OpenModels,
     /// Open Settings on the Integrations tab.
     OpenIntegrations,
     /// Pick a folder to relink offline media from.

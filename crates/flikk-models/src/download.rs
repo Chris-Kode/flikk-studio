@@ -1,7 +1,8 @@
 //! Downloads the user starts: a model's missing files fetched one after
-//! another on a thread of its own, each through a temporary file so a cut
-//! download never looks complete. A server that stops sending fails the
-//! download after a minute.
+//! another on a thread of its own, each through `<file>.part` so a cut
+//! download never looks complete, and a cancelled or cut one goes on from
+//! where it stopped. A server that stops sending fails the download after
+//! a minute.
 
 use crate::{Model, ModelFile};
 use anyhow::{Context, Result, bail};
@@ -45,7 +46,7 @@ struct Shared {
     /// Downloads ended so far, however they ended.
     finished: AtomicU64,
     /// Numbers each download, so a cancelled one still winding down
-    /// leaves the next one's state and files alone.
+    /// leaves the next one's state alone.
     next_job: AtomicU64,
 }
 
@@ -95,8 +96,7 @@ impl Downloads {
         let spawned = std::thread::Builder::new()
             .name(format!("flikk-models-{}", model.id))
             .spawn(move || {
-                let result =
-                    fetch_model(model, job, &cancel, &|f| shared.progress(model.id, job, f));
+                let result = fetch_model(model, &cancel, &|f| shared.progress(model.id, job, f));
                 shared.end(model.id, job, result.err().map(|e| format!("{e:#}")));
             });
         if let Err(e) = spawned {
@@ -108,9 +108,9 @@ impl Downloads {
         }
     }
 
-    /// Stop `model`'s download at once: the file it is fetching is thrown
-    /// away, the files it finished stay. It can be started again right
-    /// away.
+    /// Stop `model`'s download at once: the files it finished stay, and
+    /// the one it is fetching goes on from where it stopped next time. It
+    /// can be started again right away.
     pub fn cancel(&self, model: &Model) {
         let mut jobs = lock(&self.shared.jobs);
         if let Some(Job::Running { cancel, .. }) = jobs.get(model.id) {
@@ -163,8 +163,8 @@ impl Shared {
 }
 
 /// Fetch each of `model`'s files not on disk, reporting 0..1 of their
-/// bytes.
-fn fetch_model(model: &Model, job: u64, cancel: &AtomicBool, progress: &dyn Fn(f32)) -> Result<()> {
+/// bytes. A file part-fetched before counts as done that far.
+fn fetch_model(model: &Model, cancel: &AtomicBool, progress: &dyn Fn(f32)) -> Result<()> {
     let missing: Vec<&ModelFile> = model.files.iter().filter(|f| !f.is_present()).collect();
     let total = missing.iter().map(|f| f.size).sum::<u64>().max(1) as f32;
     let mut done = 0;
@@ -177,7 +177,7 @@ fn fetch_model(model: &Model, job: u64, cancel: &AtomicBool, progress: &dyn Fn(f
         if cancel.load(Ordering::Relaxed) {
             bail!("{} download cancelled", file.what);
         }
-        fetch(file, &file.path(), job, cancel, &|bytes| {
+        fetch(file, &file.path(), cancel, &|bytes| {
             progress((done + bytes) as f32 / total)
         })?;
         done += file.size;
@@ -185,35 +185,68 @@ fn fetch_model(model: &Model, job: u64, cancel: &AtomicBool, progress: &dyn Fn(f
     Ok(())
 }
 
-/// Fetch `file` into `dest` via `<dest>.<process>-<job>.part`, its own
-/// so a cancelled download still winding down never shares it, reporting
-/// the bytes read. Parts other runs left behind go first.
-fn fetch(
-    file: &ModelFile,
-    dest: &Path,
-    job: u64,
-    cancel: &AtomicBool,
-    progress: &dyn Fn(u64),
-) -> Result<()> {
+/// How often a download waiting for its part file looks again.
+const PART_WAIT: Duration = Duration::from_millis(100);
+
+/// Fetch `file` into `dest` through `<dest>.part`, reporting the bytes on
+/// disk. What a part already holds (from a cancelled or cut download) is
+/// kept and the rest asked for. The part is locked while it is written: a
+/// cancelled download still winding down, or another copy of the app,
+/// finishes with it first. A part that turns out damaged is deleted; any
+/// other failure leaves it for the next try.
+fn fetch(file: &ModelFile, dest: &Path, cancel: &AtomicBool, progress: &dyn Fn(u64)) -> Result<()> {
     remove_stale_parts(dest);
-    let mut part = dest.as_os_str().to_owned();
-    part.push(format!(".{}-{job}.part", std::process::id()));
-    let part = Path::new(&part);
-    let result = fetch_into(file, part, cancel, progress).and_then(|()| {
-        if cancel.load(Ordering::Relaxed) {
-            bail!("{} download cancelled", file.what);
+    let part = part_path(dest);
+    let mut out = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&part)
+        .with_context(|| format!("could not write {}", part.display()))?;
+    loop {
+        match out.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if cancel.load(Ordering::Relaxed) {
+                    bail!("{} download cancelled", file.what);
+                }
+                std::thread::sleep(PART_WAIT);
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("could not lock {}", part.display()));
+            }
         }
-        std::fs::rename(part, dest).map_err(Into::into)
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(part);
     }
-    result
+    let result = fetch_into(file, &mut out, cancel, progress);
+    // Unlocked before it is renamed or removed: Windows refuses either on
+    // a locked file.
+    drop(out);
+    match result {
+        Ok(()) if cancel.load(Ordering::Relaxed) => bail!("{} download cancelled", file.what),
+        Ok(()) => match std::fs::rename(&part, dest) {
+            // Another copy of the app renamed the same whole part first.
+            Err(_) if file.is_present() => Ok(()),
+            renamed => renamed.with_context(|| format!("could not write {}", dest.display())),
+        },
+        Err(Fetch::Damaged(e)) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+        Err(Fetch::Kept(e)) => Err(e),
+    }
 }
 
-/// Delete `dest`'s parts from runs of the app that ended: `<dest>.part`,
-/// or `<dest>.<process>-<job>.part` of another process. This one's own
-/// downloads delete theirs.
+/// Where `dest` is fetched into: `<dest>.part`.
+pub(crate) fn part_path(dest: &Path) -> std::path::PathBuf {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    part.into()
+}
+
+/// Delete the parts older builds left for `dest`, named after their
+/// process and job (`<dest>.<process>-<job>.part`): they could not be
+/// resumed.
 fn remove_stale_parts(dest: &Path) {
     let (Some(dir), Some(name)) = (dest.parent(), dest.file_name().and_then(|n| n.to_str())) else {
         return;
@@ -221,25 +254,38 @@ fn remove_stale_parts(dest: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let ours = format!("{}-", std::process::id());
     for entry in entries.flatten() {
         let stale = entry.file_name().to_str().is_some_and(|n| {
-            let Some(tag) = n.strip_prefix(name).and_then(|t| t.strip_suffix(".part")) else {
+            let Some(tag) = n
+                .strip_prefix(name)
+                .and_then(|t| t.strip_suffix(".part"))
+                .and_then(|t| t.strip_prefix('.'))
+            else {
                 return false;
             };
-            let Some(tag) = tag.strip_prefix('.') else {
-                return tag.is_empty();
-            };
-            let ids = tag.split_once('-').filter(|(p, j)| {
+            tag.split_once('-').is_some_and(|(p, j)| {
                 [p, j]
                     .iter()
                     .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-            });
-            ids.is_some() && !tag.starts_with(&ours)
+            })
         });
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+/// Why [`fetch_into`] failed, and whether its part is worth keeping.
+enum Fetch {
+    /// Cut short or cancelled: what the part holds is good.
+    Kept(anyhow::Error),
+    /// The part holds the wrong bytes.
+    Damaged(anyhow::Error),
+}
+
+impl<E: Into<anyhow::Error>> From<E> for Fetch {
+    fn from(e: E) -> Self {
+        Fetch::Kept(e.into())
     }
 }
 
@@ -260,14 +306,26 @@ fn timed_out(e: &(dyn std::error::Error + 'static)) -> bool {
     e.source().is_some_and(timed_out)
 }
 
+/// Fill `out`, the locked part, with `file`: from where it ends when the
+/// server can send the rest, else from the start.
 fn fetch_into(
     file: &ModelFile,
-    part: &Path,
+    out: &mut std::fs::File,
     cancel: &AtomicBool,
     progress: &dyn Fn(u64),
-) -> Result<()> {
+) -> std::result::Result<(), Fetch> {
+    use std::io::{Seek, SeekFrom};
     use ureq::tls::{RootCerts, TlsConfig};
     let what = file.what;
+    let mut done = out.metadata()?.len();
+    if file.size != 0 && done > file.size {
+        out.set_len(0)?;
+        done = 0;
+    }
+    if file.size != 0 && done == file.size {
+        progress(done);
+        return check_sha256(file, out, cancel);
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(
             TlsConfig::builder()
@@ -284,51 +342,113 @@ fn fetch_into(
         .build()
         .into();
     let stalled = || {
-        format!(
+        anyhow::anyhow!(
             "{what} download stalled: the server sent nothing for {} s",
             STALL.as_secs()
         )
     };
-    let mut response = match agent.get(file.url).call() {
-        Ok(response) => response,
-        Err(e) if timed_out(&e) => bail!(stalled()),
-        Err(e) => return Err(e).with_context(|| format!("could not download {what}")),
+    let ask = |from: u64| {
+        let request = agent.get(file.url);
+        if from == 0 {
+            request.call()
+        } else {
+            request.header("Range", format!("bytes={from}-")).call()
+        }
     };
-    let total = response.body().content_length();
+    let mut response = match ask(done) {
+        // The part is longer than the file the server has now.
+        Err(ureq::Error::StatusCode(416)) if done > 0 => {
+            out.set_len(0)?;
+            done = 0;
+            ask(0)
+        }
+        response => response,
+    }
+    .map_err(|e| match e {
+        e if timed_out(&e) => stalled(),
+        e => anyhow::Error::new(e).context(format!("could not download {what}")),
+    })?;
+    // Anything but the rest asked for is the whole file.
+    if done > 0 && response.status().as_u16() != 206 {
+        out.set_len(0)?;
+        done = 0;
+    }
+    let total = response.body().content_length().map(|len| done + len);
+    out.seek(SeekFrom::Start(done))?;
+    progress(done);
     let mut body = response.body_mut().as_reader();
-
-    let mut out = std::fs::File::create(part)
-        .with_context(|| format!("could not write {}", part.display()))?;
     let mut buf = vec![0u8; 1 << 20];
-    let mut done = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) {
-            bail!("{what} download cancelled");
+            return Err(anyhow::anyhow!("{what} download cancelled").into());
         }
         let n = match body.read(&mut buf) {
             Ok(n) => n,
-            Err(e) if timed_out(&e) => bail!(stalled()),
-            Err(e) => return Err(e).with_context(|| format!("{what} download interrupted")),
+            Err(e) if timed_out(&e) => return Err(stalled().into()),
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("{what} download interrupted"))
+                    .into());
+            }
         };
         if n == 0 {
             break;
         }
         out.write_all(&buf[..n])
-            .with_context(|| format!("could not write {}", part.display()))?;
+            .with_context(|| format!("could not write the {what}"))?;
         done += n as u64;
         progress(done);
     }
     out.sync_all()?;
     if total.is_some_and(|t| t != done) {
-        bail!("{what} download incomplete ({done} bytes)");
+        return Err(anyhow::anyhow!("{what} download incomplete ({done} bytes)").into());
     }
     // Checked before it takes the file's name, which would make it look
     // downloaded.
     if file.size != 0 && done != file.size {
-        bail!(
+        return Err(Fetch::Damaged(anyhow::anyhow!(
             "{what} download is the wrong size ({done} bytes, {} published): try again",
             file.size
-        );
+        )));
+    }
+    check_sha256(file, out, cancel)
+}
+
+/// Whether `out`, the whole part, holds the bytes published: a resumed
+/// download is otherwise taken on its length alone. One that doesn't is
+/// damaged, and goes.
+fn check_sha256(
+    file: &ModelFile,
+    out: &mut std::fs::File,
+    cancel: &AtomicBool,
+) -> std::result::Result<(), Fetch> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Seek, SeekFrom};
+    if file.sha256.is_empty() {
+        return Ok(());
+    }
+    out.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("{} download cancelled", file.what).into());
+        }
+        match out.read(&mut buf)? {
+            0 => break,
+            n => hasher.update(&buf[..n]),
+        }
+    }
+    let sum: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if sum != file.sha256 {
+        return Err(Fetch::Damaged(anyhow::anyhow!(
+            "{} download is damaged (its checksum does not match): try again",
+            file.what
+        )));
     }
     Ok(())
 }

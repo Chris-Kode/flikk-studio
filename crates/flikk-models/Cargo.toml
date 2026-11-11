@@ -46,6 +46,7 @@ matting = ["dep:ort"]
 flikk-os.workspace = true
 anyhow.workspace = true
 flikk-core.workspace = true
+sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
 serde_json = { workspace = true, optional = true }

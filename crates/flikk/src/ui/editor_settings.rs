@@ -8,6 +8,7 @@ mod on_device;
 mod storage;
 
 use crate::state::{Check, EditorState};
+use crate::ui::format::size as size_label;
 use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, h_flex, theme as t, v_flex};
 use crate::ui::settings::SettingsPanel;
 use entries::EntriesTab;
@@ -18,6 +19,7 @@ use flikk_models::Status;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use integrations::IntegrationsTab;
+pub(crate) use on_device::transcription_sizes;
 use storage::StorageTab;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -423,19 +425,4 @@ fn meta(text: impl Into<SharedString>) -> Div {
         .text_size(px(10.))
         .text_color(t::T3)
         .child(text.into())
-}
-
-/// "885 KB", "148 MB", "1.1 GB", as the files' hosts count them.
-fn size_label(bytes: u64) -> String {
-    const KB: f64 = 1e3;
-    const MB: f64 = 1e6;
-    const GB: f64 = 1e9;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.0} MB", b / MB)
-    } else {
-        format!("{:.0} KB", (b / KB).max(1.))
-    }
 }

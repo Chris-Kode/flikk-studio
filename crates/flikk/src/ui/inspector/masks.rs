@@ -121,9 +121,7 @@ impl InspectorPanel {
                         .label("Remove background")
                         .disabled(masks.iter().any(Mask::is_person))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if masks.iter().any(Mask::is_person)
-                                || !this.state.update(cx, |s, cx| s.people_ready(cx))
-                            {
+                            if masks.iter().any(Mask::is_person) {
                                 return;
                             }
                             let mut masks = masks.clone();

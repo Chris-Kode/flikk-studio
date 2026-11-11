@@ -8,6 +8,7 @@ pub const AUDIO: ModelFile = ModelFile {
     env: Some("FLIKK_CLAP_AUDIO_MODEL"),
     what: "sound search model",
     size: 78_682_146,
+    sha256: "4e286fc4ba1effb817201af133a5f4ad27fdf22cd824d113a94cb575a1ff6170",
 };
 pub const TEXT: ModelFile = ModelFile {
     name: "larger-clap-general-text.onnx",
@@ -15,6 +16,7 @@ pub const TEXT: ModelFile = ModelFile {
     env: Some("FLIKK_CLAP_TEXT_MODEL"),
     what: "sound search text model",
     size: 141_210_922,
+    sha256: "51a34ade0421d12b9e8b15754142f8d76db273dc159548cd758ac5902e75a991",
 };
 /// RoBERTa's tokenizer, from the model's own repository.
 pub const VOCAB: ModelFile = ModelFile {
@@ -23,6 +25,7 @@ pub const VOCAB: ModelFile = ModelFile {
     env: Some("FLIKK_CLAP_VOCAB"),
     what: "sound search vocabulary",
     size: 798_293,
+    sha256: "ed19656ea1707df69134c4af35c8ceda2cc9860bf2c3495026153a133670ab5e",
 };
 pub const MERGES: ModelFile = ModelFile {
     name: "larger-clap-general-merges.txt",
@@ -30,6 +33,7 @@ pub const MERGES: ModelFile = ModelFile {
     env: Some("FLIKK_CLAP_MERGES"),
     what: "sound search vocabulary",
     size: 456_318,
+    sha256: "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
 };
 
 /// Samples in a window, and between the starts of windows.

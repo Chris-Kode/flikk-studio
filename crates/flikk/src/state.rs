@@ -15,6 +15,7 @@ mod music_fit;
 mod offline;
 mod playback;
 mod respeak;
+mod setup;
 mod source;
 mod sync;
 mod update;
@@ -22,6 +23,7 @@ pub mod voices;
 
 pub use approvals::ApprovalOutcome;
 pub use cloud::{Check, Generating, ProviderStatus};
+pub use setup::{SetupStatus, full_size};
 pub use source::Source;
 
 use crate::agent_link::AgentLink;
@@ -121,12 +123,17 @@ pub struct EditorState {
     pub model_tasks: Vec<flikk_models::Task>,
     /// Model downloads, started only by the user. Clones share them.
     pub models: flikk_models::Downloads,
+    /// The download of every model at once, from the welcome page.
+    setup: setup::Setup,
+    /// A model picked for a task while it downloads, the one on disk
+    /// staying in use until then (see `pick_model`).
+    switching: Option<(flikk_models::Task, &'static flikk_models::Model)>,
     /// Warnings and errors under the top bar's notice button.
     pub notices: Notices,
     /// Media whose source file is missing.
     offline: OfflineMedia,
-    /// Which of `model_tasks` had their model, and `models.finished()`, when
-    /// the notices were last brought up to date.
+    /// Which of the required models were on disk, and `models.finished()`,
+    /// when last looked at.
     models_seen: (Vec<bool>, u64),
     _models_poll: Task<()>,
     _offline_poll: Task<()>,
@@ -152,8 +159,13 @@ pub struct EditorState {
         flikk_core::model::MediaItem,
         flikk_core::bus::Author,
     )>,
-    /// Generated items in the pool already looked at for analysis.
-    generated_seen: HashSet<flikk_core::MediaId>,
+    /// Pool items already looked at for analysis: those of the project
+    /// when it opened, and each added since.
+    media_seen: HashSet<flikk_core::MediaId>,
+    /// New pool items whose analysis would go to the provider picked to
+    /// transcribe, waiting for the user to say whether it may: automatic
+    /// analysis never spends money unasked. In the order they came.
+    pub provider_asks: Vec<flikk_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
     pub account_voices: voices::AccountVoices,
     /// Samples fetched for approval cards, by voice id; `None` while on
@@ -188,10 +200,6 @@ impl EditorState {
             persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
         ));
         let model_tasks = flikk_analysis::LocalAnalysis::model_tasks();
-        let downloaded = model_tasks
-            .iter()
-            .map(|t| t.model().is_downloaded())
-            .collect();
         let mut this = Self {
             bus,
             document,
@@ -223,9 +231,11 @@ impl EditorState {
             _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
-            models_seen: (downloaded, 0),
+            models_seen: (Vec::new(), 0),
             model_tasks,
             models: flikk_models::Downloads::default(),
+            setup: setup::Setup::new(),
+            switching: None,
             notices: Notices::default(),
             offline: OfflineMedia::default(),
             _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),
@@ -238,18 +248,19 @@ impl EditorState {
             generating: Vec::new(),
             next_generation: 1,
             kept: Vec::new(),
-            generated_seen: HashSet::new(),
+            media_seen: HashSet::new(),
+            provider_asks: Vec::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
             render: crate::render_cache::Background::new(cx),
             updater: update::Updater::default(),
             _update_watch: Self::watch_for_updates(cx),
         };
-        this.mark_generated_seen();
+        this.mark_media_seen();
         this.configure_analysis();
         this.analyze_sounds(cx);
         this.load_keys(cx);
-        this.refresh_model_notices();
+        this.refresh_key_notice();
         this.check_offline();
         this.load_agent_memory();
         this.load_presets();
@@ -361,6 +372,7 @@ impl EditorState {
         if result.is_ok() {
             self.autosave();
             self.check_offline();
+            self.analyze_new(cx);
             self.proposals.sync(&self.bus);
             // An accepted set, undo or redo may restyle the first caption
             // track, whose style new captions use.
@@ -491,9 +503,15 @@ impl EditorState {
     /// Stop the background analysis and camera path measuring of those of
     /// `items` that left the project, unless an item of the project or a
     /// library sound still has the same file. One that comes back (an
-    /// undo) is asked for again as usual; renders measure for themselves.
-    fn cancel_left(&self, items: &[flikk_core::model::MediaItem]) {
+    /// undo or a redo) is new again, analyzed as it lands; renders measure
+    /// for themselves.
+    fn cancel_left(&mut self, items: &[flikk_core::model::MediaItem]) {
         let project = self.bus.project();
+        for item in items {
+            if project.media(item.id).is_none() {
+                self.media_seen.remove(&item.id);
+            }
+        }
         let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
         let kept: HashSet<_> = project
             .media
@@ -540,7 +558,9 @@ impl EditorState {
         self.cancel_left(&left);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
-        self.mark_generated_seen();
+        self.mark_media_seen();
+        // Asked about for the project that closed.
+        self.provider_asks.clear();
         self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;

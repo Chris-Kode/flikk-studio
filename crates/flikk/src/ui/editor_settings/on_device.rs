@@ -1,9 +1,10 @@
 //! Settings → Integrations, "On this Mac": the models the editor runs on
 //! this computer, named by what they do. Each row shows whether its model
 //! is downloaded, its download, or the provider doing the work instead.
-//! Models are only ever downloaded (or deleted) from here, when the user
-//! asks. Transcription is not listed: its row in "Use for" picks where it
-//! runs and, here, its size.
+//! Every model is downloaded from the welcome page before a project opens;
+//! here one can be downloaded again. Transcription is not listed: its row
+//! in "Use for" picks where it runs and, here, its size, with Delete for
+//! the size not picked.
 
 use super::{group_label, meta, size_label};
 use crate::state::EditorState;
@@ -26,7 +27,7 @@ pub(super) const THIS_MACHINE: &str = if cfg!(target_os = "macos") {
 };
 
 /// Transcription's sizes as "Use for" offers them, smallest first.
-pub(super) fn transcription_sizes() -> impl Iterator<Item = (&'static str, &'static Model)> {
+pub(crate) fn transcription_sizes() -> impl Iterator<Item = (&'static str, &'static Model)> {
     ["Small", "Large"]
         .into_iter()
         .zip(ModelTask::Transcription.models().iter().copied())
@@ -81,8 +82,6 @@ pub(super) fn section(state: &Entity<EditorState>, cx: &App) -> AnyElement {
             let model = task.model();
             let status = s.models.status(model);
             let cell = match (by(task), &status) {
-                // Its model is not needed: only a copy on disk can be
-                // deleted.
                 (Some(_), Status::Downloaded) | (None, _) => {
                     model_status(state, task, model, status, cx)
                 }
@@ -125,8 +124,9 @@ pub(super) fn section(state: &Entity<EditorState>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Where `task`'s `model` stands: downloaded (with Delete), its Download,
-/// its progress (with Cancel), or why it failed (with Retry).
+/// Where `task`'s `model` stands: downloaded, its Download, its progress
+/// (with Cancel), or why it failed (with Retry). Every model is needed, so
+/// none is deleted here.
 pub(super) fn model_status(
     state: &Entity<EditorState>,
     task: ModelTask,
@@ -137,17 +137,9 @@ pub(super) fn model_status(
     let ix = ModelTask::ALL.iter().position(|&t| t == task).unwrap_or(0);
     let state = state.clone();
     match status {
-        Status::Downloaded => h_flex()
-            .gap(px(4.))
-            .child(Icon::new(IconName::CircleCheck).size(px(14.)).color(t::OK))
-            .child(
-                Button::new(("model-delete", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Trash)
-                    .tooltip("Delete")
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.delete_model(model, cx))),
-            )
+        Status::Downloaded => Icon::new(IconName::CircleCheck)
+            .size(px(14.))
+            .color(t::OK)
             .into_any_element(),
         Status::Missing => Button::new(("model-download", ix))
             .small()

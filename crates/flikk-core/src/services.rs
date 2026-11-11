@@ -199,8 +199,23 @@ pub enum Coverage {
 pub trait AnalysisService: Send + Sync {
     /// Queue transcript, voice activity, speakers and shot changes for an
     /// item; a no-op if its cached result covers the steps configured now,
-    /// else only the missing ones run.
+    /// else only the missing ones run. The user or the agent asked and
+    /// waits: it goes ahead of the analysis queued in the background, and
+    /// an item queued there already moves ahead.
     fn analyze(&self, item: &MediaItem) -> JobId;
+    /// [`AnalysisService::analyze`] for analysis nobody asked for
+    /// (imports): behind everything queued. It never spends money: when a
+    /// provider transcribes by the time it runs, it does nothing (the item
+    /// stays unanalyzed until asked for), unless it was asked for since.
+    fn analyze_in_background(&self, item: &MediaItem) -> JobId {
+        self.analyze(item)
+    }
+    /// Drop the analysis waiting in the background that would transcribe:
+    /// a provider was picked to transcribe. The files whose analysis was
+    /// dropped, in the order queued, to ask the user about.
+    fn cancel_background_speech(&self) -> Vec<Fingerprint> {
+        Vec::new()
+    }
     /// Queue what is heard in a library sound: sounds, music, beats and
     /// sound vectors, on this machine. No speech, so it spends no
     /// transcription credits. Nothing if it has results, or the steps or

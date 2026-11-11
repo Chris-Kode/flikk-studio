@@ -167,14 +167,9 @@ impl ViewerPanel {
         }
     }
 
-    /// Pick the subject tool, when its model is here; start encoding the
-    /// frame under the playhead for the first click.
     /// Keep the people in the active clip and cut its background away: a
     /// person mask, or the one it has, selected.
     pub(super) fn remove_background(&mut self, cx: &mut Context<Self>) {
-        if !self.state.update(cx, |s, cx| s.people_ready(cx)) {
-            return;
-        }
         let state = self.state.read(cx);
         let Some(shape) = self
             .gizmo
@@ -205,10 +200,9 @@ impl ViewerPanel {
             .update(cx, |s, cx| s.edit_batch(vec![command], "set_masks", cx));
     }
 
+    /// Pick the subject tool; start encoding the frame under the playhead
+    /// for the first click.
     pub(super) fn pick_subject_tool(&mut self, cx: &mut Context<Self>) {
-        if !self.state.update(cx, |s, cx| s.subjects_ready(cx)) {
-            return;
-        }
         self.masks.tool = Some(masks::Tool::Subject);
         let state = self.state.read(cx);
         let shape = self

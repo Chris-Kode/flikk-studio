@@ -124,11 +124,18 @@ pub struct Flikk {
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
+    /// The app was started for a project file while a model was missing:
+    /// it opens once the last one is on disk.
+    file_waiting: bool,
     /// Footage dropped on the welcome page, imported once the New project
     /// it started is open. Any other way of leaving the page, or of
     /// starting or opening a project, clears it.
     footage: Option<Vec<PathBuf>>,
+    /// The question whether new media may be analyzed with the provider
+    /// picked to transcribe, while it is open.
+    provider_ask: Option<crate::ui::kit::DialogId>,
     _observe: Subscription,
+    _observe_asks: Subscription,
     _welcome: Option<Subscription>,
 }
 
@@ -139,22 +146,28 @@ impl Flikk {
             state.update(cx, crate::demo::seed);
         }
         let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
+        let _observe_asks = cx.observe_in(&state, window, |this, _, window, cx| {
+            this.ask_about_provider(window, cx)
+        });
         // Every launch starts on the welcome page, unless the app was
-        // started for a file or a demo.
-        let welcome =
-            (!crate::demo::enabled() && !crate::persistence::launched_with_file()).then(|| {
-                let project = state.read(cx).bus.project().id;
-                (
-                    cx.new(|cx| Welcome::new(state.clone(), window, cx)),
-                    project,
-                )
-            });
+        // started for a file or a demo; and while a model is missing,
+        // whatever way it was started, with the file waiting behind it.
+        let waiting = state.read(cx).projects_wait();
+        let for_file = crate::persistence::launched_with_file();
+        let welcome = (waiting || (!crate::demo::enabled() && !for_file)).then(|| {
+            let project = state.read(cx).bus.project().id;
+            (
+                cx.new(|cx| Welcome::new(state.clone(), window, cx)),
+                project,
+            )
+        });
         let _welcome = welcome.as_ref().map(|(page, _)| {
             cx.subscribe_in(page, window, |this, _, ev: &WelcomeEvent, window, cx| {
                 match ev {
                     WelcomeEvent::Continue => {
                         this.welcome = None;
                         this.footage = None;
+                        this.file_waiting = false;
                     }
                     WelcomeEvent::Create(paths) => {
                         // Another dialog is up: New project won't open.
@@ -218,20 +231,28 @@ impl Flikk {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
             },
+            file_waiting: for_file && waiting,
             welcome,
             footage: None,
+            provider_ask: None,
             state,
             _observe,
+            _observe_asks,
             _welcome,
         }
     }
 
     /// Leave the welcome page once another project is open, importing the
-    /// footage it was started from. Footage is only still held here when
-    /// that project came from the New project dialog it opened, which
+    /// footage it was started from, or once the last model is on disk when
+    /// the app was started for a file. Footage is only still held here
+    /// when that project came from the New project dialog it opened, which
     /// already named it after a dropped folder.
     fn state_changed(&mut self, cx: &mut Context<Self>) {
         let project = self.state.read(cx).bus.project().id;
+        if self.file_waiting && !self.state.read(cx).projects_wait() {
+            self.file_waiting = false;
+            self.welcome = None;
+        }
         if self.welcome.as_ref().is_some_and(|(_, at)| *at != project) {
             self.welcome = None;
             if let Some(paths) = self.footage.take() {
@@ -240,6 +261,23 @@ impl Flikk {
             }
         }
         cx.notify();
+    }
+
+    /// Ask whether new media may be analyzed with the provider picked to
+    /// transcribe while some waits for it, and stop asking once none does
+    /// (the user answered, or the provider or project changed).
+    fn ask_about_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = !self.state.read(cx).provider_asks.is_empty();
+        match self.provider_ask {
+            None if waiting => {
+                self.provider_ask = Some(crate::ui::provider_ask::open(&self.state, window, cx));
+            }
+            Some(id) if !waiting => {
+                window.close_dialog_id(id, cx);
+                self.provider_ask = None;
+            }
+            _ => {}
+        }
     }
 
     /// Open Settings on `tab`, or on the page shown last.
@@ -450,9 +488,6 @@ impl Flikk {
             },
             move |action, window, cx| {
                 let _ = this.update(cx, |this, cx| match action {
-                    NoticeAction::OpenModels => {
-                        this.open_settings(Some(SettingsTab::Integrations), window, cx)
-                    }
                     NoticeAction::OpenIntegrations => {
                         this.open_settings(Some(SettingsTab::Integrations), window, cx)
                     }
@@ -847,8 +882,9 @@ impl Flikk {
 }
 
 /// Change sets the agent closed for review.
-/// The status bar under the welcome page.
-fn welcome_status() -> impl IntoElement {
+/// The status bar under the welcome page: the status line when it says
+/// something (why a project did not open), else that none is open.
+fn welcome_status(status: Option<String>) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(t::STATUS_BAR)
@@ -859,7 +895,10 @@ fn welcome_status() -> impl IntoElement {
         .bg(t::P)
         .text_size(px(11.))
         .text_color(t::T3)
-        .child("No project open")
+        .child(match status {
+            Some(status) => div().min_w_0().truncate().text_color(t::T2).child(status),
+            None => div().child("No project open"),
+        })
         .child(div().flex_1())
         .child(Kbd::new(format!("{MOD} ,")))
         .child("settings")
@@ -950,7 +989,7 @@ impl Render for Flikk {
                 |root| match self.welcome.as_ref().map(|(page, _)| page.clone()) {
                     Some(page) => root
                         .child(div().flex_1().min_h_0().child(page))
-                        .child(welcome_status()),
+                        .child(welcome_status(self.state.read(cx).status.clone())),
                     None => root
                         .child(div().flex_1().min_h_0().child(self.workspace(cx)))
                         .child(self.status_bar(cx)),

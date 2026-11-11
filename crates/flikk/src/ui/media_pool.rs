@@ -323,7 +323,7 @@ impl MediaPoolPanel {
             // A file that could not be read has nothing to analyze.
             _ if fp.is_none() => AnalyzeEntry::Unreadable,
             // A voiceover's script stands in for transcription.
-            _ if script.is_none() && !state.models_ready() => AnalyzeEntry::SetUp,
+            _ if script.is_none() && !state.analysis_ready() => AnalyzeEntry::SetUp,
             _ => AnalyzeEntry::Ready { again },
         })
     }
@@ -1576,7 +1576,8 @@ enum AnalyzeEntry {
     Queued,
     Running,
     Unreadable,
-    /// A model it needs is missing: opens where to get it.
+    /// The provider picked to transcribe has no key: opens where to set
+    /// it.
     SetUp,
     /// `again` when its results cover every step, which analyzing
     /// replaces; otherwise analyzing adds the steps they lack.

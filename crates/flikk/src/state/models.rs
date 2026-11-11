@@ -1,35 +1,31 @@
-//! Model files and the notices about them: downloads the user starts,
-//! the models each task runs on, and what can't be made without them.
+//! Model files: downloads the user starts, the models each task runs on,
+//! and analysis asked for. Every model is on disk before a project opens
+//! (see `setup.rs`), so nothing here warns about a missing one.
 
 use super::EditorState;
-use crate::notices::{Level, Notice, NoticeAction};
 use crate::persistence;
 use gpui_kit::*;
-
-/// Key of the notice listing the models not downloaded.
-const MODELS_NOTICE: &str = "models-missing";
-/// Key of the notice that subject masks need their model.
-const SUBJECTS_NOTICE: &str = "subjects-model";
-/// Key of the notice that optical flow needs its model.
-const FLOW_NOTICE: &str = "optical-flow-model";
-/// Key of the notice that person masks need their model.
-const PEOPLE_NOTICE: &str = "people-model";
 
 impl EditorState {
     /// Download `model`: the user asked for it.
     pub fn download_model(&mut self, model: &'static flikk_models::Model, cx: &mut Context<Self>) {
-        self.notices.clear(&download_notice(model));
+        self.setup_download_started(model);
         self.models.start(model);
         cx.notify();
     }
 
+    /// Stop `model`'s download; what it fetched stays for the next one. A
+    /// switch to it is given up: the model in use stays.
     pub fn cancel_download(&mut self, model: &flikk_models::Model, cx: &mut Context<Self>) {
         self.models.cancel(model);
+        if self.switching.is_some_and(|(_, to)| to.id == model.id) {
+            self.switching = None;
+        }
         cx.notify();
     }
 
-    /// Delete `model`'s files: the user asked. Analysis that needs it waits
-    /// until it is downloaded again.
+    /// Delete `model`'s files: the user asked. Only the transcription size
+    /// not picked is offered.
     pub fn delete_model(&mut self, model: &flikk_models::Model, cx: &mut Context<Self>) {
         if let Err(e) = model.delete() {
             self.status = Some(format!("{e:#}"));
@@ -38,35 +34,56 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Run `task` on `model` from now on: the user picked it. Media
-    /// analyzed already keeps its results.
+    /// Run `task` on `model`: the user picked it. Media analyzed already
+    /// keeps its results. A model on disk, or any during the setup, takes
+    /// over at once. Otherwise it downloads, and the model in use stays
+    /// until it is on disk ([`Self::picked_model`] shows the pick): every
+    /// model is needed, and analysis on a missing one would leave its step
+    /// out. Picking again gives up a switch under way, and its download.
     pub fn pick_model(
         &mut self,
         task: flikk_models::Task,
         model: &'static flikk_models::Model,
         cx: &mut Context<Self>,
     ) {
-        if task.model().id == model.id {
-            return;
+        if let Some((_, to)) = self.switching.take_if(|(t, _)| *t == task)
+            && to.id != model.id
+        {
+            self.models.cancel(to);
         }
-        task.pick(model);
-        persistence::with_store(|s| s.save_model_picks(&flikk_models::picked()));
+        if task.model().id != model.id {
+            if model.is_downloaded() || self.projects_wait() {
+                self.use_model(task, model);
+            } else {
+                self.switching = Some((task, model));
+                self.download_model(model, cx);
+            }
+        }
         self.poll_models(cx);
-        self.refresh_model_notices();
         cx.notify();
     }
 
-    /// Media can be analyzed: every analysis task has a model downloaded
-    /// or the provider set to transcribe doing it, with its key.
-    pub fn models_ready(&self) -> bool {
-        let online = self
-            .online_transcription()
-            .is_none_or(|p| self.provider_status(p).has_key());
-        online
-            && self
-                .required_tasks()
-                .iter()
-                .all(|t| t.model().is_downloaded())
+    /// The model the user picked for `task`: the one downloading to take
+    /// over, else the one in use.
+    pub fn picked_model(&self, task: flikk_models::Task) -> &'static flikk_models::Model {
+        match self.switching {
+            Some((t, to)) if t == task => to,
+            _ => task.model(),
+        }
+    }
+
+    /// Run `task` on `model` from now on, and remember it.
+    fn use_model(&mut self, task: flikk_models::Task, model: &'static flikk_models::Model) {
+        task.pick(model);
+        persistence::with_store(|s| s.save_model_picks(&flikk_models::picked()));
+    }
+
+    /// Media can be analyzed: unless a provider is picked to transcribe
+    /// and has no key, which has a notice of its own. The models are on
+    /// disk before a project opens.
+    pub fn analysis_ready(&self) -> bool {
+        self.online_transcription()
+            .is_none_or(|p| self.provider_status(p).has_key())
     }
 
     /// Analyze `media` (again, replacing its results, when `again`): the
@@ -83,79 +100,6 @@ impl EditorState {
             analysis.analyze(item);
         }
         cx.notify();
-    }
-
-    /// Whether subject masks can be made; when not (their model is
-    /// missing), a notice that leads to Settings → Integrations.
-    pub fn subjects_ready(&mut self, cx: &mut Context<Self>) -> bool {
-        let ready = match &self.services.subjects {
-            Some(s) => s.available(),
-            None => Err("Subject masks need the media engine (FFmpeg).".into()),
-        };
-        let changed = match &ready {
-            Ok(()) => self.notices.clear(SUBJECTS_NOTICE),
-            Err(e) => {
-                // Asked for just now: shown even if closed before.
-                self.notices.clear(SUBJECTS_NOTICE);
-                self.notices.set(Notice {
-                    key: SUBJECTS_NOTICE.into(),
-                    level: Level::Warning,
-                    title: "Subject masks need their model".into(),
-                    items: Vec::new(),
-                    detail: Some(e.clone()),
-                    action: Some(NoticeAction::OpenModels),
-                })
-            }
-        };
-        if changed {
-            cx.notify();
-        }
-        ready.is_ok()
-    }
-
-    /// When optical flow is picked without its model: a notice that leads
-    /// to Settings → Integrations (slowed frames are blended meanwhile).
-    pub fn optical_flow_picked(&mut self, cx: &mut Context<Self>) {
-        let Some(Err(e)) = self.services.interpolation.as_ref().map(|s| s.available()) else {
-            return;
-        };
-        self.notices.clear(FLOW_NOTICE);
-        self.notices.set(Notice {
-            key: FLOW_NOTICE.into(),
-            level: Level::Warning,
-            title: "Motion smoothing needs its model".into(),
-            items: Vec::new(),
-            detail: Some(e),
-            action: Some(NoticeAction::OpenModels),
-        });
-        cx.notify();
-    }
-
-    /// Whether person masks can be made; when not (their model is
-    /// missing), a notice that leads to Settings → Integrations.
-    pub fn people_ready(&mut self, cx: &mut Context<Self>) -> bool {
-        let ready = match &self.services.subjects {
-            Some(s) => s.people_available(),
-            None => Err("Person masks need the media engine (FFmpeg).".into()),
-        };
-        let changed = match &ready {
-            Ok(()) => self.notices.clear(PEOPLE_NOTICE),
-            Err(e) => {
-                self.notices.clear(PEOPLE_NOTICE);
-                self.notices.set(Notice {
-                    key: PEOPLE_NOTICE.into(),
-                    level: Level::Warning,
-                    title: "Person masks need their model".into(),
-                    items: Vec::new(),
-                    detail: Some(e.clone()),
-                    action: Some(NoticeAction::OpenModels),
-                })
-            }
-        };
-        if changed {
-            cx.notify();
-        }
-        ready.is_ok()
     }
 
     /// Mattes were made, frames made between, or camera paths measured:
@@ -180,13 +124,13 @@ impl EditorState {
         cx.notify();
     }
 
-    /// When a download ends or a model file appears or goes, bring the
-    /// notices up to date.
+    /// When a download ends or a model file appears or goes: the library's
+    /// sounds may be heard now, and the pages showing models redraw.
     pub(super) fn poll_models(&mut self, cx: &mut Context<Self>) {
         let seen = (
-            self.model_tasks
+            self.required_models()
                 .iter()
-                .map(|t| t.model().is_downloaded())
+                .map(|m| m.is_downloaded())
                 .collect::<Vec<_>>(),
             self.models.finished(),
         );
@@ -194,59 +138,10 @@ impl EditorState {
             return;
         }
         self.models_seen = seen;
+        if let Some((task, to)) = self.switching.take_if(|(_, to)| to.is_downloaded()) {
+            self.use_model(task, to);
+        }
         self.analyze_sounds(cx);
-        if self.refresh_model_notices() {
-            cx.notify();
-        }
+        cx.notify();
     }
-
-    /// One notice listing the models analysis needs that are not
-    /// downloaded, one for each download that failed, and one for a
-    /// provider without its key. Whether any changed.
-    pub(super) fn refresh_model_notices(&mut self) -> bool {
-        let mut changed = self.refresh_key_notice();
-        let mut missing = Vec::new();
-        let required = self.required_tasks();
-        for task in &self.model_tasks {
-            let model = task.model();
-            let key = download_notice(model);
-            match self.models.status(model) {
-                flikk_models::Status::Downloaded => {
-                    changed |= self.notices.clear(&key);
-                    continue;
-                }
-                flikk_models::Status::Failed(message) => {
-                    changed |= self.notices.set(Notice {
-                        key,
-                        level: Level::Error,
-                        title: format!("Could not download {}", task.label().to_lowercase()),
-                        items: Vec::new(),
-                        detail: Some(message),
-                        action: Some(NoticeAction::OpenModels),
-                    });
-                }
-                flikk_models::Status::Missing | flikk_models::Status::Downloading(_) => {}
-            }
-            if required.contains(task) {
-                missing.push(task.label().to_owned());
-            }
-        }
-        changed |= if missing.is_empty() {
-            self.notices.clear(MODELS_NOTICE)
-        } else {
-            self.notices.set(Notice {
-                key: MODELS_NOTICE.into(),
-                level: Level::Warning,
-                title: "Some models are not downloaded".into(),
-                items: missing,
-                detail: Some("Features that use them may not be available.".into()),
-                action: Some(NoticeAction::OpenModels),
-            })
-        };
-        changed
-    }
-}
-
-fn download_notice(model: &flikk_models::Model) -> String {
-    format!("download-failed:{}", model.id)
 }

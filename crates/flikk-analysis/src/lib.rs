@@ -3,7 +3,9 @@
 //! loudness. Implements `flikk_core::services::AnalysisService`.
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; the jobs run
-//! one at a time, in the order queued, on a [`JobQueue`]. Each runs the
+//! one at a time on a [`JobQueue`], those asked for by the user or the
+//! agent ahead of those queued in the background (imports, generated
+//! media, library sounds), each in the order queued. Each runs the
 //! pipeline (audio → the speech Silero hears, or the energy VAD's without
 //! it, and levels → transcript of that speech → word times from the
 //! aligner, or word edges on the audio where it can't → the speech no word
@@ -124,6 +126,10 @@ pub struct AnalyzeOptions {
     pub refresh: bool,
     /// Only what is heard: no transcript, speakers or shot changes.
     pub sound_only: bool,
+    /// Nobody asked for it: queued behind every job, and never sent to a
+    /// provider to transcribe unless asked for since. Otherwise it goes
+    /// ahead of the jobs queued in the background.
+    pub background: bool,
 }
 
 /// The [`AnalysisService`] that runs everything on this machine.
@@ -156,9 +162,9 @@ struct Shared {
     /// that asking again reads nothing. A job's result goes to `results`,
     /// which is asked first.
     absent: Mutex<HashSet<Fingerprint>>,
-    /// The steps a plain request asks for, without a script and with one,
-    /// and when they were worked out: it looks for the models on disk.
-    wanted: Mutex<[Option<(Instant, AnalysisSteps)>; 2]>,
+    /// The steps a request asks for, by [`Hearing`], and when they were
+    /// worked out: it looks for the models on disk.
+    wanted: Mutex<[Option<(Instant, AnalysisSteps)>; Hearing::COUNT]>,
     #[cfg(feature = "whisper")]
     voice: Box<dyn flikk_models::voice_activity::VoiceActivity>,
     #[cfg(feature = "whisper")]
@@ -297,33 +303,6 @@ impl LocalAnalysis {
         tasks
     }
 
-    /// The tasks whose models must be downloaded before an item can be
-    /// analyzed with `steps`. When a provider transcribes (`online`), the
-    /// ones it does ([`Self::online_tasks`]) are not among them.
-    pub fn required_tasks(steps: &AnalysisSteps, online: bool) -> Vec<ModelTask> {
-        Self::model_tasks()
-            .into_iter()
-            .filter(|task| !(online && Self::online_tasks().contains(task)))
-            .filter(|task| match task {
-                // Voice activity runs with every item that has audio.
-                ModelTask::VoiceActivity => true,
-                ModelTask::Transcription | ModelTask::WordTiming => steps.transcript,
-                ModelTask::Speakers => steps.speakers(),
-                ModelTask::SoundTagging => steps.sounds,
-                ModelTask::Beats => steps.beats(),
-                ModelTask::SoundSearch => steps.sound_search(),
-                // Subject masks, not analysis.
-                ModelTask::Segmentation => false,
-                // Optical flow slow motion, not analysis.
-                ModelTask::FrameInterpolation => false,
-                // Person masks, not analysis.
-                ModelTask::Matting => false,
-                // Depth maps, not analysis.
-                ModelTask::Depth => false,
-            })
-            .collect()
-    }
-
     /// The tasks a provider does in place of a local model when it
     /// transcribes.
     pub fn online_tasks() -> [ModelTask; 4] {
@@ -346,20 +325,27 @@ impl LocalAnalysis {
             );
             return self.queue.finished(label, Some(item.id), Err(message));
         };
+        let mut options = options;
+        // Music and sound effects are heard only, whoever asks.
+        options.sound_only |= item.heard_only();
         let wanted = Plan::for_item(&self.shared, item, options.sound_only).ran();
         if !options.refresh && self.shared.covers(&fp, &wanted) {
             return self.queue.finished(label, Some(item.id), Ok(()));
         }
         let shared = self.shared.clone();
+        let background = options.background;
         let key = (fp.clone(), wanted, options.refresh);
         let task = Task {
             item: item.clone(),
             fingerprint: fp,
             options,
         };
-        self.queue.push(key, label, Some(item.id), move |job| {
-            run(&shared, &task, job)
-        })
+        let work = move |job: &JobProgress| run(&shared, &task, job);
+        if background {
+            self.queue.push(key, label, Some(item.id), work)
+        } else {
+            self.queue.push_first(key, label, Some(item.id), work)
+        }
     }
 
     /// Drop finished and failed jobs from [`AnalysisService::jobs`].
@@ -373,6 +359,14 @@ impl AnalysisService for LocalAnalysis {
         self.analyze_with(item, AnalyzeOptions::default())
     }
 
+    fn analyze_in_background(&self, item: &MediaItem) -> JobId {
+        let options = AnalyzeOptions {
+            background: true,
+            ..AnalyzeOptions::default()
+        };
+        self.analyze_with(item, options)
+    }
+
     fn analyze_sound(&self, item: &MediaItem) {
         let wanted = cfg!(feature = "sounds")
             && lock(&self.shared.config).steps.sounds
@@ -382,6 +376,7 @@ impl AnalysisService for LocalAnalysis {
         if wanted && item.fingerprint.as_ref().is_some_and(|fp| !done(fp)) {
             let options = AnalyzeOptions {
                 sound_only: true,
+                background: true,
                 ..AnalyzeOptions::default()
             };
             self.analyze_with(item, options);
@@ -398,7 +393,20 @@ impl AnalysisService for LocalAnalysis {
 
     fn configure(&self, config: AnalysisConfig) {
         *lock(&self.shared.config) = config;
-        *lock(&self.shared.wanted) = [None, None];
+        *lock(&self.shared.wanted) = Default::default();
+    }
+
+    fn cancel_background_speech(&self) -> Vec<Fingerprint> {
+        let mut files = Vec::new();
+        for (fp, _, _) in self
+            .queue
+            .cancel_background_where(|(_, steps, _)| steps.transcript)
+        {
+            if !files.contains(&fp) {
+                files.push(fp);
+            }
+        }
+        files
     }
 
     fn cancel(&self, item: &MediaItem) {
@@ -424,7 +432,7 @@ impl AnalysisService for LocalAnalysis {
         else {
             return Coverage::None;
         };
-        match cached.steps.covers(&self.shared.wanted(has_script(item))) {
+        match cached.steps.covers(&self.shared.wanted(Hearing::of(item))) {
             true => Coverage::Full,
             false => Coverage::Partial,
         }
@@ -492,16 +500,23 @@ impl Shared {
         self.entry(fp).map(|c| c.analysis)
     }
 
-    /// What [`Plan::for_item`] runs for an item that is not sound only,
-    /// worked out again after [`WANTED_FOR`], as models come and go.
-    fn wanted(&self, script: bool) -> AnalysisSteps {
+    /// What [`Plan::for_item`] runs for a plain request about an item
+    /// heard as `hearing` says, worked out again after [`WANTED_FOR`], as
+    /// models come and go.
+    fn wanted(&self, hearing: Hearing) -> AnalysisSteps {
         let now = Instant::now();
         let fresh = |(at, _): &(Instant, AnalysisSteps)| now.duration_since(*at) < WANTED_FOR;
-        if let Some((_, steps)) = lock(&self.wanted)[script as usize].filter(fresh) {
+        let slot = hearing as usize;
+        if let Some((_, steps)) = lock(&self.wanted)[slot].filter(fresh) {
             return steps;
         }
-        let steps = Plan::new(&lock(&self.config), false, script).ran();
-        lock(&self.wanted)[script as usize] = Some((now, steps));
+        let (sound_only, script) = match hearing {
+            Hearing::Speech => (false, false),
+            Hearing::Script => (false, true),
+            Hearing::SoundOnly => (true, false),
+        };
+        let steps = Plan::new(&lock(&self.config), sound_only, script).ran();
+        lock(&self.wanted)[slot] = Some((now, steps));
         steps
     }
 
@@ -524,6 +539,31 @@ impl Shared {
         // A job may have finished while the disk was read.
         let mut results = lock(&self.results);
         Some(results.entry(fp.clone()).or_insert(loaded).clone())
+    }
+}
+
+/// How an item is heard, which decides the steps a plain request runs.
+#[derive(Clone, Copy)]
+enum Hearing {
+    /// Speech found by transcribing.
+    Speech,
+    /// Speech whose words a voiceover's script gives.
+    Script,
+    /// No speech: music and sound effects ([`MediaItem::heard_only`]).
+    SoundOnly,
+}
+
+impl Hearing {
+    const COUNT: usize = 3;
+
+    fn of(item: &MediaItem) -> Self {
+        if item.heard_only() {
+            Hearing::SoundOnly
+        } else if has_script(item) {
+            Hearing::Script
+        } else {
+            Hearing::Speech
+        }
     }
 }
 
@@ -726,6 +766,12 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         Some(_) => plan.missing(&have),
         None => plan,
     };
+    // Queued in the background with nobody asking since, it never spends
+    // money: a provider picked meanwhile leaves the item for when it is
+    // asked for.
+    if plan.online.is_some() && !job.asked() {
+        return Ok(());
+    }
     let steps = plan.steps;
     let script = script.filter(|_| steps.transcript);
     let duration = item.info.as_ref().map(|i| i.duration);

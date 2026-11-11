@@ -9,6 +9,7 @@ pub const FILE: ModelFile = ModelFile {
     env: Some("FLIKK_BEATS_MODEL"),
     what: "beat tracker",
     size: 84_973_959,
+    sha256: "af7b99f72844d464ac87a379ce4fa98e81b8f46735a743ce23b5972a21c78be3",
 };
 
 /// Samples per 20 ms frame.

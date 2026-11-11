@@ -1,7 +1,9 @@
 //! Queues for heavy background work. Jobs run in the order they were
 //! queued, at most `limit` at a time, on threads of the queue's own that
 //! end once nothing is left to run, and report their progress as
-//! [`JobStatus`]. Work queued under a key that is already queued or
+//! [`JobStatus`]. A job someone asked for and waits on goes ahead of those
+//! queued in the background ([`JobQueue::push_first`]); each group keeps
+//! the order queued. Work queued under a key that is already queued or
 //! running is that same job. A job can be cancelled by its key: one not
 //! started never runs, and one running sees [`JobProgress::cancelled`].
 
@@ -15,6 +17,37 @@ use std::sync::{Arc, Mutex};
 
 /// What a job does; `Err` says why it failed.
 type Work = Box<dyn FnOnce(&JobProgress) -> Result<(), String> + Send>;
+
+/// Whether someone waits on a new job, which decides where it waits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    /// Behind every job queued.
+    Background,
+    /// Behind the jobs asked for, ahead of those in the background.
+    Asked,
+}
+
+/// The jobs a cancel looks at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Among {
+    All,
+    WaitingInBackground,
+}
+
+/// What a job queued or running shares with its [`JobProgress`].
+#[derive(Clone, Default)]
+struct Flags {
+    cancel: Arc<AtomicBool>,
+    /// Someone asked for it: from the start, or once it was waiting in
+    /// the background.
+    asked: Arc<AtomicBool>,
+}
+
+impl Flags {
+    fn asked(&self) -> bool {
+        self.asked.load(Ordering::Relaxed)
+    }
+}
 
 /// Cheap to clone; clones share one queue.
 pub struct JobQueue<K> {
@@ -39,9 +72,10 @@ struct Shared<K> {
 }
 
 struct Queue<K> {
-    /// The keys of the jobs queued or running, and their cancel flags.
-    keys: Vec<(K, JobId, Arc<AtomicBool>)>,
-    waiting: VecDeque<(JobId, Arc<AtomicBool>, Work)>,
+    /// The keys of the jobs queued or running, and their flags.
+    keys: Vec<(K, JobId, Flags)>,
+    /// Those asked for first, then those in the background.
+    waiting: VecDeque<(JobId, Flags, Work)>,
     /// Threads running jobs.
     threads: usize,
 }
@@ -51,14 +85,21 @@ struct Queue<K> {
 pub struct JobProgress {
     jobs: Arc<Mutex<Vec<JobStatus>>>,
     id: JobId,
-    cancel: Arc<AtomicBool>,
+    flags: Flags,
 }
 
 impl JobProgress {
     /// Whether the job was cancelled ([`JobQueue::cancel`]): it should
     /// stop as soon as it can; what it returns then is not listed.
     pub fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
+        self.flags.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Whether someone asked for the job ([`JobQueue::push_first`]), when
+    /// it was queued or while it waited; `false` for one only queued in
+    /// the background ([`JobQueue::push`]).
+    pub fn asked(&self) -> bool {
+        self.flags.asked()
     }
 
     /// 0..1 of the job done. Ignored once the job has finished or failed,
@@ -105,8 +146,9 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         }
     }
 
-    /// Queue `work` as the job `label`, about `media` if any. When a job
-    /// under `key` is queued or running already, that job's id instead.
+    /// Queue `work` as the job `label`, about `media` if any, in the
+    /// background: behind every job queued. When a job under `key` is
+    /// queued or running already, that job's id instead.
     pub fn push(
         &self,
         key: K,
@@ -114,21 +156,63 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         media: Option<MediaId>,
         work: impl FnOnce(&JobProgress) -> Result<(), String> + Send + 'static,
     ) -> JobId {
+        self.enqueue(key, label.into(), media, Box::new(work), Lane::Background)
+    }
+
+    /// [`Self::push`] for a job someone asked for and waits on: behind the
+    /// others asked for, ahead of those in the background. A job under
+    /// `key` waiting in the background moves there and counts as asked
+    /// for; one running stays as it is.
+    pub fn push_first(
+        &self,
+        key: K,
+        label: impl Into<String>,
+        media: Option<MediaId>,
+        work: impl FnOnce(&JobProgress) -> Result<(), String> + Send + 'static,
+    ) -> JobId {
+        self.enqueue(key, label.into(), media, Box::new(work), Lane::Asked)
+    }
+
+    fn enqueue(
+        &self,
+        key: K,
+        label: String,
+        media: Option<MediaId>,
+        work: Work,
+        lane: Lane,
+    ) -> JobId {
         let shared = &self.shared;
         let mut queue = lock(&shared.queue);
-        if let Some(&(_, id, _)) = queue.keys.iter().find(|(k, _, _)| *k == key) {
+        if let Some((_, id, flags)) = queue.keys.iter().find(|(k, _, _)| *k == key) {
+            let (id, flags) = (*id, flags.clone());
+            if lane == Lane::Asked && !flags.asked() {
+                flags.asked.store(true, Ordering::Relaxed);
+                if let Some(at) = queue.waiting.iter().position(|(w, _, _)| *w == id)
+                    && let Some(job) = queue.waiting.remove(at)
+                {
+                    let at = queue.asked_waiting();
+                    queue.waiting.insert(at, job);
+                }
+            }
             return id;
         }
         let id = JobId::new();
         lock(&shared.jobs).push(JobStatus {
             id,
-            label: label.into(),
+            label,
             media,
             state: JobState::Queued,
         });
-        let cancel = Arc::new(AtomicBool::new(false));
-        queue.keys.push((key, id, cancel.clone()));
-        queue.waiting.push_back((id, cancel, Box::new(work)));
+        let flags = Flags::default();
+        queue.keys.push((key, id, flags.clone()));
+        match lane {
+            Lane::Background => queue.waiting.push_back((id, flags, work)),
+            Lane::Asked => {
+                flags.asked.store(true, Ordering::Relaxed);
+                let at = queue.asked_waiting();
+                queue.waiting.insert(at, (id, flags, work));
+            }
+        }
         if queue.threads < shared.limit {
             queue.threads += 1;
             drop(queue);
@@ -179,24 +263,50 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
 
     /// [`Self::cancel`] every job whose key `cancels` picks. How many there
     /// were.
-    pub fn cancel_where(&self, mut cancels: impl FnMut(&K) -> bool) -> usize {
+    pub fn cancel_where(&self, cancels: impl FnMut(&K) -> bool) -> usize {
+        self.cancel_picked(cancels, Among::All).len()
+    }
+
+    /// [`Self::cancel`] every job waiting in the background, never asked
+    /// for, whose key `cancels` picks. Jobs running go on. Their keys, in
+    /// the order they were queued.
+    pub fn cancel_background_where(&self, cancels: impl FnMut(&K) -> bool) -> Vec<K> {
+        self.cancel_picked(cancels, Among::WaitingInBackground)
+    }
+
+    /// Cancel the jobs `among` covers whose key `cancels` picks. Their
+    /// keys.
+    fn cancel_picked(&self, mut cancels: impl FnMut(&K) -> bool, among: Among) -> Vec<K> {
         let mut queue = lock(&self.shared.queue);
-        let mut ids = Vec::new();
-        queue.keys.retain(|(k, id, cancel)| {
-            let picked = cancels(k);
-            if picked {
-                cancel.store(true, Ordering::Relaxed);
-                ids.push(*id);
-            }
-            !picked
-        });
+        let background: Vec<JobId> = match among {
+            Among::All => Vec::new(),
+            Among::WaitingInBackground => queue
+                .waiting
+                .iter()
+                .filter(|(_, flags, _)| !flags.asked())
+                .map(|(id, _, _)| *id)
+                .collect(),
+        };
+        let picked: Vec<(K, JobId, Flags)> = queue
+            .keys
+            .extract_if(.., |(k, id, _)| {
+                (among == Among::All || background.contains(id)) && cancels(k)
+            })
+            .collect();
+        let ids: Vec<JobId> = picked.iter().map(|(_, id, _)| *id).collect();
         if !ids.is_empty() {
             queue
                 .waiting
                 .retain(|(waiting, _, _)| !ids.contains(waiting));
             lock(&self.shared.jobs).retain(|j| !ids.contains(&j.id));
         }
-        ids.len()
+        picked
+            .into_iter()
+            .map(|(key, _, flags)| {
+                flags.cancel.store(true, Ordering::Relaxed);
+                key
+            })
+            .collect()
     }
 
     /// Drop finished and failed jobs from [`Self::jobs`].
@@ -226,6 +336,16 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
     }
 }
 
+impl<K> Queue<K> {
+    /// How many jobs asked for wait: where the next one goes.
+    fn asked_waiting(&self) -> usize {
+        self.waiting
+            .iter()
+            .take_while(|(_, flags, _)| flags.asked())
+            .count()
+    }
+}
+
 impl<K: PartialEq> Shared<K> {
     /// Run waiting jobs until there are none. A job that panics fails, and
     /// the next one runs.
@@ -239,13 +359,13 @@ impl<K: PartialEq> Shared<K> {
                 }
                 next
             };
-            let Some((id, cancel, work)) = next else {
+            let Some((id, flags, work)) = next else {
                 return;
             };
             let progress = JobProgress {
                 jobs: self.jobs.clone(),
                 id,
-                cancel,
+                flags,
             };
             progress.set(0.0);
             let result =

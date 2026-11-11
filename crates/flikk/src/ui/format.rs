@@ -100,3 +100,18 @@ pub(crate) fn fps_two_places(fps: f64) -> String {
     let s = format!("{fps:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
+
+/// "885 KB", "148 MB", "1.1 GB", as the files' hosts count them.
+pub(crate) fn size(bytes: u64) -> String {
+    const KB: f64 = 1e3;
+    const MB: f64 = 1e6;
+    const GB: f64 = 1e9;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.0} MB", b / MB)
+    } else {
+        format!("{:.0} KB", (b / KB).max(1.))
+    }
+}

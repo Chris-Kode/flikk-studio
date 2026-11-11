@@ -11,6 +11,9 @@
 //! on that file (see [`person`]); `FLIKK_DEMO_STABILIZE=<seconds>` a
 //! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
 //! a video waiting on the user with its blockout (see [`shot`]).
+//! `FLIKK_DEMO_SETUP=missing|downloading|failed` opens on the welcome
+//! page's setup list in that state (see [`setup`]). `FLIKK_DEMO_ASK=1`
+//! opens the question whether to analyze new media with a provider.
 
 mod compose;
 mod depth;
@@ -104,6 +107,33 @@ pub fn generate_form() -> Option<String> {
         .map(|v| v.to_lowercase())
 }
 
+/// `FLIKK_DEMO_SETUP=missing|downloading|failed`: the welcome page's
+/// setup list in that state, whatever is on disk; its Download, Cancel and
+/// Retry only pretend. Needs no `FLIKK_DEMO`.
+pub fn setup() -> Option<crate::state::SetupStatus> {
+    use crate::state::SetupStatus;
+    let every_file = || {
+        flikk_models::Task::ALL
+            .iter()
+            .map(|t| crate::state::full_size(t.model()))
+            .sum()
+    };
+    match std::env::var("FLIKK_DEMO_SETUP")
+        .ok()?
+        .to_lowercase()
+        .as_str()
+    {
+        "missing" => Some(SetupStatus::Missing {
+            bytes: every_file(),
+        }),
+        "downloading" => Some(SetupStatus::Downloading { fraction: 0.42 }),
+        "failed" => Some(SetupStatus::Failed {
+            message: "speaker embedder download stalled: the server sent nothing for 60 s".into(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let mut demo = color(project());
     audio_demo(&mut demo.project);
@@ -122,6 +152,8 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let chat = agent_history(&mut bus, &demo);
 
     state.bus = bus;
+    // Its media is there when the project opens: none of it is new.
+    state.mark_media_seen();
     state.seed_chat(chat);
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![demo.ids.selected];
@@ -147,7 +179,31 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     person::seed(state);
     depth::seed(state);
     audio_demo_playback(state, cx);
+    provider_ask(state);
     cx.notify();
+}
+
+/// `FLIKK_DEMO_ASK=1`: ElevenLabs picked to transcribe (for this run
+/// only, never saved) and the demo's video and audio waiting to be asked
+/// about, so the question whether to analyze them with it opens.
+fn provider_ask(state: &mut EditorState) {
+    use flikk_core::cloud::{Capability, ProviderChoice};
+    if std::env::var("FLIKK_DEMO_ASK").ok().as_deref() != Some("1") {
+        return;
+    }
+    let mut settings = state.cloud.settings();
+    settings.set(
+        Capability::Transcription,
+        ProviderChoice {
+            provider: Some("elevenlabs".into()),
+            model: None,
+        },
+    );
+    state.cloud.set_settings(settings);
+    state.provider_asks = (state.bus.project().media.iter())
+        .filter(|m| m.kind != MediaKind::Image)
+        .map(|m| m.id)
+        .collect();
 }
 
 // -------------------------------------------------------------------- color

@@ -11,6 +11,7 @@ pub const SEGMENTATION: ModelFile = ModelFile {
     env: None,
     what: "speaker segmentation model",
     size: 5_986_908,
+    sha256: "057ee564753071c0b09b5b611648b50ac188d50846bff5f01e9f7bbf1591ea25",
 };
 /// WeSpeaker's own ONNX export of ResNet34-LM: Kaldi filterbank features
 /// in, a 256-number voiceprint out.
@@ -20,6 +21,7 @@ pub const EMBEDDING: ModelFile = ModelFile {
     env: None,
     what: "speaker embedding model",
     size: 26_530_309,
+    sha256: "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068",
 };
 
 /// Samples the segmentation model hears at once.

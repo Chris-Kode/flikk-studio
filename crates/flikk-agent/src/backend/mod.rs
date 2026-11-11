@@ -4,10 +4,12 @@
 
 mod claude;
 mod codex;
+mod installed;
 mod models;
 
 pub(crate) use claude::Claude;
 pub(crate) use codex::{Codex, codex_home};
+pub use installed::installed_version;
 pub use models::{cached_models, refresh_models};
 
 use flikk_core::agent::{Backend as BackendKind, ModelChoice};

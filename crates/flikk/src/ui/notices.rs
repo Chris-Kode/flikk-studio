@@ -45,7 +45,6 @@ fn tone(level: Level) -> Tone {
     match level {
         Level::Update => Tone::Accent,
         Level::Warning => Tone::Warn,
-        Level::Error => Tone::Err,
     }
 }
 
@@ -53,7 +52,6 @@ fn icon(level: Level) -> (IconName, Rgba) {
     match level {
         Level::Update => (IconName::Download, t::AC),
         Level::Warning => (IconName::TriangleAlert, t::WARN),
-        Level::Error => (IconName::CircleX, t::ERR),
     }
 }
 
@@ -163,7 +161,6 @@ fn row(ix: usize, notice: Notice, state: &Entity<EditorState>, on_action: &OnAct
                 .children(notice.action.map(|action| {
                     let on_action = on_action.clone();
                     let (label, icon) = match action {
-                        NoticeAction::OpenModels => ("Download…", Some(IconName::Download)),
                         NoticeAction::OpenIntegrations => ("Settings…", None),
                         NoticeAction::Relink => ("Relink…", Some(IconName::Link)),
                         NoticeAction::Update => ("Update", Some(IconName::Download)),

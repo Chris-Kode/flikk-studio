@@ -1,6 +1,8 @@
 //! Project files from the user's side: New, Open, Save and Save As, and the
 //! "Save changes?" question before anything replaces or closes a project
-//! with unsaved changes. The files themselves are `persistence`'s.
+//! with unsaved changes. The files themselves are `persistence`'s. While a
+//! model is missing no project is created or opened, however it is asked
+//! for: the welcome page's setup list comes first.
 
 use crate::state::EditorState;
 use crate::ui::kit::DialogExt as _;
@@ -65,8 +67,24 @@ fn begin_settling(cx: &mut App) -> Rc<()> {
     token
 }
 
+/// Whether projects wait for the models (see `EditorState::projects_wait`),
+/// saying so on the status line: a shortcut on the welcome page, or in a
+/// project whose model files went missing.
+fn waiting(state: &Entity<EditorState>, cx: &mut App) -> bool {
+    let waiting = state.read(cx).projects_wait();
+    if waiting {
+        state.update(cx, |s, cx| {
+            s.say("Projects open once every model is downloaded", cx)
+        });
+    }
+    waiting
+}
+
 /// Ask for the new project's name, folder and sequence.
 pub fn new_project(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+    if waiting(state, cx) {
+        return;
+    }
     crate::ui::project_settings::open_new(state, None, None, window, cx);
 }
 
@@ -79,6 +97,10 @@ pub fn new_project_named(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if waiting(state, cx) {
+        on_cancel(cx);
+        return;
+    }
     crate::ui::project_settings::open_new(state, name, Some(Box::new(on_cancel)), window, cx);
 }
 
@@ -101,6 +123,9 @@ pub fn create(
 
 /// Pick a project file and open it.
 pub fn open_dialog(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+    if waiting(state, cx) {
+        return;
+    }
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
@@ -232,6 +257,9 @@ fn ask_path(
 /// question opens over any other dialog; while it or its save is under way,
 /// another ask does nothing.
 fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut App) {
+    if matches!(then, Then::Create(..) | Then::Open(_)) && waiting(state, cx) {
+        return;
+    }
     if !state.read(cx).is_dirty() {
         run(state, then, window, cx);
         return;

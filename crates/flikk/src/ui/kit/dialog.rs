@@ -160,6 +160,7 @@ pub struct Dialog {
     primary_disabled: bool,
     working: bool,
     note: Option<AnyElement>,
+    on_cancel: Option<Close>,
     children: Vec<AnyElement>,
     style: StyleRefinement,
 }
@@ -178,6 +179,7 @@ impl Dialog {
             primary_disabled: false,
             working: false,
             note: None,
+            on_cancel: None,
             children: Vec::new(),
             style: StyleRefinement::default(),
         }
@@ -244,6 +246,14 @@ impl Dialog {
     /// opens the same settings later.
     pub fn note(mut self, note: impl IntoElement) -> Self {
         self.note = Some(note.into_any_element());
+        self
+    }
+
+    /// Runs when the dialog closes without its confirm or secondary
+    /// button: Cancel, Escape, the close button or a press on the
+    /// backdrop.
+    pub fn on_cancel(mut self, cancelled: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_cancel = Some(Rc::new(cancelled));
         self
     }
 
@@ -348,9 +358,12 @@ fn render_dialog(
 ) -> AnyElement {
     let working = d.working;
     let cancel: Close = {
-        let close = close.clone();
+        let (close, cancelled) = (close.clone(), d.on_cancel.take());
         Rc::new(move |window, cx| {
             if !working {
+                if let Some(cancelled) = &cancelled {
+                    cancelled(window, cx);
+                }
                 close(window, cx)
             }
         })

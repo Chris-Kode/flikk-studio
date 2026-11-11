@@ -565,22 +565,58 @@ bar).
 
 ## 7. Analysis and models
 
-Analysis starts only when the user asks, from an item's "⋯" menu in the
-media pool (or its right-click menu): "Analyze", or "Analyze again" once it
-has results, which runs every step anew on the models picked now. The
-exception is the library's sounds, analyzed on their own without speech or
-shots, on local models only, so that it costs nothing. "Analyze" is
-enabled only when every analysis task can run: each has its model
-downloaded, or the transcription provider (with its key) does it in place
-of the speech models. It is disabled otherwise, and while the item is
-queued or analyzing; images are not analyzed. Every step
+The user asks for analysis from an item's "⋯" menu in the media pool (or
+its right-click menu): "Analyze", or "Analyze again" once it has results,
+which runs every step anew on the models picked now. Every other item is
+also queued as it reaches the pool, however it got there (an import, the
+media pool's Generate, an approval), in the background
+(`EditorState::analyze_new`, called after every edit, which looks at each
+pool item once; there is no setting to turn it off). Pictures are never
+analyzed, and items already in a project when it opens are left as they
+were; an import undone and done again is new again. Automatic analysis
+never spends money unasked: while a provider is picked to transcribe, an
+item whose sound it would hear (one without a voiceover's script standing
+in for its words, and not heard only, below) waits in
+`EditorState::provider_asks`, and a dialog
+(`ui/provider_ask.rs`, opened and closed by the window with the list, which
+it follows as more arrive) lists them under "Analyze with <provider>?".
+Analyze queues them as asked for, so they go to the provider; Cancel,
+Escape or the backdrop leave them unanalyzed until asked for. Analyze is
+dimmed, with a note, while the provider has no key. Picking a provider to
+transcribe drops the analysis still waiting in the background that would
+go to it (`cancel_background_speech`, which names their files) and asks
+about those items the same way; going back to this machine queues the
+items asked about, as they cost nothing then. As a last guard, a job
+queued in the background and not asked for since skips itself, leaving the
+item unanalyzed, when a provider transcribes by the time it runs
+(`JobProgress::asked`). Music and sound effects a provider made are heard
+only, whoever asks and whatever is picked to transcribe
+(`MediaItem::heard_only`, applied in `LocalAnalysis::analyze_with`, the
+rule the library's sounds follow): sounds and music, beats and sound
+search, with no voice activity, transcript, speakers or shot changes, so
+they never reach a provider and are never asked about. Their result is
+whole when it covers those steps (`coverage` works out what a plain
+request wants for speech, a script or sound only), and the job's key
+carries the steps, so it is told apart from a full one. Imported audio
+can't be told to be music, so it is analyzed in full. The library's sounds are
+analyzed on their own without speech or shots, on local models only, so
+that it costs nothing. The models are on
+disk before a project opens (see Models), so "Analyze" is disabled only
+while a provider picked to transcribe has no key (`analysis_ready`; the
+key's own notice says so), and while the item is queued or analyzing;
+images are not analyzed. Every step
 (`AnalysisSteps`: transcript, speakers, sounds and music, beats, sound
 search, shot changes) is always on and cannot be turned off: each runs
 whenever the model for its task is downloaded, and one whose model is
 missing stays empty in the results (voice activity falls back to an
 energy VAD). Speakers need the transcript; beats and sound search, the
-sound pass. Items are analyzed one at a
-time, in the order asked, on a `JobQueue`. A result is written to
+sound pass. Items are analyzed one at a time on a `JobQueue`: what the
+user or the agent asks for (`AnalysisService::analyze`: "Analyze",
+`view_media`, the provider dialog's Analyze) goes ahead of what is queued
+in the background (`analyze_in_background`: new pool items, library
+sounds), and an
+item waiting there moves up with them when asked for
+(`JobQueue::push_first`); each group runs in the order queued. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
 kept for the session and the job fails, naming the steps.
 `ANALYSIS_VERSION` (1) marks the results: those of another version, and the
@@ -596,7 +632,7 @@ task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
-sizes) and the settings it runs with, `runner.rs` the code that loads and
+sizes and SHA-256) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
@@ -618,16 +654,52 @@ transcript, and results made already stay. A new model is a folder under
 its task, its `MODEL` in `MODELS` and an arm in `runner`; a model in several
 sizes (Whisper) has a `MODEL` for each in one folder.
 
+Every model is needed: each task of `Task::ALL` on the model picked for
+it (`EditorState::required_models`). While one is missing, the welcome
+page shows a setup list in place of Recent (`state/setup.rs`,
+`ui/welcome.rs`): one row for the whole set, with its total size and one
+Download that starts each missing model at once, its progress counted
+against the bytes missing when each of the set's downloads started (from
+here or Settings), Cancel, and a failed download
+in place with Retry; Whisper small or large, each with its size, held
+while the set downloads; the agent CLIs found and their versions
+(`flikk_agent::backend::installed_version` runs `--version` off the UI
+thread; with neither, Install… and Check again); and FFmpeg and a browser,
+only when they are not found. After an update that adds a task, the list
+comes back with only its files to fetch. No project is created or opened
+while it shows, however it is asked for (`EditorState::projects_wait`,
+checked in `projects.rs`): the app opens on it whatever way it was
+started, and a `.flikk` file it was started for opens once the set is
+complete. New project, Open… and the drop zone are held meanwhile; a
+shortcut that asks says why on the status line, which the welcome page
+shows too. The demo opens without the models. `FLIKK_DEMO_SETUP` seeds
+it, its buttons only pretending.
+
 Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more
 than one (saved per user in the store), and downloads one or all of them,
 with progress and cancel, through `<file>.part`; a failed download stays
-there with Retry. `LocalAnalysis::model_tasks` says which tasks a build
-runs; "Analyze" stays disabled until each has its picked model downloaded.
-A runner whose files are missing fails ("… is not downloaded") and its step
-is left out. While a model is missing, the top bar's notices button lists
-them; its notices (warnings and errors, such as a failed download or
-offline media) can be dismissed for the session.
+there with Retry. A part is kept when a download is cancelled or cut, and
+the next one asks the server for the rest (a range request; a server that
+sends the whole file again starts it over). Before a file takes its name
+it is checked against its pinned SHA-256 (`ModelFile::sha256`: the host's
+LFS object id for the pinned commit, or measured on bytes checked against
+the host's git hash for the small files); one that comes out the wrong
+size or does not match is deleted and fails, so Retry fetches it clean. A part is locked while it is written, so a cancelled
+download still winding down, or another copy of the app, is done with it
+first. `LocalAnalysis::model_tasks` says which tasks a build
+runs. A runner whose files are missing (deleted by hand) fails ("… is not
+downloaded") and its step is left out; nothing warns about a missing
+model, as the welcome page covers it. A model the editor needs can't be
+deleted there: only the transcription size not in use has Delete, whole
+or part downloaded. Picking the other size downloads it while the size on
+disk stays in use (`EditorState::picked_model` is the pick, `Task::model`
+the size analysis runs on), and switches once it is on disk; so the set
+stays complete and projects open meanwhile. A failed download shows on
+its row with Retry, the old size still in use; Cancel, or picking again,
+gives the switch up and stops its download. The top bar's notices
+(warnings such as offline media or a provider without its key) can be
+dismissed for the session.
 
 Cargo features of `flikk-analysis` (all default) gate the runners: `whisper`,
 `aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
@@ -638,9 +710,8 @@ Apple's frameworks) adds the MLX subject mask model and makes it the
 default; `flikk` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
 as "Subject masks" and matting as "Person masks", but neither is part of
-analysis: `required_tasks` never asks for them. Frame interpolation ("Optical flow", RIFE) is listed the same way;
-picking optical flow for a clip without it raises a notice that leads to
-Settings → Models, and slowed frames are blended meanwhile.
+analysis. Frame interpolation ("Optical flow", RIFE) is listed the same way;
+slowed frames are blended while its frames are made.
 `LocalInterpolation` makes flow frames on one thread of its own, the
 newest asked first, keeps the last 48 in memory and those with a short
 side up to 720 (the viewer's and the render cache's) as QOI in a disk
@@ -1312,9 +1383,11 @@ on the UI thread and run it off it:
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
   a generated item reaches the pool (the media pool or an approval),
-  `analyze_generated` queues it once: a video like footage when the analysis models are ready, a
-  voiceover when transcripts are on. Items already in a project when it
-  opens are left as they were. Settings → Integrations has a "Video sound"
+  `analyze_new` queues it once like any new item (see §7): a video is
+  asked about first while a provider is picked to transcribe; a
+  voiceover, whose script stands in for its words, never is, nor are
+  music and sound effects, which are heard only.
+  Items already in a project when it opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
   some models): the media pool's form starts its Sound switch from it, and
   with it off the agent's videos are made silent whatever it asks. Each
@@ -1808,8 +1881,8 @@ Captions (transcript and caption style panel), Color (wheels, curves,
 scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
 the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
-(each provider's key and account, and who does each capability on which
-model), Analysis (the steps), Models (download, pick and delete) and
+(each provider's key and account, who does each capability on which
+model), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
 models, the library (effects, presets, sounds and voices, their audio in
@@ -1860,6 +1933,8 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
+| `FLIKK_DEMO_SETUP` | `missing`, `downloading`, `failed` | The welcome page's setup list in that state, whatever is on disk (Download, Cancel and Retry only pretend); needs no `FLIKK_DEMO` |
+| `FLIKK_DEMO_ASK` | `1` | ElevenLabs picked to transcribe for the run, and the question whether to analyze the demo's video and audio with it |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh
