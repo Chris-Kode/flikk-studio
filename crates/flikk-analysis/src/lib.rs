@@ -3,7 +3,9 @@
 //! loudness. Implements `flikk_core::services::AnalysisService`.
 //!
 //! [`LocalAnalysis::analyze`] queues a job and returns at once; the jobs run
-//! one at a time, in the order queued, on a [`JobQueue`]. Each runs the
+//! one at a time on a [`JobQueue`], those asked for by the user or the
+//! agent ahead of those queued in the background (imports, generated
+//! media, library sounds), each in the order queued. Each runs the
 //! pipeline (audio → the speech Silero hears, or the energy VAD's without
 //! it, and levels → transcript of that speech → word times from the
 //! aligner, or word edges on the audio where it can't → the speech no word
@@ -124,6 +126,9 @@ pub struct AnalyzeOptions {
     pub refresh: bool,
     /// Only what is heard: no transcript, speakers or shot changes.
     pub sound_only: bool,
+    /// Nobody waits on it: queued behind every job, where otherwise it
+    /// goes ahead of those queued in the background.
+    pub background: bool,
 }
 
 /// The [`AnalysisService`] that runs everything on this machine.
@@ -324,15 +329,19 @@ impl LocalAnalysis {
             return self.queue.finished(label, Some(item.id), Ok(()));
         }
         let shared = self.shared.clone();
+        let background = options.background;
         let key = (fp.clone(), wanted, options.refresh);
         let task = Task {
             item: item.clone(),
             fingerprint: fp,
             options,
         };
-        self.queue.push(key, label, Some(item.id), move |job| {
-            run(&shared, &task, job)
-        })
+        let work = move |job: &JobProgress| run(&shared, &task, job);
+        if background {
+            self.queue.push(key, label, Some(item.id), work)
+        } else {
+            self.queue.push_first(key, label, Some(item.id), work)
+        }
     }
 
     /// Drop finished and failed jobs from [`AnalysisService::jobs`].
@@ -346,6 +355,14 @@ impl AnalysisService for LocalAnalysis {
         self.analyze_with(item, AnalyzeOptions::default())
     }
 
+    fn analyze_in_background(&self, item: &MediaItem) -> JobId {
+        let options = AnalyzeOptions {
+            background: true,
+            ..AnalyzeOptions::default()
+        };
+        self.analyze_with(item, options)
+    }
+
     fn analyze_sound(&self, item: &MediaItem) {
         let wanted = cfg!(feature = "sounds")
             && lock(&self.shared.config).steps.sounds
@@ -355,6 +372,7 @@ impl AnalysisService for LocalAnalysis {
         if wanted && item.fingerprint.as_ref().is_some_and(|fp| !done(fp)) {
             let options = AnalyzeOptions {
                 sound_only: true,
+                background: true,
                 ..AnalyzeOptions::default()
             };
             self.analyze_with(item, options);

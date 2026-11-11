@@ -565,11 +565,18 @@ bar).
 
 ## 7. Analysis and models
 
-Analysis starts only when the user asks, from an item's "⋯" menu in the
-media pool (or its right-click menu): "Analyze", or "Analyze again" once it
-has results, which runs every step anew on the models picked now. The
-exception is the library's sounds, analyzed on their own without speech or
-shots, on local models only, so that it costs nothing. The models are on
+The user asks for analysis from an item's "⋯" menu in the media pool (or
+its right-click menu): "Analyze", or "Analyze again" once it has results,
+which runs every step anew on the models picked now. Imported video and
+audio are also queued as they land while "Analyze on import" is on
+(Settings → Integrations, saved per user in the store, on by default),
+through the route generated media takes (`EditorState::analyze_new`,
+called after every edit, which looks at each pool item once): never while
+a provider is picked to transcribe, as automatic analysis spends no money
+(the switch is dimmed then, with the provider in its tooltip), and never
+for items already in a project when it opens. The library's sounds are
+analyzed on their own without speech or shots, on local models only, so
+that it costs nothing. The models are on
 disk before a project opens (see Models), so "Analyze" is disabled only
 while a provider picked to transcribe has no key (`analysis_ready`; the
 key's own notice says so), and while the item is queued or analyzing;
@@ -579,8 +586,12 @@ search, shot changes) is always on and cannot be turned off: each runs
 whenever the model for its task is downloaded, and one whose model is
 missing stays empty in the results (voice activity falls back to an
 energy VAD). Speakers need the transcript; beats and sound search, the
-sound pass. Items are analyzed one at a
-time, in the order asked, on a `JobQueue`. A result is written to
+sound pass. Items are analyzed one at a time on a `JobQueue`: what the
+user or the agent asks for (`AnalysisService::analyze`: "Analyze",
+`view_media`) goes ahead of what is queued in the background
+(`analyze_in_background`: imports, generated media, library sounds), and
+an item waiting there moves ahead when asked for (`JobQueue::push_first`);
+each group runs in the order queued. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
 kept for the session and the job fails, naming the steps.
 `ANALYSIS_VERSION` (1) marks the results: those of another version, and the
@@ -1809,8 +1820,8 @@ Captions (transcript and caption style panel), Color (wheels, curves,
 scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
 the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
-(each provider's key and account, and who does each capability on which
-model), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
+(each provider's key and account, who does each capability on which
+model, and "Analyze on import"), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
 models, the library (effects, presets, sounds and voices, their audio in

@@ -139,7 +139,11 @@ impl Flikk {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(EditorState::new);
         if crate::demo::enabled() {
-            state.update(cx, crate::demo::seed);
+            state.update(cx, |s, cx| {
+                crate::demo::seed(s, cx);
+                // The seed's media is there when the project opens.
+                s.mark_media_seen();
+            });
         }
         let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
         // Every launch starts on the welcome page, unless the app was

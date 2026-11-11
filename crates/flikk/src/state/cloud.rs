@@ -593,7 +593,7 @@ impl EditorState {
     /// Add `item`, which a provider made at the user's request, to the
     /// pool's Generated bin as one undo step, and to the drafts waiting for
     /// review so a proposal can place it, then analyze it
-    /// ([`Self::analyze_generated`]). Its id when added.
+    /// ([`Self::analyze_new`]). Its id when added.
     pub(crate) fn add_generated(
         &mut self,
         item: MediaItem,
@@ -624,7 +624,6 @@ impl EditorState {
         let commands = flikk_core::cloud::pool_commands(self.bus.project(), item, bin);
         let result = self.bus.execute_shared_as(commands, label, author);
         self.finish(result, cx)?;
-        self.analyze_generated(cx);
         Some(id)
     }
 
@@ -686,44 +685,56 @@ impl EditorState {
     }
 
     /// Take what is in the pool now as looked at: a project just opened
-    /// keeps its generated items as they were.
-    pub(super) fn mark_generated_seen(&mut self) {
-        self.generated_seen = self
-            .bus
-            .project()
-            .media
-            .iter()
-            .filter(|m| m.generated.is_some())
-            .map(|m| m.id)
-            .collect();
+    /// keeps its items as they were, analyzed or not.
+    pub(crate) fn mark_media_seen(&mut self) {
+        self.media_seen = self.bus.project().media.iter().map(|m| m.id).collect();
     }
 
-    /// Analyze each item a provider made as it reaches the pool, once,
-    /// however it got there (the media pool or an approval): a
-    /// video like footage, so the agent can see and hear it, once the
-    /// analysis models are ready; a voiceover when transcripts are on (its
-    /// words are its script, so it costs no credits). Music and sound
-    /// effects are left to be analyzed when asked.
-    pub(super) fn analyze_generated(&mut self, cx: &mut Context<Self>) {
-        let new: Vec<(MediaId, Capability)> = self
+    /// Imported video and audio follow "Analyze on import"; it never
+    /// spends money, so nothing is analyzed while a provider transcribes.
+    pub fn set_analyze_on_import(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.analyze_on_import = on;
+        persistence::with_store(|s| s.save_analyze_on_import(on));
+        cx.notify();
+    }
+
+    /// Analyze each item as it reaches the pool, once, however it got
+    /// there (an import, the media pool's Generate, an approval), behind
+    /// what the user and the agent asked for. Imported video and audio
+    /// when "Analyze on import" is on and no provider transcribes, so it
+    /// costs nothing. What a provider made: a video like footage, so the
+    /// agent can see and hear it; a voiceover too (its words are its
+    /// script, so it costs no credits); music and sound effects are left
+    /// to be analyzed when asked. Pictures are never analyzed.
+    pub(super) fn analyze_new(&mut self, cx: &mut Context<Self>) {
+        let new: Vec<(MediaId, MediaKind, Option<Capability>)> = self
             .bus
             .project()
             .media
             .iter()
-            .filter(|m| m.fingerprint.is_some() && !self.generated_seen.contains(&m.id))
-            .filter_map(|m| Some((m.id, m.generated.as_deref()?.capability)))
+            .filter(|m| m.fingerprint.is_some() && !self.media_seen.contains(&m.id))
+            .map(|m| (m.id, m.kind, m.generated.as_deref().map(|g| g.capability)))
             .collect();
-        for (id, capability) in new {
-            self.generated_seen.insert(id);
+        let Some(analysis) = self.services.analysis.clone() else {
+            return;
+        };
+        for (id, kind, capability) in new {
+            self.media_seen.insert(id);
             let analyze = match capability {
                 // An upscaled video is new footage to the agent: its
                 // results are keyed by the file.
-                Capability::Video | Capability::Upscale => self.analysis_ready(),
-                Capability::Voiceover => true,
-                _ => false,
+                Some(Capability::Video | Capability::Upscale) => self.analysis_ready(),
+                Some(Capability::Voiceover) => true,
+                Some(_) => false,
+                None => {
+                    kind != MediaKind::Image
+                        && self.analyze_on_import
+                        && self.online_transcription().is_none()
+                }
             };
-            if analyze {
-                self.analyze(id, false, cx);
+            if analyze && let Some(item) = self.bus.project().media(id) {
+                analysis.analyze_in_background(item);
+                cx.notify();
             }
         }
     }

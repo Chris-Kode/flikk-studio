@@ -156,8 +156,12 @@ pub struct EditorState {
         flikk_core::model::MediaItem,
         flikk_core::bus::Author,
     )>,
-    /// Generated items in the pool already looked at for analysis.
-    generated_seen: HashSet<flikk_core::MediaId>,
+    /// Pool items already looked at for analysis: those of the project
+    /// when it opened, and each added since.
+    media_seen: HashSet<flikk_core::MediaId>,
+    /// Imported video and audio are analyzed as they land (Settings →
+    /// Integrations), per user.
+    pub analyze_on_import: bool,
     /// The voices of the provider doing voiceovers, as last read.
     pub account_voices: voices::AccountVoices,
     /// Samples fetched for approval cards, by voice id; `None` while on
@@ -239,14 +243,15 @@ impl EditorState {
             generating: Vec::new(),
             next_generation: 1,
             kept: Vec::new(),
-            generated_seen: HashSet::new(),
+            media_seen: HashSet::new(),
+            analyze_on_import: persistence::with_store(|s| s.analyze_on_import()).unwrap_or(true),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
             render: crate::render_cache::Background::new(cx),
             updater: update::Updater::default(),
             _update_watch: Self::watch_for_updates(cx),
         };
-        this.mark_generated_seen();
+        this.mark_media_seen();
         this.configure_analysis();
         this.analyze_sounds(cx);
         this.load_keys(cx);
@@ -362,6 +367,7 @@ impl EditorState {
         if result.is_ok() {
             self.autosave();
             self.check_offline();
+            self.analyze_new(cx);
             self.proposals.sync(&self.bus);
             // An accepted set, undo or redo may restyle the first caption
             // track, whose style new captions use.
@@ -541,7 +547,7 @@ impl EditorState {
         self.cancel_left(&left);
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
-        self.mark_generated_seen();
+        self.mark_media_seen();
         self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;

@@ -1,5 +1,6 @@
 //! Import: probe and fingerprint off-thread, add with `ImportMedia`, then
-//! make the playback proxy (PRD M1, M4). Analysis waits for the user.
+//! make the playback proxy (PRD M1, M4). Video and audio are analyzed
+//! after, when "Analyze on import" is on (`EditorState::analyze_new`).
 
 use super::{MediaPoolPanel, hdr};
 use flikk_core::command::Command;

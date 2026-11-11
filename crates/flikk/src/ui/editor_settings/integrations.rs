@@ -227,6 +227,27 @@ impl IntegrationsTab {
             .children(other)
     }
 
+    /// "Analyze on import": dimmed, its value kept, while a provider
+    /// transcribes, as automatic analysis never spends money.
+    fn render_analysis(&self, cx: &App) -> impl IntoElement {
+        let s = self.state.read(cx);
+        let online = s.online_transcription();
+        let state = self.state.clone();
+        v_flex().mt(px(20.)).child(group_label("Analysis")).child(
+            row("Analyze on import", LABEL_W).h(px(36.)).child(
+                Switch::new("analyze-on-import")
+                    .checked(s.analyze_on_import && online.is_none())
+                    .disabled(online.is_some())
+                    .when_some(online, |switch, provider| {
+                        switch.tooltip(format!("Off while {} transcribes", provider.name))
+                    })
+                    .on_click(move |on: &bool, _, cx| {
+                        state.update(cx, |s, cx| s.set_analyze_on_import(*on, cx))
+                    }),
+            ),
+        )
+    }
+
     /// The page is shown again: drop a replacement left half typed and
     /// check the keys anew.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -634,6 +655,7 @@ impl Render for IntegrationsTab {
                     .child(group_label("Use for"))
                     .children(rows),
             )
+            .child(self.render_analysis(cx))
             .child(on_device::section(&self.state, cx))
             .overflow_y_scrollbar()
     }

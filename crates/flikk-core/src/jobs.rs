@@ -1,7 +1,8 @@
 //! Queues for heavy background work. Jobs run in the order they were
 //! queued, at most `limit` at a time, on threads of the queue's own that
 //! end once nothing is left to run, and report their progress as
-//! [`JobStatus`]. Work queued under a key that is already queued or
+//! [`JobStatus`]. A job someone waits on can go ahead of the others
+//! ([`JobQueue::push_first`]). Work queued under a key that is already queued or
 //! running is that same job. A job can be cancelled by its key: one not
 //! started never runs, and one running sees [`JobProgress::cancelled`].
 
@@ -15,6 +16,13 @@ use std::sync::{Arc, Mutex};
 
 /// What a job does; `Err` says why it failed.
 type Work = Box<dyn FnOnce(&JobProgress) -> Result<(), String> + Send>;
+
+/// Where a new job waits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Last,
+    First,
+}
 
 /// Cheap to clone; clones share one queue.
 pub struct JobQueue<K> {
@@ -105,8 +113,9 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         }
     }
 
-    /// Queue `work` as the job `label`, about `media` if any. When a job
-    /// under `key` is queued or running already, that job's id instead.
+    /// Queue `work` as the job `label`, about `media` if any, behind every
+    /// job queued. When a job under `key` is queued or running already,
+    /// that job's id instead.
     pub fn push(
         &self,
         key: K,
@@ -114,21 +123,54 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
         media: Option<MediaId>,
         work: impl FnOnce(&JobProgress) -> Result<(), String> + Send + 'static,
     ) -> JobId {
+        self.enqueue(key, label.into(), media, Box::new(work), Place::Last)
+    }
+
+    /// [`Self::push`], but ahead of every job waiting: someone waits on
+    /// it. A job under `key` that is waiting already moves ahead; one
+    /// running stays as it is.
+    pub fn push_first(
+        &self,
+        key: K,
+        label: impl Into<String>,
+        media: Option<MediaId>,
+        work: impl FnOnce(&JobProgress) -> Result<(), String> + Send + 'static,
+    ) -> JobId {
+        self.enqueue(key, label.into(), media, Box::new(work), Place::First)
+    }
+
+    fn enqueue(
+        &self,
+        key: K,
+        label: String,
+        media: Option<MediaId>,
+        work: Work,
+        place: Place,
+    ) -> JobId {
         let shared = &self.shared;
         let mut queue = lock(&shared.queue);
         if let Some(&(_, id, _)) = queue.keys.iter().find(|(k, _, _)| *k == key) {
+            if place == Place::First
+                && let Some(at) = queue.waiting.iter().position(|(w, _, _)| *w == id)
+                && let Some(job) = queue.waiting.remove(at)
+            {
+                queue.waiting.push_front(job);
+            }
             return id;
         }
         let id = JobId::new();
         lock(&shared.jobs).push(JobStatus {
             id,
-            label: label.into(),
+            label,
             media,
             state: JobState::Queued,
         });
         let cancel = Arc::new(AtomicBool::new(false));
         queue.keys.push((key, id, cancel.clone()));
-        queue.waiting.push_back((id, cancel, Box::new(work)));
+        match place {
+            Place::Last => queue.waiting.push_back((id, cancel, work)),
+            Place::First => queue.waiting.push_front((id, cancel, work)),
+        }
         if queue.threads < shared.limit {
             queue.threads += 1;
             drop(queue);
