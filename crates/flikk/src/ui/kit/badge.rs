@@ -1,6 +1,7 @@
 //! Pills and indicators. A [`Badge`] is an 18 px pill on a wash of its tone,
 //! mono for change counts and diffs (+4, −2). An [`Indicator`] marks an icon
-//! button: a dot for "something here", a count for how many.
+//! button: a dot for "something here", a count for how many. A [`Dot`]
+//! sits in a row: what kind of thing the row is, or how much it matters.
 
 use super::theme as t;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -132,5 +133,19 @@ impl RenderOnce for Indicator {
                 .line_height(px(10.))
                 .child(count.to_string()),
         }
+    }
+}
+
+/// A 6 px dot in the tone's colour, in line with a row's text.
+#[derive(IntoElement)]
+pub struct Dot(pub Tone);
+
+impl RenderOnce for Dot {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(self.0.solid())
     }
 }

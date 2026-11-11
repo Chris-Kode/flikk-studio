@@ -5,8 +5,8 @@
 use super::ChatPanel;
 use crate::ui::format::clock_truncated;
 use crate::ui::kit::{
-    Badge, Button, Checkbox, Icon, IconName, ScrollableElement as _, Tooltip, h_flex, theme as t,
-    v_flex,
+    Badge, Button, Checkbox, Dot, Icon, IconName, ScrollableElement as _, Tone, Tooltip, h_flex,
+    theme as t, v_flex,
 };
 use flikk_core::changeset::{ChangeItem, ChangeSet, ChangeSetState, ItemState};
 use flikk_core::check::{Finding, Severity};
@@ -586,15 +586,11 @@ fn outcome(set: &ChangeSet) -> impl IntoElement {
 
 /// A finding's dot: `WARN` for what a viewer will notice, quiet for what
 /// may be meant.
-pub(crate) fn finding_dot(severity: Severity) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(6.))
-        .rounded_full()
-        .bg(match severity {
-            Severity::Warning => t::WARN,
-            Severity::Notice => t::T3,
-        })
+pub(crate) fn finding_dot(severity: Severity) -> Dot {
+    Dot(match severity {
+        Severity::Warning => Tone::Warn,
+        Severity::Notice => Tone::Neutral,
+    })
 }
 
 /// The gravest severity among `found`.

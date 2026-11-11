@@ -29,4 +29,4 @@ pub use hw::Encoder;
 pub use lettering::Letterer;
 pub use otio::export_otio;
 pub use preset::{AudioCodec, Container, LoudnessTarget, RenderSettings, VideoCodec};
-pub use queue::{RenderJob, RenderQueue, RenderRequest, RenderState, render_blocking};
+pub use queue::{RenderJob, RenderQueue, RenderRequest, RenderState, measure_mix, render_blocking};

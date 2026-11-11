@@ -1825,6 +1825,18 @@ available to them.
   ProRes 422 HQ, WAV and Custom, sized by the short side so they keep the sequence's shape
   ("1080p" is 1080 × 1920 for 9:16).
 * **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
+* **Findings** (`ui/deliver.rs`): above Render, the timeline check (§4)
+  of the render range, run off the UI thread whenever the panel shows a
+  project version or range it has not checked (`Snapshot`; the last list
+  stays while the next is worked out), each row its dot, note and
+  timecode, a click seeking there; six are listed and the rest counted.
+  Beside the loudness switch, while normalization is off, a Measure
+  button plays the range's mix through FFmpeg (`flikk_deliver::measure_mix`,
+  the render's own first `loudnorm` pass) as a job: its integrated
+  loudness shows next to it, and `check::loudness` adds a finding when it
+  is more than 1 LU off the target or its true peak is over the ceiling.
+  An edit or a new range cancels a measurement and drops one made. Findings
+  never hold a render back.
 
 ## 11. UI
 

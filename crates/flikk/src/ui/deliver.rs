@@ -3,14 +3,17 @@
 //! exports and the render queue.
 
 use crate::state::EditorState;
+use crate::ui::chat::finding_dot;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, Checkbox, Icon, IconName, Input, Panel, PanelHeader, Progress, ScrollableElement as _,
     Segmented, Select, SelectEvent, SelectState, Spinner, Tooltip, h_flex, v_flex,
 };
-use flikk_core::Rate;
+use flikk_core::analysis::Loudness;
+use flikk_core::check::{self, Finding};
 use flikk_core::memory::{CaptionStyle, Presets};
 use flikk_core::model::{Project, SequenceSettings};
+use flikk_core::{ProjectId, Rate, Time, TimeRange};
 use flikk_deliver::{
     AudioCodec, Encoder, LoudnessTarget, RenderJob, RenderQueue, RenderRequest, RenderSettings,
     RenderState, VideoCodec,
@@ -62,6 +65,62 @@ impl Export {
     }
 }
 
+/// What the findings shown are for: the project as it was and the render
+/// range.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Snapshot {
+    project: ProjectId,
+    version: u64,
+    range: Option<TimeRange>,
+}
+
+/// The timeline check of the render range, worked out off the UI thread.
+enum RangeCheck {
+    Idle,
+    /// Running for `of`; the last findings stay on show meanwhile.
+    Checking {
+        of: Snapshot,
+        shown: Vec<Finding>,
+    },
+    Checked {
+        of: Snapshot,
+        findings: Vec<Finding>,
+    },
+}
+
+impl RangeCheck {
+    fn findings(&self) -> &[Finding] {
+        match self {
+            RangeCheck::Idle => &[],
+            RangeCheck::Checking { shown, .. } => shown,
+            RangeCheck::Checked { findings, .. } => findings,
+        }
+    }
+
+    fn is_for(&self, now: Snapshot) -> bool {
+        match self {
+            RangeCheck::Idle => false,
+            RangeCheck::Checking { of, .. } | RangeCheck::Checked { of, .. } => *of == now,
+        }
+    }
+}
+
+/// The mix's loudness, measured when asked.
+enum Mix {
+    Idle,
+    Measuring {
+        of: Snapshot,
+        cancel: Arc<AtomicBool>,
+    },
+    Measured {
+        of: Snapshot,
+        loudness: Loudness,
+    },
+}
+
+/// Findings listed above Render before the rest are counted.
+const FINDINGS_SHOWN: usize = 6;
+
 /// A preset card. Presets that differ only in codec share one and are
 /// told apart in the Format row.
 struct Card {
@@ -97,6 +156,9 @@ pub struct DeliverPanel {
     polling: Option<Task<()>>,
     /// The running still export's cancel flag.
     still: Option<Arc<AtomicBool>>,
+    /// What the timeline check finds in the render range.
+    check: RangeCheck,
+    mix: Mix,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -195,8 +257,140 @@ impl DeliverPanel {
             encoder: saved_encoder(),
             polling: None,
             still: None,
+            check: RangeCheck::Idle,
+            mix: Mix::Idle,
             _subscriptions,
         }
+    }
+
+    /// The range a render takes: In → Out unless the whole timeline is
+    /// picked.
+    fn render_range(&self, cx: &App) -> Option<TimeRange> {
+        self.state
+            .read(cx)
+            .in_out
+            .filter(|r| !r.is_empty() && !self.whole_timeline)
+    }
+
+    fn snapshot(&self, cx: &App) -> Snapshot {
+        let bus = &self.state.read(cx).bus;
+        Snapshot {
+            project: bus.project().id,
+            version: bus.version(),
+            range: self.render_range(cx),
+        }
+    }
+
+    /// Check the render range again when the project or the range changed
+    /// since, and drop a loudness measured, or being measured, for before.
+    fn refresh_check(&mut self, cx: &mut Context<Self>) {
+        let now = self.snapshot(cx);
+        match &self.mix {
+            Mix::Measuring { of, cancel } if *of != now => {
+                cancel.store(true, Ordering::Relaxed);
+                self.mix = Mix::Idle;
+            }
+            Mix::Measured { of, .. } if *of != now => self.mix = Mix::Idle,
+            _ => {}
+        }
+        if self.check.is_for(now) {
+            return;
+        }
+        let state = self.state.read(cx);
+        let project = state.bus.project().clone();
+        let sources = state.check_sources();
+        let shown = match &self.check {
+            RangeCheck::Checking { of, .. } | RangeCheck::Checked { of, .. }
+                if of.project == now.project =>
+            {
+                self.check.findings().to_vec()
+            }
+            _ => Vec::new(),
+        };
+        self.check = RangeCheck::Checking { of: now, shown };
+        cx.spawn(async move |this, cx| {
+            let findings = cx
+                .background_executor()
+                .spawn(async move {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        check::check(&project, now.range, &sources).findings
+                    }))
+                    .unwrap_or_default()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if matches!(this.check, RangeCheck::Checking { of, .. } if of == now) {
+                    this.check = RangeCheck::Checked { of: now, findings };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Play the mix of the render range through FFmpeg for its loudness
+    /// and true peak, off the UI thread.
+    fn measure_mix(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.mix, Mix::Measuring { .. }) {
+            return;
+        }
+        let now = self.snapshot(cx);
+        let project = self.project(cx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.mix = Mix::Measuring {
+            of: now,
+            cancel: cancel.clone(),
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let flag = cancel.clone();
+            let measured = cx
+                .background_executor()
+                .spawn(async move {
+                    flikk_deliver::measure_mix(&project, now.range, &|_| {}, &flag)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let ours =
+                    matches!(&this.mix, Mix::Measuring { cancel: c, .. } if Arc::ptr_eq(c, &cancel));
+                if !ours {
+                    return;
+                }
+                match measured {
+                    Ok(loudness) => this.mix = Mix::Measured { of: now, loudness },
+                    Err(e) => {
+                        this.mix = Mix::Idle;
+                        if !cancel.load(Ordering::Relaxed) {
+                            this.set_status(format!("Could not measure the mix: {e:#}"), cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The findings for the render range, the mix's included once measured.
+    fn findings(&self, cx: &App) -> Vec<Finding> {
+        let mut out = self.check.findings().to_vec();
+        if let Mix::Measured { of, loudness } = &self.mix {
+            let target = self.loudness_target();
+            let range = of
+                .range
+                .unwrap_or_else(|| TimeRange::new(Time::ZERO, self.project_duration(cx)));
+            out.extend(check::loudness(
+                *loudness,
+                target.lufs,
+                target.true_peak_db,
+                range,
+            ));
+        }
+        out
+    }
+
+    fn project_duration(&self, cx: &App) -> Time {
+        self.state.read(cx).bus.project().timeline.duration()
     }
 
     fn project(&self, cx: &App) -> Project {
@@ -323,11 +517,7 @@ impl DeliverPanel {
         }
         settings.loudness = self.loudness.then(|| self.loudness_target());
         settings.burn_captions = settings.video.is_some() && self.burn_captions;
-        settings.range = self
-            .state
-            .read(cx)
-            .in_out
-            .filter(|r| !r.is_empty() && !self.whole_timeline);
+        settings.range = self.render_range(cx);
         settings.encoder = self.encoder;
         Ok(settings)
     }
@@ -654,6 +844,7 @@ impl DeliverPanel {
                             })),
                     )
                     .child(div().flex_1())
+                    .when(!self.loudness, |el| el.child(self.render_measure(cx)))
                     .child(
                         meta(format!("{} dBTP", minus(target.true_peak_db))).font_family(t::mono()),
                     ),
@@ -671,6 +862,92 @@ impl DeliverPanel {
                     ),
                 )
             })
+    }
+
+    /// Measure the mix, or what it measured.
+    fn render_measure(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let measured = match &self.mix {
+            Mix::Measured { loudness, .. } => Some(loudness.integrated_lufs),
+            _ => None,
+        };
+        h_flex()
+            .flex_none()
+            .gap(px(6.))
+            .mr(px(8.))
+            .when_some(measured, |el, lufs| {
+                el.child(
+                    meta(format!("{} LUFS", minus((lufs * 10.).round() / 10.)))
+                        .font_family(t::mono())
+                        .text_color(t::T2),
+                )
+            })
+            .child(
+                Button::new("measure-mix")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Gauge)
+                    .tooltip("Measure the mix")
+                    .loading(matches!(self.mix, Mix::Measuring { .. }))
+                    .on_click(cx.listener(|this, _, _, cx| this.measure_mix(cx))),
+            )
+    }
+
+    /// The findings for the render range, each leading to its place. They
+    /// never hold a render back.
+    fn render_findings(&self, seq: &SequenceSettings, cx: &mut Context<Self>) -> Option<Div> {
+        let findings = self.findings(cx);
+        if findings.is_empty() {
+            return None;
+        }
+        let more = findings.len().saturating_sub(FINDINGS_SHOWN);
+        let rows: Vec<AnyElement> = findings
+            .iter()
+            .take(FINDINGS_SHOWN)
+            .enumerate()
+            .map(|(ix, f)| {
+                let at = f.range.start;
+                h_flex()
+                    .id(("deliver-finding", ix))
+                    .h(px(22.))
+                    .px(px(6.))
+                    .gap(px(8.))
+                    .rounded(t::RADIUS_SM)
+                    .cursor_pointer()
+                    .hover(|el| el.bg(t::HV))
+                    .child(finding_dot(f.severity))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(t::T2)
+                            .child(f.note.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(t::mono())
+                            .text_size(px(10.))
+                            .text_color(t::T3)
+                            .child(at.timecode(seq.rate)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.seek(at, cx))
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        Some(v_flex().gap(px(2.)).children(rows).when(more > 0, |el| {
+            el.child(
+                div()
+                    .pl(px(20.))
+                    .font_family(t::mono())
+                    .text_size(px(10.))
+                    .text_color(t::T3)
+                    .child(format!("+{more}")),
+            )
+        }))
     }
 
     /// The output file, Render, and what it will write.
@@ -744,6 +1021,7 @@ impl DeliverPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.choose_output(cx))),
                     ),
             )
+            .children(self.render_findings(seq, cx))
             .child(
                 Button::new("render")
                     .primary()
@@ -970,6 +1248,9 @@ impl Render for DeliverPanel {
         if self.queue.is_busy() {
             self.poll(cx);
         }
+        // Only while the panel shows: a check per edit is not worth it
+        // elsewhere.
+        self.refresh_check(cx);
         let seq = self.sequence(cx);
         Panel::new()
             .child(PanelHeader::new().title("Deliver"))

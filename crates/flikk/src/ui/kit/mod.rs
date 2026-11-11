@@ -39,7 +39,7 @@ pub use select::{Select, SelectEvent, SelectItem, SelectState};
 pub use spinner::Spinner;
 pub use tooltip::Tooltip;
 
-pub use badge::{Badge, Indicator, Tone};
+pub use badge::{Badge, Dot, Indicator, Tone};
 pub use empty::EmptyState;
 pub use layout::{ScrollableElement, h_resizable, resizable_panel, v_resizable};
 pub use panel::{Panel, PanelHeader, SectionHeader};

@@ -6,13 +6,14 @@ use crate::composed::{self, Frames};
 use crate::ffmpeg::{self, TempOutput, ensure_free, filter_script_args, publish};
 use crate::graph::{self, GraphSpec, Loudnorm, Measured};
 use crate::hw::{self, Encoder, HwEncoder};
-use crate::preset::RenderSettings;
+use crate::preset::{LoudnessTarget, RenderSettings};
 use anyhow::{Context as _, Result, anyhow};
-use flikk_core::JobId;
+use flikk_core::analysis::Loudness;
 use flikk_core::memory::CaptionStyle;
 use flikk_core::model::Project;
 use flikk_core::paths;
 use flikk_core::services::Services;
+use flikk_core::{JobId, TimeRange};
 use flikk_os::sync::{lock, panic_message};
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -363,6 +364,61 @@ pub fn render_blocking(
     render(request, None, progress, cancel).map(|_| ())
 }
 
+/// The loudness of the mix `spec` would render, as `loudnorm` measures it
+/// against `target`; `work` holds the filter script.
+fn measure(
+    project: &Project,
+    spec: &GraphSpec,
+    target: LoudnessTarget,
+    work: &Path,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<Measured> {
+    let mut measure = spec.clone();
+    measure.video = false;
+    measure.loudnorm = Some(Loudnorm::Measure(target));
+    let g = graph::build(project, &measure, work)?;
+    let script = write_script(work, "measure.txt", &g.script)?;
+    let mut args: Vec<OsString> = vec!["-loglevel".into(), "info".into()];
+    args.extend(filter_script_args(&script));
+    args.extend(["-map", "[aout]", "-f", "null", "-"].map(OsString::from));
+    let stderr = ffmpeg::run(&args, g.seconds, progress, cancel)?;
+    Measured::parse(&stderr).ok_or_else(|| anyhow!("could not measure loudness (silent mix?)"))
+}
+
+/// The programme loudness and true peak of `project`'s mix over `range`
+/// (the whole timeline when `None`), as a render would make it before any
+/// normalization. Blocks while FFmpeg plays the mix through; `progress`
+/// gets 0..1, and `cancel` stops it with an error.
+pub fn measure_mix(
+    project: &Project,
+    range: Option<TimeRange>,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<Loudness> {
+    let settings = RenderSettings {
+        range,
+        ..RenderSettings::wav()
+    };
+    let spec = GraphSpec::new(project, &settings, &[]);
+    let work = WorkDir::new()?;
+    // The measurement doesn't depend on the target.
+    let m = measure(
+        project,
+        &spec,
+        LoudnessTarget::default(),
+        &work.0,
+        progress,
+        cancel,
+    )?;
+    let number = |v: &str| v.parse::<f32>().context("loudness out of range");
+    Ok(Loudness {
+        integrated_lufs: number(&m.input_i)?,
+        true_peak_db: number(&m.input_tp)?,
+        range_lu: number(&m.input_lra)?,
+    })
+}
+
 /// [`render_blocking`], returning the path written: `request.output`, or
 /// the next name free of files and of other jobs' outputs when a file
 /// appeared there during the render. `job` is the queued job rendering.
@@ -420,24 +476,16 @@ fn render(
 
     // Pass 1 of 2: measure loudness of the final mix.
     if let Some(target) = settings.loudness {
-        let mut measure = spec.clone();
-        measure.video = false;
-        measure.loudnorm = Some(Loudnorm::Measure(target));
-        let g = graph::build(&request.project, &measure, &work.0)?;
-        let script = write_script(&work.0, "measure.txt", &g.script)?;
-        let mut args: Vec<OsString> = vec!["-loglevel".into(), "info".into()];
-        args.extend(filter_script_args(&script));
-        args.extend(["-map", "[aout]", "-f", "null", "-"].map(OsString::from));
         let from = share;
         share += (1.0 - share) * LOUDNESS_SHARE;
-        let stderr = ffmpeg::run(
-            &args,
-            g.seconds,
+        let measured = measure(
+            &request.project,
+            &spec,
+            target,
+            &work.0,
             &|p| progress(from + p * (share - from)),
             cancel,
         )?;
-        let measured = Measured::parse(&stderr)
-            .ok_or_else(|| anyhow!("could not measure loudness (silent mix?)"))?;
         spec.loudnorm = Some(Loudnorm::Apply(target, measured));
     }
 
