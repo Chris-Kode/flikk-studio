@@ -12,6 +12,7 @@ pub const WEIGHTS: ModelFile = ModelFile {
     env: Some("FLIKK_SUBJECTS_MLX_MODEL"),
     what: "subject mask model",
     size: 90_538_932,
+    sha256: "d97f27bd15bbf281e5bf49c54f35f131fbaa130fd5e26fbe4ad34627f5a1c6b5",
 };
 
 /// Side of the square picture the model sees, of its coarsest feature

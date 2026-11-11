@@ -612,7 +612,7 @@ task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
-sizes) and the settings it runs with, `runner.rs` the code that loads and
+sizes and SHA-256) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
@@ -661,8 +661,11 @@ than one (saved per user in the store), and downloads one or all of them,
 with progress and cancel, through `<file>.part`; a failed download stays
 there with Retry. A part is kept when a download is cancelled or cut, and
 the next one asks the server for the rest (a range request; a server that
-sends the whole file again starts it over); one that comes out the wrong
-size is deleted. A part is locked while it is written, so a cancelled
+sends the whole file again starts it over). Before a file takes its name
+it is checked against its pinned SHA-256 (`ModelFile::sha256`: the host's
+LFS object id for the pinned commit, or measured on bytes checked against
+the host's git hash for the small files); one that comes out the wrong
+size or does not match is deleted and fails, so Retry fetches it clean. A part is locked while it is written, so a cancelled
 download still winding down, or another copy of the app, is done with it
 first. `LocalAnalysis::model_tasks` says which tasks a build
 runs. A runner whose files are missing (deleted by hand) fails ("… is not

@@ -11,6 +11,7 @@ pub const GRAPH: ModelFile = ModelFile {
     env: Some("FLIKK_MODNET"),
     what: "person mask model",
     size: 25_888_640,
+    sha256: "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9",
 };
 
 /// Short side of the picture the model sees (its training size); the long

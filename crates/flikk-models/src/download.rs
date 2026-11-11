@@ -324,7 +324,7 @@ fn fetch_into(
     }
     if file.size != 0 && done == file.size {
         progress(done);
-        return Ok(());
+        return check_sha256(file, out, cancel);
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(
@@ -409,6 +409,45 @@ fn fetch_into(
         return Err(Fetch::Damaged(anyhow::anyhow!(
             "{what} download is the wrong size ({done} bytes, {} published): try again",
             file.size
+        )));
+    }
+    check_sha256(file, out, cancel)
+}
+
+/// Whether `out`, the whole part, holds the bytes published: a resumed
+/// download is otherwise taken on its length alone. One that doesn't is
+/// damaged, and goes.
+fn check_sha256(
+    file: &ModelFile,
+    out: &mut std::fs::File,
+    cancel: &AtomicBool,
+) -> std::result::Result<(), Fetch> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Seek, SeekFrom};
+    if file.sha256.is_empty() {
+        return Ok(());
+    }
+    out.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("{} download cancelled", file.what).into());
+        }
+        match out.read(&mut buf)? {
+            0 => break,
+            n => hasher.update(&buf[..n]),
+        }
+    }
+    let sum: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if sum != file.sha256 {
+        return Err(Fetch::Damaged(anyhow::anyhow!(
+            "{} download is damaged (its checksum does not match): try again",
+            file.what
         )));
     }
     Ok(())

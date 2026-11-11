@@ -8,6 +8,7 @@ pub const FILE: ModelFile = ModelFile {
     env: Some("FLIKK_RIFE_MODEL"),
     what: "frame interpolation model",
     size: 21_604_567,
+    sha256: "4da60c1f20d42dba4f21503140940aa48a488585ead977532bf22e95a0319327",
 };
 
 /// Widest picture the model sees; wider frames are made at this width

@@ -13,6 +13,7 @@ pub const FILE: ModelFile = ModelFile {
     env: Some("FLIKK_ALIGNER_MODEL"),
     what: "alignment model",
     size: 589_447_679,
+    sha256: "228f127baf68f9c71af16cdd3ada97d64122424caafee364b241d2c0f9ab49df",
 };
 /// Qwen's tokenizer, from the model's own repository.
 pub const VOCAB: ModelFile = ModelFile {
@@ -21,6 +22,7 @@ pub const VOCAB: ModelFile = ModelFile {
     env: None,
     what: "alignment tokenizer",
     size: 2_776_833,
+    sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
 };
 pub const MERGES: ModelFile = ModelFile {
     name: "qwen3-forced-aligner-merges.txt",
@@ -28,6 +30,7 @@ pub const MERGES: ModelFile = ModelFile {
     env: None,
     what: "alignment tokenizer",
     size: 1_671_853,
+    sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
 };
 
 /// The languages it knows, as Whisper's codes.

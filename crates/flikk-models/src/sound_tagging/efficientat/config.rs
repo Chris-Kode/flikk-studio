@@ -9,6 +9,7 @@ pub const FILE: ModelFile = ModelFile {
     env: Some("FLIKK_TAGGER_MODEL"),
     what: "sound tagger",
     size: 20_200_590,
+    sha256: "bec20620ab8be5e41297b45845f6fb116fbe42cd4da339ad7d44f27630b7a504",
 };
 
 /// Samples the tagger hears at once, and between the starts of windows.

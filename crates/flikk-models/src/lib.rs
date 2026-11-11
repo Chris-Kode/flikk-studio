@@ -273,6 +273,11 @@ pub struct ModelFile {
     /// length is taken for a cut or damaged download. 0 when unknown, and
     /// then any length passes.
     pub size: u64,
+    /// SHA-256 of the file at `url`, lower-case hex: the host's own for
+    /// the pinned commit (the LFS object id), or measured on bytes checked
+    /// against the host. A download is checked against it once, before it
+    /// takes the file's name; a mismatch deletes it. Empty when unknown.
+    pub sha256: &'static str,
 }
 
 impl ModelFile {

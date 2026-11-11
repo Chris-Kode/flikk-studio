@@ -13,6 +13,7 @@ pub const SMALL: ModelFile = ModelFile {
     env: ENV,
     what: "Whisper small model",
     size: 264_464_607,
+    sha256: "49c8fb02b65e6049d5fa6c04f81f53b867b5ec9540406812c643f177317f779f",
 };
 
 /// Large-v3-turbo, its weights stored as 8-bit blocks.
@@ -22,6 +23,7 @@ pub const LARGE: ModelFile = ModelFile {
     env: ENV,
     what: "Whisper large model",
     size: 874_188_075,
+    sha256: "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
 };
 
 /// Whether whisper.cpp was built for a GPU. It still runs on the CPU when

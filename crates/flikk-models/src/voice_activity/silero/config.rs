@@ -9,6 +9,7 @@ pub const FILE: ModelFile = ModelFile {
     env: Some("FLIKK_VAD_MODEL"),
     what: "voice activity model",
     size: 885_098,
+    sha256: "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
 };
 
 /// Silero hears 16 kHz audio in windows of this many samples.

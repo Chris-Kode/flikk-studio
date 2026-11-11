@@ -10,6 +10,7 @@ pub const MODEL_FILE: ModelFile = ModelFile {
     env: Some("FLIKK_DEPTH_MODEL"),
     what: "depth model",
     size: 99_060_839,
+    sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
 };
 
 /// The longer side of the picture the model sees. It was trained at 518 on

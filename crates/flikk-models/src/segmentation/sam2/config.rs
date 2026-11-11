@@ -22,6 +22,7 @@ pub const ENCODER: ModelFile = ModelFile {
     env: None,
     what: "subject mask encoder",
     size: 134_335_567,
+    sha256: "aa7a8542942f042e235a993a1ab0ccf5f049918500577802a7f10ec1b39bb873",
 };
 /// Features and points → the object's logits, a score and its pointer.
 pub const DECODER: ModelFile = ModelFile {
@@ -30,6 +31,7 @@ pub const DECODER: ModelFile = ModelFile {
     env: None,
     what: "subject mask decoder",
     size: 17_794_355,
+    sha256: "0461896de3db00936fe1643506f129d71cb6d5d2ae15754811756b7ea1b070c6",
 };
 /// A frame's features and mask → the memory later frames look back at.
 pub const MEMORY_ENCODER: ModelFile = ModelFile {
@@ -38,6 +40,7 @@ pub const MEMORY_ENCODER: ModelFile = ModelFile {
     env: None,
     what: "subject tracking memory",
     size: 5_616_496,
+    sha256: "580d246c109de88838f600ba7c1c0d03d1fe267f7641b06f8c88c5f0dc5834cd",
 };
 /// A frame's features conditioned on the memory of other frames.
 pub const MEMORY_ATTENTION: ModelFile = ModelFile {
@@ -46,6 +49,7 @@ pub const MEMORY_ATTENTION: ModelFile = ModelFile {
     env: None,
     what: "subject tracking attention",
     size: 32_259_165,
+    sha256: "791e648ce8f5ef91ad00ba06e83066ff261ae5a645f0b042b4f46a89fd054baf",
 };
 /// Frame distances of object pointers → their positions.
 pub const POINTER_POSITIONS: ModelFile = ModelFile {
@@ -54,6 +58,7 @@ pub const POINTER_POSITIONS: ModelFile = ModelFile {
     env: None,
     what: "subject tracking pointers",
     size: 67_289,
+    sha256: "7e71df1d75dba09bc18dd4ae745c2a2cceebdd14d84eadea2fe65d0205f101fc",
 };
 /// The memory's temporal position table and the picture normalization.
 pub const CONSTANTS: ModelFile = ModelFile {
@@ -62,6 +67,7 @@ pub const CONSTANTS: ModelFile = ModelFile {
     env: None,
     what: "subject mask constants",
     size: 9_922,
+    sha256: "172edc70e892aab0aef6caedf97b8e4091fbf6c5d26dac5fd9ea69d093d927d3",
 };
 
 /// Side of the square picture the model sees.
