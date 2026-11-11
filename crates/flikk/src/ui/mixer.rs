@@ -1,8 +1,9 @@
 //! Mixer (Audio workspace, Fairlight-style): one strip per audio track,
-//! top to bottom as on the timeline, then the master. A strip has its
-//! track effect inserts (add from the menu or drop an effect from the
-//! library; click one for its parameters), pan, a fader beside a peak/RMS
-//! meter with peak hold, and mute/solo. Meters read the playback mixer's
+//! top to bottom as on the timeline, then the master. A strip has Clean
+//! voice for every clip on the track (on, and its amount), its track
+//! effect inserts (add from the menu or drop an effect from the library;
+//! click one for its parameters), pan, a fader beside a peak/RMS meter
+//! with peak hold, and mute/solo. Meters read the playback mixer's
 //! levels ([`meter`]); every change is a `Command`.
 
 pub mod controls;
@@ -12,11 +13,12 @@ pub mod stack;
 use crate::state::EditorState;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
-    Button, Icon, IconName, Panel, PanelHeader, Popover, ScrollableElement as _, Slider, Tooltip,
-    h_flex, v_flex,
+    Button, Icon, IconName, Panel, PanelHeader, Popover, ScrollableElement as _, Slider, Spinner,
+    Switch, Tooltip, h_flex, v_flex,
 };
 use controls::{ControlHost, Controls, Ctl, Range, Target};
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
+use flikk_core::cleanup::Progress;
 use flikk_core::command::Command;
 use flikk_core::model::{Track, TrackKind};
 use flikk_core::{EffectId, TrackId};
@@ -39,6 +41,11 @@ const FADER: Range = Range {
 const PAN: Range = Range {
     min: -1.,
     max: 1.,
+    log: false,
+};
+const AMOUNT: Range = Range {
+    min: 0.,
+    max: 100.,
     log: false,
 };
 /// Marks beside a fader, dB.
@@ -103,6 +110,7 @@ impl MixerPanel {
         let pan = controls::knob(self, Ctl::Pan(id), track.mix.pan, PAN, window, cx);
         let volume = controls::shown(self, &Ctl::Fader(id)).unwrap_or(track.mix.volume_db);
         let pan_shown = controls::shown(self, &Ctl::Pan(id)).unwrap_or(track.mix.pan);
+        let voice = self.voice_row(ix, track, window, cx);
         let inserts = self.inserts(ix, track, &strip.code, window, cx);
         let display = self.meters.get(&Some(id)).copied().unwrap_or_default();
         let (mute_track, solo_track) = (track.clone(), track.clone());
@@ -198,11 +206,70 @@ impl MixerPanel {
             .when(strip.selected, |s| s.bg(t::alpha(t::HV, 0.25)))
             .when(strip.soloed_out, |s| s.opacity(0.45))
             .child(header)
+            .child(voice)
             .child(inserts)
             .child(pan_row)
             .child(fader_zone)
             .child(readout)
             .child(buttons)
+    }
+
+    /// Clean voice for every clip on the track: on when all of them have
+    /// it, the amount of the first; a spinner while a copy is made.
+    fn voice_row(
+        &mut self,
+        ix: usize,
+        track: &Track,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let target = Target::Track(track.id);
+        let (ready, any, making, (voice, on)) = {
+            let state = self.state.read(cx);
+            let project = state.bus.project();
+            (
+                controls::voice_ready(state),
+                !controls::voice_clips(project, target).is_empty(),
+                matches!(
+                    controls::voice_progress(state, target),
+                    Some(Progress::Making(_))
+                ),
+                controls::voice_of(project, target),
+            )
+        };
+        let ctl = Ctl::CleanVoice(target);
+        let amount = controls::knob(self, ctl.clone(), voice.amount * 100., AMOUNT, window, cx);
+        let shown = controls::shown(self, &ctl).unwrap_or(voice.amount * 100.);
+        let state = self.state.clone();
+        let switch = Switch::new(("clean-voice", ix))
+            .checked(on)
+            .disabled(!ready || !any)
+            .tooltip("Clean voice")
+            .on_click(move |on: &bool, _, cx| controls::set_voice(&state, target, *on, cx));
+        let readout: AnyElement = if making {
+            Spinner::new().size(px(10.)).into_any_element()
+        } else {
+            div().child(format!("{shown:.0}")).into_any_element()
+        };
+        h_flex()
+            .h(px(34.))
+            .flex_none()
+            .gap(px(6.))
+            .px(px(8.))
+            .border_b_1()
+            .border_color(t::LN)
+            .child(switch)
+            .child(Slider::new(&amount).disabled(!on).flex_1().min_w_0())
+            .child(
+                h_flex()
+                    .w(px(24.))
+                    .flex_none()
+                    .justify_end()
+                    .font_family(t::mono())
+                    .text_size(px(10.))
+                    .text_color(if on { t::T2 } else { t::T3 })
+                    .child(readout),
+            )
     }
 
     /// Track inserts: one row each (bypass, name opening its parameters,

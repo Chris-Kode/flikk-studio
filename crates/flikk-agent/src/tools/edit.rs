@@ -6,6 +6,7 @@ use super::{Done, Job, JobDone, Rebase, Step, ToolCtx, propose};
 use crate::args::*;
 use crate::bridge::Content;
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
+use flikk_core::cleanup::VoiceCleanup;
 use flikk_core::command::{Command, Edge, InsertMode, PlacedClip};
 use flikk_core::cuts::{FADE, Speech};
 use flikk_core::fx::ParamKind;
@@ -246,6 +247,7 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolErr
         "set_audio_effects" | "add_audio_effect" | "remove_audio_effect" => {
             audio_effects(ctx, tool, args)?
         }
+        "clean_voice" => clean_voice(ctx, args)?,
 
         "generate_captions" => return generate_captions(ctx, args, &reason),
         "set_caption_style" => {
@@ -657,6 +659,50 @@ fn property(args: &Args) -> ToolResultOf<Property> {
             names.join(", ")
         ))
     })
+}
+
+/// Clean voice on `clips`, or on every clip with sound on `track`, at
+/// `amount` (0–100; default the first clip's, else
+/// [`VoiceCleanup::DEFAULT_AMOUNT`]), or off with `on: false`.
+fn clean_voice(ctx: &ToolCtx, args: &Args) -> ToolResultOf<Vec<Command>> {
+    let p = ctx.project();
+    let clips: Vec<flikk_core::ClipId> = match (args.opt_str("track")?, args.has("clips")) {
+        (Some(track), false) => {
+            let track = track_id(p, track)?;
+            p.timeline
+                .track(track)
+                .map(|t| t.clips.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter(|c| {
+                    c.media()
+                        .and_then(|m| p.media(m))
+                        .is_some_and(flikk_core::cleanup::has_sound)
+                })
+                .map(|c| c.id)
+                .collect()
+        }
+        (None, true) => some_clips(ctx, args)?,
+        _ => return fail("give `clips` or `track`"),
+    };
+    if clips.is_empty() {
+        return fail("no clip with sound to clean");
+    }
+    let current = clips
+        .iter()
+        .find_map(|id| p.timeline.clip(*id)?.1.audio.voice_cleanup)
+        .map_or(VoiceCleanup::DEFAULT_AMOUNT, |v| v.amount);
+    let amount = match args.opt_f64("amount")? {
+        Some(a) => (a / 100.0).clamp(0.0, 1.0) as f32,
+        None => current,
+    };
+    Ok(vec![Command::SetVoiceCleanup {
+        clips,
+        cleanup: VoiceCleanup {
+            enabled: args.opt_bool("on")?.unwrap_or(true),
+            amount,
+        },
+    }])
 }
 
 /// `clips`, required and non-empty.

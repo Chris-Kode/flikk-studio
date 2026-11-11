@@ -1,8 +1,9 @@
 //! Sliders: a 3 px track with an accent fill and a 10 px thumb, optionally
 //! under a header row (label left, mono value right), or bipolar with the
 //! fill running from a centre tick. Vertical sliders are mixer faders: a
-//! recessed groove and a fader cap. GPUI Base's [`SliderState`] keeps the
-//! value and the drag; this element only draws it.
+//! recessed groove and a fader cap. A disabled slider takes no input and
+//! draws its fill and thumb in the meta grey. GPUI Base's [`SliderState`]
+//! keeps the value and the drag; this element only draws it.
 
 use super::theme as t;
 use gpui_kit::base::slider::SliderState;
@@ -50,6 +51,7 @@ pub struct Slider {
     state: Entity<SliderState>,
     vertical: bool,
     bipolar: bool,
+    disabled: bool,
     label: Option<SharedString>,
     readout: Option<SharedString>,
     style: StyleRefinement,
@@ -61,6 +63,7 @@ impl Slider {
             state: state.clone(),
             vertical: false,
             bipolar: false,
+            disabled: false,
             label: None,
             readout: None,
             style: StyleRefinement::default(),
@@ -77,6 +80,12 @@ impl Slider {
     /// zero such as pan or exposure.
     pub fn bipolar(mut self) -> Self {
         self.bipolar = true;
+        self
+    }
+
+    /// Shown but not movable, as when what it sets is off.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -113,6 +122,7 @@ impl RenderOnce for Slider {
         };
 
         let track = SliderTrack::new(&self.state)
+            .disabled(self.disabled)
             .axis(axis)
             .relative()
             .flex()
@@ -145,6 +155,7 @@ impl RenderOnce for Slider {
                         .bg(t::T1),
                 );
             BaseSlider::new(&self.state)
+                .disabled(self.disabled)
                 .vertical()
                 .flex_1()
                 .w(px(24.))
@@ -171,7 +182,7 @@ impl RenderOnce for Slider {
                 .h_full()
                 .left(relative(from))
                 .right(relative(1. - to))
-                .bg(t::AC)
+                .bg(if self.disabled { t::T3 } else { t::AC })
                 .map(|f| match (self.bipolar, p < 0.5) {
                     (false, _) => f.rounded_full(),
                     (true, true) => f.rounded_l_full(),
@@ -187,7 +198,7 @@ impl RenderOnce for Slider {
                 .absolute()
                 .left(relative(p))
                 .rounded_full()
-                .bg(t::T1)
+                .bg(if self.disabled { t::T3 } else { t::T1 })
                 .map(|th| {
                     if dragging {
                         th.size(px(12.)).top(px(-4.5)).ml(px(-6.))
@@ -196,7 +207,7 @@ impl RenderOnce for Slider {
                     }
                 })
                 .shadow(thumb_shadow(ring))
-                .when(!dragging, |th| {
+                .when(!dragging && !self.disabled, |th| {
                     th.group_hover(group.clone(), |s| {
                         s.size(px(12.))
                             .top(px(-4.5))
@@ -204,31 +215,35 @@ impl RenderOnce for Slider {
                             .shadow(thumb_shadow(Some(t::alpha(t::ON_AC, 0.08))))
                     })
                 });
-            BaseSlider::new(&self.state).w_full().h(px(14.)).child(
-                track.size_full().items_center().child(
-                    SliderIndicator::new(&self.state)
-                        .relative()
-                        .w_full()
-                        .h(px(3.))
-                        .rounded_full()
-                        .bg(t::R1)
-                        .shadow(vec![shadow(t::alpha(t::ON_AC, 0.03), 0., 0., 1., true)])
-                        .group_hover(group.clone(), |s| s.bg(t::LN))
-                        .when(self.bipolar, |s| {
-                            s.child(
-                                div()
-                                    .absolute()
-                                    .left(relative(0.5))
-                                    .top(px(-4.5))
-                                    .w(px(1.))
-                                    .h(px(12.))
-                                    .bg(t::T3),
-                            )
-                        })
-                        .child(fill)
-                        .child(thumb),
-                ),
-            )
+            BaseSlider::new(&self.state)
+                .disabled(self.disabled)
+                .w_full()
+                .h(px(14.))
+                .child(
+                    track.size_full().items_center().child(
+                        SliderIndicator::new(&self.state)
+                            .relative()
+                            .w_full()
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(t::R1)
+                            .shadow(vec![shadow(t::alpha(t::ON_AC, 0.03), 0., 0., 1., true)])
+                            .group_hover(group.clone(), |s| s.bg(t::LN))
+                            .when(self.bipolar, |s| {
+                                s.child(
+                                    div()
+                                        .absolute()
+                                        .left(relative(0.5))
+                                        .top(px(-4.5))
+                                        .w(px(1.))
+                                        .h(px(12.))
+                                        .bg(t::T3),
+                                )
+                            })
+                            .child(fill)
+                            .child(thumb),
+                    ),
+                )
         };
 
         let header = (self.label.is_some() || self.readout.is_some()).then(|| {

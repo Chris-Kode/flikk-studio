@@ -160,6 +160,13 @@ changes where the edit does (an intro up to the first cut, a lift on the \
 reveal). Describe genre, mood, instruments and tempo, never an artist or a \
 song. After placing music under speech, duck it (`set_ducking`).
 
+Cleaning up speech: `clean_voice` (audio group) has a model take noise, hum \
+and room away from voices. Reach for it on interviews, talking heads and \
+podcasts recorded somewhere noisy, or when the user asks for cleaner sound. \
+It takes music and sound effects away too, so keep it to speech. Around 80 \
+leaves some of the room in and sounds natural; 100 can sound processed. For \
+steady hiss alone, the lighter Noise Reduction effect is enough.
+
 Fixing what someone said: `replace_words` (generate group) has a misspoken \
 or missing word said again in the speaker's own voice and cut in where the \
 old words were; it costs credits like a voiceover. Use it only when the user \

@@ -122,6 +122,9 @@ pub fn clip_brief(project: &Project, clip: &Clip) -> Value {
     if !clip.audio.effects.is_empty() {
         v["audio_effects"] = json!(clip.audio.effects.len());
     }
+    if let Some(amount) = clip.audio.voice_cleanup.and_then(|c| c.heard()) {
+        v["clean_voice"] = json!((amount * 100.0).round());
+    }
     v
 }
 

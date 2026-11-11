@@ -1406,6 +1406,21 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "clean_voice",
+            Some(Audio),
+            "Propose Clean voice on clips, or on every clip of a track: a speech model takes noise, hum and room away from voices. It takes music and sound effects away too, so keep it to speech. `amount` (0–100) mixes the cleaned sound with the recording; changing it later is instant.",
+            object(
+                json!({
+                    "clips": strings("Clip ids"),
+                    "track": string("Track name or id: every clip with sound on it"),
+                    "amount": number("0–100 (default: the clip's, else 80)"),
+                    "on": boolean("false turns it off (default true)"),
+                    "reason": reason()
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "set_audio_effects",
             Some(Audio),
             "Propose a clip's (or a track's) whole audio effect chain, in order. Give `id` on an item to keep an existing effect.",

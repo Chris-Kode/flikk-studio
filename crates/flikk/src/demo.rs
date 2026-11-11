@@ -10,7 +10,9 @@
 //! media (see [`compose`]); `FLIKK_DEMO_PERSON=<file>` a person mask
 //! on that file (see [`person`]); `FLIKK_DEMO_STABILIZE=<seconds>` a
 //! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
-//! a video waiting on the user with its blockout (see [`shot`]).
+//! a video waiting on the user with its blockout (see [`shot`]);
+//! `FLIKK_DEMO_VOICE=on|making` Clean voice on a dialogue clip (see
+//! [`voice`]).
 
 mod compose;
 mod depth;
@@ -20,6 +22,7 @@ mod person;
 pub mod shot;
 pub mod speed;
 mod stabilize;
+mod voice;
 
 use crate::state::EditorState;
 use engines::{FakeAnalysis, FakeMedia};
@@ -146,6 +149,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     stabilize::seed(state);
     person::seed(state);
     depth::seed(state);
+    voice::seed(state);
     audio_demo_playback(state, cx);
     cx.notify();
 }

@@ -403,23 +403,72 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 * **Audio effects** (`flikk-core/src/audiofx.rs`, `audiofx/dsp.rs`) run in the
   preview mixer and map to FFmpeg filters in `flikk-deliver/src/audio_fx.rs`,
   table by table, so preview and export match.
-* **Sound cleaned at its source** (`flikk-core/src/cleanup.rs`): Noise
-  Reduction is not live. Its `afftdn` runs once per source stream and
-  setting over the whole stream, decoded as the mixer hears it (stereo,
-  48 kHz), its 25 ms block delay taken out, into 24-bit FLAC under
-  `cache/denoised/` (`LocalCleanup` in `flikk-analysis/src/cleanup.rs`,
-  behind `CleanupService`, one worker thread, the newest asked first). The
-  preview mixer plays that copy in place of the recording once it is made,
-  and the render reads the same file, making it first (`queue::clean_sound`),
-  so both play the same samples. It so works on the recording, before the
-  retime and the other effects wherever it sits in a stack, the clip's
-  settings then the track's, on each clip of the track. Until its copy is
-  made a clip plays as recorded. Measured with a verbatim copy of the mixer
-  run offline against a WAV export, on 17 s of synthetic speech (FFmpeg's
-  flite voice) under pink noise rising and falling every 7 s and a 120 Hz
-  hum, as AAC: the difference was 0 (bit-identical) for Noise Reduction on
-  the clip or on its track, −108 dB under the signal with an equalizer after
-  it, −119 dB trimmed by 3 s with −4 dB gain and 30 dB of reduction.
+* **Sound cleaned at its source** (`flikk-core/src/cleanup.rs`): Clean
+  voice and Noise Reduction are not live. Each runs once per source
+  stream (and setting, and model) over the whole stream, decoded as the
+  mixer hears it (stereo, 48 kHz), into 24-bit FLAC in the cache
+  (`LocalCleanup` in `flikk-analysis/src/cleanup.rs`, behind
+  `CleanupService`, one worker thread, the newest asked first; a failure
+  is tried again after 30 s). The preview mixer plays those copies once
+  they are made, and the render reads the same files, making them first
+  (`queue::clean_sound`, handed to the graph as `GraphSpec::copies`), so
+  both play the same samples. What a clip plays, before its retime and
+  other effects:
+
+  ```text
+  base   = the recording, or its Noise Reduction copy (cache/denoised/)
+  played = base, or with Clean voice on
+           (1 − amount)·base + amount·cleaned recording (cache/clean-voice/)
+  ```
+
+  The mixer mixes in `cleanup::Blend`, the graph with `amerge` and `pan`,
+  both at `cleanup::gains` (the amount to 1/10 000), so changing the
+  amount needs no new copy. Noise Reduction so works on the recording,
+  before the retime and the other effects wherever it sits in a stack, the
+  clip's settings then the track's, on each clip of the track; its
+  `afftdn` has its 25 ms block delay taken out. Clean voice is
+  DeepFilterNet 3 (§2, `flikk-models/src/enhancement/`), run on each
+  channel, once for a mono source. Until a copy is made a clip plays as
+  recorded (without Clean voice, or without Noise Reduction); a voice
+  already playing keeps what it opened until playback restarts.
+  * **Where it is set:** `ClipAudio::voice_cleanup` (on, and the amount
+    0..1, 0.8 when first turned on; left out of `.flikk` files until set),
+    by `Command::SetVoiceCleanup` on any clips with sound: the inspector's
+    Audio tab (a Clean voice group above the effects: its switch, a spinner
+    and percentage while the copy is made, Amount in %), the mixer (a row
+    per strip above the inserts, for every clip on the track: on when all
+    are), and the agent's `clean_voice` (audio group: `clips` or `track`,
+    `amount` 0–100, `on`), with a line in the prompt on when to reach for it
+    and that it takes music away too. The switches are disabled while the
+    model is not downloaded. Loudness and the cut planner read the
+    recording, and the control is offered on any clip with sound, music
+    included.
+  * **Measured** with a verbatim copy of the mixer run offline against a
+    24-bit WAV export of the same project (the difference, under the
+    signal's level):
+
+    | Material | Setting | Difference |
+    | --- | --- | --- |
+    | DeepFilterNet's `noisy_snr0.wav` (48 kHz speech at 0 dB SNR, WAV) | Clean voice 100 | 0 (bit-identical) |
+    | same | Clean voice 80, and 35 | −115, −116 dB |
+    | same | Clean voice 80 and Noise Reduction | −116 dB |
+    | same | Clean voice 80, trimmed 2 s, −3 dB gain, an equalizer after it | −107 dB |
+    | 17 s of FFmpeg's flite voice under pink noise rising and falling every 7 s and a 120 Hz hum, AAC | Noise Reduction on the clip, on its track | 0, 0 |
+    | same | Noise Reduction then an equalizer; trimmed 3 s, −4 dB, 30 dB of reduction | −108, −119 dB |
+    | same | Clean voice 100; 80 | 0; −61 dB |
+
+    The AAC recording itself differs between a seeked and an unseeked
+    decode (§13), which the 20 % of it left in at 80 carries. Under a speed
+    change the stretches differ with or without cleaning, so the cleaning
+    was checked instead: at 1.25× the noise before the speech fell from
+    −46.4 dBFS to −69.1 in the preview and −69.3 in the export.
+    Re-opening finds the copies by fingerprint, stream and model; a second
+    run used them without making them again. On the flite material Clean
+    voice lowered the noise from −42.9 to −64.7 dBFS but also the
+    synthetic speech, by 5–8 dB (SI-SDR 26.7 dB before, 12.6 after);
+    started 5 s in, or 12 dB quieter, the same file came out within 0.3 dB
+    of the speech's level, so how a recording opens can set how hard the
+    model works on all of it.
 
 ## 6. Media and playback
 
@@ -1858,6 +1907,7 @@ see:
 | `FLIKK_DEMO_SPEED` | `1` | The selected clip ramped (Hero) and blending, its Speed tab open |
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
+| `FLIKK_DEMO_VOICE` | `on`, `making` | Clean voice at 80 on the first dialogue clip, selected, in the Audio workspace, its copy made or 42 % made (the switch is enabled with the model in `FLIKK_HOME/models`) |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
@@ -1890,6 +1940,7 @@ there.
 | C1–C3, C6 | `flikk-core/src/captions.rs`, caption tracks, `CaptionStyle`, `ui/caption_style*`, `flikk-deliver` SRT/ASS, `ui/lettering.rs` |
 | K1 grade | `flikk-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
+| Clean voice, Noise Reduction's copies | `flikk-core/src/cleanup.rs`, `Command::SetVoiceCleanup`, `flikk-models/src/enhancement/`, `flikk-analysis/src/cleanup.rs`, `ui/viewer/audio.rs`, `flikk-deliver/src/graph.rs`, `queue.rs`, `ui/inspector/audio_fx.rs`, `ui/mixer.rs`, `tools/edit.rs` (`clean_voice`) |
 | Fit music to length | `flikk-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
 | D1 render | `flikk-deliver`, `ui/deliver.rs`; hardware encoders `flikk-deliver/src/hw.rs` |
 | Render cache | `flikk/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `flikk-store/src/render_cache.rs` |
@@ -1909,7 +1960,7 @@ there.
 * No GPU video surface: the viewer paints read-back frames as images.
   Windows and macOS builds haven't been run here.
 * P1/P2 PRD items not built: nested sequences, a music playlist UI (the
-  `SetPlaylist` command and agent tool exist), voice cleanup, voice input.
+  `SetPlaylist` command and agent tool exist), voice input.
 * Mouse and keyboard interactions (drags, drops, context menus, shortcuts)
   were checked by code review and screenshots of seeded states only.
 * Blockouts: only the agent's `generate_video` takes one; the media pool's
@@ -1926,13 +1977,24 @@ there.
   checked by code review only, as it needs an image provider's key. In a
   debug build the scene is drawn coarse, since drawing is some twenty
   times slower unoptimized.
-* Preview vs export: the limiter and time-stretch differ slightly in shape.
-  An AAC recording decodes a little differently after a seek (the bands
-  the decoder fills with generated noise, it appears), and the preview
-  always seeks:
-  on noisy AAC the two differed by up to −40 dBFS in places (−49 dB under
-  the signal overall), and not at all on lossless sources or cleaned
-  copies, which are FLAC.
+* Preview vs export: the limiter and time-stretch differ slightly in shape;
+  a stretched clip sounds alike in both but does not null (at 1.25× the
+  difference was as loud as the signal). An AAC recording decodes a little
+  differently after a seek (the bands the decoder fills with generated
+  noise, it appears), and the preview always seeks: on noisy AAC the two
+  differed by up to −40 dBFS in places (−49 dB under the signal overall),
+  and not at all on lossless sources or cleaned copies, which are FLAC.
+* Clean voice was measured on the authors' sample and on synthetic speech
+  (§5), and listened to by no one: how it treats real interviews, rooms
+  with echo, laughter, and music under speech is unheard. It takes music
+  and effects away with the noise, and is offered on any clip with sound:
+  it is not limited to where analysis heard speech, nor bypassed over
+  music. A copy takes about 5 MB a minute of mono sound and 6 MB of
+  stereo, and runs to its end once started, even when its media leaves
+  the project. A voice already playing when its copy lands keeps playing
+  as recorded until playback restarts. Its model is in `Task::ALL`, so
+  Settings → Models lists it; making it part of the first-run download is
+  the first-run setup's (#53).
 * The FX code editor has no syntax highlighting (gpui-kit's `syntect`
   feature is not vendored). A shader that never returns can stall the GPU.
 * A program an external agent proposes is usable by its later connections

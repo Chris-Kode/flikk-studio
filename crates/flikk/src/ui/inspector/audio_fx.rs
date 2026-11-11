@@ -1,17 +1,19 @@
 //! A clip's sound for the inspector: volume with its keyframe lane at the
-//! playhead (volume automation), and its effect stack with parameters.
-//! The inspector embeds it and sets the clip each render.
+//! playhead (volume automation), Clean voice with its amount (and how far
+//! its cleaned copy is made), and its effect stack with parameters. The
+//! inspector embeds it and sets the clip each render.
 
 use super::{group, row};
 use crate::state::EditorState;
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Keyframe, KeyframeNav, NumberField, PopupMenuItem,
-    ScrubLabel, SectionHeader, Switch, h_flex, v_flex,
+    ScrubLabel, SectionHeader, Spinner, Switch, Tooltip, h_flex, v_flex,
 };
 use crate::ui::mixer::controls::{self, ControlHost, Controls, Ctl, Range, Target};
 use crate::ui::mixer::stack;
 use flikk_core::audiofx::AudioFx;
+use flikk_core::cleanup::{Progress, VoiceCleanup};
 use flikk_core::command::Command;
 use flikk_core::model::{Clip, Property};
 use flikk_core::{ClipId, EffectId, Time};
@@ -24,11 +26,19 @@ const VOLUME: Range = Range {
     max: 24.,
     log: false,
 };
+const AMOUNT: Range = Range {
+    min: 0.,
+    max: 100.,
+    log: false,
+};
+/// How often the progress of a cleaned copy is read while it is made.
+const PROGRESS_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// What can be folded away.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Fold {
     Clip,
+    Voice,
     Effects,
     Effect(EffectId),
 }
@@ -38,6 +48,8 @@ pub struct ClipAudioFx {
     controls: Controls,
     clip: Option<ClipId>,
     folded: HashSet<Fold>,
+    /// A redraw is due to show a cleaned copy's progress.
+    polling: bool,
     _observe: Subscription,
 }
 
@@ -59,6 +71,7 @@ impl ClipAudioFx {
             controls: Controls::default(),
             clip: None,
             folded: HashSet::new(),
+            polling: false,
             _observe,
         }
     }
@@ -194,6 +207,83 @@ impl ClipAudioFx {
             NumberField::new(&field).keyed(keyed).unit("dB"),
             Some(nav.into_any_element()),
         )
+    }
+
+    /// Clean voice: its switch (disabled without its model), how far the
+    /// cleaned copy is while it is made, and the amount while on.
+    fn voice_group(&mut self, clip: &Clip, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let target = Target::Clip(clip.id);
+        let (ready, progress) = {
+            let state = self.state.read(cx);
+            (
+                controls::voice_ready(state),
+                controls::voice_progress(state, target),
+            )
+        };
+        let voice = clip.audio.voice_cleanup.unwrap_or(VoiceCleanup {
+            enabled: false,
+            amount: VoiceCleanup::DEFAULT_AMOUNT,
+        });
+        if matches!(progress, Some(Progress::Making(_))) && !self.polling {
+            self.polling = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PROGRESS_POLL).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.polling = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        let status = match &progress {
+            Some(Progress::Making(p)) => Some(
+                h_flex()
+                    .gap(px(4.))
+                    .child(Spinner::new().size(px(12.)))
+                    .child(
+                        div()
+                            .font_family(t::mono())
+                            .text_size(px(10.))
+                            .text_color(t::T3)
+                            .child(format!("{:.0}%", p * 100.)),
+                    )
+                    .into_any_element(),
+            ),
+            Some(Progress::Failed(why) | Progress::Unavailable(why)) => Some(
+                div()
+                    .id("clean-voice-failed")
+                    .child(
+                        Icon::new(IconName::CircleAlert)
+                            .size(px(14.))
+                            .color(t::WARN),
+                    )
+                    .tooltip(Tooltip::text(why.clone()))
+                    .into_any_element(),
+            ),
+            Some(Progress::Made(_)) | None => None,
+        };
+        let state = self.state.clone();
+        let switch = Switch::new("clean-voice-on")
+            .checked(voice.enabled)
+            .disabled(!ready)
+            .on_click(move |on: &bool, _, cx| controls::set_voice(&state, target, *on, cx));
+        let header = self
+            .header("clean-voice", "Clean voice", Fold::Voice, cx)
+            .when_some(status, |h, status| h.child(status))
+            .child(switch);
+        let rows = if voice.enabled && self.is_open(Fold::Voice) {
+            let ctl = Ctl::CleanVoice(target);
+            let amount = voice.amount * 100.;
+            let field = controls::field(self, ctl.clone(), amount, AMOUNT, 0, window, cx);
+            let state = self.state.clone();
+            let label = ScrubLabel::new(&field, "Amount").on_reset(move |_, cx| {
+                controls::commit(&state, &ctl, VoiceCleanup::DEFAULT_AMOUNT * 100., cx)
+            });
+            vec![row(label, NumberField::new(&field).unit("%"), None)]
+        } else {
+            Vec::new()
+        };
+        group(header, rows)
     }
 
     /// One effect: its header (fold, name, enable, menu), then its
@@ -345,11 +435,13 @@ impl Render for ClipAudioFx {
                 .child(add),
             effects,
         );
+        let voice = self.voice_group(&clip, window, cx);
         v_flex()
             .child(group(
                 self.header("clip-volume", "Clip", Fold::Clip, cx),
                 volume,
             ))
+            .child(voice)
             .child(stack::drop_target(
                 div().id("clip-fx-drop").child(effects),
                 &self.state,

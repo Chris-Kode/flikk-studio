@@ -1,16 +1,19 @@
 //! Controls for the mixer and the clip effect stack. Each commits once as a
 //! `Command` (faders and pan as `SetTrackMix`, clip volume as `SetGain` or a
 //! volume keyframe at the playhead, effect parameters as `SetTrackMix` or
-//! `SetAudioEffects`): a slider on release, its readout following the drag;
+//! `SetAudioEffects`, Clean voice as `SetVoiceCleanup` on the clip or every
+//! clip of the track): a slider on release, its readout following the drag;
 //! a number field when a scrub is released or a typed value entered.
 
 use crate::state::EditorState;
 use crate::ui::kit::{NumberFieldEvent, NumberFieldState};
 use flikk_core::audiofx::AudioFx;
+use flikk_core::cleanup::{self, Progress, Treatment, VoiceCleanup};
 use flikk_core::command::Command;
 use flikk_core::fx::ParamKind;
 use flikk_core::model::{Clip, Project, Property};
 use flikk_core::{ClipId, EffectId, Time, TrackId};
+use flikk_models::Task as ModelTask;
 use gpui_kit::base::slider::{SliderEvent, SliderScale, SliderState};
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +31,8 @@ pub enum Ctl {
     Pan(TrackId),
     ClipVolume(ClipId),
     Param(Target, EffectId, String),
+    /// Clean voice's amount, 0..100.
+    CleanVoice(Target),
 }
 
 /// Range of a control in model units, and whether a slider moves on a log
@@ -250,8 +255,109 @@ fn commands(project: &Project, playhead: Time, ctl: &Ctl, v: f32) -> Vec<Command
             };
             edit_effects(project, *target, set)
         }
+        Ctl::CleanVoice(target) => {
+            let clips = voice_clips(project, *target);
+            (!clips.is_empty()).then(|| Command::SetVoiceCleanup {
+                clips: clips.iter().map(|c| c.id).collect(),
+                cleanup: VoiceCleanup::on(v / 100.),
+            })
+        }
     };
     command.into_iter().collect()
+}
+
+/// The clips Clean voice works on for `target`: the clip, or every clip
+/// of the track that has sound.
+pub fn voice_clips(project: &Project, target: Target) -> Vec<&Clip> {
+    let tl = &project.timeline;
+    let clips: Vec<&Clip> = match target {
+        Target::Clip(id) => tl.clip(id).map(|(_, c)| c).into_iter().collect(),
+        Target::Track(id) => tl
+            .track(id)
+            .map(|t| t.clips.iter().collect())
+            .unwrap_or_default(),
+    };
+    clips
+        .into_iter()
+        .filter(|c| {
+            c.media()
+                .and_then(|m| project.media(m))
+                .is_some_and(cleanup::has_sound)
+        })
+        .collect()
+}
+
+/// Clean voice as `target` has it: the first of its clips with a setting,
+/// and whether every one of them has it on.
+pub fn voice_of(project: &Project, target: Target) -> (VoiceCleanup, bool) {
+    let clips = voice_clips(project, target);
+    let first = clips
+        .iter()
+        .find_map(|c| c.audio.voice_cleanup)
+        .unwrap_or(VoiceCleanup {
+            enabled: false,
+            amount: VoiceCleanup::DEFAULT_AMOUNT,
+        });
+    let on = !clips.is_empty()
+        && clips
+            .iter()
+            .all(|c| c.audio.voice_cleanup.is_some_and(|v| v.enabled));
+    (first, on)
+}
+
+/// Turn Clean voice on or off for `target`, keeping its amount.
+pub fn set_voice(state: &Entity<EditorState>, target: Target, on: bool, cx: &mut App) {
+    let command = {
+        let project = state.read(cx).bus.project();
+        let clips: Vec<ClipId> = voice_clips(project, target).iter().map(|c| c.id).collect();
+        let (current, _) = voice_of(project, target);
+        (!clips.is_empty()).then_some(Command::SetVoiceCleanup {
+            clips,
+            cleanup: VoiceCleanup {
+                enabled: on,
+                amount: current.amount,
+            },
+        })
+    };
+    if let Some(command) = command {
+        state.update(cx, |s, cx| {
+            s.execute(command, cx);
+        });
+    }
+}
+
+/// Whether Clean voice can run here: in this build, wired, and with its
+/// model downloaded. Otherwise its controls are disabled.
+pub fn voice_ready(state: &EditorState) -> bool {
+    state.services.cleanup.is_some()
+        && flikk_analysis::LocalAnalysis::model_tasks().contains(&ModelTask::Enhancement)
+        && ModelTask::Enhancement.model().is_downloaded()
+}
+
+/// How far the cleaned copies of `target`'s clips are, starting those not
+/// made: `None` once all are made (or Clean voice is off), else the least
+/// made one, or the first failure.
+pub fn voice_progress(state: &EditorState, target: Target) -> Option<Progress> {
+    let service = state.services.cleanup.as_ref()?;
+    let project = state.bus.project();
+    let mut least: Option<Progress> = None;
+    for clip in voice_clips(project, target) {
+        if !clip.audio.voice_cleanup.is_some_and(|v| v.enabled) {
+            continue;
+        }
+        let Some(item) = clip.media().and_then(|m| project.media(m)) else {
+            continue;
+        };
+        let stream = cleanup::stream_of(clip, item);
+        let progress = service.request(item, stream, &Treatment::CleanVoice);
+        least = match (least, progress) {
+            (kept, Progress::Made(_)) => kept,
+            (Some(failed @ (Progress::Failed(_) | Progress::Unavailable(_))), _) => Some(failed),
+            (Some(Progress::Making(a)), Progress::Making(b)) => Some(Progress::Making(a.min(b))),
+            (_, other) => Some(other),
+        };
+    }
+    least
 }
 
 /// `SetTrackMix` or `SetAudioEffects` with `f` applied to the stack.
