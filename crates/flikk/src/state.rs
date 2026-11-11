@@ -129,8 +129,8 @@ pub struct EditorState {
     pub notices: Notices,
     /// Media whose source file is missing.
     offline: OfflineMedia,
-    /// Which of `model_tasks` had their model, and `models.finished()`, when
-    /// the notices were last brought up to date.
+    /// Which of the required models were on disk, and `models.finished()`,
+    /// when last looked at.
     models_seen: (Vec<bool>, u64),
     _models_poll: Task<()>,
     _offline_poll: Task<()>,
@@ -192,10 +192,6 @@ impl EditorState {
             persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
         ));
         let model_tasks = flikk_analysis::LocalAnalysis::model_tasks();
-        let downloaded = model_tasks
-            .iter()
-            .map(|t| t.model().is_downloaded())
-            .collect();
         let mut this = Self {
             bus,
             document,
@@ -227,7 +223,7 @@ impl EditorState {
             _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
-            models_seen: (downloaded, 0),
+            models_seen: (Vec::new(), 0),
             model_tasks,
             models: flikk_models::Downloads::default(),
             setup: setup::Setup::new(),
@@ -254,7 +250,7 @@ impl EditorState {
         this.configure_analysis();
         this.analyze_sounds(cx);
         this.load_keys(cx);
-        this.refresh_model_notices();
+        this.refresh_key_notice();
         this.check_offline();
         this.load_agent_memory();
         this.load_presets();

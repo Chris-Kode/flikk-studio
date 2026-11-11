@@ -181,8 +181,9 @@ impl IntegrationsTab {
         self.busy = busy;
     }
 
-    /// Transcription on this computer: its size, and where its model
-    /// stands.
+    /// Transcription on this computer: its size, where its model stands,
+    /// and Delete for the other size when it is on disk: the only model
+    /// the editor can do without.
     fn render_transcription_size(&self, cx: &App) -> impl IntoElement {
         let model = ModelTask::Transcription.model();
         let selected = transcription_sizes()
@@ -190,6 +191,17 @@ impl IntegrationsTab {
             .unwrap_or(0);
         let state = self.state.clone();
         let status = self.state.read(cx).models.status(model);
+        let other = transcription_sizes()
+            .find(|(_, m)| m.id != model.id && m.is_downloaded())
+            .map(|(label, other)| {
+                let state = self.state.clone();
+                Button::new("transcription-delete-other")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Trash)
+                    .tooltip(format!("Delete {}", label.to_lowercase()))
+                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.delete_model(other, cx)))
+            });
         h_flex()
             .gap(px(10.))
             .child(
@@ -212,6 +224,7 @@ impl IntegrationsTab {
                 status,
                 cx,
             ))
+            .children(other)
     }
 
     /// The page is shown again: drop a replacement left half typed and

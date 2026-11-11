@@ -297,33 +297,6 @@ impl LocalAnalysis {
         tasks
     }
 
-    /// The tasks whose models must be downloaded before an item can be
-    /// analyzed with `steps`. When a provider transcribes (`online`), the
-    /// ones it does ([`Self::online_tasks`]) are not among them.
-    pub fn required_tasks(steps: &AnalysisSteps, online: bool) -> Vec<ModelTask> {
-        Self::model_tasks()
-            .into_iter()
-            .filter(|task| !(online && Self::online_tasks().contains(task)))
-            .filter(|task| match task {
-                // Voice activity runs with every item that has audio.
-                ModelTask::VoiceActivity => true,
-                ModelTask::Transcription | ModelTask::WordTiming => steps.transcript,
-                ModelTask::Speakers => steps.speakers(),
-                ModelTask::SoundTagging => steps.sounds,
-                ModelTask::Beats => steps.beats(),
-                ModelTask::SoundSearch => steps.sound_search(),
-                // Subject masks, not analysis.
-                ModelTask::Segmentation => false,
-                // Optical flow slow motion, not analysis.
-                ModelTask::FrameInterpolation => false,
-                // Person masks, not analysis.
-                ModelTask::Matting => false,
-                // Depth maps, not analysis.
-                ModelTask::Depth => false,
-            })
-            .collect()
-    }
-
     /// The tasks a provider does in place of a local model when it
     /// transcribes.
     pub fn online_tasks() -> [ModelTask; 4] {

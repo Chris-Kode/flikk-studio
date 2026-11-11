@@ -132,7 +132,7 @@ impl EditorState {
                         status.key = Some(source);
                     }
                 }
-                this.refresh_model_notices();
+                this.refresh_key_notice();
                 cx.notify();
             });
         })
@@ -283,7 +283,7 @@ impl EditorState {
         if self.voice_provider().as_deref() == Some(provider.id) {
             self.invalidate_voices(cx);
         }
-        self.refresh_model_notices();
+        self.refresh_key_notice();
         cx.notify();
     }
 
@@ -328,7 +328,7 @@ impl EditorState {
             self.invalidate_voices(cx);
         }
         self.configure_analysis();
-        self.refresh_model_notices();
+        self.refresh_key_notice();
         cx.notify();
     }
 
@@ -357,15 +357,6 @@ impl EditorState {
         self.cloud
             .picked(Capability::Transcription)
             .map(|(provider, _)| provider)
-    }
-
-    /// The tasks whose models must be on disk before media can be
-    /// analyzed: those a provider transcribing doesn't do.
-    pub fn required_tasks(&self) -> Vec<flikk_models::Task> {
-        flikk_analysis::LocalAnalysis::required_tasks(
-            &AnalysisSteps::default(),
-            self.online_transcription().is_some(),
-        )
     }
 
     /// A notice while a capability is set to a provider with no key.
@@ -727,7 +718,7 @@ impl EditorState {
             let analyze = match capability {
                 // An upscaled video is new footage to the agent: its
                 // results are keyed by the file.
-                Capability::Video | Capability::Upscale => self.models_ready(),
+                Capability::Video | Capability::Upscale => self.analysis_ready(),
                 Capability::Voiceover => true,
                 _ => false,
             };

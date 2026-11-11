@@ -569,11 +569,11 @@ Analysis starts only when the user asks, from an item's "⋯" menu in the
 media pool (or its right-click menu): "Analyze", or "Analyze again" once it
 has results, which runs every step anew on the models picked now. The
 exception is the library's sounds, analyzed on their own without speech or
-shots, on local models only, so that it costs nothing. "Analyze" is
-enabled only when every analysis task can run: each has its model
-downloaded, or the transcription provider (with its key) does it in place
-of the speech models. It is disabled otherwise, and while the item is
-queued or analyzing; images are not analyzed. Every step
+shots, on local models only, so that it costs nothing. The models are on
+disk before a project opens (see Models), so "Analyze" is disabled only
+while a provider picked to transcribe has no key (`analysis_ready`; the
+key's own notice says so), and while the item is queued or analyzing;
+images are not analyzed. Every step
 (`AnalysisSteps`: transcript, speakers, sounds and music, beats, sound
 search, shot changes) is always on and cannot be turned off: each runs
 whenever the model for its task is downloaded, and one whose model is
@@ -646,11 +646,13 @@ sends the whole file again starts it over); one that comes out the wrong
 size is deleted. A part is locked while it is written, so a cancelled
 download still winding down, or another copy of the app, is done with it
 first. `LocalAnalysis::model_tasks` says which tasks a build
-runs; "Analyze" stays disabled until each has its picked model downloaded.
-A runner whose files are missing fails ("… is not downloaded") and its step
-is left out. While a model is missing, the top bar's notices button lists
-them; its notices (warnings and errors, such as a failed download or
-offline media) can be dismissed for the session.
+runs. A runner whose files are missing (deleted by hand) fails ("… is not
+downloaded") and its step is left out; nothing warns about a missing
+model, as the welcome page covers it. A model the editor needs can't be
+deleted there: only the transcription size not picked has Delete, and
+picking the other size downloads it at once. The top bar's notices
+(warnings such as offline media or a provider without its key) can be
+dismissed for the session.
 
 Cargo features of `flikk-analysis` (all default) gate the runners: `whisper`,
 `aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
@@ -661,9 +663,8 @@ Apple's frameworks) adds the MLX subject mask model and makes it the
 default; `flikk` turns it on with `metal` on macOS. mlx-sys builds
 MLX from source, so a macOS build needs CMake and Xcode's Metal compiler. Segmentation is listed under Settings → Models
 as "Subject masks" and matting as "Person masks", but neither is part of
-analysis: `required_tasks` never asks for them. Frame interpolation ("Optical flow", RIFE) is listed the same way;
-picking optical flow for a clip without it raises a notice that leads to
-Settings → Models, and slowed frames are blended meanwhile.
+analysis. Frame interpolation ("Optical flow", RIFE) is listed the same way;
+slowed frames are blended while its frames are made.
 `LocalInterpolation` makes flow frames on one thread of its own, the
 newest asked first, keeps the last 48 in memory and those with a short
 side up to 720 (the viewer's and the render cache's) as QOI in a disk
@@ -1809,7 +1810,7 @@ scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
 the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, and who does each capability on which
-model), Analysis (the steps), Models (download, pick and delete) and
+model), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
 models, the library (effects, presets, sounds and voices, their audio in

@@ -128,9 +128,6 @@ impl SpeedRamp {
                 },
                 cx,
             );
-            if interpolation == Some(Interpolation::OpticalFlow) {
-                s.optical_flow_picked(cx);
-            }
         });
     }
 }
