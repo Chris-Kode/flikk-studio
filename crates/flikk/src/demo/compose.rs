@@ -32,6 +32,8 @@ pub fn seed(state: &mut EditorState) {
             let mut bus = CommandBus::new(project);
             bus.set_permissions(state.settings.permissions.clone());
             state.bus = bus;
+            // Its media is there when the project opens: none of it is new.
+            state.mark_media_seen();
             state.preview = None;
             state.selection.clips.clear();
             state.playhead = Time::from_secs_f64(at);

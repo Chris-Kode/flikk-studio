@@ -107,14 +107,14 @@ pub fn generate_form() -> Option<String> {
 }
 
 /// `FLIKK_DEMO_SETUP=missing|downloading|failed`: the welcome page's
-/// setup list in that state, whatever is on disk. Needs no `FLIKK_DEMO`.
+/// setup list in that state, whatever is on disk; its Download, Cancel and
+/// Retry only pretend. Needs no `FLIKK_DEMO`.
 pub fn setup() -> Option<crate::state::SetupStatus> {
     use crate::state::SetupStatus;
     let every_file = || {
         flikk_models::Task::ALL
             .iter()
-            .flat_map(|t| t.model().files)
-            .map(|f| f.size)
+            .map(|t| crate::state::full_size(t.model()))
             .sum()
     };
     match std::env::var("FLIKK_DEMO_SETUP")
@@ -151,6 +151,8 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let chat = agent_history(&mut bus, &demo);
 
     state.bus = bus;
+    // Its media is there when the project opens: none of it is new.
+    state.mark_media_seen();
     state.seed_chat(chat);
     state.playhead = Time::from_secs_f64(2.5);
     state.selection.clips = vec![demo.ids.selected];
