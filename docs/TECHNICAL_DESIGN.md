@@ -629,7 +629,12 @@ while the set downloads; the agent CLIs found and their versions
 (`flikk_agent::backend::installed_version` runs `--version` off the UI
 thread; with neither, Install… and Check again); and FFmpeg and a browser,
 only when they are not found. After an update that adds a task, the list
-comes back with only its files to fetch. `FLIKK_DEMO_SETUP` seeds it.
+comes back with only its files to fetch. No project is created or opened
+while it shows, however it is asked for (`EditorState::projects_wait`,
+checked in `projects.rs`): the app opens on it whatever way it was
+started, and a `.flikk` file it was started for opens once the set is
+complete. New project, Open… and the drop zone are held meanwhile; the
+demo opens without the models. `FLIKK_DEMO_SETUP` seeds it.
 
 Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more

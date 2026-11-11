@@ -124,6 +124,9 @@ pub struct Flikk {
     /// The welcome page, shown at launch until a project is picked, and the
     /// project open underneath it.
     welcome: Option<(Entity<Welcome>, ProjectId)>,
+    /// The app was started for a project file while a model was missing:
+    /// it opens once the last one is on disk.
+    file_waiting: bool,
     /// Footage dropped on the welcome page, imported once the New project
     /// it started is open. Any other way of leaving the page, or of
     /// starting or opening a project, clears it.
@@ -140,21 +143,24 @@ impl Flikk {
         }
         let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
         // Every launch starts on the welcome page, unless the app was
-        // started for a file or a demo.
-        let welcome =
-            (!crate::demo::enabled() && !crate::persistence::launched_with_file()).then(|| {
-                let project = state.read(cx).bus.project().id;
-                (
-                    cx.new(|cx| Welcome::new(state.clone(), window, cx)),
-                    project,
-                )
-            });
+        // started for a file or a demo; and while a model is missing,
+        // whatever way it was started, with the file waiting behind it.
+        let waiting = state.read(cx).projects_wait();
+        let for_file = crate::persistence::launched_with_file();
+        let welcome = (waiting || (!crate::demo::enabled() && !for_file)).then(|| {
+            let project = state.read(cx).bus.project().id;
+            (
+                cx.new(|cx| Welcome::new(state.clone(), window, cx)),
+                project,
+            )
+        });
         let _welcome = welcome.as_ref().map(|(page, _)| {
             cx.subscribe_in(page, window, |this, _, ev: &WelcomeEvent, window, cx| {
                 match ev {
                     WelcomeEvent::Continue => {
                         this.welcome = None;
                         this.footage = None;
+                        this.file_waiting = false;
                     }
                     WelcomeEvent::Create(paths) => {
                         // Another dialog is up: New project won't open.
@@ -218,6 +224,7 @@ impl Flikk {
                 Some("library" | "code") => LeftTab::Effects,
                 _ => LeftTab::Media,
             },
+            file_waiting: for_file && waiting,
             welcome,
             footage: None,
             state,
@@ -227,11 +234,16 @@ impl Flikk {
     }
 
     /// Leave the welcome page once another project is open, importing the
-    /// footage it was started from. Footage is only still held here when
-    /// that project came from the New project dialog it opened, which
+    /// footage it was started from, or once the last model is on disk when
+    /// the app was started for a file. Footage is only still held here
+    /// when that project came from the New project dialog it opened, which
     /// already named it after a dropped folder.
     fn state_changed(&mut self, cx: &mut Context<Self>) {
         let project = self.state.read(cx).bus.project().id;
+        if self.file_waiting && !self.state.read(cx).projects_wait() {
+            self.file_waiting = false;
+            self.welcome = None;
+        }
         if self.welcome.as_ref().is_some_and(|(_, at)| *at != project) {
             self.welcome = None;
             if let Some(paths) = self.footage.take() {
