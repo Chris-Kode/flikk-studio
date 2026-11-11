@@ -622,7 +622,12 @@ Nothing downloads on its own. Settings → Models (the gear in the top bar, or
 cmd-,) lists each task with its model, picked there when the task has more
 than one (saved per user in the store), and downloads one or all of them,
 with progress and cancel, through `<file>.part`; a failed download stays
-there with Retry. `LocalAnalysis::model_tasks` says which tasks a build
+there with Retry. A part is kept when a download is cancelled or cut, and
+the next one asks the server for the rest (a range request; a server that
+sends the whole file again starts it over); one that comes out the wrong
+size is deleted. A part is locked while it is written, so a cancelled
+download still winding down, or another copy of the app, is done with it
+first. `LocalAnalysis::model_tasks` says which tasks a build
 runs; "Analyze" stays disabled until each has its picked model downloaded.
 A runner whose files are missing fails ("… is not downloaded") and its step
 is left out. While a model is missing, the top bar's notices button lists

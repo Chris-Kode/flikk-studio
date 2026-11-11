@@ -216,17 +216,19 @@ impl Model {
         self.files.iter().all(ModelFile::is_present)
     }
 
-    /// Bytes of the files not on disk yet, or not whole.
+    /// Bytes still to fetch: of the files not on disk yet, or not whole,
+    /// less what a download stopped part way through already holds.
     pub fn missing_bytes(&self) -> u64 {
         self.files
             .iter()
             .filter(|f| !f.is_present())
-            .map(|f| f.size)
+            .map(|f| f.size.saturating_sub(f.fetched()))
             .sum()
     }
 
-    /// Delete its files from `paths::models()`. Copies an environment
-    /// variable points at, and files another model also uses, stay.
+    /// Delete its files, and what a download left of them, from
+    /// `paths::models()`. Copies an environment variable points at, and
+    /// files another model also uses, stay.
     pub fn delete(&self) -> Result<()> {
         let shared = |file: &ModelFile| {
             Task::ALL
@@ -238,11 +240,13 @@ impl Model {
             if file.overridden().is_some() || shared(file) {
                 continue;
             }
-            match std::fs::remove_file(file.path()) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    bail!("could not delete {}: {e}", file.path().display())
+            for path in [file.path(), download::part_path(&file.path())] {
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        bail!("could not delete {}: {e}", path.display())
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -281,6 +285,15 @@ impl ModelFile {
         } else {
             path
         })
+    }
+
+    /// Bytes a download stopped part way through left in its part file,
+    /// to go on from. 0 for a copy the environment points at.
+    fn fetched(&self) -> u64 {
+        if self.overridden().is_some() {
+            return 0;
+        }
+        std::fs::metadata(download::part_path(&self.path())).map_or(0, |m| m.len())
     }
 
     /// On disk and whole. Cheap: no more than the file's metadata is read.
