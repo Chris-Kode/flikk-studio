@@ -296,6 +296,9 @@ impl LocalAnalysis {
         if cfg!(feature = "depth") {
             tasks.push(ModelTask::Depth);
         }
+        if cfg!(feature = "voice") {
+            tasks.push(ModelTask::Enhancement);
+        }
         tasks
     }
 
@@ -322,6 +325,8 @@ impl LocalAnalysis {
                 ModelTask::Matting => false,
                 // Depth maps, not analysis.
                 ModelTask::Depth => false,
+                // Clean voice, not analysis.
+                ModelTask::Enhancement => false,
             })
             .collect()
     }

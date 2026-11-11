@@ -3,8 +3,10 @@
 //! media engine as the preview mixer hears it (stereo, at
 //! [`cleanup::RATE`]), cleaned, and written as 24-bit FLAC under
 //! `paths::cache()` by the name [`Treatment::file`] gives it, through a
-//! temp file placed once whole. Noise Reduction is FFmpeg's `afftdn` on
-//! that stream, its block delay taken out.
+//! temp file placed once whole. Clean voice is the enhancement model
+//! picked (`flikk-models`), run on each channel (once for a mono source);
+//! Noise Reduction is FFmpeg's `afftdn` on that stream, its block delay
+//! taken out.
 //!
 //! Copies are made one at a time on a worker thread of their own, the
 //! newest asked for first. One that fails is not tried again for
@@ -16,6 +18,9 @@ use flikk_core::cleanup::{self, Denoise, Progress, Treatment};
 use flikk_core::model::MediaItem;
 use flikk_core::services::{CleanupService, MediaService, PcmStream, ServiceError, ServiceResult};
 use flikk_core::time::Time;
+use flikk_models::Task as ModelTask;
+#[cfg(feature = "voice")]
+use flikk_models::enhancement::{Enhancer, Pass};
 use flikk_os::backoff::Failures;
 use flikk_os::fs::{place_new, temp_sibling};
 use flikk_os::process::{ChildGuard, command, ffmpeg};
@@ -38,6 +43,9 @@ pub struct LocalCleanup {
 
 struct Shared {
     media: Arc<dyn MediaService>,
+    /// The enhancement model's runner, made on first use.
+    #[cfg(feature = "voice")]
+    enhancer: OnceLock<Box<dyn Enhancer>>,
     state: Mutex<State>,
     wake: Condvar,
     version: AtomicU64,
@@ -65,6 +73,8 @@ impl LocalCleanup {
     pub fn new(media: Arc<dyn MediaService>) -> Self {
         let shared = Arc::new(Shared {
             media,
+            #[cfg(feature = "voice")]
+            enhancer: OnceLock::new(),
             state: Mutex::default(),
             wake: Condvar::new(),
             version: AtomicU64::new(0),
@@ -89,7 +99,16 @@ fn file_of(item: &MediaItem, stream: u32, treatment: &Treatment) -> Result<PathB
         .ok_or_else(|| format!("{} is not fingerprinted yet", item.path.display()))?;
     let model = match treatment {
         Treatment::Denoise(_) => DENOISER,
-        Treatment::CleanVoice => return Err("Clean voice is not in this build".into()),
+        Treatment::CleanVoice if !cfg!(feature = "voice") => {
+            return Err("Clean voice is not in this build".into());
+        }
+        Treatment::CleanVoice => {
+            let model = ModelTask::Enhancement.model();
+            if !model.is_downloaded() {
+                return Err(format!("{} is not downloaded", model.name));
+            }
+            model.id
+        }
     };
     Ok(treatment.file(fingerprint, stream, model))
 }
@@ -116,10 +135,10 @@ impl Shared {
                 }
             };
             let never = AtomicBool::new(false);
-            let made = catch_unwind(AssertUnwindSafe(|| {
-                make(&*self.media, &job, &progress, &never)
-            }))
-            .unwrap_or_else(|panic| Err(ServiceError(panic_message("cleaning sound", &*panic))));
+            let made = catch_unwind(AssertUnwindSafe(|| make(&self, &job, &progress, &never)))
+                .unwrap_or_else(|panic| {
+                    Err(ServiceError(panic_message("cleaning sound", &*panic)))
+                });
             let mut state = lock(&self.state);
             state.making.remove(&job.file);
             match made {
@@ -183,7 +202,7 @@ impl CleanupService for LocalCleanup {
                 treatment: treatment.clone(),
                 file: file.clone(),
             };
-            make(&*self.shared.media, &job, progress, cancel)?;
+            make(&self.shared, &job, progress, cancel)?;
             self.shared.version.fetch_add(1, Ordering::Relaxed);
         }
         mark_used(&file);
@@ -199,7 +218,7 @@ impl CleanupService for LocalCleanup {
 /// Make `job`'s copy: decode, clean, encode into a temp file, then place
 /// it, unless one was placed meanwhile.
 fn make(
-    media: &dyn MediaService,
+    shared: &Shared,
     job: &Job,
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
@@ -209,7 +228,7 @@ fn make(
         std::fs::create_dir_all(dir).map_err(|e| fail("could not make the cache folder", &e))?;
     }
     let part = temp_sibling(&job.file);
-    let result = write(media, job, &part, progress, cancel);
+    let result = write(shared, job, &part, progress, cancel);
     let placed = result.and_then(|()| {
         place_new(&part, &job.file)
             .map(|_| ())
@@ -221,17 +240,19 @@ fn make(
 
 /// The stream decoded, cleaned and encoded into `part`.
 fn write(
-    media: &dyn MediaService,
+    shared: &Shared,
     job: &Job,
     part: &Path,
     progress: &dyn Fn(f32),
     cancel: &AtomicBool,
 ) -> ServiceResult<()> {
-    let filters = match &job.treatment {
-        Treatment::Denoise(settings) => denoise_filters(settings),
-        Treatment::CleanVoice => String::new(),
+    let (filters, mut clean) = match &job.treatment {
+        Treatment::Denoise(settings) => (denoise_filters(settings), Clean::Pass),
+        Treatment::CleanVoice => (String::new(), Clean::voice(shared, &job.item, job.stream)?),
     };
-    let mut source = media.audio(&job.item, job.stream, Time::ZERO, cleanup::RATE)?;
+    let mut source = shared
+        .media
+        .audio(&job.item, job.stream, Time::ZERO, cleanup::RATE)?;
     let mut encoder = Encoder::start(part, &filters)?;
     let total = job
         .item
@@ -248,13 +269,109 @@ fn write(
         if n == 0 {
             break;
         }
-        encoder.write(&block[..n])?;
+        encoder.write(&clean.push(&block[..n])?)?;
         done += n / 2;
         if total > 0.0 {
             progress((done as f64 / total).min(0.99) as f32);
         }
     }
+    encoder.write(&clean.finish()?)?;
     encoder.finish()
+}
+
+/// What cleans the stream in Rust, between decoding and encoding.
+enum Clean<'a> {
+    /// Nothing: FFmpeg's filters do it.
+    Pass,
+    /// A pass of the enhancement model per channel: one for both when the
+    /// source is mono.
+    #[cfg(feature = "voice")]
+    Voice(Vec<Box<dyn Pass + 'a>>),
+    #[cfg(not(feature = "voice"))]
+    #[allow(dead_code)]
+    Never(std::marker::PhantomData<&'a ()>),
+}
+
+impl<'a> Clean<'a> {
+    #[cfg(feature = "voice")]
+    fn voice(shared: &'a Shared, item: &MediaItem, stream: u32) -> ServiceResult<Self> {
+        let enhancer = shared
+            .enhancer
+            .get_or_init(|| flikk_models::enhancement::runner(ModelTask::Enhancement.model()));
+        let audio = item
+            .info
+            .as_ref()
+            .map(|i| i.audio.as_slice())
+            .unwrap_or(&[]);
+        let channels = audio
+            .iter()
+            .find(|a| a.index == stream)
+            .or_else(|| audio.get(stream as usize))
+            .map_or(2, |a| a.channels);
+        let passes = (0..channels.clamp(1, 2))
+            .map(|_| enhancer.start())
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| ServiceError(format!("{e:#}")))?;
+        Ok(Clean::Voice(passes))
+    }
+
+    #[cfg(not(feature = "voice"))]
+    fn voice(_: &'a Shared, _: &MediaItem, _: u32) -> ServiceResult<Self> {
+        Err(ServiceError("Clean voice is not in this build".into()))
+    }
+
+    /// Interleaved stereo in, cleaned interleaved stereo out (for a model,
+    /// late by what it holds back).
+    fn push(&mut self, stereo: &[f32]) -> ServiceResult<Vec<f32>> {
+        match self {
+            Clean::Pass => Ok(stereo.to_vec()),
+            #[cfg(feature = "voice")]
+            Clean::Voice(passes) => {
+                let mut outs = Vec::with_capacity(passes.len());
+                for (c, pass) in passes.iter_mut().enumerate() {
+                    let channel: Vec<f32> = stereo.iter().skip(c).step_by(2).copied().collect();
+                    outs.push(
+                        pass.push(&channel)
+                            .map_err(|e| ServiceError(format!("{e:#}")))?,
+                    );
+                }
+                Ok(interleave(&outs))
+            }
+            #[cfg(not(feature = "voice"))]
+            Clean::Never(_) => unreachable!(),
+        }
+    }
+
+    /// What is still owed once the stream has ended.
+    fn finish(self) -> ServiceResult<Vec<f32>> {
+        match self {
+            Clean::Pass => Ok(Vec::new()),
+            #[cfg(feature = "voice")]
+            Clean::Voice(passes) => {
+                let outs = passes
+                    .into_iter()
+                    .map(|p| p.finish())
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .map_err(|e| ServiceError(format!("{e:#}")))?;
+                Ok(interleave(&outs))
+            }
+            #[cfg(not(feature = "voice"))]
+            Clean::Never(_) => unreachable!(),
+        }
+    }
+}
+
+/// One channel or two as interleaved stereo: one is put on both sides.
+#[cfg(feature = "voice")]
+fn interleave(channels: &[Vec<f32>]) -> Vec<f32> {
+    let n = channels.iter().map(Vec::len).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let left = channels[0][i];
+        out.push(left);
+        out.push(channels.get(1).map_or(left, |r| r[i]));
+    }
+    out
 }
 
 /// Fill `out` as far as the stream goes; the samples read.

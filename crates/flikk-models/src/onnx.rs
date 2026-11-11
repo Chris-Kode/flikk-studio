@@ -36,6 +36,17 @@ pub fn session(model: &Path, what: &str) -> Result<Session> {
         .map_err(|e| anyhow!("could not load {what} {}: {e}", model.display()))
 }
 
+/// A session for a model held in memory, on the CPU; `what` names it in
+/// errors.
+#[cfg(feature = "enhance")]
+pub fn session_from_memory(model: &[u8], what: &str) -> Result<Session> {
+    builder()?
+        .with_execution_providers([cpu()])
+        .map_err(|e| anyhow!("{e}"))?
+        .commit_from_memory(model)
+        .map_err(|e| anyhow!("could not load {what}: {e}"))
+}
+
 /// A model on the GPU (Core ML, DirectML or WebGPU), with a session per set
 /// of free dimensions, the last [`KEPT`] used; on the CPU in other builds,
 /// and from the first time the GPU fails to load or run it. Check that what

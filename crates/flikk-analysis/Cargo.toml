@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people", "depth"]
+default = ["whisper", "aligner", "diarizer", "sounds", "subjects", "interpolation", "people", "depth", "voice"]
 # Local transcription with whisper.cpp; without it the transcript step is
 # reported as unavailable and only voice activity and shot changes run.
 whisper = ["flikk-models/whisper"]
@@ -29,6 +29,8 @@ people = ["flikk-models/matting"]
 # Depth maps for the depth effects and masks, by Depth Anything V2 Small;
 # without them depth effects leave the picture as it is.
 depth = ["flikk-models/depth"]
+# Clean voice, by DeepFilterNet 3; without it the control stays off.
+voice = ["flikk-models/enhance"]
 
 [dependencies]
 flikk-os.workspace = true

@@ -100,6 +100,7 @@ which the editor hands it (`AnalysisService::configure`).
 | Slow motion | Per clip: frame repeat, blend (two neighbouring source frames mixed in the batch) or optical flow with RIFE v4 (MIT; FuryTMP's ONNX export with the time step made an input, pinned, 22 MB) on ONNX Runtime, on the GPU (`onnx::GpuSessions`). Flow frames are made off the UI thread and blended until they land; renders wait for each | One run makes the frame at any moment between two; blending keeps playback smooth while the CPU catches up, and the render matches the viewer once frames are made |
 | Person masks | MODNet (Apache-2.0; Xenova's ONNX export, pinned) per frame at a 512 short side, the edge eased onto the full-size frame by a guided filter, eased toward the frame before where it barely changed; mattes kept by fingerprint and model, made ahead of the playhead | One click, no prompt and no green screen; a matting model gives soft hair where a segmenter gives a hard edge, and is fast enough to run ahead of playback. SAM 2 stays for objects and one person among several. Robust Video Matting (GPL-3.0) was ruled out by its license |
 | Depth maps | Depth Anything V2 Small (Apache-2.0; onnx-community's ONNX export, pinned) on ONNX Runtime, per source frame at 518 on the longer side, spread over each frame's 2nd–98th percentile, smoothed over ±2 frames, kept by fingerprint and model; effects read it as `getDepth(uv)` | One permissively licensed model gives relative depth for any picture; what effects need is what is in front of what, not metres. The larger sizes are CC-BY-NC |
+| Clean voice | DeepFilterNet 3 (code and weights MIT or Apache-2.0, as its README says since commit `7b14b89`; the authors' ONNX export, three graphs in an 8 MB `.tar.gz` pinned to that commit) on ONNX Runtime at 48 kHz, its STFT, ERB and deep-filter steps written in Rust after `libDF` and run offline as the authors' `enhance()` does, in 30 s stretches each started 5 s early. Made once per source stream into a FLAC in the cache; preview and render mix it with the recording at the clip's amount | Full-band speech enhancement that handles changing noise, hum and some room, small (8 MB), and it takes 2–4 % of the sound's length on 4 CPU cores (1.6 s for 85 s). On the authors' own sample (`noisy_snr0.wav`) it scores 20.015 dB SI-SDR here, as their tests pin for PyTorch (20.0149 dB) |
 | Subject masks | SAM 2.1 tiny (Apache-2.0): on macOS written over MLX (`mlx-rs`) and run on the GPU; elsewhere as five ONNX graphs (square-zero-labs' video export, pinned), the memory bank assembled in Rust as `transformers`' `Sam2VideoModel` does; prompts on source frames, mattes (the model's 256² logits) kept by fingerprint, prompts and model | Clicks and a box say *which* object, the model finds its edge, for the user and the agent alike; tracking follows it through occlusion; the same weights on either runtime, one checked against PyTorch and the other against it |
 
 Confirm CLI flags against the installed `claude --help` and the current Codex
@@ -610,9 +611,9 @@ the user analyzes it again.
 ### Models (`flikk-models`)
 
 One folder per task (voice activity, transcription, word timing, speakers,
-sound tagging, beats, sound search, segmentation, frame interpolation, matting, depth). Its `mod.rs` holds the
+sound tagging, beats, sound search, segmentation, frame interpolation, matting, depth, enhancement). Its `mod.rs` holds the
 task's interface, the trait analysis calls (`VoiceActivity`, `Transcriber`,
-`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`, `DepthEstimator`); `MODELS`, the
+`Aligner`, `Diarizer`, `Tagger`, `BeatTracker`, `SoundSearch`, `Segmenter`, `Interpolator`, `Matter`, `DepthEstimator`, `Enhancer`); `MODELS`, the
 models that can do it, the default first; and `runner`, which builds the
 runner of one of them. In it, one folder per model: `mod.rs` is the model as
 the user sees it, `config.rs` its files (pinned to a commit, with their
@@ -620,7 +621,7 @@ sizes) and the settings it runs with, `runner.rs` the code that loads and
 runs it (behind its feature) and finds its own files. What models share
 sits at the crate root: the catalog types, the audio rates, the downloads,
 ONNX Runtime (`onnx.rs`; one environment per process, shared by the
-aligner, the diarizer, the sound models, segmentation, frame interpolation, matting and depth) and the BPE tokenizer
+aligner, the diarizer, the sound models, segmentation, frame interpolation, matting, depth and Clean voice) and the BPE tokenizer
 (`bpe.rs`). `onnx::GpuSessions` runs RIFE and Depth Anything on the GPU:
 Core ML on macOS, DirectML on Windows, WebGPU on x86-64 Linux (its Dawn
 library sits beside the binary, which finds it by rpath, and the editor
@@ -650,7 +651,7 @@ them; its notices (warnings and errors, such as a failed download or
 offline media) can be dismissed for the session.
 
 Cargo features of `flikk-analysis` (all default) gate the runners: `whisper`,
-`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`. Without one, its models stay
+`aligner`, `diarizer`, `sounds`, `subjects`, `interpolation`, `people`, `depth`, `voice`. Without one, its models stay
 listed but its step falls back as described below (without `subjects`,
 subject masks keep nothing; without `interpolation`, optical flow blends;
 without `people`, person masks keep nothing). `flikk-models`' `mlx` (macOS only: mlx-sys links
@@ -668,7 +669,8 @@ cache under `cache/interpolated/`, 4 GB at most, least recently used
 first out (counted and cleared with the Cache in Settings → Storage). A render's larger frames
 stay in memory: it asks for each only while it is on it.
 Depth ("Depth maps", the `depth` feature, default on) is not part of
-analysis either.
+analysis either, nor is enhancement ("Clean voice", the `voice`
+feature, default on; see "Sound cleaned at its source" in §5).
 
 ### Transcription online
 

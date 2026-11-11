@@ -25,6 +25,9 @@ sounds = ["dep:ort", "dep:serde_json", "dep:unicode-normalization"]
 segment = ["dep:ort", "dep:serde_json"]
 # Depth maps for depth effects and masks, run by ONNX Runtime.
 depth = ["dep:ort"]
+# Clean voice: speech enhanced by DeepFilterNet 3, run by ONNX Runtime;
+# its graphs come in a gzipped tar, its STFT is realfft's.
+enhance = ["dep:ort", "dep:realfft", "dep:flate2", "dep:tar"]
 # The same subject masks on MLX, Apple's array framework: on the Mac's GPU
 # with `metal`. mlx-sys links Apple's frameworks, so this builds on macOS
 # only.
@@ -52,3 +55,6 @@ serde_json = { workspace = true, optional = true }
 unicode-normalization = { version = "0.1", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 mlx-rs = { version = "0.33", default-features = false, optional = true }
+realfft = { version = "3", optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", default-features = false, optional = true }

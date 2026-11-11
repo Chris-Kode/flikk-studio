@@ -26,6 +26,7 @@ pub mod beats;
 mod bpe;
 pub mod depth;
 mod download;
+pub mod enhancement;
 pub mod interpolation;
 pub mod matting;
 #[cfg(any(
@@ -35,7 +36,8 @@ pub mod matting;
     feature = "segment",
     feature = "interpolate",
     feature = "matting",
-    feature = "depth"
+    feature = "depth",
+    feature = "enhance"
 ))]
 mod onnx;
 pub mod segmentation;
@@ -103,12 +105,14 @@ pub enum Task {
     Matting,
     /// Depth maps for depth effects and masks: not part of analysis.
     Depth,
+    /// Clean voice: not part of analysis.
+    Enhancement,
 }
 
 impl Task {
     /// In the order analysis runs them, then subject masks, optical flow,
-    /// person masks and depth.
-    pub const ALL: [Task; 11] = [
+    /// person masks, depth and Clean voice.
+    pub const ALL: [Task; 12] = [
         Task::VoiceActivity,
         Task::Transcription,
         Task::WordTiming,
@@ -120,6 +124,7 @@ impl Task {
         Task::FrameInterpolation,
         Task::Matting,
         Task::Depth,
+        Task::Enhancement,
     ];
 
     pub fn label(self) -> &'static str {
@@ -135,6 +140,7 @@ impl Task {
             Task::FrameInterpolation => "Motion smoothing",
             Task::Matting => "Person masks",
             Task::Depth => "Depth maps",
+            Task::Enhancement => "Clean voice",
         }
     }
 
@@ -152,6 +158,7 @@ impl Task {
             Task::FrameInterpolation => interpolation::MODELS,
             Task::Matting => matting::MODELS,
             Task::Depth => depth::MODELS,
+            Task::Enhancement => enhancement::MODELS,
         }
     }
 
