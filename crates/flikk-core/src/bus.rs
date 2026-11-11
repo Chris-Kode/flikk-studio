@@ -1,7 +1,8 @@
 //! The command bus: the single place where permissions, undo and change sets
 //! are enforced (PRD "Architecture" principles 1–3).
 
-use crate::changeset::{ChangeItem, ChangeSet, ChangeSetState, ItemState};
+use crate::changeset::{ChangeItem, ChangeSet, ChangeSetState, Findings, ItemState};
+use crate::check::Finding;
 use crate::command::{Command, Plan, ToolCategory, Warning};
 use crate::error::{CoreError, Result};
 use crate::history::{History, HistoryEntry};
@@ -166,6 +167,18 @@ pub struct CommandBus {
     /// Counts proposed items. Versions only move on commits, so this is
     /// what orders proposals.
     proposals: u64,
+    /// Counts the change sets handed out to be checked.
+    check_rounds: u64,
+}
+
+/// A change set to check: see [`CommandBus::take_check`].
+pub struct SetCheck {
+    pub set: ChangeSetId,
+    pub round: u64,
+    /// The committed project.
+    pub before: Project,
+    /// The project with the set's pending items.
+    pub after: Project,
 }
 
 impl CommandBus {
@@ -180,6 +193,7 @@ impl CommandBus {
             chat: None,
             resolutions: 0,
             proposals: 0,
+            check_rounds: 0,
         }
     }
 
@@ -373,6 +387,7 @@ impl CommandBus {
                 base_version: s.base_version,
                 draft: None,
                 resolved_at: 0,
+                findings: Findings::Unchecked,
             })
             .collect()
     }
@@ -592,6 +607,7 @@ impl CommandBus {
                     base_version: version,
                     draft: None,
                     resolved_at: 0,
+                    findings: Findings::Unchecked,
                 });
                 self.change_sets.len() - 1
             }
@@ -692,9 +708,48 @@ impl CommandBus {
                 resolve(set, &mut self.resolutions);
             } else {
                 set.state = ChangeSetState::Pending;
+                set.findings = Findings::Unchecked;
             }
         }
         self.prune();
+    }
+
+    /// The next set waiting for review whose findings are not known, now
+    /// marked as being checked: the project without it and with it (its
+    /// draft), to run [`crate::check::check`] on off the UI thread and hand
+    /// back to [`Self::keep_findings`].
+    pub fn take_check(&mut self) -> Option<SetCheck> {
+        loop {
+            let set = self.change_sets.iter_mut().find(|s| {
+                s.state == ChangeSetState::Pending && s.findings == Findings::Unchecked
+            })?;
+            // Without a draft there is nothing it shows to look at.
+            let Some(draft) = set.draft.clone() else {
+                set.findings = Findings::Checked(Vec::new());
+                continue;
+            };
+            self.check_rounds += 1;
+            let round = self.check_rounds;
+            set.findings = Findings::Checking { round };
+            return Some(SetCheck {
+                set: set.id,
+                round,
+                before: self.project.clone(),
+                after: draft,
+            });
+        }
+    }
+
+    /// Keep what `set` introduces, as worked out for [`Self::take_check`]'s
+    /// `round`; dropped when the set changed or went since.
+    pub fn keep_findings(&mut self, set: ChangeSetId, round: u64, findings: Vec<Finding>) {
+        if let Some(set) = self
+            .change_sets
+            .iter_mut()
+            .find(|s| s.id == set && s.findings == Findings::Checking { round })
+        {
+            set.findings = Findings::Checked(findings);
+        }
     }
 
     /// Accept the given items (all pending ones if `None`) as one undo step.

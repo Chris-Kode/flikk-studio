@@ -276,6 +276,16 @@ the effect of its earlier calls.
   `Pending`, or `Resolved` if empty; the card is posted on the newest message
   only if the set grew. While the set is `Open`, the card's Accept and Reject
   are disabled; Preview and Review still work.
+* **Findings.** A set that becomes `Pending` is checked (§4, "Timeline
+  check"): `CommandBus::take_check` hands out the committed project and the
+  set's draft with a round number and marks the set `Findings::Checking`;
+  the editor runs the check on both off the UI thread (`state/findings.rs`,
+  from `pump_agent`, so sets from the agent, external clients, approvals
+  and restored chats are all checked) and `keep_findings` keeps
+  `check::introduced` on the set, unless the set changed or went since.
+  Reopening the set for another turn and closing it again checks it again.
+  Findings live with the set in the bus, not in saved chats. Accepting
+  never waits on them.
 * **Accept** takes all pending items or the ticked subset. An item becomes
   `Conflicted` if a clip its ops touch was changed by the user after the
   version it was planned against; otherwise its ops replay, or its command
@@ -1633,7 +1643,10 @@ on the UI thread and run it off it:
   until its `ToolFinished` replaces it; one still running when the turn ends
   is marked Stopped. The change-set card sits above the composer, once per set however
   many turns grew it, and stays with its outcome until the next message;
-  it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Skills run as
+  it has Preview, Review (a checklist with ticks), Reject and Accept. Its
+  header counts the findings the set brings in (a dot, `WARN` when a
+  viewer will notice one, and a quiet mono count); Review lists them under
+  the items, each with its dot, note and time, and a click seeks there. `ask_user` shows up to six choices. Skills run as
   `/name …`, the rest of the message being their input; none are built
   in. Skills and styles are Markdown files under `paths::skills()` and
   `paths::styles()` (`flikk-core/src/skills.rs`), managed in Settings and by

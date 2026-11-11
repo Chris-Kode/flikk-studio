@@ -9,6 +9,7 @@ use crate::ui::kit::{
     v_flex,
 };
 use flikk_core::changeset::{ChangeItem, ChangeSet, ChangeSetState, ItemState};
+use flikk_core::check::{Finding, Severity};
 use flikk_core::command::{Command, ToolCategory, Warning};
 use flikk_core::model::Project;
 use flikk_core::ops::{DiffKind, Op};
@@ -193,6 +194,7 @@ impl ChatPanel {
     ) -> impl IntoElement {
         let id = set.id;
         let total = set.items.len();
+        let found = set.findings.checked();
         let warnings = set.items.iter().filter(|i| !i.warnings.is_empty()).count();
         let listen = set.items.iter().filter(|i| needs_listen(i)).count();
         let cut: f64 = set
@@ -244,6 +246,27 @@ impl ChatPanel {
                         .id(("listen", id_hash(id)))
                         .child(count(IconName::Mic, t::T2, listen))
                         .tooltip(Tooltip::text("Needs a listen")),
+                )
+            })
+            .when(!found.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .id(("findings", id_hash(id)))
+                        .flex_none()
+                        .gap(px(4.))
+                        .child(finding_dot(worst(found)))
+                        .child(
+                            div()
+                                .font_family(t::mono())
+                                .text_size(px(11.))
+                                .text_color(t::T3)
+                                .child(found.len().to_string()),
+                        )
+                        .tooltip(Tooltip::text(if found.len() == 1 {
+                            "1 finding".to_string()
+                        } else {
+                            format!("{} findings", found.len())
+                        })),
                 )
             })
             .child(div().flex_1())
@@ -308,6 +331,13 @@ impl ChatPanel {
         if let Some(row) = reveal.and_then(|r| items.iter().position(|(_, i, _)| i.id == r)) {
             scroll.scroll_to_item(row);
         }
+        let found: Vec<AnyElement> = set
+            .findings
+            .checked()
+            .iter()
+            .enumerate()
+            .map(|(ix, f)| self.render_finding(ix, f, cx))
+            .collect();
         let rows = items.into_iter().map(|(ix, item, at)| {
             let item_id = item.id;
             let tint = match diff_kind(item) {
@@ -424,6 +454,15 @@ impl ChatPanel {
                     }))
                 })
         });
+        let findings = (!found.is_empty()).then(|| {
+            v_flex()
+                .flex_none()
+                .mt(px(4.))
+                .pt(px(4.))
+                .border_t_1()
+                .border_color(t::LN)
+                .children(found)
+        });
         div()
             .relative()
             .child(
@@ -433,10 +472,53 @@ impl ChatPanel {
                     .py(px(4.))
                     .text_size(px(12.))
                     .children(rows)
+                    .children(findings)
                     .track_scroll(&scroll)
                     .overflow_y_scroll(),
             )
             .vertical_scrollbar(&scroll)
+            .into_any_element()
+    }
+
+    /// One finding the set brings in: its dot, what it is and where;
+    /// clicking it moves the playhead there.
+    fn render_finding(&self, ix: usize, f: &Finding, cx: &mut Context<Self>) -> AnyElement {
+        let at = f.range.start;
+        h_flex()
+            .id(("finding", ix))
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|el| el.bg(t::HV))
+            // In the column of the items' checkboxes.
+            .child(
+                h_flex()
+                    .flex_none()
+                    .justify_center()
+                    .size(px(14.))
+                    .child(finding_dot(f.severity)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t::T2)
+                    .child(f.note.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(t::mono())
+                    .text_size(px(10.))
+                    .text_color(t::T3)
+                    .child(clock_truncated(at)),
+            )
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.state.update(cx, |s, cx| s.seek(at, cx))),
+            )
             .into_any_element()
     }
 
@@ -500,6 +582,28 @@ fn outcome(set: &ChangeSet) -> impl IntoElement {
         .text_color(color)
         .child(Icon::new(icon).size(px(13.)))
         .child(div().min_w_0().truncate().child(text))
+}
+
+/// A finding's dot: `WARN` for what a viewer will notice, quiet for what
+/// may be meant.
+pub(crate) fn finding_dot(severity: Severity) -> impl IntoElement {
+    div()
+        .flex_none()
+        .size(px(6.))
+        .rounded_full()
+        .bg(match severity {
+            Severity::Warning => t::WARN,
+            Severity::Notice => t::T3,
+        })
+}
+
+/// The gravest severity among `found`.
+fn worst(found: &[Finding]) -> Severity {
+    found
+        .iter()
+        .map(|f| f.severity)
+        .min()
+        .unwrap_or(Severity::Notice)
 }
 
 fn state_icon(state: ItemState) -> impl IntoElement {

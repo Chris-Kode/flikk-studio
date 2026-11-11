@@ -31,6 +31,11 @@ impl OfflineMedia {
         self.offline.contains(&media)
     }
 
+    /// The media whose file was missing when last looked at.
+    pub(super) fn ids(&self) -> &HashSet<MediaId> {
+        &self.offline
+    }
+
     /// Work out which of `project`'s sources are missing when its media
     /// list changed since the last look, and keep the notice about them in
     /// `notices` current.

@@ -8,6 +8,7 @@ mod captions;
 mod chat;
 mod cloud;
 mod document;
+mod findings;
 mod library;
 mod live;
 mod models;

@@ -1,6 +1,7 @@
 //! Pending agent work (PRD AG4–AG6).
 
 use crate::bus::Author;
+use crate::check::Finding;
 use crate::command::{Command, Warning};
 use crate::ids::*;
 use crate::model::Project;
@@ -77,6 +78,34 @@ pub struct ChangeSet {
     /// When it was resolved, counted by the bus, for keeping the latest.
     #[serde(skip)]
     pub(crate) resolved_at: u64,
+    /// The mistakes it brings in, looked for once it is pending.
+    #[serde(skip)]
+    pub findings: Findings,
+}
+
+/// What a set waiting for review brings in that the project did not have
+/// ([`crate::check::introduced`]), worked out off the UI thread.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Findings {
+    /// Not looked at: the set is open, or became pending since.
+    #[default]
+    Unchecked,
+    /// Being looked at, in the bus's check `round`; a result of an
+    /// earlier round is dropped.
+    Checking {
+        round: u64,
+    },
+    Checked(Vec<Finding>),
+}
+
+impl Findings {
+    /// The findings, once checked.
+    pub fn checked(&self) -> &[Finding] {
+        match self {
+            Findings::Checked(found) => found,
+            _ => &[],
+        }
+    }
 }
 
 impl ChangeSet {

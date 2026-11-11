@@ -104,6 +104,8 @@ impl EditorState {
         let events = self.agent.pump(&mut self.bus, &self.services);
         // Proposals and closed sets; cheap while nothing changed.
         self.proposals.sync(&self.bus);
+        // Sets that just went to review: what they bring in.
+        self.check_change_sets(cx);
         // What its jobs brought in for a project closed meanwhile comes in
         // as its own.
         for (project, item) in self.agent.take_orphans() {
