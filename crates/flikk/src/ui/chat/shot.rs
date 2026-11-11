@@ -85,6 +85,10 @@ enum Draft {
 
 /// How often a blockout being written is looked at.
 const DRAFT_POLL: Duration = Duration::from_millis(150);
+/// What an image model is told of a shot's prompt, which runs past the
+/// frame it is asked for.
+const OPENING_ONLY: &str = "Show only the opening instant of what follows: none of its later \
+    shots, camera moves or sound. Nothing blurred by motion, no text.";
 
 /// A clip's poster frame.
 enum Poster {
@@ -498,14 +502,21 @@ impl ShotCard {
         }
         let follows = self.picture_in(slot).cloned();
         let from_blockout = follows.is_none() && slot == Slot::First && self.player.is_some();
-        let start = match (&follows, from_blockout) {
-            (Some(_), _) => String::new(),
-            (None, true) => format!(
-                "The finished first frame of this shot, after @Image1: keep its camera and \
-                 composition exactly, and make the grey stand-ins what they stand for.\n\n{}",
+        // The shot's prompt is written for a video model: an image model
+        // is told which part of it is its own.
+        let start = match (&follows, from_blockout, slot) {
+            (Some(_), _, _) => String::new(),
+            (None, true, _) => format!(
+                "The finished first frame of this shot, as one sharp still. @Image1 is a rough \
+                 3D blockout: keep its camera and composition exactly, and make the grey \
+                 stand-ins what they stand for. {OPENING_ONLY}\n\n{}",
                 self.shot.look()
             ),
-            (None, false) => self.shot.look().to_owned(),
+            (None, false, Slot::First) => format!(
+                "The first frame of this shot, as one sharp still. {OPENING_ONLY}\n\n{}",
+                self.shot.look()
+            ),
+            (None, false, _) => self.shot.look().to_owned(),
         };
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)

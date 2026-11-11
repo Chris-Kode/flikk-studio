@@ -1564,7 +1564,12 @@ on the UI thread and run it off it:
   agent's "Image generation" switch says, taking `aspect`, `resolution`,
   `references` (pictures in the pool) and `frames_at` (the program at
   those times, grabbed just before); the approval carries which way it
-  goes (`via`), so an older ChatGPT request still reads.
+  goes (`via`), so an older ChatGPT request still reads. The agent writes
+  the prompt as `catalog::IMAGE_PROMPT` lays out (a few sentences with
+  what the picture is and its subject first, words in it quoted, an edit
+  as the change and then what stays), the shape image models follow best.
+  The shot card's first-frame form starts from the shot's prompt, told to
+  show only its opening instant.
 * **Upscaling video:** `Capability::Upscale` is a row in Settings →
   Integrations like video. On fal: Topaz Precision (Proteus, the default)
   and Starlight, SeedVR2, Crystal, FLUX Video Upscale and Gemini Omni

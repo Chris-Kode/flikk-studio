@@ -30,9 +30,12 @@ const IMAGES: &str = "\
 Making pictures: `generate_image` (generate group) makes one, with the image \
 provider the user set up or else their ChatGPT plan. Use it when the user \
 asks for a picture, one call per picture; each costs them money or counts \
-against their plan. Describe it fully in the prompt, with any words in it \
-exactly as written. With a provider it can also edit or follow pictures in \
-the pool and frames of the program (`references`, `frames_at`). It lands \
+against their plan. Write the prompt the way its `prompt` field lays out: a \
+few plain sentences, what the picture is and its subject first, then \
+framing and light, with any words in it in quotes, exactly as written. With \
+a provider it can also edit or follow pictures in \
+the pool and frames of the program (`references`, `frames_at`): say the \
+change first, then what stays. It lands \
 in the pool's Images Generated bin, and the call returns its media id: look \
 at it with `view_media`, and use it like any other picture in the pool.";
 
