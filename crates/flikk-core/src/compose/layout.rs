@@ -9,12 +9,12 @@
 //! into each clip's own transform.
 
 use super::{
-    Pictures, is_lettering, lettering_layer, lettering_tracks, lettering_transform, overlay_item,
-    picture_tracks, placement, placement_from,
+    Pictures, lettering_layer, lettering_tracks, lettering_transform, overlay_item, picture_tracks,
+    placement, placement_from,
 };
 use crate::fx::{self, FxKind, FxLanguage};
 use crate::ids::{ClipId, TrackId};
-use crate::model::{Clip, ClipContent, MediaKind, Project, Transform};
+use crate::model::{Clip, ClipContent, MediaKind, Project, Track, Transform};
 use crate::services::{Frame, FxCall, Placement, Services};
 use crate::time::Time;
 
@@ -167,28 +167,62 @@ pub fn layout(
         ));
     }
     for track in lettering_tracks(project) {
-        let Some(clip) = track
-            .clip_at(t)
-            .filter(|c| c.enabled && is_lettering(track, c))
-        else {
+        let Some(clip) = track.clip_at(t).filter(|c| c.enabled) else {
             continue;
         };
-        if let Some((l, placement)) = lettering_layer(services, track, clip, t, canvas, Some(1.0)) {
-            shapes.push(Shape {
-                track: track.id,
-                clip: clip.id,
-                placement,
-                rest_center: l.center,
-                rest_size: l.size,
-                content: [0.0, 0.0, 1.0, 1.0],
-                lettering: true,
-                canvas,
-            });
-        }
+        shapes.extend(lettering_shape(track, clip, t, canvas, services));
     }
     pictures.finish();
     shapes.reverse();
     shapes
+}
+
+/// Where the caption or title `clip` on `track` lands at `t` on a
+/// `canvas`, as [`layout`] has it: `None` when it is not lettering on that
+/// track, shows nothing then, or there is no [`Services::lettering`].
+pub fn lettering_shape(
+    track: &Track,
+    clip: &Clip,
+    t: Time,
+    canvas: (u32, u32),
+    services: &Services,
+) -> Option<Shape> {
+    let canvas = (canvas.0.max(1), canvas.1.max(1));
+    let (l, placement) = lettering_layer(services, track, clip, t, canvas, Some(1.0))?;
+    Some(Shape {
+        track: track.id,
+        clip: clip.id,
+        placement,
+        rest_center: l.center,
+        rest_size: l.size,
+        content: [0.0, 0.0, 1.0, 1.0],
+        lettering: true,
+        canvas,
+    })
+}
+
+/// Margin of the action-safe area, as a fraction of the frame.
+pub const ACTION_SAFE: f32 = 0.05;
+/// Margin of the title-safe area, as a fraction of the frame: where text
+/// stays readable on every screen it plays on.
+pub const TITLE_SAFE: f32 = 0.1;
+
+/// The box `margin` (a fraction of each side, such as [`TITLE_SAFE`]) in
+/// from the edges of a `canvas`, as `[x0, y0, x1, y1]` in pixels.
+pub fn safe_area(canvas: (u32, u32), margin: f32) -> [f32; 4] {
+    let (w, h) = (canvas.0.max(1) as f32, canvas.1.max(1) as f32);
+    [
+        w * margin,
+        h * margin,
+        w * (1.0 - margin),
+        h * (1.0 - margin),
+    ]
+}
+
+/// Whether box `b` lies inside `area` (both `[x0, y0, x1, y1]`), to half
+/// a pixel.
+pub fn inside(b: [f32; 4], area: [f32; 4]) -> bool {
+    b[0] >= area[0] - 0.5 && b[1] >= area[1] - 0.5 && b[2] <= area[2] + 0.5 && b[3] <= area[3] + 0.5
 }
 
 /// `clip`'s picture layer at `t`.

@@ -48,7 +48,7 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes built from plain solids, their models and cycles, renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, the timeline check, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes built from plain solids, their models and cycles, renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
 | `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
 | `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
@@ -229,6 +229,35 @@ panics fails without stopping the queue.
 * **Queries** (`flikk-core/src/query.rs`): topmost clip at a time, sample
   points, transcript↔timeline word mapping, typed timestamp and chat
   reference resolution, effective style rules.
+* **Timeline check** (`flikk-core/src/check.rs`): `check(project, range,
+  sources)` finds the mistakes a viewer notices and returns `Finding`s
+  (a `Kind`, a `Severity`, a time range, the clips involved and a one-line
+  note), in timeline order. From the project alone: a gap on the picture
+  under 0.5 s between two clips (video tracks shown, enabled clips), a
+  clip under three frames, two audio clips meeting without a fade or a
+  transition (a split that plays on in the same source is no join), a
+  caption or title past the end of the last picture or sound clip, two
+  captions on screen at once (on two caption tracks), and clips on media
+  in `Sources::offline` (one finding per file). With the analysis already
+  cached (`AnalysisService::analysis`, never started or waited on): an
+  audio clip's edge on a word, by `cuts::on_word`, the rule `Speech::snap`
+  moves cuts by (only edges where the source goes on); a caption shown
+  more than 0.5 s before its first word or left 1.5 s after its last
+  (its first and last words matched by text among those heard within 2 s);
+  a hard join is not reported when both sides are at or below −45 dBFS
+  within 30 ms of it (a pause); a jump of more than 10 dB between the mean
+  levels of the 0.4 s either side of a join, frames under −50 dBFS left
+  out, gain included. With the lettering engine: a caption or title whose
+  box at its middle leaves title-safe (`compose::safe_area`, `TITLE_SAFE`
+  10 %, `ACTION_SAFE` 5 %, shared with `get_layout`; the box from
+  `compose::lettering_shape`, as the viewer letters it). A check whose data
+  is missing for an item leaves it out and names its kind in
+  `Report::skipped`. Thresholds are fixed. `introduced(before, after)`
+  keeps the findings of `after` that `before` lacks, a finding being its
+  kind and its clips, so one an edit only moved is not new.
+  `check::loudness` turns a measured mix into findings (more than 1 LU off
+  the target, true peak over the ceiling) for Deliver. Findings cannot be
+  dismissed yet.
 
 ### Change sets
 

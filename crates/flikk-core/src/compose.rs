@@ -73,7 +73,10 @@ mod pictures;
 mod placement;
 
 pub use cpu::{blend_channel, composite_cpu};
-pub use layout::{GroupMove, Shape, group_bounds, layout};
+pub use layout::{
+    ACTION_SAFE, GroupMove, Shape, TITLE_SAFE, group_bounds, inside, layout, lettering_shape,
+    safe_area,
+};
 pub use pictures::{
     Pictures, STILL_IMAGE_EXTENSIONS, Stills, Streams, frame_length, is_still_overlay, overlay_item,
 };

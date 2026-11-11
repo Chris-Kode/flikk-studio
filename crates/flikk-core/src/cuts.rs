@@ -51,6 +51,15 @@ pub struct Snap {
     pub word: usize,
 }
 
+/// The index of the word in `words` a cut at `t` falls on: inside it, or
+/// closer to it than a cut keeps clear of (its attack before, its decay
+/// after). `None` when `t` is clear of every word.
+pub fn on_word(words: &[TimelineWord], t: Time) -> Option<usize> {
+    words
+        .iter()
+        .position(|w| w.timeline.start - LEAD < t && t < w.timeline.end + TAIL)
+}
+
 /// The project's speech: words (from [`crate::query::words_in_range`])
 /// and the levels of their sources.
 pub struct Speech<'p> {
@@ -132,9 +141,7 @@ impl<'p> Speech<'p> {
     /// close to one: the nearer of the cuts before and after that word.
     /// `None` when `t` is clear of every word.
     pub fn snap(&self, words: &[TimelineWord], t: Time) -> Option<Snap> {
-        let k = words
-            .iter()
-            .position(|w| w.timeline.start - LEAD < t && t < w.timeline.end + TAIL)?;
+        let k = on_word(words, t)?;
         let w = &words[k];
         let prev = words[..k].iter().rev().find(|p| p.clip == w.clip);
         let next = words[k + 1..].iter().find(|n| n.clip == w.clip);

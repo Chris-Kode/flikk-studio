@@ -23,7 +23,7 @@ impl Time {
         Time((s * FLICKS_PER_SECOND as f64).round() as i64)
     }
 
-    pub fn from_millis(ms: i64) -> Self {
+    pub const fn from_millis(ms: i64) -> Self {
         Time(ms * (FLICKS_PER_SECOND / 1000))
     }
 

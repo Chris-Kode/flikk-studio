@@ -9,16 +9,13 @@
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::*;
 use flikk_core::command::Command;
-use flikk_core::compose::{self, GroupMove, Shape, Stills};
+use flikk_core::compose::{self, ACTION_SAFE, GroupMove, Shape, Stills, TITLE_SAFE};
 use flikk_core::model::{Clip, ClipContent, Ease, Project, Property, Transform};
 use flikk_core::services::Services;
 use flikk_core::{ClipId, Time};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Margins of the action- and title-safe areas, as a fraction of the frame.
-const ACTION_SAFE: f32 = 0.05;
-const TITLE_SAFE: f32 = 0.1;
 /// Default `place` margin, as a fraction of the frame height.
 const MARGIN: f32 = 0.05;
 
@@ -105,8 +102,8 @@ fn area(b: [f32; 4]) -> f32 {
 pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
     let s = &project.timeline.settings;
     let (w, h) = (s.width.max(1) as f32, s.height.max(1) as f32);
-    let safe = |f: f32| [w * f, h * f, w * (1.0 - f), h * (1.0 - f)];
-    let title = safe(TITLE_SAFE);
+    let canvas = (s.width, s.height);
+    let title = compose::safe_area(canvas, TITLE_SAFE);
     let items: Vec<Value> = shapes
         .iter()
         .filter_map(|shape| {
@@ -121,10 +118,7 @@ pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
                 "bounds": b.map(round),
                 "bounds_fraction": [norm(b[0] / w), norm(b[1] / h), norm(b[2] / w), norm(b[3] / h)],
                 "frame_fraction": norm(overlap(b, [0.0, 0.0, w, h]) / (w * h)),
-                "inside_title_safe": b[0] >= title[0] - 0.5
-                    && b[1] >= title[1] - 0.5
-                    && b[2] <= title[2] + 0.5
-                    && b[3] <= title[3] + 0.5,
+                "inside_title_safe": compose::inside(b, title),
             });
             let tf = transform_json(&tf);
             if tf.as_object().is_some_and(|o| !o.is_empty()) {
@@ -157,7 +151,7 @@ pub fn layout_json(project: &Project, shapes: &[Shape], t: Time) -> Value {
     json!({
         "t": secs(t),
         "frame": { "width": s.width, "height": s.height },
-        "action_safe": safe(ACTION_SAFE).map(round),
+        "action_safe": compose::safe_area(canvas, ACTION_SAFE).map(round),
         "title_safe": title.map(round),
         "items": items,
         "overlaps": overlaps,
