@@ -14,9 +14,9 @@ mod voice;
 
 pub use crate::pool::{generated_bin, image_item, media_item, pool_commands, sample_item};
 pub use request::{
-    GenerateRequest, ImageMode, ImageModel, MusicSection, Reading, ReferenceLimits, SCRIPT_CHARS,
-    SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel, VideoReference, VideoSound,
-    resolution_lines,
+    AudioLengths, AudioModel, GenerateRequest, ImageMode, ImageModel, MusicSection, Reading,
+    ReferenceLimits, SCRIPT_CHARS, SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel,
+    VideoReference, VideoSound, resolution_lines,
 };
 pub use script::{check_script, spoken_words, without_breaks};
 pub use task::{GenerationTask, Stage};
@@ -255,6 +255,9 @@ pub trait GenerationService: Send + Sync {
     fn image_model(&self) -> Option<ImageModel>;
     /// What the model picked for upscaling can do, when one is.
     fn upscale_model(&self) -> Option<UpscaleModel>;
+    /// What the model picked for `capability` (music or sound effects) can
+    /// make, when one is.
+    fn audio_model(&self, capability: Capability) -> Option<AudioModel>;
     /// Whether videos are made with sound, as the user set it.
     fn video_sound(&self) -> bool;
     /// The resolution the user set for videos ("1080p"); `None` takes the

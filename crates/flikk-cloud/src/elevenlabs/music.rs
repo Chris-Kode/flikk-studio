@@ -57,8 +57,9 @@ fn ms(t: Time) -> u64 {
 
 /// The composition plan for `sections`, in the shape `model` takes: v1
 /// has global styles and sections of lines; v2 and later, chunks whose
-/// text carries the section's name and lyrics.
-fn plan(
+/// text carries the section's name and lyrics. Also sent to ElevenLabs'
+/// models on other hosts.
+pub(crate) fn plan(
     model: &str,
     prompt: &str,
     instrumental: bool,

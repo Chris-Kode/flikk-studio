@@ -5,8 +5,9 @@ paid, prepaid aggregator: one key reaches Pika's own models and about 170
 operations from other vendors (Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs
 and more). The editor uses it as a video provider for Pika's own models and
 the other vendors' video models that fit its video request (see "What the
-editor uses"), and as an image provider for the other vendors' image models
-(see "Image operations").
+editor uses"), as an image provider for the other vendors' image models
+(see "Image operations"), and for music and sound effects, Pika's own and
+other vendors' (see "Audio operations").
 
 Read on 2026-11-02 from `llms.txt`, the per-operation specifications, the
 public catalog and `openapi.json` (links at the end). The catalog's
@@ -149,12 +150,12 @@ $0.02–0.09 per second by resolution.
   (`draft-to-video` is used to upscale; see "Upscaling");
 - Pikadditions and Pikaswaps (`video-to-video`: add or swap something in a
   clip), Pikaffects (`image-to-video`, `video-to-video`: named effects);
-- Pika Dynamic Captions, Video Compose, Video Merge, and the Pika audio
-  models (music, SFX, speech, soundtrack);
+- Pika Dynamic Captions, Video Compose, Video Merge, Pika Speech and Pika
+  Soundtrack (sound for a whole video);
 - webhooks, idempotency keys, quotes, spend reports.
 
 These edit media the editor's video request has no field for, or duplicate
-what ElevenLabs already does here.
+what ElevenLabs already does here (speech).
 
 ## Other vendors' video models
 
@@ -262,6 +263,25 @@ resolution, transparent where offered) and image-to-image body (one
 picture, its most pictures, pictures with a shape) as `image.rs` writes it
 answers 401, which is how Recraft 4.1's refused `size` was found.
 
+## Audio operations
+
+The editor makes music and sound effects with these (`pika/audio.rs`; the
+fields each request is written in are in `audio.rs`). All are media jobs;
+a completed job has `output.audio.url` and `content_type`.
+
+| Operation | Prompt | Length | Other fields the editor sends |
+| --- | --- | --- | --- |
+| Pika Music (`pika/pika-audio/pika-music`, default) | `prompt`, 4,000 | `duration` 10–360 (default 30) | `lyrics` (`[Name]` blocks) when sung lines are given |
+| Sonilo 1.1 (`sonilo/sonilo-v1.1-music/text-to-music`) | `prompt`, 2,000 | `duration` 5–360, whole seconds, required | `segments: [{start, prompt (200), label?}]`, up to 30; `label` one of intro, verse, pre-chorus, chorus, bridge, break, silence, outro |
+| MiniMax Music 3.0 (`minimax/minimax-music-3.0/text-to-audio`) | `prompt`, 2,000 | none (up to 5 min) | `is_instrumental`; `lyrics` (3,500), or `lyrics_optimizer` to have it write them |
+| Lyria 3.5, Lyria 3 Pro (`google/lyria-3.5/text-to-audio`, `google/lyria-3-pro/text-to-audio`) | `prompt`, 4,096 | none (3 Pro: up to 184 s) | none: structure, tempo and lyrics go in the prompt |
+| Pika SFX (`pika/pika-audio/pika-sfx`, default) | `prompt`, 4,000 | `duration` 1–20 (default 10) | |
+| Sonilo 1.1 SFX (`sonilo/sonilo-v1.1-sfx/sound-effects`) | `prompt`, 2,000 | `duration` 1–180, whole seconds, required | `audio_format: wav` |
+| ElevenLabs Sound Effects v2 (`elevenlabs/eleven-text-to-sound-v2/sound-effects`) | `text`, 450 | `duration_seconds` 0.5–30, required | `loop` |
+
+Not used: Lyria 2, Lyria 3 (30 s), Seed Audio, Kling Audio, the video-to-audio
+operations (Sonilo, Kling, Pika Soundtrack) and stems.
+
 ## Upscaling
 
 Two operations make a video larger; both are jobs as above, take the video
@@ -297,6 +317,11 @@ used: pictures are not upscaled yet.
   none); a submit with `duration: 30` answers `422 {"message":"duration:
   Input should be less than or equal to 15"}` before the key is checked.
 
+- Every audio request the editor writes (each model above, with and
+  without a length, sections, lyrics and looping) is accepted (401), and
+  a length out of range, a fractional length to Sonilo SFX and a length
+  to Lyria are refused (422), with a made-up key on 2026-11-11.
+
 Not verified without a paid key: a real job end to end, the exact
 `headers` an upload hands out, whether `output.video.url` downloads without
 the key, and the failed-job bodies for balance, rate limits and moderation
@@ -315,4 +340,7 @@ the key, and the failed-job bodies for balance, rate limits and moderation
 - <https://dev.pika.art/llms/pika/pikaframes/image-to-video>
 - <https://dev.pika.art/llms/openai/gpt-image-2/text-to-image> (the image
   job's output)
+- <https://dev.pika.art/llms/pika/pika-audio/pika-music>,
+  [pika-sfx](https://dev.pika.art/llms/pika/pika-audio/pika-sfx),
+  [Sonilo text-to-music](https://dev.pika.art/llms/sonilo/sonilo-v1.1-music/text-to-music)
 - <https://dev.pika.art/models>, <https://dev.pika.art/pricing>

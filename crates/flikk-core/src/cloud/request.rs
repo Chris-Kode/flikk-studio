@@ -448,6 +448,74 @@ impl ImageModel {
     }
 }
 
+/// What one music or sound effect model can make, so a request is checked
+/// before it costs anything and the form offers only what the model takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioModel {
+    pub name: &'static str,
+    /// The lengths it makes; `None` when it picks the length itself, and a
+    /// length asked for is left out.
+    pub lengths: Option<AudioLengths>,
+    /// It makes sound effects that repeat without a seam.
+    pub looping: bool,
+}
+
+/// The lengths an audio model makes, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioLengths {
+    pub shortest: f64,
+    pub longest: f64,
+    /// The finest step between two lengths: 1 for whole seconds.
+    pub step: f64,
+}
+
+impl AudioLengths {
+    /// "1 to 20 s".
+    fn text(&self) -> String {
+        format!("{} to {} s", self.shortest, self.longest)
+    }
+
+    /// `secs` on a step and within the range.
+    pub fn fit(&self, secs: f64) -> f64 {
+        let stepped = if self.step > 0.0 {
+            (secs / self.step).round() * self.step
+        } else {
+            secs
+        };
+        stepped.clamp(self.shortest, self.longest)
+    }
+}
+
+impl AudioModel {
+    /// Why it can't make `request`, before any money is spent on it.
+    pub fn check(&self, request: &GenerateRequest) -> CloudResult<()> {
+        let (what, looping) = match request {
+            GenerateRequest::Music { .. } => ("music", false),
+            GenerateRequest::SoundEffect { looping, .. } => ("sound", *looping),
+            _ => return Ok(()),
+        };
+        let refuse = |message: String| {
+            Err(CloudError::BadPrompt {
+                message,
+                suggestion: None,
+            })
+        };
+        let name = self.name;
+        if looping && !self.looping {
+            return refuse(format!("{name} doesn't make sounds that loop"));
+        }
+        if let (Some(length), Some(lengths)) = (request.length(), self.lengths) {
+            // A slider's last step, or a range read off the timeline, can
+            // land a hair outside.
+            let secs = length.as_secs_f64();
+            if secs < lengths.shortest - 0.05 || secs > lengths.longest + 0.05 {
+                return refuse(format!("{name} makes {} of {what}", lengths.text()));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Who reads a voiceover, and how.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reading {

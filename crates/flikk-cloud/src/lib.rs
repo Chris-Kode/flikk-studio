@@ -13,6 +13,7 @@
 //! [`PROVIDERS`], and nothing else: settings, analysis and the agent find
 //! it through the catalog.
 
+mod audio;
 mod elevenlabs;
 mod fal;
 mod http;
@@ -24,8 +25,8 @@ mod upscaled;
 pub use keys::{KeySource, Keys};
 
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest, Generated,
-    GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
+    AudioModel, Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest,
+    Generated, GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
     SpeechService, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage,
     VoicePreview, VoiceQuery,
 };
@@ -152,6 +153,12 @@ pub trait Api: Sync {
     /// What upscale model `model` can do; only for providers offering
     /// upscaling.
     fn upscale_model(&self, _model: &str) -> Option<&'static UpscaleModel> {
+        None
+    }
+
+    /// What music or sound effect model `model` can make; only for
+    /// providers offering either.
+    fn audio_model(&self, _model: &str) -> Option<&'static AudioModel> {
         None
     }
 
@@ -332,6 +339,11 @@ impl GenerationService for Cloud {
         provider.api.upscale_model(model.id).cloned()
     }
 
+    fn audio_model(&self, capability: Capability) -> Option<AudioModel> {
+        let (provider, model) = self.picked(capability)?;
+        provider.api.audio_model(model.id).copied()
+    }
+
     fn generate(
         &self,
         request: &GenerateRequest,
@@ -357,7 +369,12 @@ impl GenerationService for Cloud {
                     upscale.check(request)?;
                 }
             }
-            _ => {}
+            Capability::Music | Capability::SoundEffects => {
+                if let Some(audio) = provider.api.audio_model(model.id) {
+                    audio.check(request)?;
+                }
+            }
+            Capability::Transcription | Capability::Voiceover => {}
         }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;

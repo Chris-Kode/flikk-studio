@@ -133,6 +133,13 @@ pub fn request(
             if !available {
                 return Err(ToolError(super::generate::unavailable(&request)));
             }
+            let model = (ctx.services.generation.as_ref())
+                .and_then(|g| g.audio_model(request.capability()));
+            if let Some(model) = model {
+                model
+                    .check(&request)
+                    .map_err(|e| ToolError(super::image::error_text(&e)))?;
+            }
             let mut json = super::generate::request_json(&request, placement.as_ref());
             if let flikk_core::cloud::GenerateRequest::Voiceover { reading, .. } = &request {
                 json = super::voices::with_sample(json, &reading.voice);

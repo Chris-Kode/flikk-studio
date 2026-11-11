@@ -1,15 +1,18 @@
 //! Pika (dev.pika.art): video and pictures, from the models in
-//! [`models`], and larger videos, from the operations in [`upscale`].
+//! [`models`], larger videos, from the operations in [`upscale`], and
+//! music and sound effects, from those in [`audio`].
 //! Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes) and the
 //! other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy
 //! Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from a
 //! description or from pictures: Nano Banana, GPT Image, Seedream,
 //! Ideogram, Grok Imagine, Muse, Recraft. Larger videos: Topaz, and Pika H3
-//! Flex's own upscale. Every call sends the key as `X-API-Key`. All are
-//! made as media jobs ([`jobs`]); what goes in is [`video`]'s, [`image`]'s
-//! or [`upscale`]'s, and the files they follow are uploaded to Pika first
+//! Flex's own upscale. Music: Pika Music, Sonilo, MiniMax, Lyria. Sound
+//! effects: Pika SFX, Sonilo, ElevenLabs. Every call sends the key as
+//! `X-API-Key`. All are made as media jobs ([`jobs`]); what goes in is
+//! [`video`]'s, [`image`]'s, [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to Pika first
 //! ([`files`]). See `docs/pika.md`.
 
+mod audio;
 mod files;
 mod image;
 mod jobs;
@@ -20,8 +23,8 @@ mod video;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, UpscaleModel,
-    VideoModel,
+    AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
+    UpscaleModel, VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -186,6 +189,50 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Music,
+            // The ids and order of `audio::MUSIC`, the default first.
+            models: &[
+                CloudModel {
+                    id: "pika/pika-audio/pika-music",
+                    name: "Pika Music",
+                },
+                CloudModel {
+                    id: "sonilo/sonilo-v1.1-music/text-to-music",
+                    name: "Sonilo 1.1",
+                },
+                CloudModel {
+                    id: "minimax/minimax-music-3.0/text-to-audio",
+                    name: "MiniMax Music 3.0",
+                },
+                CloudModel {
+                    id: "google/lyria-3.5/text-to-audio",
+                    name: "Lyria 3.5",
+                },
+                CloudModel {
+                    id: "google/lyria-3-pro/text-to-audio",
+                    name: "Lyria 3 Pro",
+                },
+            ],
+        },
+        Offer {
+            capability: Capability::SoundEffects,
+            // The ids and order of `audio::SOUND`, the default first.
+            models: &[
+                CloudModel {
+                    id: "pika/pika-audio/pika-sfx",
+                    name: "Pika SFX",
+                },
+                CloudModel {
+                    id: "sonilo/sonilo-v1.1-sfx/sound-effects",
+                    name: "Sonilo 1.1 SFX",
+                },
+                CloudModel {
+                    id: "elevenlabs/eleven-text-to-sound-v2/sound-effects",
+                    name: "ElevenLabs Sound Effects v2",
+                },
+            ],
+        },
     ],
     api: &Pika,
 };
@@ -236,9 +283,19 @@ impl Api for Pika {
                 let model = upscale::find(model).ok_or_else(missing)?;
                 upscale::run(key, model, request, stem, task)
             }
-            _ => {
+            Capability::Music | Capability::SoundEffects => {
+                let model = audio::find(model).ok_or_else(missing)?;
+                audio::run(key, model, request, stem, task)
+            }
+            Capability::Video => {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
+            }
+            Capability::Transcription | Capability::Voiceover => {
+                Err(CloudError::Unavailable(format!(
+                    "{NAME} doesn't make {}",
+                    request.capability().label().to_lowercase()
+                )))
             }
         }
     }
@@ -253,6 +310,10 @@ impl Api for Pika {
 
     fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
         upscale::find(model).map(|m| &m.spec)
+    }
+
+    fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {
+        audio::find(model).map(|m| &m.spec)
     }
 }
 

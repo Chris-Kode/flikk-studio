@@ -1,8 +1,9 @@
 //! Generate: music or a sound effect from a description, each in a dialog
 //! of its own, made by the provider set in Settings → Integrations and
-//! landing in the Music Generated or Sound Effects Generated bin. Music runs
-//! as long as In/Out when they are set. Each generation running (any kind)
-//! shows in the pool until it lands.
+//! landing in the Music Generated or Sound Effects Generated bin. The form
+//! offers what the model picked can make: its lengths, and looping where it
+//! loops. Music runs as long as In/Out when they are set. Each generation
+//! running (any kind) shows in the pool until it lands.
 
 use super::{MediaPoolPanel, form, thumb_badge};
 use crate::state::{EditorState, Generating};
@@ -11,7 +12,7 @@ use crate::ui::kit::{
     Button, DialogExt as _, Icon, IconName, Progress, Spinner, Switch, Textarea, Tooltip, h_flex,
     v_flex,
 };
-use flikk_core::cloud::{Capability, CloudError, GenerateRequest, Stage};
+use flikk_core::cloud::{AudioLengths, AudioModel, Capability, CloudError, GenerateRequest, Stage};
 use flikk_core::time::Time;
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::{SliderEvent, SliderState};
@@ -53,13 +54,37 @@ impl Kind {
         }
     }
 
-    /// Seconds: shortest, longest, and the step between.
-    fn lengths(self) -> (f32, f32, f32) {
-        match self {
+    /// What to offer when the provider says nothing of its model: the
+    /// lengths most models make.
+    fn any_model(self) -> AudioModel {
+        let (shortest, longest, step) = match self {
             Kind::Music => (5., 300., 1.),
             Kind::SoundEffect => (0.5, 30., 0.5),
+        };
+        AudioModel {
+            name: self.label(),
+            lengths: Some(AudioLengths {
+                shortest,
+                longest,
+                step,
+            }),
+            looping: self == Kind::SoundEffect,
         }
     }
+
+    /// The length it starts at, before the model's range fits it.
+    fn default_length(self) -> f64 {
+        match self {
+            Kind::Music => 30.,
+            Kind::SoundEffect => 5.,
+        }
+    }
+}
+
+/// How long it runs, on a slider over the model's lengths.
+struct LengthSlider {
+    slider: Entity<SliderState>,
+    _changed: Subscription,
 }
 
 /// The form: what it should sound like, how long, and instrumental (music)
@@ -68,17 +93,21 @@ pub struct GenerateForm {
     state: Entity<EditorState>,
     kind: Kind,
     prompt: Entity<TextareaState>,
-    length: Entity<SliderState>,
+    /// `None` when the model picks the length itself.
+    length: Option<LengthSlider>,
+    /// Whether the model loops sound effects; music is always offered
+    /// without vocals.
+    can_loop: bool,
     /// Instrumental music, or a sound effect that loops.
     option: bool,
     _prompt: Subscription,
-    _length: Subscription,
 }
 
 impl GenerateForm {
     fn new(
         state: Entity<EditorState>,
         kind: Kind,
+        model: AudioModel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -87,35 +116,43 @@ impl GenerateForm {
                 .auto_grow(3, 6)
                 .placeholder(kind.placeholder())
         });
-        let length = Self::slider(&state, kind, cx);
+        let length = model.lengths.map(|lengths| {
+            let slider = Self::slider(&state, kind, lengths, cx);
+            LengthSlider {
+                _changed: cx.subscribe(&slider, |_, _, _: &SliderEvent, cx| cx.notify()),
+                slider,
+            }
+        });
         Self {
             _prompt: cx.subscribe(&prompt, |_, _, _: &InputEvent, cx| cx.notify()),
-            _length: cx.subscribe(&length, |_, _, _: &SliderEvent, cx| cx.notify()),
             state,
             kind,
             prompt,
             length,
+            can_loop: model.looping,
             option: kind == Kind::Music,
         }
     }
 
-    /// The length slider for `kind`: music starts as long as In/Out.
-    fn slider(state: &Entity<EditorState>, kind: Kind, cx: &mut App) -> Entity<SliderState> {
-        let (min, max, step) = kind.lengths();
-        let in_out = state
-            .read(cx)
-            .in_out
-            .map(|r| r.duration().as_secs_f64() as f32);
+    /// The length slider for `kind` over `lengths`: music starts as long
+    /// as In/Out.
+    fn slider(
+        state: &Entity<EditorState>,
+        kind: Kind,
+        lengths: AudioLengths,
+        cx: &mut App,
+    ) -> Entity<SliderState> {
+        let in_out = state.read(cx).in_out.map(|r| r.duration().as_secs_f64());
         let default = match kind {
-            Kind::Music => in_out.unwrap_or(30.),
-            Kind::SoundEffect => 5.,
+            Kind::Music => in_out.unwrap_or(kind.default_length()),
+            Kind::SoundEffect => kind.default_length(),
         };
         cx.new(|_| {
             SliderState::new()
-                .min(min)
-                .max(max)
-                .step(step)
-                .default_value(default.clamp(min, max))
+                .min(lengths.shortest as f32)
+                .max(lengths.longest as f32)
+                .step(lengths.step as f32)
+                .default_value(lengths.fit(default) as f32)
         })
     }
 
@@ -124,9 +161,10 @@ impl GenerateForm {
         if prompt.is_empty() {
             return None;
         }
-        let length = Some(Time::from_secs_f64(
-            self.length.read(cx).value().start() as f64
-        ));
+        let length = self
+            .length
+            .as_ref()
+            .map(|l| Time::from_secs_f64(l.slider.read(cx).value().start() as f64));
         Some(match self.kind {
             Kind::Music => GenerateRequest::Music {
                 prompt,
@@ -137,7 +175,7 @@ impl GenerateForm {
             Kind::SoundEffect => GenerateRequest::SoundEffect {
                 prompt,
                 length,
-                looping: self.option,
+                looping: self.can_loop && self.option,
             },
         })
     }
@@ -154,27 +192,31 @@ impl GenerateForm {
 
 impl Render for GenerateForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let seconds = self.length.read(cx).value().start();
         let option = match self.kind {
-            Kind::Music => "Instrumental",
-            Kind::SoundEffect => "Loop",
+            Kind::Music => Some("Instrumental"),
+            Kind::SoundEffect => self.can_loop.then_some("Loop"),
         };
         v_flex()
             .gap(px(10.))
             .child(Textarea::new(&self.prompt))
-            .child(form::row(
-                "Length",
-                form::slider(&self.length, length_label(seconds)),
-            ))
-            .child(form::row(
-                option,
-                Switch::new("generate-option")
-                    .checked(self.option)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        this.option = *on;
-                        cx.notify();
-                    })),
-            ))
+            .when_some(self.length.as_ref(), |el, length| {
+                let seconds = length.slider.read(cx).value().start();
+                el.child(form::row(
+                    "Length",
+                    form::slider(&length.slider, length_label(seconds)),
+                ))
+            })
+            .when_some(option, |el, option| {
+                el.child(form::row(
+                    option,
+                    Switch::new("generate-option")
+                        .checked(self.option)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            this.option = *on;
+                            cx.notify();
+                        })),
+                ))
+            })
     }
 }
 
@@ -201,7 +243,15 @@ impl MediaPoolPanel {
         if window.has_active_dialog(cx) {
             return;
         }
-        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kind, window, cx));
+        let model = self
+            .state
+            .read(cx)
+            .services
+            .generation
+            .as_ref()
+            .and_then(|g| g.audio_model(kind.capability()))
+            .unwrap_or_else(|| kind.any_model());
+        let form = cx.new(|cx| GenerateForm::new(self.state.clone(), kind, model, window, cx));
         window.open_dialog(cx, move |dialog, _, cx| {
             let submit = form.clone();
             let ready = form.read(cx).request(cx).is_some();

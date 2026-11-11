@@ -78,16 +78,13 @@ pub(crate) fn parse(
             instrumental: args.opt_bool("instrumental")?.unwrap_or(true),
             sections: sections(args)?,
         },
-        "sound_effect" => {
-            if length.is_some_and(|l| l > Time::from_secs_f64(30.0)) {
-                return fail("A sound effect runs at most 30 s; make it loop, or make music");
-            }
-            GenerateRequest::SoundEffect {
-                prompt,
-                length,
-                looping: args.opt_bool("loop")?.unwrap_or(false),
-            }
-        }
+        // The lengths and looping the model takes are checked against the
+        // model the user picked, before approval.
+        "sound_effect" => GenerateRequest::SoundEffect {
+            prompt,
+            length,
+            looping: args.opt_bool("loop")?.unwrap_or(false),
+        },
         "voiceover" => {
             cloud::check_script(&prompt).map_err(|e| ToolError(error_text(&e)))?;
             let voice = args.str("voice")?.trim().to_owned();
