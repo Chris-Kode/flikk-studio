@@ -126,8 +126,9 @@ pub struct AnalyzeOptions {
     pub refresh: bool,
     /// Only what is heard: no transcript, speakers or shot changes.
     pub sound_only: bool,
-    /// Nobody waits on it: queued behind every job, where otherwise it
-    /// goes ahead of those queued in the background.
+    /// Nobody asked for it: queued behind every job, and never sent to a
+    /// provider to transcribe unless asked for since. Otherwise it goes
+    /// ahead of the jobs queued in the background.
     pub background: bool,
 }
 
@@ -390,6 +391,11 @@ impl AnalysisService for LocalAnalysis {
     fn configure(&self, config: AnalysisConfig) {
         *lock(&self.shared.config) = config;
         *lock(&self.shared.wanted) = [None, None];
+    }
+
+    fn cancel_background_speech(&self) {
+        self.queue
+            .cancel_background_where(|(_, steps, _)| steps.transcript);
     }
 
     fn cancel(&self, item: &MediaItem) {
@@ -717,6 +723,12 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
         Some(_) => plan.missing(&have),
         None => plan,
     };
+    // Queued in the background with nobody asking since, it never spends
+    // money: a provider picked meanwhile leaves the item for when it is
+    // asked for.
+    if plan.online.is_some() && !job.asked() {
+        return Ok(());
+    }
     let steps = plan.steps;
     let script = script.filter(|_| steps.transcript);
     let duration = item.info.as_ref().map(|i| i.duration);

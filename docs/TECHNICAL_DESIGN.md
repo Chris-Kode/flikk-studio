@@ -574,7 +574,12 @@ through the route generated media takes (`EditorState::analyze_new`,
 called after every edit, which looks at each pool item once): never while
 a provider is picked to transcribe, as automatic analysis spends no money
 (the switch is dimmed then, with the provider in its tooltip), and never
-for items already in a project when it opens. The library's sounds are
+for items already in a project when it opens. An import undone and done
+again is new again. Automatic analysis never reaches a provider: a job
+queued in the background and not asked for since skips itself, leaving
+the item unanalyzed, when a provider transcribes by the time it runs
+(`JobProgress::asked`), and picking a provider to transcribe drops those
+still waiting that would transcribe (`cancel_background_speech`). The library's sounds are
 analyzed on their own without speech or shots, on local models only, so
 that it costs nothing. The models are on
 disk before a project opens (see Models), so "Analyze" is disabled only
@@ -588,10 +593,10 @@ missing stays empty in the results (voice activity falls back to an
 energy VAD). Speakers need the transcript; beats and sound search, the
 sound pass. Items are analyzed one at a time on a `JobQueue`: what the
 user or the agent asks for (`AnalysisService::analyze`: "Analyze",
-`view_media`) goes ahead of what is queued in the background
-(`analyze_in_background`: imports, generated media, library sounds), and
-an item waiting there moves ahead when asked for (`JobQueue::push_first`);
-each group runs in the order queued. A result is written to
+`view_media`, generated media) goes ahead of what is queued in the
+background (`analyze_in_background`: imports, library sounds), and an
+item waiting there moves up with them when asked for
+(`JobQueue::push_first`); each group runs in the order queued. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
 kept for the session and the job fails, naming the steps.
 `ANALYSIS_VERSION` (1) marks the results: those of another version, and the
@@ -1326,8 +1331,8 @@ on the UI thread and run it off it:
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
   a generated item reaches the pool (the media pool or an approval),
-  `analyze_generated` queues it once: a video like footage when the analysis models are ready, a
-  voiceover when transcripts are on. Items already in a project when it
+  `analyze_new` queues it once, as asked for: a video like footage unless
+  a provider picked to transcribe has no key, and a voiceover. Items already in a project when it
   opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
   some models): the media pool's form starts its Sound switch from it, and

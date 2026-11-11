@@ -203,11 +203,17 @@ pub trait AnalysisService: Send + Sync {
     /// waits: it goes ahead of the analysis queued in the background, and
     /// an item queued there already moves ahead.
     fn analyze(&self, item: &MediaItem) -> JobId;
-    /// [`AnalysisService::analyze`] for analysis nobody waits on yet
-    /// (imports, generated media): behind everything queued.
+    /// [`AnalysisService::analyze`] for analysis nobody asked for
+    /// (imports): behind everything queued. It never spends money: when a
+    /// provider transcribes by the time it runs, it does nothing (the item
+    /// stays unanalyzed until asked for), unless it was asked for since.
     fn analyze_in_background(&self, item: &MediaItem) -> JobId {
         self.analyze(item)
     }
+    /// Drop the analysis waiting in the background that would transcribe:
+    /// a provider was picked to transcribe. Its items stay unanalyzed until
+    /// asked for.
+    fn cancel_background_speech(&self) {}
     /// Queue what is heard in a library sound: sounds, music, beats and
     /// sound vectors, on this machine. No speech, so it spends no
     /// transcription credits. Nothing if it has results, or the steps or

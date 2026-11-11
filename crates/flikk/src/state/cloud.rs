@@ -328,6 +328,13 @@ impl EditorState {
             self.invalidate_voices(cx);
         }
         self.configure_analysis();
+        if capability == Capability::Transcription
+            && self.online_transcription().is_some()
+            && let Some(analysis) = &self.services.analysis
+        {
+            // Automatic analysis never spends money.
+            analysis.cancel_background_speech();
+        }
         self.refresh_key_notice();
         cx.notify();
     }
@@ -699,13 +706,14 @@ impl EditorState {
     }
 
     /// Analyze each item as it reaches the pool, once, however it got
-    /// there (an import, the media pool's Generate, an approval), behind
-    /// what the user and the agent asked for. Imported video and audio
-    /// when "Analyze on import" is on and no provider transcribes, so it
-    /// costs nothing. What a provider made: a video like footage, so the
-    /// agent can see and hear it; a voiceover too (its words are its
-    /// script, so it costs no credits); music and sound effects are left
-    /// to be analyzed when asked. Pictures are never analyzed.
+    /// there (an import, the media pool's Generate, an approval). Imported
+    /// video and audio in the background, when "Analyze on import" is on
+    /// and no provider transcribes: it never spends money. What a provider
+    /// made, as asked for (the user or the agent asked for it): a video
+    /// like footage, so the agent can see and hear it; a voiceover too
+    /// (its words are its script, so it costs no credits); music and sound
+    /// effects are left to be analyzed when asked. Pictures are never
+    /// analyzed.
     pub(super) fn analyze_new(&mut self, cx: &mut Context<Self>) {
         let new: Vec<(MediaId, MediaKind, Option<Capability>)> = self
             .bus
@@ -720,22 +728,27 @@ impl EditorState {
         };
         for (id, kind, capability) in new {
             self.media_seen.insert(id);
-            let analyze = match capability {
+            let Some(item) = self.bus.project().media(id) else {
+                continue;
+            };
+            match capability {
                 // An upscaled video is new footage to the agent: its
                 // results are keyed by the file.
-                Some(Capability::Video | Capability::Upscale) => self.analysis_ready(),
-                Some(Capability::Voiceover) => true,
-                Some(_) => false,
-                None => {
-                    kind != MediaKind::Image
-                        && self.analyze_on_import
-                        && self.online_transcription().is_none()
+                Some(Capability::Video | Capability::Upscale) if self.analysis_ready() => {
+                    analysis.analyze(item);
                 }
-            };
-            if analyze && let Some(item) = self.bus.project().media(id) {
-                analysis.analyze_in_background(item);
-                cx.notify();
+                Some(Capability::Voiceover) => {
+                    analysis.analyze(item);
+                }
+                None if kind != MediaKind::Image
+                    && self.analyze_on_import
+                    && self.online_transcription().is_none() =>
+                {
+                    analysis.analyze_in_background(item);
+                }
+                _ => continue,
             }
+            cx.notify();
         }
     }
 
