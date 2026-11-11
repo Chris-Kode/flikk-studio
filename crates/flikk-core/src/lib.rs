@@ -17,6 +17,7 @@ pub mod bus;
 pub mod cache_sweep;
 pub mod captions;
 pub mod changeset;
+pub mod cleanup;
 pub mod cloud;
 pub mod command;
 pub mod compose;

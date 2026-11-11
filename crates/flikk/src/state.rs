@@ -596,6 +596,10 @@ fn services(cloud: &Arc<flikk_cloud::Cloud>) -> Services {
     let depth = media.clone().map(|m| {
         Arc::new(flikk_analysis::LocalDepth::new(m)) as Arc<dyn flikk_core::depth::DepthService>
     });
+    let cleanup = media.clone().map(|m| {
+        Arc::new(flikk_analysis::LocalCleanup::new(m))
+            as Arc<dyn flikk_core::services::CleanupService>
+    });
     Services {
         media,
         analysis: Some(
@@ -608,6 +612,7 @@ fn services(cloud: &Arc<flikk_cloud::Cloud>) -> Services {
         interpolation: Some(Arc::new(flikk_analysis::LocalInterpolation::new())
             as Arc<dyn flikk_core::services::InterpolationService>),
         depth,
+        cleanup,
         // Made with the caption styles, see `CaptionStyles::refresh_lettering`.
         lettering: None,
         generation: Some(cloud.clone() as Arc<dyn flikk_core::cloud::GenerationService>),

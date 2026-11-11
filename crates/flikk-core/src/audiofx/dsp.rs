@@ -19,8 +19,9 @@
 //! * reverb: Freeverb; it is linear, so the render convolves with its
 //!   impulse response ([`reverb_impulse`]) and matches exactly;
 //! * limiter: a 5 ms look-ahead brick wall (the render uses `alimiter`);
-//! * noise reduction: a downward expander below the noise floor, a light
-//!   stand-in for the render's spectral `afftdn`.
+//!
+//! Noise reduction is not live: FFmpeg's `afftdn` makes a copy of the
+//! source that both play ([`crate::cleanup`]).
 
 use super::{AudioFx, AudioFxKind};
 
@@ -70,7 +71,8 @@ impl Chain {
     }
 }
 
-/// A processor for `fx` at `rate` Hz.
+/// A processor for `fx` at `rate` Hz; `None` for Noise Reduction, which
+/// is made into a copy of the source.
 pub fn processor(fx: &AudioFx, rate: f64) -> Option<Box<dyn Processor>> {
     let v = |name: &str| fx.value(name);
     Some(match fx.kind {
@@ -129,7 +131,8 @@ pub fn processor(fx: &AudioFx, rate: f64) -> Option<Box<dyn Processor>> {
             curve: de_esser_curve(v("amount"), rate),
             high: [0.0; 2],
         }),
-        AudioFxKind::NoiseReduction => Box::new(Expander::new(v("floor_db"), v("amount_db"), rate)),
+        // Made into a copy of the source instead (`crate::cleanup`).
+        AudioFxKind::NoiseReduction => return None,
         AudioFxKind::Reverb => Box::new(Reverb::new(v("room"), v("damping"), v("mix"), rate)),
         AudioFxKind::Echo => Box::new(Echo::new(v("delay_ms"), v("feedback"), v("mix"), rate)),
     })
@@ -584,56 +587,6 @@ impl Processor for Limiter {
                 // Drop accumulated rounding.
                 self.sum = self.mins.iter().sum();
             }
-        }
-    }
-}
-
-/// Noise reduction for preview: 1:2 downward expansion below the noise
-/// floor + 6 dB, at most `amount_db` deep.
-struct Expander {
-    threshold: f64,
-    floor: f64,
-    attack: f64,
-    release: f64,
-    env: f64,
-    smooth: f64,
-    gain: f64,
-}
-
-impl Expander {
-    fn new(floor_db: f64, amount_db: f64, rate: f64) -> Self {
-        let coef = |ms: f64| (-1.0 / (ms / 1000.0 * rate)).exp();
-        Self {
-            threshold: db(floor_db + 6.0),
-            floor: db(-amount_db.abs()),
-            attack: coef(2.0),
-            release: coef(150.0),
-            env: 0.0,
-            smooth: coef(10.0),
-            gain: 1.0,
-        }
-    }
-}
-
-impl Processor for Expander {
-    fn process(&mut self, buf: &mut [f32]) {
-        for f in buf.as_chunks_mut::<2>().0.iter_mut() {
-            let x = f[0].abs().max(f[1].abs()) as f64;
-            let k = if x > self.env {
-                self.attack
-            } else {
-                self.release
-            };
-            self.env = x + (self.env - x) * k;
-            let target = if self.env < self.threshold {
-                (self.env / self.threshold).max(self.floor)
-            } else {
-                1.0
-            };
-            self.gain = target + (self.gain - target) * self.smooth;
-            let g = self.gain as f32;
-            f[0] *= g;
-            f[1] *= g;
         }
     }
 }

@@ -40,6 +40,7 @@
 
 mod align;
 mod cache;
+mod cleanup;
 mod depth;
 mod engine;
 mod ffmpeg;
@@ -78,6 +79,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub use cleanup::LocalCleanup;
 pub use depth::LocalDepth;
 pub use ffmpeg::cut_speech;
 pub use interpolation::{LocalInterpolation, clear_disk as clear_interpolated};

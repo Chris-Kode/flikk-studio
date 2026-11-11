@@ -7,7 +7,7 @@
 
 use super::EditorState;
 use super::playback::PLAY_TICK;
-use crate::ui::viewer::audio::AudioOut;
+use crate::ui::viewer::audio::{AudioOut, Engines};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{Clip, ClipContent, MediaItem, MediaKind, Project, Track, TrackKind};
 use flikk_core::{MediaId, Time, TimeRange};
@@ -260,7 +260,14 @@ impl EditorState {
         }
         source.playing = Some(Playing {
             since: Instant::now(),
-            _audio: AudioOut::start(media, source.project.clone(), source.from),
+            _audio: AudioOut::start(
+                Engines {
+                    media,
+                    cleanup: self.services.cleanup.clone(),
+                },
+                source.project.clone(),
+                source.from,
+            ),
             _tick: clock,
         });
         self.source = Some(source);

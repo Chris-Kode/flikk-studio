@@ -402,6 +402,23 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 * **Audio effects** (`flikk-core/src/audiofx.rs`, `audiofx/dsp.rs`) run in the
   preview mixer and map to FFmpeg filters in `flikk-deliver/src/audio_fx.rs`,
   table by table, so preview and export match.
+* **Sound cleaned at its source** (`flikk-core/src/cleanup.rs`): Noise
+  Reduction is not live. Its `afftdn` runs once per source stream and
+  setting over the whole stream, decoded as the mixer hears it (stereo,
+  48 kHz), its 25 ms block delay taken out, into 24-bit FLAC under
+  `cache/denoised/` (`LocalCleanup` in `flikk-analysis/src/cleanup.rs`,
+  behind `CleanupService`, one worker thread, the newest asked first). The
+  preview mixer plays that copy in place of the recording once it is made,
+  and the render reads the same file, making it first (`queue::clean_sound`),
+  so both play the same samples. It so works on the recording, before the
+  retime and the other effects wherever it sits in a stack, the clip's
+  settings then the track's, on each clip of the track. Until its copy is
+  made a clip plays as recorded. Measured with a verbatim copy of the mixer
+  run offline against a WAV export, on 17 s of synthetic speech (FFmpeg's
+  flite voice) under pink noise rising and falling every 7 s and a 120 Hz
+  hum, as AAC: the difference was 0 (bit-identical) for Noise Reduction on
+  the clip or on its track, −108 dB under the signal with an equalizer after
+  it, −119 dB trimmed by 3 s with −4 dB gain and 30 dB of reduction.
 
 ## 6. Media and playback
 
@@ -426,7 +443,8 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
   `hdr/` (tone-mapping tables), `respeak/` (a provider's takes of a fixed
   sentence, until the words are cut out of them), `voice-sources/`
   (speech cut as FLAC for a provider to clone or match, removed with the
-  voices dialog). An HDR item's proxy is
+  voices dialog), `denoised/<fp>-<stream>-afftdn-<settings>.flac` (Noise
+  Reduction's copies, §5). An HDR item's proxy is
   `proxies/<fp>-<mapping>.mp4` (below).
 * **Disk caches** (`flikk-core/src/disk_cache.rs`): the render cache and
   optical flow frames are files named by a 16-byte key under
@@ -439,7 +457,7 @@ by what they both heard (`flikk-core/src/sync/`), for podcasts and multicam.
 * **Sweep** (`flikk-core/src/cache_sweep.rs`): at startup, off the UI
   thread, files unused for 30 days go from `proxies/`, `depth/`,
   `collages/`, `waveforms/`, `frames/`, `agent/`, `voices/`,
-  `voice-previews/`, `hdr/` and the pages in `html/`; scratch
+  `voice-previews/`, `hdr/`, `denoised/` and the pages in `html/`; scratch
   (`voice-sources/`, `upload/`, `respeak/`, `render/`) and partial writes
   (`.part`, `.tmp`, `.tmp-…`) a day old; and proxies of a fingerprint a
   day older than its newest, made for a tone map since changed. Readers
@@ -1904,8 +1922,13 @@ there.
   checked by code review only, as it needs an image provider's key. In a
   debug build the scene is drawn coarse, since drawing is some twenty
   times slower unoptimized.
-* Preview vs export: noise reduction previews with an expander (export uses
-  `afftdn`); the limiter and time-stretch differ slightly in shape.
+* Preview vs export: the limiter and time-stretch differ slightly in shape.
+  An AAC recording decodes a little differently after a seek (the bands
+  the decoder fills with generated noise, it appears), and the preview
+  always seeks:
+  on noisy AAC the two differed by up to −40 dBFS in places (−49 dB under
+  the signal overall), and not at all on lossless sources or cleaned
+  copies, which are FLAC.
 * The FX code editor has no syntax highlighting (gpui-kit's `syntect`
   feature is not vendored). A shader that never returns can stall the GPU.
 * A program an external agent proposes is usable by its later connections

@@ -8,11 +8,13 @@ use crate::graph::{self, GraphSpec, Loudnorm, Measured};
 use crate::hw::{self, Encoder, HwEncoder};
 use crate::preset::RenderSettings;
 use anyhow::{Context as _, Result, anyhow};
-use flikk_core::JobId;
+use flikk_core::audiofx;
+use flikk_core::cleanup::{self, Cleanup, Treatment};
 use flikk_core::memory::CaptionStyle;
-use flikk_core::model::Project;
+use flikk_core::model::{MediaItem, Project};
 use flikk_core::paths;
 use flikk_core::services::Services;
+use flikk_core::{JobId, TimeRange};
 use flikk_os::sync::{lock, panic_message};
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -347,9 +349,69 @@ const MOTION_SHARE: f32 = 0.2;
 /// The part of what is left spent making depth maps, when it has any to
 /// make.
 const DEPTH_SHARE: f32 = 0.5;
+/// The part of what is left spent cleaning sound, when it has any to
+/// clean.
+const CLEANUP_SHARE: f32 = 0.3;
 /// The part of what is left spent measuring loudness, when it is
 /// normalized.
 const LOUDNESS_SHARE: f32 = 0.2;
+
+/// Make every cleaned copy the clips heard over `range` play
+/// ([`flikk_core::cleanup`]), so the graph reads them. Whether there were
+/// any.
+fn clean_sound(
+    project: &Project,
+    range: TimeRange,
+    services: &Services,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<bool> {
+    let tl = &project.timeline;
+    let mut wanted: Vec<(&MediaItem, u32, Treatment)> = Vec::new();
+    for track in tl.tracks.iter().filter(|t| tl.audible(t)) {
+        for span in audiofx::spans(track) {
+            if span.range.intersect(&range).is_none() {
+                continue;
+            }
+            let Some(item) = span.clip.media().and_then(|m| project.media(m)) else {
+                continue;
+            };
+            if !cleanup::has_sound(item) {
+                continue;
+            }
+            let stream = cleanup::stream_of(span.clip, item);
+            for treatment in Cleanup::of(span.clip, track).treatments() {
+                let copy = (item, stream, treatment.clone());
+                let same = |w: &(&MediaItem, u32, Treatment)| {
+                    w.0.fingerprint == item.fingerprint && w.1 == stream && w.2 == *treatment
+                };
+                if !wanted.iter().any(same) {
+                    wanted.push(copy);
+                }
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(false);
+    }
+    let service = services
+        .cleanup
+        .as_ref()
+        .ok_or_else(|| anyhow!("cleaning sound needs the media engine"))?;
+    let n = wanted.len() as f32;
+    for (i, (item, stream, treatment)) in wanted.iter().enumerate() {
+        service
+            .complete(
+                item,
+                *stream,
+                treatment,
+                &|p| progress((i as f32 + p) / n),
+                cancel,
+            )
+            .map_err(|e| anyhow!("cleaning the sound of {}: {e}", item.path.display()))?;
+    }
+    Ok(true)
+}
 
 /// How long [`RenderQueue::shutdown`] waits for the running job to stop.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
@@ -407,6 +469,21 @@ fn render(
         // Depth maps too.
         let (from, part) = (share, (1.0 - share) * DEPTH_SHARE);
         let made = composed::find_depth(
+            &request.project,
+            spec.range,
+            &request.services,
+            &|p| progress(from + p * part),
+            cancel,
+        )?;
+        if made {
+            share = from + part;
+        }
+    }
+
+    // Cleaned sound: made before the graph reads it.
+    if spec.audio {
+        let (from, part) = (share, (1.0 - share) * CLEANUP_SHARE);
+        let made = clean_sound(
             &request.project,
             spec.range,
             &request.services,

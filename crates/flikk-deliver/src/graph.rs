@@ -29,9 +29,12 @@ use crate::preset::{LoudnessTarget, RenderSettings};
 use crate::{audio_fx, captions};
 use anyhow::{Context as _, Result, bail};
 use flikk_core::audiofx::{self, Span};
+use flikk_core::cleanup::{self, Cleanup, Sound, SoundFile};
 use flikk_core::compose::is_still_overlay;
 use flikk_core::memory::CaptionStyle;
-use flikk_core::model::{Clip, ClipContent, Grade, MediaKind, Project, Property, Track, TrackKind};
+use flikk_core::model::{
+    Clip, ClipContent, Grade, MediaItem, MediaKind, Project, Property, Track, TrackKind,
+};
 use flikk_core::speed::RampAudio;
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{Rate, Time, TimeRange, TrackId};
@@ -620,7 +623,7 @@ impl Builder<'_> {
                 continue;
             }
             let start = self.sample_time(s0);
-            let Some(segment) = self.audio_segment(&span, start, s1 - s0, work_dir)? else {
+            let Some(segment) = self.audio_segment(track, &span, start, s1 - s0, work_dir)? else {
                 continue;
             };
             let cursor = lanes[lane].0;
@@ -676,12 +679,14 @@ impl Builder<'_> {
         self.spec.range.start + Time(flicks as i64)
     }
 
-    /// `samples` samples of `span` from timeline time `start`: the source
-    /// (with handles; silence before the media starts), retimed with
-    /// `atempo`, through the clip's effects, then one `volume` expression
-    /// for gain or volume keyframes, fades and crossfade ramps.
+    /// `samples` samples of `span` (on `track`) from timeline time `start`:
+    /// the source as cleaned ([`cleanup`]; with handles, silence before the
+    /// media starts), retimed with `atempo`, through the clip's effects,
+    /// then one `volume` expression for gain or volume keyframes, fades
+    /// and crossfade ramps.
     fn audio_segment(
         &mut self,
+        track: &Track,
         span: &Span,
         start: Time,
         samples: i64,
@@ -689,9 +694,7 @@ impl Builder<'_> {
     ) -> Result<Option<String>> {
         let clip = span.clip;
         let ClipContent::Media {
-            media,
-            source_in,
-            audio_stream,
+            media, source_in, ..
         } = &clip.content
         else {
             return Ok(None);
@@ -727,12 +730,13 @@ impl Builder<'_> {
             ramp_tempo(clip, start + Time::from_secs_f64(lead), end, s0)
         });
         let vary = !clip.is_ramped() && flikk_core::sync::varispeed::is_varispeed(speed);
+        let sound = sound_of(clip, track, item)?;
         let mut f = if vary {
             // Drift correction: resampled as the preview does it.
             let file = work_dir.join(format!("{}.flac", self.label("vary")));
             crate::varispeed::render(
                 item,
-                *audio_stream,
+                &sound.file,
                 s0,
                 (length - lead).max(0.0),
                 speed,
@@ -744,18 +748,19 @@ impl Builder<'_> {
                 format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
             ]
         } else {
-            let mut f = vec![format!(
-                "amovie={}:seek_point={}{}",
-                escape_path(&item.path),
-                num(s0),
-                audio_stream.map(|i| format!(":si={i}")).unwrap_or_default()
-            )];
-            f.push(format!("atrim=start={}:end={}", num(s0), num(s1)));
-            f.push("asetpts=PTS-STARTPTS".into());
-            f.push(format!(
-                "aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"
-            ));
-            f
+            let (path, si) = match &sound.file {
+                SoundFile::Recording { stream } => (
+                    item.path.as_path(),
+                    stream.map(|i| format!(":si={i}")).unwrap_or_default(),
+                ),
+                SoundFile::Copy(path) => (path.as_path(), String::new()),
+            };
+            vec![
+                format!("amovie={}:seek_point={}{si}", escape_path(path), num(s0)),
+                format!("atrim=start={}:end={}", num(s0), num(s1)),
+                "asetpts=PTS-STARTPTS".into(),
+                format!("aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts=stereo"),
+            ]
         };
         match ramp {
             Some(steps) => f.extend(self.ramp_atempo(&steps, work_dir)?),
@@ -836,6 +841,29 @@ impl Builder<'_> {
 
 /// Every 50 ms of timeline from `from` to `to`, where the ramped `clip`'s
 /// source is then (seconds from `s0`) and its speed.
+/// What `clip` on `track` plays from: its cleaned copies must be made
+/// already (the queue makes them first, `crate::queue`).
+fn sound_of(clip: &Clip, track: &Track, item: &MediaItem) -> Result<Sound> {
+    let cleanup = Cleanup::of(clip, track);
+    let stream = cleanup::stream_of(clip, item);
+    let mut missing = None;
+    let sound = cleanup.sound(clip, |treatment| {
+        let file = item
+            .fingerprint
+            .as_ref()
+            .map(|fp| treatment.file(fp, stream))
+            .filter(|file| file.is_file());
+        if file.is_none() {
+            missing = Some(treatment.clone());
+        }
+        file
+    });
+    if missing.is_some() {
+        bail!("the cleaned sound of {} is not made", item.path.display());
+    }
+    Ok(sound)
+}
+
 fn ramp_tempo(clip: &Clip, from: Time, to: Time, s0: f64) -> Vec<(f64, f64)> {
     let step = Time::from_millis(50);
     let mut out = Vec::new();

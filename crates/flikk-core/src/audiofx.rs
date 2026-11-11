@@ -5,7 +5,8 @@
 //! Signal flow, the same in the viewer's mixer and the render:
 //!
 //! ```text
-//! clip:   source → retime (pitch-preserving) → clip effects
+//! clip:   source (cleaned, see `crate::cleanup`) → retime
+//!         (pitch-preserving) → clip effects
 //!         → volume (gain or its keyframes) × fades × crossfade ramps
 //! track:  Σ clips → track volume → pan → track effects
 //! master: Σ tracks (ducking under dialogue) → loudness

@@ -141,6 +141,15 @@ impl MediaService for FfmpegMedia {
         decode::audio(self, item, stream, from, sample_rate)
     }
 
+    fn audio_file(
+        &self,
+        path: &Path,
+        from: Time,
+        sample_rate: u32,
+    ) -> ServiceResult<Box<dyn PcmStream>> {
+        decode::audio_file(self, path, from, sample_rate)
+    }
+
     fn collage(&self, request: &CollageRequest) -> ServiceResult<Collage> {
         collage::collage(self, request)
     }

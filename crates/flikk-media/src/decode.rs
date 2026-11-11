@@ -422,6 +422,23 @@ pub(crate) fn audio(
     }))
 }
 
+/// Audio of the first audio stream of the file at `path`.
+pub(crate) fn audio_file(
+    media: &FfmpegMedia,
+    path: &Path,
+    from: Time,
+    sample_rate: u32,
+) -> ServiceResult<Box<dyn PcmStream>> {
+    let mut cmd = media.ffmpeg();
+    cmd.args(["-ss", &secs_arg(from)]).arg("-i").arg(path);
+    pcm_output(&mut cmd, "0:a:0", sample_rate.max(1));
+    Ok(Box::new(FfmpegPcm {
+        process: Process::spawn(cmd, |out| out)?,
+        buf: Vec::new(),
+        carry: 0,
+    }))
+}
+
 /// `-map` for an audio stream: `stream` is a container index as in
 /// `AudioStream::index`; anything else counts audio streams from zero.
 pub(crate) fn audio_map(

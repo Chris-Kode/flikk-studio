@@ -54,7 +54,7 @@ pub fn mark_used(path: &Path) {
 pub fn sweep() {
     let cache = paths::cache();
     let now = SystemTime::now();
-    for dir in KEPT {
+    for dir in KEPT.into_iter().chain(crate::cleanup::FOLDERS) {
         older_than(&cache.join(dir), now, UNUSED);
     }
     for dir in SCRATCH {

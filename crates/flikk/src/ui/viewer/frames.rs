@@ -2,7 +2,7 @@
 //! (newest request wins), their layout for picking, and frames rendered
 //! ahead of a resting playhead.
 
-use super::audio::AudioOut;
+use super::audio::{AudioOut, Engines};
 use super::player::{self, Player};
 use super::{AHEAD_DELAY, AHEAD_SECONDS, PlayKey, Playback, Request, SEEK_JUMP, ViewerPanel};
 use crate::render_cache::{self, Globals};
@@ -61,12 +61,14 @@ impl ViewerPanel {
         let disk = self.disk(key, cx);
         let state = self.state.read(cx);
         let media = state.services.media.clone();
+        let cleanup = state.services.cleanup.clone();
         let source = state.source_picture().is_some();
         let realtime = state.monitor_playing() && (source || state.play_speed() == 1.0);
         let (Some(media), true) = (media, realtime) else {
             self.playback = None;
             return;
         };
+        let engines = Engines { media, cleanup };
         self.ahead = None;
         // A paused frame still waiting is not composed once playback runs.
         self.composing.drop_next();
@@ -90,7 +92,7 @@ impl ViewerPanel {
                 disk,
             );
             // A source plays its own sound.
-            let audio = (!source).then(|| AudioOut::start(media, project.clone(), playhead));
+            let audio = (!source).then(|| AudioOut::start(engines, project.clone(), playhead));
             self.playback = Some(Playback {
                 key,
                 player,
@@ -99,7 +101,7 @@ impl ViewerPanel {
                 last: playhead,
             });
         } else if let (Some(p), true, false) = (self.playback.as_mut(), jumped, source) {
-            p.audio = Some(AudioOut::start(media, p.project.clone(), playhead));
+            p.audio = Some(AudioOut::start(engines, p.project.clone(), playhead));
         }
         let picture = self.playback.as_mut().and_then(|p| {
             p.last = playhead;

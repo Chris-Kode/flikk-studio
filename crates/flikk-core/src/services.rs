@@ -2,6 +2,7 @@
 //! agent host can be written against them independently.
 
 use crate::analysis::{Analysis, AnalysisSteps, Loudness, SoundVectors};
+use crate::cleanup::{Progress, Treatment};
 use crate::cloud::SpeechService;
 use crate::fx::{FxAsset, ParamValue};
 use crate::ids::{JobId, MaskId, MediaId};
@@ -137,6 +138,19 @@ pub trait MediaService: Send + Sync {
         from: Time,
         sample_rate: u32,
     ) -> ServiceResult<Box<dyn PcmStream>>;
+    /// Audio of the first audio stream of the file at `path` (a cleaned
+    /// copy in the cache, [`crate::cleanup`]) from time `from` onward.
+    fn audio_file(
+        &self,
+        path: &Path,
+        _from: Time,
+        _sample_rate: u32,
+    ) -> ServiceResult<Box<dyn PcmStream>> {
+        Err(ServiceError(format!(
+            "cannot play {}: no media engine",
+            path.display()
+        )))
+    }
     fn collage(&self, request: &CollageRequest) -> ServiceResult<Collage>;
     /// Peak envelope for drawing, `buckets` values in 0..1 over `range`.
     fn waveform(
@@ -397,6 +411,26 @@ pub trait InterpolationService: Send + Sync {
     fn version(&self) -> u64;
 }
 
+/// Cleaned copies of source sound (`flikk-analysis`), kept by
+/// fingerprint, stream and how they were made, so the preview mixer and
+/// the render read the same samples (see [`crate::cleanup`]).
+pub trait CleanupService: Send + Sync {
+    /// How far the copy of `stream` of `item` that `treatment` makes is.
+    /// Starts making it when it is neither made nor being made.
+    fn request(&self, item: &MediaItem, stream: u32, treatment: &Treatment) -> Progress;
+    /// Make it now, waiting for it (renders). `progress` gets 0..1.
+    fn complete(
+        &self,
+        item: &MediaItem,
+        stream: u32,
+        treatment: &Treatment,
+        progress: &dyn Fn(f32),
+        cancel: &AtomicBool,
+    ) -> ServiceResult<PathBuf>;
+    /// Counts copies made, so views know to look again.
+    fn version(&self) -> u64;
+}
+
 /// One evaluated FX program: what to run, its parameter values and clock.
 /// Build `values` with [`crate::fx::FxInstance::values_at`].
 #[derive(Clone, Copy, Debug)]
@@ -619,6 +653,8 @@ pub struct Services {
     pub interpolation: Option<Arc<dyn InterpolationService>>,
     /// Depth maps for depth effects and masks.
     pub depth: Option<Arc<dyn crate::depth::DepthService>>,
+    /// Cleaned copies of source sound: Noise Reduction.
+    pub cleanup: Option<Arc<dyn CleanupService>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -635,6 +671,7 @@ impl std::fmt::Debug for Services {
             .field("stabilizer", &self.stabilizer.is_some())
             .field("interpolation", &self.interpolation.is_some())
             .field("depth", &self.depth.is_some())
+            .field("cleanup", &self.cleanup.is_some())
             .finish()
     }
 }

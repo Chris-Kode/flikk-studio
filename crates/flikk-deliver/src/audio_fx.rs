@@ -11,7 +11,7 @@
 //! | De-esser | `highpass` band, `sidechaincompress`d by itself, summed back as `x − hp + g·hp` | same structure and curve |
 //! | Echo | `aecho` taps from the feedback line | same down to -60 dB |
 //! | Reverb | `afir` with the Freeverb impulse response | exact (Freeverb is linear) |
-//! | Noise reduction | spectral `afftdn` | the preview approximates it with an expander |
+//! | Noise reduction | spectral `afftdn`, made into a copy of the source | both read the copy (`flikk_core::cleanup`) |
 
 use crate::ffmpeg::escape_path;
 use crate::keyframes::num;
@@ -130,21 +130,8 @@ fn linear(fx: &AudioFx, sr: u32) -> Option<Vec<String>> {
             num(v("attack_ms")),
             num(v("release_ms"))
         )],
-        AudioFxKind::NoiseReduction => {
-            let mut f = vec![format!(
-                "afftdn=nr={}:nf={}",
-                num(v("amount_db").clamp(0.01, 97.0)),
-                num(v("floor_db").clamp(-80.0, -20.0))
-            )];
-            // Undo its block delay: pad the end, drop as much from the start.
-            let delay = (afftdn_latency() * sr as f64).round() as i64;
-            if delay > 0 {
-                f.insert(0, format!("apad=pad_len={delay}"));
-                f.push(format!("atrim=start_sample={delay}"));
-                f.push("asetpts=PTS-STARTPTS".into());
-            }
-            f
-        }
+        // Read from a cleaned copy of the source instead (`flikk_core::cleanup`).
+        AudioFxKind::NoiseReduction => vec![],
         AudioFxKind::Echo => {
             let taps = dsp::echo_taps(v("delay_ms"), v("feedback"), v("mix"));
             let join = |f: &dyn Fn(&(f64, f64)) -> String| {
@@ -226,55 +213,6 @@ fn reverb(
         dry = num(dry)
     ));
     Ok(out)
-}
-
-/// Output delay of `afftdn` in seconds, measured once on this FFmpeg:
-/// noise through it next to the original, best-correlating lag. FFmpeg 6
-/// delays by its 25 ms analysis window and has no option to compensate.
-fn afftdn_latency() -> f64 {
-    static LATENCY: OnceLock<f64> = OnceLock::new();
-    *LATENCY.get_or_init(|| {
-        const SR: usize = 48_000;
-        let out = command(ffmpeg())
-            .args([
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "anoisesrc=d=0.5:r=48000:a=0.3:seed=3,asplit[a][b];[b]afftdn=nr=0.01:nf=-80[c];[a][c]amerge=inputs=2",
-                "-f",
-                "f32le",
-                "-",
-            ])
-            .output();
-        let Ok(out) = out else {
-            return 0.025;
-        };
-        let v: Vec<f32> = out
-            .stdout
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect();
-        let (input, output): (Vec<f32>, Vec<f32>) =
-            v.as_chunks::<2>().0.iter().map(|f| (f[0], f[1])).unzip();
-        let (from, len, max_lag) = (2_000, 8_000, SR / 10);
-        if input.len() < from + len + max_lag {
-            return 0.025;
-        }
-        let best = (0..max_lag)
-            .map(|lag| {
-                let c: f32 = (0..len)
-                    .map(|i| input[from + i] * output[from + lag + i])
-                    .sum();
-                (lag, c)
-            })
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map_or(0, |(lag, _)| lag);
-        best as f64 / SR as f64
-    })
 }
 
 /// `afir` normalizes the impulse response by default; the option that

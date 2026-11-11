@@ -6,6 +6,7 @@
 //! work folder for the graph to read.
 
 use anyhow::{Context as _, Result, bail};
+use flikk_core::cleanup::SoundFile;
 use flikk_core::model::MediaItem;
 use flikk_core::sync::varispeed::Varispeed;
 use flikk_os::process::{ChildGuard, command, ffmpeg};
@@ -13,29 +14,35 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;
 
-/// `seconds` of output from source time `from` of `item`'s audio
-/// `stream` (a container index, else the n-th audio stream, as the
-/// preview takes it), played at `speed`, at `rate`; written to
-/// `out`.
+/// `seconds` of output from source time `from` of `item`'s sound as
+/// `file` holds it (its recording, at a container index or else the n-th
+/// audio stream as the preview takes it, or a cleaned copy), played at
+/// `speed`, at `rate`; written to `out`.
 pub fn render(
     item: &MediaItem,
-    stream: Option<u32>,
+    file: &SoundFile,
     from: f64,
     seconds: f64,
     speed: f64,
     rate: u32,
     out: &Path,
 ) -> Result<()> {
-    let n = stream.unwrap_or(0);
-    let audio = item
-        .info
-        .as_ref()
-        .map(|i| i.audio.as_slice())
-        .unwrap_or(&[]);
-    let map = if audio.iter().any(|a| a.index == n) {
-        format!("0:{n}")
-    } else {
-        format!("0:a:{n}")
+    let (path, map) = match file {
+        SoundFile::Recording { stream } => {
+            let n = stream.unwrap_or(0);
+            let audio = item
+                .info
+                .as_ref()
+                .map(|i| i.audio.as_slice())
+                .unwrap_or(&[]);
+            let map = if audio.iter().any(|a| a.index == n) {
+                format!("0:{n}")
+            } else {
+                format!("0:a:{n}")
+            };
+            (item.path.as_path(), map)
+        }
+        SoundFile::Copy(path) => (path.as_path(), "0:a:0".to_string()),
     };
     // Both guarded: an early return (a failed write, a missing pipe) kills
     // and reaps them.
@@ -49,7 +56,7 @@ pub fn render(
                 &format!("{:.6}", from.max(0.0)),
             ])
             .arg("-i")
-            .arg(&item.path)
+            .arg(path)
             .args(["-map", &map, "-vn", "-ac", "2", "-ar", &rate.to_string()])
             .args(["-f", "f32le", "pipe:1"])
             .stdin(Stdio::null())

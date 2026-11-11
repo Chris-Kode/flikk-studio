@@ -2,7 +2,8 @@
 //! `flikk_core::audiofx` (the render follows it too):
 //!
 //! * each audible clip span (the clip plus crossfade handles) opens a
-//!   `MediaService::audio` stream as the play position reaches it, retimed
+//!   `MediaService::audio` stream as the play position reaches it (its
+//!   cleaned copy once made, `flikk_core::cleanup`), retimed
 //!   with a pitch-preserving stretch when its speed is not 1, through the
 //!   clip's effect chain, then its volume (gain or keyframes), fades and
 //!   equal-power crossfade ramps;
@@ -22,8 +23,9 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use flikk_core::audiofx::dsp::{self, Chain, Curve};
 use flikk_core::audiofx::stretch::Stretch;
 use flikk_core::audiofx::{self, Ramp};
+use flikk_core::cleanup::{self, Cleanup, SoundFile};
 use flikk_core::model::{Clip, ClipContent, MediaItem, Project, Property};
-use flikk_core::services::{MediaService, PcmStream};
+use flikk_core::services::{CleanupService, MediaService, PcmStream};
 use flikk_core::speed::RampAudio;
 use flikk_core::sync::varispeed::{Varispeed, is_varispeed};
 use flikk_core::time::FLICKS_PER_SECOND;
@@ -55,13 +57,21 @@ pub struct AudioOut {
     stop: Arc<AtomicBool>,
 }
 
+/// The engines the mixer reads sound through.
+#[derive(Clone)]
+pub struct Engines {
+    pub media: Arc<dyn MediaService>,
+    /// Cleaned copies of source sound; without it clips play as recorded.
+    pub cleanup: Option<Arc<dyn CleanupService>>,
+}
+
 impl AudioOut {
-    pub fn start(media: Arc<dyn MediaService>, project: Arc<Project>, from: Time) -> Self {
+    pub fn start(engines: Engines, project: Arc<Project>, from: Time) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let _ = thread::Builder::new()
             .name("flikk-audio".into())
-            .spawn(move || run(flag, media, project, from));
+            .spawn(move || run(flag, engines, project, from));
         Self { stop }
     }
 }
@@ -74,7 +84,7 @@ impl Drop for AudioOut {
 
 type Queue = Arc<Mutex<VecDeque<f32>>>;
 
-fn run(stop: Arc<AtomicBool>, media: Arc<dyn MediaService>, project: Arc<Project>, from: Time) {
+fn run(stop: Arc<AtomicBool>, engines: Engines, project: Arc<Project>, from: Time) {
     let host = cpal::default_host();
     let output = host.default_output_device().and_then(|device| {
         let config = device.default_output_config().ok()?;
@@ -91,7 +101,7 @@ fn run(stop: Arc<AtomicBool>, media: Arc<dyn MediaService>, project: Arc<Project
         Some((stream, queue, rate))
     });
     let rate = output.as_ref().map_or(FALLBACK_RATE, |o| o.2);
-    let mut mixer = Mixer::new(media, &project, from, rate);
+    let mut mixer = Mixer::new(engines, &project, from, rate);
     let ahead = (AHEAD * rate as f64) as usize * 2;
     let mut block = vec![0f32; BLOCK * 2];
     let started = Instant::now();
@@ -161,6 +171,7 @@ struct Source {
     ramps: Vec<Ramp>,
     item: MediaItem,
     stream: u32,
+    cleanup: Cleanup,
     /// Volume keyframes present: evaluate the volume per step.
     automated: bool,
 }
@@ -293,7 +304,7 @@ struct Bus {
 }
 
 struct Mixer {
-    media: Arc<dyn MediaService>,
+    engines: Engines,
     buses: Vec<Bus>,
     voices: HashMap<ClipId, Voice>,
     finished: HashSet<ClipId>,
@@ -323,7 +334,7 @@ struct Duck {
 const RMS_WINDOW_S: f64 = 0.3;
 
 impl Mixer {
-    fn new(media: Arc<dyn MediaService>, project: &Project, from: Time, rate: u32) -> Self {
+    fn new(engines: Engines, project: &Project, from: Time, rate: u32) -> Self {
         let tl = &project.timeline;
         let buses: Vec<Bus> = tl
             .tracks
@@ -336,16 +347,12 @@ impl Mixer {
                     .filter_map(|s| {
                         let c = s.clip;
                         let item = project.media(c.media()?)?.clone();
-                        let stream = match &c.content {
-                            ClipContent::Media { audio_stream, .. } => audio_stream
-                                .or_else(|| item.first_audio_stream())
-                                .unwrap_or(0),
-                            _ => return None,
-                        };
+                        let stream = cleanup::stream_of(c, &item);
                         Some(Source {
                             clip: c.clone(),
                             range: s.range,
                             ramps: s.ramps,
+                            cleanup: Cleanup::of(c, t),
                             item,
                             stream,
                             automated: c.keyframes.iter().any(|k| k.property == Property::Volume),
@@ -381,7 +388,7 @@ impl Mixer {
             })
         });
         Self {
-            media,
+            engines,
             buses,
             voices: HashMap::new(),
             finished: HashSet::new(),
@@ -424,15 +431,7 @@ impl Mixer {
             Time::ZERO
         };
         let lead = (lead_t.as_secs_f64() * self.rate as f64).round() as usize;
-        let stream = self
-            .media
-            .audio(
-                &source.item,
-                source.stream,
-                source_t.max(Time::ZERO),
-                self.rate,
-            )
-            .ok()?;
+        let stream = self.sound(source, source_t.max(Time::ZERO))?;
         let chain = Chain::new(&clip.audio.effects, self.rate);
         Some(Voice {
             stream,
@@ -446,6 +445,25 @@ impl Mixer {
             lead,
             tmp: vec![0.; BLOCK * 2],
         })
+    }
+
+    /// `source`'s sound from source time `from`: its cleaned copy when it
+    /// is made, else the recording.
+    fn sound(&self, source: &Source, from: Time) -> Option<Box<dyn PcmStream>> {
+        let sound = source.cleanup.sound(&source.clip, |treatment| {
+            let service = self.engines.cleanup.as_ref()?;
+            service
+                .request(&source.item, source.stream, treatment)
+                .made()
+        });
+        let media = &self.engines.media;
+        match sound.file {
+            SoundFile::Recording { .. } => {
+                media.audio(&source.item, source.stream, from, self.rate)
+            }
+            SoundFile::Copy(path) => media.audio_file(&path, from, self.rate),
+        }
+        .ok()
     }
 
     /// Mix the next block into `out` (interleaved stereo).
