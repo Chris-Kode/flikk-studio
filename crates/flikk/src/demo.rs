@@ -12,7 +12,8 @@
 //! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
 //! a video waiting on the user with its blockout (see [`shot`]).
 //! `FLIKK_DEMO_SETUP=missing|downloading|failed` opens on the welcome
-//! page's setup list in that state (see [`setup`]).
+//! page's setup list in that state (see [`setup`]). `FLIKK_DEMO_ASK=1`
+//! opens the question whether to analyze new media with a provider.
 
 mod compose;
 mod depth;
@@ -178,7 +179,31 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     person::seed(state);
     depth::seed(state);
     audio_demo_playback(state, cx);
+    provider_ask(state);
     cx.notify();
+}
+
+/// `FLIKK_DEMO_ASK=1`: ElevenLabs picked to transcribe (for this run
+/// only, never saved) and the demo's video and audio waiting to be asked
+/// about, so the question whether to analyze them with it opens.
+fn provider_ask(state: &mut EditorState) {
+    use flikk_core::cloud::{Capability, ProviderChoice};
+    if std::env::var("FLIKK_DEMO_ASK").ok().as_deref() != Some("1") {
+        return;
+    }
+    let mut settings = state.cloud.settings();
+    settings.set(
+        Capability::Transcription,
+        ProviderChoice {
+            provider: Some("elevenlabs".into()),
+            model: None,
+        },
+    );
+    state.cloud.set_settings(settings);
+    state.provider_asks = (state.bus.project().media.iter())
+        .filter(|m| m.kind != MediaKind::Image)
+        .map(|m| m.id)
+        .collect();
 }
 
 // -------------------------------------------------------------------- color

@@ -13,8 +13,6 @@ const USER_SETTINGS: &str = "agent_settings";
 const MODEL_PICKS: &str = "model_picks";
 /// The provider picked for each capability (never its key).
 const CLOUD_SETTINGS: &str = "cloud_settings";
-/// Whether imported video and audio are analyzed as they land.
-const ANALYZE_ON_IMPORT: &str = "analyze_on_import";
 
 impl Store {
     /// User settings; the defaults on first run.
@@ -52,16 +50,6 @@ impl Store {
 
     pub fn save_cloud_settings(&self, settings: &CloudSettings) -> Result<()> {
         self.set_meta(CLOUD_SETTINGS, settings)
-    }
-
-    /// Settings → Integrations' "Analyze on import", per user: on until
-    /// the user turns it off.
-    pub fn analyze_on_import(&self) -> Result<bool> {
-        Ok(self.meta(ANALYZE_ON_IMPORT)?.unwrap_or(true))
-    }
-
-    pub fn save_analyze_on_import(&self, on: bool) -> Result<()> {
-        self.set_meta(ANALYZE_ON_IMPORT, &on)
     }
 }
 

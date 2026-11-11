@@ -264,19 +264,19 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
     /// [`Self::cancel`] every job whose key `cancels` picks. How many there
     /// were.
     pub fn cancel_where(&self, cancels: impl FnMut(&K) -> bool) -> usize {
-        self.cancel_picked(cancels, Among::All)
+        self.cancel_picked(cancels, Among::All).len()
     }
 
     /// [`Self::cancel`] every job waiting in the background, never asked
-    /// for, whose key `cancels` picks. Jobs running go on. How many there
-    /// were.
-    pub fn cancel_background_where(&self, cancels: impl FnMut(&K) -> bool) -> usize {
+    /// for, whose key `cancels` picks. Jobs running go on. Their keys, in
+    /// the order they were queued.
+    pub fn cancel_background_where(&self, cancels: impl FnMut(&K) -> bool) -> Vec<K> {
         self.cancel_picked(cancels, Among::WaitingInBackground)
     }
 
-    /// Cancel the jobs `among` covers whose key `cancels` picks. How many
-    /// there were.
-    fn cancel_picked(&self, mut cancels: impl FnMut(&K) -> bool, among: Among) -> usize {
+    /// Cancel the jobs `among` covers whose key `cancels` picks. Their
+    /// keys.
+    fn cancel_picked(&self, mut cancels: impl FnMut(&K) -> bool, among: Among) -> Vec<K> {
         let mut queue = lock(&self.shared.queue);
         let background: Vec<JobId> = match among {
             Among::All => Vec::new(),
@@ -287,23 +287,26 @@ impl<K: PartialEq + Send + 'static> JobQueue<K> {
                 .map(|(id, _, _)| *id)
                 .collect(),
         };
-        let mut ids = Vec::new();
-        queue.keys.retain(|(k, id, flags)| {
-            let covered = among == Among::All || background.contains(id);
-            let picked = covered && cancels(k);
-            if picked {
-                flags.cancel.store(true, Ordering::Relaxed);
-                ids.push(*id);
-            }
-            !picked
-        });
+        let picked: Vec<(K, JobId, Flags)> = queue
+            .keys
+            .extract_if(.., |(k, id, _)| {
+                (among == Among::All || background.contains(id)) && cancels(k)
+            })
+            .collect();
+        let ids: Vec<JobId> = picked.iter().map(|(_, id, _)| *id).collect();
         if !ids.is_empty() {
             queue
                 .waiting
                 .retain(|(waiting, _, _)| !ids.contains(waiting));
             lock(&self.shared.jobs).retain(|j| !ids.contains(&j.id));
         }
-        ids.len()
+        picked
+            .into_iter()
+            .map(|(key, _, flags)| {
+                flags.cancel.store(true, Ordering::Relaxed);
+                key
+            })
+            .collect()
     }
 
     /// Drop finished and failed jobs from [`Self::jobs`].

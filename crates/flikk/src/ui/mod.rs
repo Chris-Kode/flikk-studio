@@ -18,6 +18,7 @@ pub mod media_pool;
 pub mod mixer;
 pub mod notices;
 pub mod project_settings;
+pub mod provider_ask;
 pub mod scopes;
 pub mod settings;
 pub mod timeline;

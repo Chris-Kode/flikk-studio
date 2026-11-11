@@ -328,12 +328,8 @@ impl EditorState {
             self.invalidate_voices(cx);
         }
         self.configure_analysis();
-        if capability == Capability::Transcription
-            && self.online_transcription().is_some()
-            && let Some(analysis) = &self.services.analysis
-        {
-            // Automatic analysis never spends money.
-            analysis.cancel_background_speech();
+        if capability == Capability::Transcription {
+            self.transcription_changed();
         }
         self.refresh_key_notice();
         cx.notify();
@@ -697,58 +693,93 @@ impl EditorState {
         self.media_seen = self.bus.project().media.iter().map(|m| m.id).collect();
     }
 
-    /// Imported video and audio follow "Analyze on import"; it never
-    /// spends money, so nothing is analyzed while a provider transcribes.
-    pub fn set_analyze_on_import(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.analyze_on_import = on;
-        persistence::with_store(|s| s.save_analyze_on_import(on));
-        cx.notify();
-    }
-
     /// Analyze each item as it reaches the pool, once, however it got
-    /// there (an import, the media pool's Generate, an approval). Imported
-    /// video and audio in the background, when "Analyze on import" is on
-    /// and no provider transcribes: it never spends money. What a provider
-    /// made, as asked for (the user or the agent asked for it): a video
-    /// like footage, so the agent can see and hear it; a voiceover too
-    /// (its words are its script, so it costs no credits); music and sound
-    /// effects are left to be analyzed when asked. Pictures are never
-    /// analyzed.
+    /// there (an import, the media pool's Generate, an approval), in the
+    /// background. Pictures are never analyzed. One whose analysis would go
+    /// to the provider picked to transcribe waits in
+    /// [`Self::provider_asks`] for the user to say whether it may.
     pub(super) fn analyze_new(&mut self, cx: &mut Context<Self>) {
-        let new: Vec<(MediaId, MediaKind, Option<Capability>)> = self
+        let new: Vec<MediaId> = self
             .bus
             .project()
             .media
             .iter()
             .filter(|m| m.fingerprint.is_some() && !self.media_seen.contains(&m.id))
-            .map(|m| (m.id, m.kind, m.generated.as_deref().map(|g| g.capability)))
+            .map(|m| m.id)
             .collect();
         let Some(analysis) = self.services.analysis.clone() else {
             return;
         };
-        for (id, kind, capability) in new {
+        for id in new {
             self.media_seen.insert(id);
             let Some(item) = self.bus.project().media(id) else {
                 continue;
             };
-            match capability {
-                // An upscaled video is new footage to the agent: its
-                // results are keyed by the file.
-                Some(Capability::Video | Capability::Upscale) if self.analysis_ready() => {
-                    analysis.analyze(item);
-                }
-                Some(Capability::Voiceover) => {
-                    analysis.analyze(item);
-                }
-                None if kind != MediaKind::Image
-                    && self.analyze_on_import
-                    && self.online_transcription().is_none() =>
-                {
-                    analysis.analyze_in_background(item);
-                }
-                _ => continue,
+            if item.kind == MediaKind::Image {
+                continue;
+            }
+            if self.would_pay(item) {
+                self.provider_asks.push(id);
+            } else {
+                analysis.analyze_in_background(item);
             }
             cx.notify();
+        }
+    }
+
+    /// Whether analyzing `item` now would send its sound to the provider
+    /// picked to transcribe: it has sound, and no script stands in for its
+    /// words.
+    fn would_pay(&self, item: &MediaItem) -> bool {
+        let script = item.generated.as_deref().and_then(|g| g.script());
+        let heard = item.info.as_ref().is_none_or(|i| !i.audio.is_empty());
+        self.online_transcription().is_some() && script.is_none() && heard
+    }
+
+    /// The user said yes: analyze the items in [`Self::provider_asks`]
+    /// still in the pool, with the provider, ahead of the background.
+    pub fn analyze_asked_with_provider(&mut self, cx: &mut Context<Self>) {
+        let asked = std::mem::take(&mut self.provider_asks);
+        if let Some(analysis) = &self.services.analysis {
+            for id in asked {
+                if let Some(item) = self.bus.project().media(id) {
+                    analysis.analyze(item);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The user said no: the items in [`Self::provider_asks`] stay
+    /// unanalyzed until asked for.
+    pub fn skip_provider_asks(&mut self, cx: &mut Context<Self>) {
+        self.provider_asks.clear();
+        cx.notify();
+    }
+
+    /// Who transcribes changed. To a provider: the analysis waiting in the
+    /// background that would go to it is dropped, and its items asked
+    /// about. To this machine: the items asked about are analyzed, which
+    /// is free now.
+    fn transcription_changed(&mut self) {
+        let Some(analysis) = self.services.analysis.clone() else {
+            return;
+        };
+        if self.online_transcription().is_none() {
+            for id in std::mem::take(&mut self.provider_asks) {
+                if let Some(item) = self.bus.project().media(id) {
+                    analysis.analyze_in_background(item);
+                }
+            }
+            return;
+        }
+        for fp in analysis.cancel_background_speech() {
+            let items = self.bus.project().media.iter();
+            for item in items.filter(|m| m.fingerprint.as_ref() == Some(&fp)) {
+                if !self.provider_asks.contains(&item.id) {
+                    self.provider_asks.push(item.id);
+                }
+            }
         }
     }
 

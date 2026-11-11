@@ -393,9 +393,17 @@ impl AnalysisService for LocalAnalysis {
         *lock(&self.shared.wanted) = [None, None];
     }
 
-    fn cancel_background_speech(&self) {
-        self.queue
-            .cancel_background_where(|(_, steps, _)| steps.transcript);
+    fn cancel_background_speech(&self) -> Vec<Fingerprint> {
+        let mut files = Vec::new();
+        for (fp, _, _) in self
+            .queue
+            .cancel_background_where(|(_, steps, _)| steps.transcript)
+        {
+            if !files.contains(&fp) {
+                files.push(fp);
+            }
+        }
+        files
     }
 
     fn cancel(&self, item: &MediaItem) {

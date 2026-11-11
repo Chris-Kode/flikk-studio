@@ -162,9 +162,10 @@ pub struct EditorState {
     /// Pool items already looked at for analysis: those of the project
     /// when it opened, and each added since.
     media_seen: HashSet<flikk_core::MediaId>,
-    /// Imported video and audio are analyzed as they land (Settings →
-    /// Integrations), per user.
-    pub analyze_on_import: bool,
+    /// New pool items whose analysis would go to the provider picked to
+    /// transcribe, waiting for the user to say whether it may: automatic
+    /// analysis never spends money unasked. In the order they came.
+    pub provider_asks: Vec<flikk_core::MediaId>,
     /// The voices of the provider doing voiceovers, as last read.
     pub account_voices: voices::AccountVoices,
     /// Samples fetched for approval cards, by voice id; `None` while on
@@ -248,7 +249,7 @@ impl EditorState {
             next_generation: 1,
             kept: Vec::new(),
             media_seen: HashSet::new(),
-            analyze_on_import: persistence::with_store(|s| s.analyze_on_import()).unwrap_or(true),
+            provider_asks: Vec::new(),
             account_voices: Default::default(),
             heard_voices: HashMap::new(),
             render: crate::render_cache::Background::new(cx),
@@ -558,6 +559,8 @@ impl EditorState {
         self.bus
             .set_permissions(loaded.settings.permissions.clone());
         self.mark_media_seen();
+        // Asked about for the project that closed.
+        self.provider_asks.clear();
         self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
         self.settings = loaded.settings;
         self.playhead = Time::ZERO;

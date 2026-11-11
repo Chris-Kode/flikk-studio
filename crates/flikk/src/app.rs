@@ -131,7 +131,11 @@ pub struct Flikk {
     /// it started is open. Any other way of leaving the page, or of
     /// starting or opening a project, clears it.
     footage: Option<Vec<PathBuf>>,
+    /// The question whether new media may be analyzed with the provider
+    /// picked to transcribe, while it is open.
+    provider_ask: Option<crate::ui::kit::DialogId>,
     _observe: Subscription,
+    _observe_asks: Subscription,
     _welcome: Option<Subscription>,
 }
 
@@ -142,6 +146,9 @@ impl Flikk {
             state.update(cx, crate::demo::seed);
         }
         let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
+        let _observe_asks = cx.observe_in(&state, window, |this, _, window, cx| {
+            this.ask_about_provider(window, cx)
+        });
         // Every launch starts on the welcome page, unless the app was
         // started for a file or a demo; and while a model is missing,
         // whatever way it was started, with the file waiting behind it.
@@ -227,8 +234,10 @@ impl Flikk {
             file_waiting: for_file && waiting,
             welcome,
             footage: None,
+            provider_ask: None,
             state,
             _observe,
+            _observe_asks,
             _welcome,
         }
     }
@@ -252,6 +261,23 @@ impl Flikk {
             }
         }
         cx.notify();
+    }
+
+    /// Ask whether new media may be analyzed with the provider picked to
+    /// transcribe while some waits for it, and stop asking once none does
+    /// (the user answered, or the provider or project changed).
+    fn ask_about_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = !self.state.read(cx).provider_asks.is_empty();
+        match self.provider_ask {
+            None if waiting => {
+                self.provider_ask = Some(crate::ui::provider_ask::open(&self.state, window, cx));
+            }
+            Some(id) if !waiting => {
+                window.close_dialog_id(id, cx);
+                self.provider_ask = None;
+            }
+            _ => {}
+        }
     }
 
     /// Open Settings on `tab`, or on the page shown last.

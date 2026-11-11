@@ -211,9 +211,11 @@ pub trait AnalysisService: Send + Sync {
         self.analyze(item)
     }
     /// Drop the analysis waiting in the background that would transcribe:
-    /// a provider was picked to transcribe. Its items stay unanalyzed until
-    /// asked for.
-    fn cancel_background_speech(&self) {}
+    /// a provider was picked to transcribe. The files whose analysis was
+    /// dropped, in the order queued, to ask the user about.
+    fn cancel_background_speech(&self) -> Vec<Fingerprint> {
+        Vec::new()
+    }
     /// Queue what is heard in a library sound: sounds, music, beats and
     /// sound vectors, on this machine. No speech, so it spends no
     /// transcription credits. Nothing if it has results, or the steps or

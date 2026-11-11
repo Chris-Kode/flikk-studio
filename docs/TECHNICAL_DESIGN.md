@@ -567,19 +567,28 @@ bar).
 
 The user asks for analysis from an item's "⋯" menu in the media pool (or
 its right-click menu): "Analyze", or "Analyze again" once it has results,
-which runs every step anew on the models picked now. Imported video and
-audio are also queued as they land while "Analyze on import" is on
-(Settings → Integrations, saved per user in the store, on by default),
-through the route generated media takes (`EditorState::analyze_new`,
-called after every edit, which looks at each pool item once): never while
-a provider is picked to transcribe, as automatic analysis spends no money
-(the switch is dimmed then, with the provider in its tooltip), and never
-for items already in a project when it opens. An import undone and done
-again is new again. Automatic analysis never reaches a provider: a job
-queued in the background and not asked for since skips itself, leaving
-the item unanalyzed, when a provider transcribes by the time it runs
-(`JobProgress::asked`), and picking a provider to transcribe drops those
-still waiting that would transcribe (`cancel_background_speech`). The library's sounds are
+which runs every step anew on the models picked now. Every other item is
+also queued as it reaches the pool, however it got there (an import, the
+media pool's Generate, an approval), in the background
+(`EditorState::analyze_new`, called after every edit, which looks at each
+pool item once; there is no setting to turn it off). Pictures are never
+analyzed, and items already in a project when it opens are left as they
+were; an import undone and done again is new again. Automatic analysis
+never spends money unasked: while a provider is picked to transcribe, an
+item whose sound it would hear (one without a voiceover's script standing
+in for its words) waits in `EditorState::provider_asks`, and a dialog
+(`ui/provider_ask.rs`, opened and closed by the window with the list, which
+it follows as more arrive) lists them under "Analyze with <provider>?".
+Analyze queues them as asked for, so they go to the provider; Cancel,
+Escape or the backdrop leave them unanalyzed until asked for. Analyze is
+dimmed, with a note, while the provider has no key. Picking a provider to
+transcribe drops the analysis still waiting in the background that would
+go to it (`cancel_background_speech`, which names their files) and asks
+about those items the same way; going back to this machine queues the
+items asked about, as they cost nothing then. As a last guard, a job
+queued in the background and not asked for since skips itself, leaving the
+item unanalyzed, when a provider transcribes by the time it runs
+(`JobProgress::asked`). The library's sounds are
 analyzed on their own without speech or shots, on local models only, so
 that it costs nothing. The models are on
 disk before a project opens (see Models), so "Analyze" is disabled only
@@ -593,8 +602,9 @@ missing stays empty in the results (voice activity falls back to an
 energy VAD). Speakers need the transcript; beats and sound search, the
 sound pass. Items are analyzed one at a time on a `JobQueue`: what the
 user or the agent asks for (`AnalysisService::analyze`: "Analyze",
-`view_media`, generated media) goes ahead of what is queued in the
-background (`analyze_in_background`: imports, library sounds), and an
+`view_media`, the provider dialog's Analyze) goes ahead of what is queued
+in the background (`analyze_in_background`: new pool items, library
+sounds), and an
 item waiting there moves up with them when asked for
 (`JobQueue::push_first`); each group runs in the order queued. A result is written to
 `cache/analysis/<fp>.json` only when every step succeeded; otherwise it is
@@ -1340,9 +1350,10 @@ on the UI thread and run it off it:
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
   a generated item reaches the pool (the media pool or an approval),
-  `analyze_new` queues it once, as asked for: a video like footage unless
-  a provider picked to transcribe has no key, and a voiceover. Items already in a project when it
-  opens are left as they were. Settings → Integrations has a "Video sound"
+  `analyze_new` queues it once like any new item (see §7): music, sound
+  effects and videos are asked about first while a provider is picked to
+  transcribe; a voiceover, whose script stands in for its words, never is.
+  Items already in a project when it opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
   some models): the media pool's form starts its Sound switch from it, and
   with it off the agent's videos are made silent whatever it asks. Each
@@ -1837,7 +1848,7 @@ scopes), Audio (mixer and meters) and Deliver. The agent chat is docked on
 the right in every workspace. Settings (the gear in the top bar, cmd-,, or
 the chat's gear for its Agent page) has five pages: Agent, Integrations
 (each provider's key and account, who does each capability on which
-model, and "Analyze on import"), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
+model), Analysis (the steps), Models (download, pick, and delete the transcription size not picked) and
 Storage (the folders a user has a stake in: the Cache, everything the
 editor makes again by itself, with one Clear that removes what it counts;
 models, the library (effects, presets, sounds and voices, their audio in
@@ -1889,6 +1900,7 @@ see:
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
 | `FLIKK_DEMO_SETUP` | `missing`, `downloading`, `failed` | The welcome page's setup list in that state, whatever is on disk (Download, Cancel and Retry only pretend); needs no `FLIKK_DEMO` |
+| `FLIKK_DEMO_ASK` | `1` | ElevenLabs picked to transcribe for the run, and the question whether to analyze the demo's video and audio with it |
 | `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh
