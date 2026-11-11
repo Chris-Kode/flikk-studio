@@ -1245,7 +1245,7 @@ on the UI thread and run it off it:
   it already has keyframes. Depth masks are `set_mask`'s `depth` shape.
 * **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
   (a prompt and a length, or `sections` with lengths of their own, so it
-  changes on cue), a sound effect (up to 30 s, optionally looping) or a
+  changes on cue), a sound effect (optionally looping) or a
   voiceover (a script of up to 10,000 characters, one voice from
   `find_voices`, its stability and similarity) with the provider picked
   for it. The file goes to `paths::generated()` with a `<file>.json` of
@@ -1259,6 +1259,29 @@ on the UI thread and run it off it:
   placement into the chat's set and answers the waiting call with the
   media id. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
+* **Music and sound effect providers:** ElevenLabs (its own API), fal and
+  Pika. On fal, music: ElevenLabs Music v2.5 (the default), Sonilo 1.1,
+  Lyria 3.5, Lyria 3 Pro, Stable Audio 3; sound effects: ElevenLabs Sound
+  Effects v3 (the default), Sonilo 1.1, Mirelo SFX 2.0, Stable Audio 3
+  SFX. On Pika, music: Pika Music (the default), Sonilo 1.1, MiniMax Music
+  3.0, Lyria 3.5, Lyria 3 Pro; sound effects: Pika SFX (the default),
+  Sonilo 1.1, ElevenLabs Sound Effects v2. Each model's
+  `cloud::AudioModel` says the lengths it makes (a range and a step, or
+  none when it picks the length itself) and whether it loops; the media
+  pool's Generate dialog offers only those (no Length row for a model that
+  picks, no Loop switch for one that can't), and `AudioModel::check`
+  refuses the rest before anything is spent: in `Cloud::generate`, and
+  before the agent's request waits for approval. A hosted model is a
+  `HostedAudio` entry in `fal/audio.rs` or `pika/audio.rs` naming its
+  fields; `audio.rs` writes a request in them, and asks in words for what
+  a model has no field for: no vocals ("Instrumental only, no vocals."),
+  and sections as timed lines in the prompt (`0:00–0:12 Intro: soft
+  piano`) with their lyrics, or in a lyrics field as `[Name]` blocks. An
+  ElevenLabs model on fal gets the same composition plan as ElevenLabs'
+  own API, and Sonilo on Pika gets `segments`. fal runs them on its queue,
+  Pika as media jobs, and `audio::fetch` names the file by what it is
+  (WAV, FLAC, M4A, Ogg, else MP3). Mirelo is sent `num_samples: 1`: it
+  makes, and bills, two takes by default.
 * **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
   with the provider and model picked for video (on fal: Seedance 2.0, 2.0
   Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse

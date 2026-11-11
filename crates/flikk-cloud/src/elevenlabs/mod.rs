@@ -10,11 +10,14 @@ mod speech;
 mod transcribe;
 mod voices;
 
+pub(crate) use music::plan as composition_plan;
+
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, Designed, GenerateRequest, GenerationTask, Heard,
-    SpeechRequest, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview, VoiceQuery,
+    AudioLengths, AudioModel, Capability, CloudError, CloudResult, Designed, GenerateRequest,
+    GenerationTask, Heard, SpeechRequest, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview,
+    VoiceQuery,
 };
 use flikk_os::sync::lock;
 use serde_json::Value;
@@ -86,6 +89,41 @@ pub static PROVIDER: Provider = Provider {
 
 pub struct ElevenLabs;
 
+/// A music model: 3 s to 5 min.
+const fn music_model(name: &'static str) -> AudioModel {
+    AudioModel {
+        name,
+        lengths: Some(AudioLengths {
+            shortest: 3.0,
+            longest: 300.0,
+            step: 1.0,
+        }),
+        looping: false,
+    }
+}
+
+/// A sound effect model: 0.5 to 30 s, looping when asked.
+const fn sound_model(name: &'static str) -> AudioModel {
+    AudioModel {
+        name,
+        lengths: Some(AudioLengths {
+            shortest: 0.5,
+            longest: 30.0,
+            step: 0.5,
+        }),
+        looping: true,
+    }
+}
+
+/// What each music and sound effect model in the catalog can make.
+static AUDIO: [(&str, AudioModel); 5] = [
+    ("music_v2_5", music_model("Music v2.5")),
+    ("music_v2", music_model("Music v2")),
+    ("music_v1", music_model("Music v1")),
+    ("eleven_text_to_sound_v2", sound_model("Sound Effects v2")),
+    ("eleven_text_to_sound_v3", sound_model("Sound Effects v3")),
+];
+
 impl Api for ElevenLabs {
     fn account(&self, key: &str) -> CloudResult<Account> {
         let reply = http::get(
@@ -141,6 +179,13 @@ impl Api for ElevenLabs {
                 "{NAME} doesn't upscale video"
             ))),
         }
+    }
+
+    fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {
+        AUDIO
+            .iter()
+            .find(|(id, _)| *id == model)
+            .map(|(_, spec)| spec)
     }
 
     fn voices(&self, key: &str) -> CloudResult<Vec<Voice>> {

@@ -1752,16 +1752,16 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_audio",
             Some(Generate),
-            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
+            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute. Lengths, looping and sections depend on the model the user picked: a request it can't make is refused with what it takes; some music models pick their own length, so fit what they make with fit_music.",
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect", "voiceover"], "What to make"),
                     "prompt": string("Music and sound in English. Music: genre, mood, instruments, tempo, how it builds. Sound: what is heard, how close, the space around it. Voiceover: the script, in the language it is read in, up to 10,000 characters, with delivery written in as the system prompt says"),
                     "range": range("The timeline range it is for: sets its length, and where it is proposed"),
-                    "duration": number("Seconds, when there is no `range`. Music 3–300, sound 0.5–30; left out, the model picks"),
+                    "duration": number("Seconds, when there is no `range`; the model sets the range (ElevenLabs: music 3–300, sound 0.5–30). Left out, the model picks"),
                     "sections": {
                         "type": "array",
-                        "description": "Music only: parts with lengths of their own, so it changes on cue (an intro up to the first cut, the drop on the reveal). 3–120 s each, 3–300 s together; replaces `duration`",
+                        "description": "Music only: parts with lengths of their own, so it changes on cue (an intro up to the first cut, the drop on the reveal). On ElevenLabs 3–120 s each, 3–300 s together; models without parts are asked for them in words. Replaces `duration`",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1775,7 +1775,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                         }
                     },
                     "instrumental": boolean("Music without vocals (default true)"),
-                    "loop": boolean("A sound effect made to repeat seamlessly (ambience, a hum)"),
+                    "loop": boolean("A sound effect made to repeat seamlessly (ambience, a hum), on models that loop (ElevenLabs)"),
                     "voice": string("Voiceover: the voice id from find_voices"),
                     "voice_name": string("Voiceover: the voice's name, for the approval card"),
                     "stability": number("Voiceover, 0–1 (default 0.5): lower reads with more emotional range, higher more evenly"),

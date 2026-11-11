@@ -1,14 +1,18 @@
-//! fal (fal.ai): video and pictures, from the models in [`models`], and
-//! larger videos, from those in [`upscale`]. Video: Seedance, Kling,
+//! fal (fal.ai): video and pictures, from the models in [`models`],
+//! larger videos, from those in [`upscale`], and music and sound effects,
+//! from those in [`audio`]. Video: Seedance, Kling,
 //! MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX. Pictures, from
 //! a description or from pictures: Nano Banana, GPT Image, FLUX 3,
 //! Seedream, Ideogram, Grok Imagine, Qwen Image, Krea, Recraft. Larger
-//! videos: Topaz, SeedVR2, Crystal, FLUX, Gemini Omni Flash. Every call
+//! videos: Topaz, SeedVR2, Crystal, FLUX, Gemini Omni Flash. Music:
+//! ElevenLabs, Sonilo, Lyria, Stable Audio. Sound effects: ElevenLabs,
+//! Sonilo, Mirelo, Stable Audio. Every call
 //! sends the key as `Authorization: Key <key>`. All are made on fal's
-//! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s or
-//! [`upscale`]'s, and the files they follow are uploaded to fal's storage
+//! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s,
+//! [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to fal's storage
 //! first ([`files`]).
 
+mod audio;
 mod files;
 mod image;
 mod models;
@@ -19,8 +23,8 @@ mod video;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel, UpscaleModel,
-    VideoModel,
+    AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
+    UpscaleModel, VideoModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -171,6 +175,54 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Music,
+            // The ids and order of `audio::MUSIC`, the default first.
+            models: &[
+                CloudModel {
+                    id: "elevenlabs/music/v2.5",
+                    name: "ElevenLabs Music v2.5",
+                },
+                CloudModel {
+                    id: "sonilo/v1.1/text-to-music",
+                    name: "Sonilo 1.1",
+                },
+                CloudModel {
+                    id: "google/lyria-3.5",
+                    name: "Lyria 3.5",
+                },
+                CloudModel {
+                    id: "fal-ai/lyria3/pro",
+                    name: "Lyria 3 Pro",
+                },
+                CloudModel {
+                    id: "fal-ai/stable-audio-3/medium/text-to-audio",
+                    name: "Stable Audio 3",
+                },
+            ],
+        },
+        Offer {
+            capability: Capability::SoundEffects,
+            // The ids and order of `audio::SOUND`, the default first.
+            models: &[
+                CloudModel {
+                    id: "elevenlabs/sound-effects/v3",
+                    name: "ElevenLabs Sound Effects v3",
+                },
+                CloudModel {
+                    id: "sonilo/v1.1/text-to-sound-effects",
+                    name: "Sonilo 1.1 SFX",
+                },
+                CloudModel {
+                    id: "mirelo-ai/sfx2.0/text-to-audio",
+                    name: "Mirelo SFX 2.0",
+                },
+                CloudModel {
+                    id: "fal-ai/stable-audio-3/small/sfx/text-to-audio",
+                    name: "Stable Audio 3 SFX",
+                },
+            ],
+        },
     ],
     api: &Fal,
 };
@@ -223,9 +275,19 @@ impl Api for Fal {
                 let model = upscale::find(model).ok_or_else(missing)?;
                 upscale::run(key, model, request, stem, task)
             }
-            _ => {
+            Capability::Music | Capability::SoundEffects => {
+                let model = audio::find(model).ok_or_else(missing)?;
+                audio::run(key, model, request, stem, task)
+            }
+            Capability::Video => {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
+            }
+            Capability::Transcription | Capability::Voiceover => {
+                Err(CloudError::Unavailable(format!(
+                    "{NAME} doesn't make {}",
+                    request.capability().label().to_lowercase()
+                )))
             }
         }
     }
@@ -240,6 +302,10 @@ impl Api for Fal {
 
     fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
         upscale::find(model).map(|m| &m.spec)
+    }
+
+    fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {
+        audio::find(model).map(|m| &m.spec)
     }
 }
 
