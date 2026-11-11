@@ -30,12 +30,13 @@ pub const RUN_TOOL: &str = "run_tool";
 
 /// Listed on every turn: reading, looking, listening and cutting, and the
 /// attached files (they say so when nothing is attached).
-pub const CORE: [&str; 26] = [
+pub const CORE: [&str; 27] = [
     "get_timeline",
     "get_selection",
     "list_media",
     "get_clip",
     "get_markers",
+    "check_timeline",
     "search_transcript",
     "get_transcript",
     "get_speakers",

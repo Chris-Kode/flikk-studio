@@ -24,8 +24,9 @@ use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
 use crate::{prompt, session};
 use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, EditorContext};
-use flikk_core::bus::{Author, CommandBus};
+use flikk_core::bus::{Author, CommandBus, Since};
 use flikk_core::changeset::ChangeSetState;
+use flikk_core::check::Finding;
 use flikk_core::command::ToolCategory;
 use flikk_core::memory::{SourceFact, StyleRule};
 use flikk_core::model::MediaItem;
@@ -152,6 +153,25 @@ struct Turn {
     usage: Usage,
     /// The backend's own tool calls still running: their key and call id.
     web_calls: HashMap<String, u64>,
+    /// Where the turn's view of the project was when its change set was
+    /// last checked (or the turn started); a call that leaves it elsewhere
+    /// grew the set, and the set is checked again.
+    checked: Since,
+    /// What the agent was last told the set brings in.
+    told: Vec<Finding>,
+}
+
+/// A call's answer held while its change set was checked: what the check
+/// found, and everything to answer the call with.
+struct SetChecked {
+    turn: u64,
+    project: ProjectId,
+    reply: Reply,
+    tool: String,
+    args: Value,
+    done: Done,
+    call: Option<u64>,
+    found: Vec<Finding>,
 }
 
 /// Where a started turn is.
@@ -194,6 +214,8 @@ pub struct AgentHost {
     events: Vec<AgentEvent>,
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
+    checks_tx: Sender<SetChecked>,
+    checks_rx: Receiver<SetChecked>,
     approvals: Vec<PendingApproval>,
     next_approval: u64,
     /// Replies of the calls waiting on an approval, by its id: the call
@@ -224,6 +246,7 @@ impl Default for AgentHost {
 impl AgentHost {
     pub fn new() -> Self {
         let (jobs_tx, jobs_rx) = mpsc::channel();
+        let (checks_tx, checks_rx) = mpsc::channel();
         Self {
             bridge: None,
             chat: session::MAIN_CHAT.to_owned(),
@@ -233,6 +256,8 @@ impl AgentHost {
             events: Vec::new(),
             jobs_tx,
             jobs_rx,
+            checks_tx,
+            checks_rx,
             approvals: Vec::new(),
             next_approval: 1,
             held: HashMap::new(),
@@ -433,6 +458,7 @@ impl AgentHost {
         }
         self.serve_calls(bus, services);
         self.drain_jobs(bus, services);
+        self.drain_checks();
         self.drain_backend();
         self.maybe_finish(bus);
         self.maybe_close_external(bus);
@@ -559,6 +585,7 @@ impl AgentHost {
         });
         let id = self.next_turn;
         self.next_turn += 1;
+        let checked = bus.view_since(&author);
         self.turn = Some(Turn {
             id,
             stop: Stop::default(),
@@ -578,6 +605,8 @@ impl AgentHost {
             usage: Usage::new(picked, groups.clone()),
             groups,
             web_calls: HashMap::new(),
+            checked,
+            told: Vec::new(),
         });
     }
 
@@ -798,7 +827,8 @@ impl AgentHost {
                     match tools::serve(&mut ctx, &tool, &args) {
                         Step::Done(done) => {
                             let project = bus.project().id;
-                            self.finish_call(origin, project, reply, tool, args, *done, None)
+                            let answer = (reply, tool, args, *done, None);
+                            self.answer_turn(bus, services, project, answer)
                         }
                         Step::Job(job) => {
                             turn.jobs += 1;
@@ -977,7 +1007,83 @@ impl AgentHost {
                     }
                 }
             };
-            self.finish_call(origin, project, reply, tool, args, done, Some(call));
+            if origin == Origin::Turn && live {
+                self.answer_turn(
+                    bus,
+                    services,
+                    project,
+                    (reply, tool, args, done, Some(call)),
+                );
+            } else {
+                self.finish_call(origin, project, reply, tool, args, done, Some(call));
+            }
+        }
+    }
+
+    /// Answer a call of the running turn. When the call grew the turn's
+    /// change set, the set is first checked off the UI thread and what it
+    /// brings in is added to the result ([`Self::drain_checks`]), so the
+    /// agent can put it right before the turn ends.
+    fn answer_turn(
+        &mut self,
+        bus: &CommandBus,
+        services: &Services,
+        project: ProjectId,
+        (reply, tool, args, done, call): (Reply, String, Value, Done, Option<u64>),
+    ) {
+        let origin = Origin::Turn;
+        let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
+            return self.finish_call(origin, project, reply, tool, args, done, call);
+        };
+        let since = bus.view_since(&turn.author);
+        if since == turn.checked || done.result.is_error || done.approval.is_some() {
+            return self.finish_call(origin, project, reply, tool, args, done, call);
+        }
+        turn.checked = since;
+        let Some(work) = tools::check::set_findings(bus, &turn.author, services) else {
+            return self.finish_call(origin, project, reply, tool, args, done, call);
+        };
+        turn.jobs += 1;
+        let (tx, id) = (self.checks_tx.clone(), turn.id);
+        std::thread::spawn(move || {
+            // A check that panics still answers the call, telling nothing.
+            let found =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_default();
+            let _ = tx.send(SetChecked {
+                turn: id,
+                project,
+                reply,
+                tool,
+                args,
+                done,
+                call,
+                found,
+            });
+        });
+    }
+
+    /// Answer the calls whose change set was checked, with what it brings
+    /// in when that changed since the agent was last told.
+    fn drain_checks(&mut self) {
+        let checked: Vec<_> = self.checks_rx.try_iter().collect();
+        for SetChecked {
+            turn,
+            project,
+            reply,
+            tool,
+            args,
+            mut done,
+            call,
+            found,
+        } in checked
+        {
+            if let Some(t) = self.turn.as_mut().filter(|t| t.id == turn) {
+                t.jobs = t.jobs.saturating_sub(1);
+                if !t.stopping() {
+                    tools::check::tell(&mut done, found, &mut t.told);
+                }
+            }
+            self.finish_call(Origin::Turn, project, reply, tool, args, done, call);
         }
     }
 

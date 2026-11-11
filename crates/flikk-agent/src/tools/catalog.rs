@@ -430,6 +430,15 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(json!({ "range": range("Timeline range") }), &[]),
         ),
         spec(
+            "check_timeline",
+            Some(ReadProject),
+            "Look for the mistakes a viewer notices, in the project as you see it (your pending changes included): gaps of black under half a second, clips under three frames, hard audio joins outside a pause, captions or titles past the end or two captions at once, clips on offline media, cuts on a word, captions shown well before or after their words, captions and titles outside title-safe, and jumps in level at a join. Checks that need analysis skip media without it and say so in `skipped`. What your change set brings in is also added to the result of the call that brought it in.",
+            object(
+                json!({ "range": range("Timeline range (default: whole timeline)") }),
+                &[],
+            ),
+        ),
+        spec(
             "list_fx",
             Some(ReadProject),
             "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text.",

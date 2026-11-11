@@ -1211,10 +1211,10 @@ on the UI thread and run it off it:
   off, so there is one image tool. Web calls show as `web_search` and
   `web_fetch`, read from each backend's stream, whatever the backend calls
   them.
-* **Tools** (`flikk-agent/src/tools/`): 106 in the catalog (104 plus
+* **Tools** (`flikk-agent/src/tools/`): 107 in the catalog (105 plus
   `load_tools` and `run_tool`). Remove, move and detail operations are flags
   of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
-  Each turn lists 26 core tools (`load_tools` among them) plus `run_tool`, and the groups (`edit`,
+  Each turn lists 27 core tools (`load_tools` among them) plus `run_tool`, and the groups (`edit`,
   `transform`, `captions`, `color`, `audio`, `effects`, `overlays`,
   `generate`, `memory`, `deliver`) the turn is likely to need, picked from the
   workspace, the selection and words in the message. A chat keeps the list
@@ -1241,6 +1241,19 @@ on the UI thread and run it off it:
   `list_media` says which items are analysed.
   `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
   target clear of words wins over a nearer one on a word.
+* **Checking:** `check_timeline` (`tools/check.rs`, a core read tool,
+  optionally a `range`) runs the timeline check (§4) as a job on the
+  agent's view, offline media looked for on disk, and returns the findings
+  (kind, `at`, `end`, short clip ids, note) and the kinds `skipped` for
+  want of analysis. After a turn's call whose result leaves the agent's
+  view elsewhere (`CommandBus::view_since`: the change set grew), the host
+  holds the answer, checks the committed project and the set's draft on a
+  thread of its own (`check::set_findings`, counted with the turn's jobs so
+  the turn waits for it) and, when what the set brings in differs from what
+  the agent was last told, adds a `Check:` line listing it to that result
+  (`check::tell`), or says that none is left. So the last result of a turn
+  that edited carries what its set still brings in, before the card is
+  posted. The prompt tells the agent to fix each or say why it is meant.
 * **Subject masks:** `set_mask` with `shape.type: subject` (`tools/masks.rs`)
   takes `include` and `exclude` points and a `box`, in picture fractions
   or frame pixels, on the frame at `at`; each list given replaces that

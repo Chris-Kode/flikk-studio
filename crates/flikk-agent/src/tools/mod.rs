@@ -10,6 +10,7 @@ mod approval;
 mod audio;
 pub mod caption_styles;
 pub(crate) mod catalog;
+pub(crate) mod check;
 mod depth;
 pub mod drafts;
 mod edit;
@@ -314,6 +315,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "list_media" => read::list_media(ctx, &args),
         "get_clip" => read::get_clip(ctx, &args),
         "get_markers" => read::get_markers(ctx, &args),
+        "check_timeline" => check::check_timeline(ctx, &args),
         "list_fx" => read::list_fx(ctx, &args),
         "get_fx" => read::get_fx(ctx, &args),
         "list_caption_styles" => caption_styles::list(ctx).map(Into::into),
