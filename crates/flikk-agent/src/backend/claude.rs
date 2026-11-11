@@ -123,20 +123,21 @@ impl Adapter for Claude {
     }
 
     fn command(&self, turn: &TurnSpec) -> std::io::Result<Command> {
-        let mut env = serde_json::Map::new();
-        for (k, v) in &turn.mcp.env {
-            env.insert(k.clone(), json!(v));
-        }
-        let config = json!({
-            "mcpServers": {
-                "flikk": {
+        let mut servers = serde_json::Map::new();
+        if let Some(mcp) = &turn.mcp {
+            let env: serde_json::Map<String, Value> =
+                (mcp.env.iter().map(|(k, v)| (k.clone(), json!(v)))).collect();
+            servers.insert(
+                "flikk".into(),
+                json!({
                     "type": "stdio",
-                    "command": turn.mcp.command,
-                    "args": turn.mcp.args,
+                    "command": mcp.command,
+                    "args": mcp.args,
                     "env": env,
-                }
-            }
-        });
+                }),
+            );
+        }
+        let config = json!({ "mcpServers": servers });
         let config_path = turn.run_dir.join("mcp.json");
         std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
 
@@ -153,10 +154,11 @@ impl Adapter for Claude {
             "--tools",
             if turn.web { WEB_TOOLS } else { "" },
             "--allowedTools",
-            if turn.web {
-                "mcp__flikk,WebSearch,WebFetch"
-            } else {
-                "mcp__flikk"
+            match (turn.mcp.is_some(), turn.web) {
+                (true, true) => "mcp__flikk,WebSearch,WebFetch",
+                (true, false) => "mcp__flikk",
+                (false, true) => WEB_TOOLS,
+                (false, false) => "",
             },
             "--permission-mode",
             "dontAsk",

@@ -198,11 +198,8 @@ impl SettingsPanel {
         };
         let rows = ToolCategory::ALL.iter().map(|&category| {
             let effective = settings.permissions.get(category);
-            let fixed = category.is_read()
-                || matches!(
-                    category,
-                    ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Media
-                );
+            let choices = Permissions::choices(category);
+            let fixed = choices.is_empty();
             let control = if fixed {
                 div()
                     .text_size(px(11.))
@@ -214,39 +211,19 @@ impl SettingsPanel {
                         Permission::Propose => "Propose",
                     })
                     .into_any_element()
-            } else if category.can_allow() {
-                // Credits spent, or styles saved where undo can't reach:
-                // asked each time unless allowed.
-                const CHOICES: [(Permission, &str); 3] = [
-                    (Permission::Off, "Off"),
-                    (Permission::NeedsApproval, "Ask"),
-                    (Permission::Allowed, "Allow"),
-                ];
-                Segmented::new(("perm", category as usize))
-                    .compact()
-                    .items(CHOICES.iter().map(|(_, label)| *label))
-                    .selected(
-                        CHOICES
-                            .iter()
-                            .position(|(p, _)| *p == effective)
-                            .unwrap_or(1),
-                    )
-                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                        let permission = CHOICES[*ix].0;
-                        this.update(cx, |s| s.permissions.set(category, permission));
-                    }))
-                    .into_any_element()
             } else {
+                let label = |permission: &Permission| match permission {
+                    Permission::Off => "Off",
+                    Permission::NeedsApproval => "Ask",
+                    Permission::Allowed => "Allow",
+                    Permission::Propose => "Propose",
+                };
                 Segmented::new(("perm", category as usize))
                     .compact()
-                    .items(["Off", "Propose"])
-                    .selected((effective == Permission::Propose) as usize)
+                    .items(choices.iter().map(label))
+                    .selected(choices.iter().position(|p| *p == effective).unwrap_or(1))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                        let permission = if *ix == 1 {
-                            Permission::Propose
-                        } else {
-                            Permission::Off
-                        };
+                        let permission = choices[*ix];
                         this.update(cx, |s| s.permissions.set(category, permission));
                     }))
                     .into_any_element()

@@ -90,6 +90,21 @@ impl AgentLink {
         self.host.resolve_approval(id)
     }
 
+    /// Demo only: `request` waiting on the user for `project`.
+    pub fn seed_approval(
+        &mut self,
+        request: flikk_agent::tools::ApprovalRequest,
+        project: flikk_core::ProjectId,
+    ) {
+        self.host.seed_approval(request, project);
+    }
+
+    /// The user changed waiting request `id`: what it asks for now, and
+    /// its one line.
+    pub fn revise_approval(&mut self, id: u64, args: serde_json::Value, summary: String) {
+        self.host.revise_approval(id, args, summary);
+    }
+
     /// What came of request `id`: the result of the call still waiting for
     /// it, else told to the agent at the start of its next turn.
     pub fn report_outcome(&mut self, id: u64, outcome: String) {

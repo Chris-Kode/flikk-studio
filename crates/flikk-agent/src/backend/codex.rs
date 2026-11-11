@@ -125,37 +125,32 @@ impl Adapter for Codex {
             "--sandbox",
             "read-only",
         ]);
-        let env: Vec<String> = turn
-            .mcp
-            .env
-            .iter()
-            .map(|(k, v)| format!("{k}={}", toml_str(v)))
-            .collect();
-        let mut overrides = vec![
-            format!(
-                "mcp_servers.flikk.command={}",
-                toml_str(&turn.mcp.command.to_string_lossy())
-            ),
-            format!(
-                "mcp_servers.flikk.args=[{}]",
-                turn.mcp
-                    .args
-                    .iter()
-                    .map(|a| toml_str(a))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            format!("mcp_servers.flikk.env={{{}}}", env.join(",")),
-            "mcp_servers.flikk.startup_timeout_sec=20".into(),
-            format!(
-                "mcp_servers.flikk.tool_timeout_sec={}",
-                super::TOOL_TIMEOUT_SECS
-            ),
+        let mut overrides = Vec::new();
+        if let Some(mcp) = &turn.mcp {
+            let env: Vec<String> = (mcp.env.iter())
+                .map(|(k, v)| format!("{k}={}", toml_str(v)))
+                .collect();
+            let args: Vec<String> = mcp.args.iter().map(|a| toml_str(a)).collect();
+            overrides.extend([
+                format!(
+                    "mcp_servers.flikk.command={}",
+                    toml_str(&mcp.command.to_string_lossy())
+                ),
+                format!("mcp_servers.flikk.args=[{}]", args.join(",")),
+                format!("mcp_servers.flikk.env={{{}}}", env.join(",")),
+                "mcp_servers.flikk.startup_timeout_sec=20".into(),
+                format!(
+                    "mcp_servers.flikk.tool_timeout_sec={}",
+                    super::TOOL_TIMEOUT_SECS
+                ),
+                // Codex asks before an MCP tool that is not read-only, which
+                // "never" turns into a refusal. Flikk asks the user itself.
+                "mcp_servers.flikk.default_tools_approval_mode=\"approve\"".into(),
+            ]);
+        }
+        overrides.extend([
             format!("developer_instructions={}", toml_str(&turn.system_prompt)),
             "approval_policy=\"never\"".into(),
-            // Codex asks before an MCP tool that is not read-only, which
-            // "never" turns into a refusal. Flikk asks the user itself.
-            "mcp_servers.flikk.default_tools_approval_mode=\"approve\"".into(),
             if turn.web {
                 "web_search=\"live\"".into()
             } else {
@@ -170,7 +165,7 @@ impl Adapter for Codex {
             "features.image_generation=false".into(),
             "include_apply_patch_tool=false".into(),
             "tools.view_image=false".into(),
-        ];
+        ]);
         if let Some(model) = &turn.model.model {
             overrides.push(format!("model={}", toml_str(model)));
         }

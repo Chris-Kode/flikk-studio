@@ -68,6 +68,146 @@ fn curve(desc: &str) -> Value {
     })
 }
 
+/// How a blockout's things are built and moved: what its writer is told,
+/// whoever it is.
+pub(crate) const BLOCKOUT_GRAMMAR: &str = "Nothing in a blockout is ready-made: build every thing from plain solids, so any character, creature, machine or set can be shown, moving any way the shot asks.\n\
+Building: a thing is solids that ride one another. With `parent`, a part's `at` and `rotate` are in its parent's own space, and it moves and turns with it. An object with no `shape` is a joint: nothing is drawn, it only carries others (hips that carry a body and two legs). `anchor` says which point of a solid `at` places and `rotate` turns about: \"top\" hangs it from its joint, as a limb from a shoulder or a hip, so `rotate` swings it. Things face +Z. Turning about X by a positive angle tips a thing's top toward +Z, so the free end of a limb hung from its top swings back, and a negative angle swings it forward; about Z, positive tips the top toward -X.\n\
+Moving: `keys` say what an object is at given seconds, for what happens once (it crosses the room, an arm rises at 2 s, it sits down). A `cycle` is motion that repeats, added on top of the keys: a swing, a step, a breath, a wing beat, a wheel turning. It runs by the clock (`seconds` a round) or by the ground covered (`metres` a round): then it follows how far the thing it is part of has travelled, so feet and wheels keep up with the ground at any speed, and it comes to rest when the thing stands still. `shift` 0.5 puts the other leg half a round behind.\n\
+Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
+An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"leg l\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0],\"cycle\":{\"metres\":1.4,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}},{\"name\":\"leg r\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0],\"cycle\":{\"metres\":1.4,\"shift\":0.5,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"leg l\":{\"cycle\":null,\"rotate\":[-80,0,0]}}}],\"camera\":{\"at\":[0,1.5,7],\"look_at\":\"guard\"}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
+
+/// How a change to a blockout is written (`Scene::changed`): what its
+/// writer is told, whoever it is.
+pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ; `duration`, `ground` and `sun` are given as they should be.";
+
+/// A blockout as `generate_video` takes it (`flikk_core::blockout::Scene`).
+pub(crate) fn blockout() -> Value {
+    use flikk_core::blockout::{Anchor, Ease, Shape};
+    let point = |d: &str| numbers(3, d);
+    let ease = |d: &str| one_of(&Ease::NAMES, d);
+    let arrives = "How it arrives here (default linear): `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
+    let target = |d: &str| json!({ "type": ["array", "string"], "description": d });
+    let description = format!(
+        "A rough 3D scene for the video to follow, when camera, staging, action or timing matter: grey stand-ins you build and move yourself, and a moving camera, drawn by Flikk for nothing and shown to the user, who can change it by asking, before anything is spent. Metres; X is right, Y up, +Z toward a camera placed at +Z; the ground is y 0. Block what the shot needs: who and what matters and the set they move through, where they go and when, one clear camera idea a shot, everything that matters in view at the start. A key gives a time and what is different then; each thing a key gives moves there from the key before that gave it. It needs a model that follows clips (Seedance, Kling, Wan). In the prompt the blockout is @Video1, and a first frame given with it @Image1 (then `references` count on from @Image2 and @Video2); say what each stand-in is (\"the tall figure is the runner, the dark box the taxi\") and describe the look, which the blockout does not carry. {BLOCKOUT_GRAMMAR}"
+    );
+    let cycle = json!({
+        "type": "object",
+        "description": "Motion that repeats, added to what the keys make of it",
+        "properties": {
+            "seconds": number("How long a round takes; or give `metres`"),
+            "metres": number("The ground a round covers: a step cycle of two steps, a wheel's rim"),
+            "shift": number("How far into its round it starts, 0 to 1"),
+            "keys": {
+                "type": "array",
+                "description": "What it adds through a round. After the last key it goes on to the first, unless a key at 1 ends the round (a wheel turning from 0 to 360)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "t": number("How far through the round, 0 to 1"),
+                        "at": point("Metres added to its place"),
+                        "rotate": point("Degrees added to its turn"),
+                        "size": point("Metres added to its size"),
+                        "ease": ease("How it arrives here (default in_out)")
+                    },
+                    "required": ["t"]
+                }
+            }
+        },
+        "required": ["keys"]
+    });
+    let keys = json!({
+        "type": "array",
+        "description": "What it is later; it moves along a smooth path through the places",
+        "items": {
+            "type": "object",
+            "properties": {
+                "t": number("Seconds"),
+                "at": point("Its place then"),
+                "rotate": point("Its turn then"),
+                "size": point("Its size then"),
+                "shade": number("Its grey then"),
+                "hidden": boolean("Gone (true) or there (false) from here on"),
+                "ease": ease(arrives)
+            },
+            "required": ["t"]
+        }
+    });
+    let camera = json!({
+        "type": "object",
+        "properties": {
+            "at": point("Where it is; 1.6 high is eye level"),
+            "look_at": target("A point [x, y, z], or an object's name, which it then follows"),
+            "fov": number("Degrees across the longer side: 74 is a 24 mm lens, 54 a 35 mm (the default), 40 a 50 mm, 24 an 85 mm"),
+            "roll": number("Degrees it is rolled: a Dutch angle"),
+            "shake": number("How much a hand holds it, 0 (locked off, the default) to 1 (running with it)"),
+            "parent": string("The object it rides: `at`, and a point it looks at, are then in that object's own space: a dashboard, a shoulder, a chase behind a car"),
+            "keys": {
+                "type": "array",
+                "description": "Its move: a dolly, an orbit (a few keys around the subject), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "t": number("Seconds"),
+                        "at": point("Where it is then"),
+                        "look_at": target("What it looks at then"),
+                        "fov": number("Its field of view then"),
+                        "roll": number("Its roll then"),
+                        "ease": ease(arrives)
+                    },
+                    "required": ["t"]
+                }
+            }
+        },
+        "required": ["at", "look_at"]
+    });
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "duration": number("Seconds, at most 30 (default: the video's)"),
+            "ground": boolean("A floor at y 0 (default true); false in the air or in space"),
+            "sun": numbers(2, "Where the light comes from: degrees around the vertical (0 from +Z, 90 from +X) and above the horizon (default 47, 55). Low for long shadows; behind the subject for a backlit shot"),
+            "models": {
+                "type": "object",
+                "description": "Things built once, by name: each a list of parts, written as `objects` are. A part rides the copy unless its `parent` names a part beside it",
+                "additionalProperties": { "type": "array", "items": { "type": "object" } }
+            },
+            "objects": {
+                "type": "array",
+                "description": "What is in the scene: solids, joints, and copies of models. At most 256, and 1200 parts once the copies are written out",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": string("What it stands for: \"runner\", \"left shin\". A part of a copy is called `copy/part`"),
+                        "shape": one_of(&Shape::NAMES, "The solid it is: box, sphere (any ellipsoid), cylinder, cone, capsule (a rod with round ends), dome (half a sphere), wedge (a ramp, low at +Z), roof (a gable, its ridge along Z), pyramid. Leave out for a joint and for a copy of a model"),
+                        "model": string("The model it is a copy of"),
+                        "scale": number("How large a copy is against its model (default 1)"),
+                        "parts": {
+                            "type": "object",
+                            "description": "What a copy does its own way: for a part of the model by name, the fields that replace the model's",
+                            "additionalProperties": { "type": "object" }
+                        },
+                        "size": point("Width, height, depth of a solid (default 1 1 1)"),
+                        "at": point("Where its anchor is, in the space of what it rides: y 0 stands a thing on the ground"),
+                        "rotate": point("Degrees about X, Y and Z, about its anchor; Y turns it about the vertical"),
+                        "anchor": one_of(&Anchor::NAMES, "The point of a solid `at` places and `rotate` turns about: the middle of its underside (base, the default), its middle, or the middle of its top"),
+                        "shade": number("Its grey, 0 dark to 1 light (default 0.62): tell the subject from the set, and keep characters light (0.75 or more) so their limbs read. On a copy, how light the copy is"),
+                        "parent": string("The object it rides, by name"),
+                        "face": target("What it turns to about the vertical, on top of `rotate`: \"path\" (the way it travels: give it to whatever walks, runs, rides or drives), \"camera\", an object's name, or a point [x, y, z]"),
+                        "spin": point("Degrees a second it keeps turning about X, Y and Z"),
+                        "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
+                        "cycle": cycle,
+                        "keys": keys
+                    },
+                    "required": ["name"]
+                }
+            },
+            "camera": camera
+        },
+        "required": ["camera"]
+    })
+}
+
 /// Grade fields shared by `set_primary` and `set_timeline_grade`.
 fn grade_props(mut props: Value) -> Value {
     let rgb = |d: &str| json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": d });
@@ -1608,11 +1748,11 @@ pub fn catalog() -> Vec<ToolSpec> {
                 &["sound"],
             ),
         ),
-        // ---- generate (credits: approved each time unless allowed)
+        // ---- generate (money or credits: approved each time)
         spec(
             "generate_audio",
             Some(Generate),
-            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: unless they allowed it, each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
+            "Make music, a sound effect or a voiceover with the provider the user set up. It lands in the pool's Music Generated, Sound Effects Generated or Voiceover Generated bin; with `at` or `range` it is also proposed on an audio track. It costs the user credits: each call waits for their approval and then returns its media id. Read the range first (get_music, get_audio, view_range) and describe what it needs; naming artists or songs is refused. A voiceover needs a `voice` from find_voices and runs as long as its words take, about 1,000 characters a minute.",
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect", "voiceover"], "What to make"),
@@ -1649,7 +1789,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "generate_video",
             Some(Generate),
-            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, or after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat). It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
+            "Make a video with the provider and model the user set up (on fal: Seedance, Kling, MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX or LTX; on Pika: Pika H3 Flex, Pika 2.5, Seedance, Kling, MiniMax, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX or Grok Imagine): from the prompt alone, from a first frame (a picture in the pool, or the program at a time) and optionally a last one, after references (pictures, clips and sounds in the pool: a character, a style, a motion, a beat), or after a `blockout` (a rough 3D scene you write, drawn in grey for the model to follow its camera, staging, action and timing; look at it first with `preview_blockout`). The user sees the blockout playing, the frames, the references and the prompt, and can change each, before approving. It lands in the pool's Video Generated bin; with `at` or `range` it is also proposed on a video track, its sound on an audio track. It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Lengths, aspect ratios, resolutions, end frames and references depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
                     "prompt": string("What happens, shot by shot if it changes: subject and action, camera (\"slow dolly in\", \"handheld\"), lens and light, style. With references, name them by kind and order: @Image1, @Video1, @Audio1 (the first picture, clip and sound in `references`), whatever the model; they are renamed for it"),
@@ -1661,7 +1801,9 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "first_frame_at": time("Or start on the program's frame at this time (to continue a shot)"),
                     "last_frame": string("Media id of a picture to end on; needs a first frame"),
                     "last_frame_at": time("Or end on the program's frame at this time"),
-                    "references": strings("Media ids of pictures, clips and sounds in the pool for it to follow; not with a first frame"),
+                    "references": strings("Media ids of pictures, clips and sounds in the pool for it to follow; not with a first frame, unless there is a `blockout`"),
+                    "blockout": blockout(),
+                    "blockout_id": string("Or the id of a blockout kept by `preview_blockout`, in place of `blockout`: the scene as it is kept now"),
                     "audio": boolean("Make sound with it, where the model makes sound (default true). The user can turn video sound off in Settings; then it is made silent whatever this says"),
                     "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
                     "track": string("Video track to put it on (default: one with nothing there, else a new one)")
@@ -1670,9 +1812,24 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::video::PREVIEW,
+            Some(View),
+            "Look at a blockout before asking for its video: one collage of frames across it, and in words what its camera sees and what looks like a mistake. It costs nothing. The scene is kept under an id, given in the answer. Write a scene once, as `blockout`; from then on change the one kept, with `id` and `changes`, which is far quicker than writing it again and loses nothing. Use it on every blockout you write, fix what is off (a limb that swings the wrong way, a part off its joint, a subject out of frame or hidden, a walker sliding sideways, a camera inside a wall, timing that doesn't read), and only then call `generate_video` with `blockout_id`. A blockout stays kept after the user decides, as they left it on the card: when they deny a video or want another take, look at the kept one with `id` and change that.",
+            object(
+                json!({
+                    "blockout": { "type": "object", "description": "A new scene to keep and look at, as `generate_video` takes its `blockout`" },
+                    "id": string("Or the id of a blockout kept earlier: looks at it as it is now, or with `changes` made"),
+                    "changes": { "type": "object", "description": BLOCKOUT_CHANGES },
+                    "duration": number("Seconds, when a new scene gives none"),
+                    "aspect": string("The video's shape, as generate_video takes it (default: the sequence's, or the one it was kept for)")
+                }),
+                &[],
+            ),
+        ),
+        spec(
             super::upscale::TOOL,
             Some(Generate),
-            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: unless they allowed it, each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
+            "Make a video in the pool larger with the upscale provider and model the user set up (on fal: Topaz Precision or Starlight, SeedVR2, Crystal, FLUX Video Upscale or Gemini Omni Flash; on Pika: Topaz Proteus, Starlight Precise or Fast, or Pika H3 Flex Upscale for videos of 768p or less). The picture is rebuilt at the resolution asked for; the sound is the source's. It lands in the pool's Video Upscaled bin; with `replace` it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Offer it when footage or a generated draft is small next to the sequence (list_media gives sizes), or when the user asks for sharper or higher resolution video. Resolutions, the longest and largest video and how much larger it can make one depend on the model; a request it can't make is refused with why before anything is spent.",
             object(
                 json!({
                     "media": string("Media id of a video in the pool"),
@@ -1685,7 +1842,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             super::image::TOOL,
             Some(Generate),
-            "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Unless they allowed generating, each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
+            "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",
             object(
                 json!({
                     "prompt": string("What to make: subject, composition, style and light, and any words that appear in it, exactly as written. With pictures to follow, name them by order: @Image1, @Image2 (`references` first, then `frames_at`), and say what to keep and what to change. With the ChatGPT plan, also say its shape (wide 16:9, portrait 9:16, square)"),
@@ -1705,7 +1862,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "replace_words",
             Some(Generate),
-            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: unless they allowed it, each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
+            "Fix misspoken or missing words: the words from `from` to `to` are said again as `text`, in the speaker's own voice, and cut in where they were (the cuts sit in the pauses either side; what follows moves by the difference, and the picture over them is held or cut). To add a missing word, replace the word next to it with itself and the new one. The voice is the one the user linked to that speaker, or `voice`. It costs the user credits: each call waits for their approval. Proposed in your change set; the new words are in the Voiceover Generated bin.",
             object(
                 json!({
                     "from": time("Start of the first word to replace, as the transcript gives it"),
@@ -1739,7 +1896,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "add_voice",
             Some(Generate),
-            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: unless they allowed generating, it waits for their approval and then returns the voice id.",
+            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: it waits for their approval and then returns the voice id.",
             object(
                 json!({
                     "voice": string("The shared voice's id from find_voices"),
@@ -1752,7 +1909,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "design_voice",
             Some(Generate),
-            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. Unless they allowed generating, it waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. It waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
             object(
                 json!({
                     "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),

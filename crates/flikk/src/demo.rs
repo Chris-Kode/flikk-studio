@@ -9,13 +9,15 @@
 //! `FLIKK_DEMO_COMPOSE=<seconds>` swaps in the compositor demo on real
 //! media (see [`compose`]); `FLIKK_DEMO_PERSON=<file>` a person mask
 //! on that file (see [`person`]); `FLIKK_DEMO_STABILIZE=<seconds>` a
-//! shaky clip, stabilized (see [`stabilize`]).
+//! shaky clip, stabilized (see [`stabilize`]); `FLIKK_DEMO_SHOT=card|blockout`
+//! a video waiting on the user with its blockout (see [`shot`]).
 
 mod compose;
 mod depth;
 mod engines;
 mod hdr;
 mod person;
+pub mod shot;
 pub mod speed;
 mod stabilize;
 
@@ -139,6 +141,7 @@ pub fn seed(state: &mut EditorState, cx: &mut Context<EditorState>) {
     }
     seed_fx(state, &demo.ids, cx);
     chat_references(state, &demo, cx);
+    shot::seed(state);
     compose::seed(state);
     stabilize::seed(state);
     person::seed(state);

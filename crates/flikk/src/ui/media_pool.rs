@@ -12,9 +12,10 @@ pub(crate) mod import;
 mod look;
 mod menus;
 mod selection;
-mod thumbs;
+pub(crate) mod thumbs;
 mod upscale;
 mod video;
+pub(crate) use video::shape_of;
 pub(crate) mod voiceover;
 
 use crate::state::EditorState;

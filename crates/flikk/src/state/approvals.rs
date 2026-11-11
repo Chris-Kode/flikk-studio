@@ -13,6 +13,26 @@ impl EditorState {
         self.agent.pending_approvals()
     }
 
+    /// Demo only: `request` waiting on the user in the open project.
+    pub(crate) fn seed_approval(&mut self, request: flikk_agent::tools::ApprovalRequest) {
+        let project = self.bus.project().id;
+        self.agent.seed_approval(request, project);
+    }
+
+    /// The user changed the video waiting as request `id` (its prompt, a
+    /// frame, a reference, its blockout): it now asks for `shot`.
+    pub fn revise_shot(
+        &mut self,
+        id: u64,
+        shot: &flikk_agent::tools::video::Shot,
+        cx: &mut Context<Self>,
+    ) {
+        use flikk_agent::tools::video;
+        self.agent
+            .revise_approval(id, video::request_json(shot), video::summary(shot));
+        cx.notify();
+    }
+
     pub fn deny_approval(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(pending) = self.agent.resolve_approval(id) else {
             return;

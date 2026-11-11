@@ -365,6 +365,29 @@ impl AgentHost {
         Some(self.approvals.remove(ix))
     }
 
+    /// Demo only: `request` waiting on the user for `project`, as a turn's
+    /// call leaves one, with no call waiting on its outcome.
+    pub fn seed_approval(&mut self, request: ApprovalRequest, project: ProjectId) {
+        let id = self.next_approval;
+        self.next_approval += 1;
+        self.approvals.push(PendingApproval {
+            id,
+            request,
+            at: now(),
+            project,
+            chat: None,
+        });
+    }
+
+    /// The user changed waiting request `id` before deciding: it now asks
+    /// for `args`, shown as `summary`. Nothing when it is no longer waiting.
+    pub fn revise_approval(&mut self, id: u64, args: Value, summary: String) {
+        if let Some(approval) = self.approvals.iter_mut().find(|a| a.id == id) {
+            approval.request.args = args;
+            approval.request.summary = summary;
+        }
+    }
+
     /// Tell the agent what became of approval request `id` (`"approved:
     /// Style rule: …"`): as the result of the call that asked, which is
     /// still waiting, else at the start of its next turn.
@@ -516,7 +539,7 @@ impl AgentHost {
             message,
             resume,
             model: q.settings.models.get(backend).clone(),
-            mcp,
+            mcp: Some(mcp),
             web: q.settings.web,
             workdir,
             run_dir,
@@ -895,30 +918,12 @@ impl AgentHost {
             };
             let done = match out {
                 JobDone::Done(done) => done,
-                JobDone::Generated {
-                    item,
-                    destination,
-                    summary,
-                } => {
-                    let author = match origin {
-                        Origin::Turn => turn_author(),
-                        Origin::External(_) => Some(external_author()),
-                    };
-                    tools::generate::finish(bus, author.as_ref(), *item, &destination, &summary)
-                }
                 JobDone::Fetched { item, done, bin } => {
                     let author = match origin {
                         Origin::Turn => turn_author(),
                         Origin::External(_) => Some(external_author()),
                     };
                     tools::web::finish(bus, author.as_ref(), *item, *done, bin)
-                }
-                JobDone::Respoken { item, fix, summary } => {
-                    let author = match origin {
-                        Origin::Turn => turn_author(),
-                        Origin::External(_) => Some(external_author()),
-                    };
-                    tools::respeak::finish(bus, author.as_ref(), *item, &fix, &summary)
                 }
                 JobDone::Propose {
                     commands,
@@ -983,10 +988,6 @@ impl AgentHost {
                     project's media pool when it is opened again.";
         match out {
             JobDone::Done(done) => done,
-            JobDone::Generated { item, .. } | JobDone::Respoken { item, .. } => {
-                self.orphans.push((project, *item));
-                Done::text("Kept for its project", kept)
-            }
             JobDone::Fetched { item, .. } => {
                 self.orphans.push((project, *item));
                 Done::text("Kept for its project", kept)

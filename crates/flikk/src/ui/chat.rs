@@ -11,6 +11,7 @@ mod entries;
 mod quick;
 mod refs;
 mod reveal;
+mod shot;
 mod tools;
 
 use crate::state::EditorState;
@@ -72,6 +73,8 @@ pub struct ChatPanel {
     tools_open: HashSet<usize>,
     /// Tool calls (message, call) showing their details.
     tool_open: HashSet<(usize, usize)>,
+    /// The cards of the videos waiting on the user, by request.
+    shots: std::collections::HashMap<u64, Entity<shot::ShotCard>>,
     /// The answered requests' stack is folded to its header.
     approvals_folded: bool,
     /// Scroll positions of the waiting requests and the answered stack.
@@ -129,6 +132,7 @@ impl ChatPanel {
             user_messages,
             tools_open: HashSet::new(),
             tool_open: HashSet::new(),
+            shots: Default::default(),
             approvals_folded: false,
             pending_scroll: ScrollHandle::new(),
             settled_scroll: ScrollHandle::new(),
@@ -634,6 +638,7 @@ impl ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_shots(window, cx);
         let focused = self.composer.read(cx).has_focus(window, cx);
         Panel::new()
             .focused(focused)

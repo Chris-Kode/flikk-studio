@@ -48,14 +48,14 @@ described here, update the section in the same commit.
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
+| `flikk-core` | Model, time, ids, commands, ops, bus, change sets, history, queries, captions, cuts, grade, scopes, masks and subject mattes, speed ramps, depth maps, audio FX DSP, FX format and built-ins, compositor, blockouts (rough 3D scenes built from plain solids, their models and cycles, renderer, review and clip), job queue, service traits, online capabilities, user library, paths | os, serde, serde_json, thiserror, uuid |
 | `flikk-os` | What every crate needs from the system, std only: files written whole (temp file and rename, durable or private) and outputs that never replace a file, the sweep of crash-left temp files, child processes killed on drop and the ffmpeg/ffprobe paths, poison-tolerant locks and panic messages, the 30 s retry back-off | — |
 | `flikk-store` | `.flikk` project files, autosave, backups, recent files; SQLite for settings, style profiles and rules, source facts, fingerprints | core, rusqlite, chrono |
 | `flikk-media` | ffprobe, fingerprint, proxies, frame and PCM decode, playback streams, collages, waveforms, spectrogram pictures | core, blake3, png |
 | `flikk-analysis` | `AnalysisService`: the analysis pipeline over `flikk-models`' task interfaces, plus shot changes, silences, loudness, the energy VAD and the analysis cache; `SubjectService` (`LocalSubjects`): subject masks found and tracked, person masks matted, and their matte caches; `InterpolationService` (`LocalInterpolation`): optical flow frames for slow motion, and their cache; `DepthService` (`LocalDepth`): depth maps per frame, smoothed, and their cache | core, models |
 | `flikk-models` | A folder per task (its interface and the models that can do it) and per model (files pinned to a commit, settings, runner); downloads; shared ONNX Runtime and BPE tokenizer | core, ureq, whisper-rs, ort, mlx-rs (macOS) |
 | `flikk-cloud` | Online providers (ElevenLabs, fal, Pika): the provider catalog, `SpeechService` and `GenerationService`, the shared HTTP client, API keys in the system's credential store | core, ureq, keyring |
-| `flikk-agent` | Backend adapters (Claude, Codex), MCP server (`flikk-mcp` bin) and bridge, tool catalog and groups, prompt builder, skill and style tools, backend sessions | core, base64, png |
+| `flikk-agent` | Backend adapters (Claude, Codex), MCP server (`flikk-mcp` bin) and bridge, tool catalog and groups, prompt builder, skill and style tools, backend sessions, blockout changes by asking (`reblock`) | core, base64, png |
 | `flikk-deliver` | Render graph → FFmpeg, render queue, presets, SRT/ASS, OTIO, FCPXML, frame export, cosmic-text `Letterer` | core, cosmic-text |
 | `flikk-gpu` | `FxService` on wgpu: GLSL effects, transitions, generators, masks and layer compositing | core, wgpu, naga |
 | `flikk-html` | `HtmlService`: HTML generators in headless Chromium over CDP with a virtual clock, GSAP preloaded | core, tungstenite, GSAP (vendored) |
@@ -1145,15 +1145,21 @@ on the UI thread and run it off it:
   (a generated voiceover's media id, for one), so the turn carries on; an
   outcome whose call is gone (the turn ended or was cancelled) reaches the
   agent in the next turn's `<approvals>` block. Backends allow a tool call
-  an hour for this. Generate media (music, sound
-  effects and voiceovers, which spend the user's credits) is Off, Ask each time (the
-  default) or Allow. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
+  an hour for this. Generate media (music, sound effects, voiceovers and
+  voices, pictures, videos and upscales: whatever spends the user's money
+  or credits with a provider, `ToolCategory::costs`) is Off or Ask each
+  time (the default). No setting lets it run unasked: a saved "Allow" from
+  before reads as asking (`Permissions::get`), the handlers that ran one as
+  a tool job are gone, and the only code that calls a provider for the
+  agent is `agent_link/approve.rs`, on the user's click. `Permissions::choices`
+  says what each category can be set to, and Settings → Agent draws its
+  rows from it. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
   search. Both read pages as text only, so the same switch lists the `flikk`
   tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
   25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
   the original under `paths::web()` and adds it to the pool's "Web Images"
   bin as the user's edit. The `flikk` tool `generate_image` (Generate
-  category, so it asks each time unless the user allowed generating) is
+  category, so it asks each time) is
   offered while someone can make the picture (`image::route`): the image
   provider picked in Settings → Integrations when one is set with a key,
   whatever the agent's own setting says (see "Generating pictures"), else
@@ -1249,9 +1255,9 @@ on the UI thread and run it off it:
   for; `MediaItem::generated` records the provider, model and prompt, and
   for a voiceover who read it, so the pool can regenerate it. With
   `at` or `range` it is proposed on an audio track free over its length,
-  else a new one. Asked each time, the approval runs it in the background,
-  proposes the placement into the chat's set and answers the waiting call
-  with the media id; allowed, it runs as a tool job and answers the same. A
+  else a new one. The approval runs it in the background, proposes the
+  placement into the chat's set and answers the waiting call with the
+  media id. A
   refused prompt (an artist's name) comes back with the provider's rewrite.
 * **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
   with the provider and model picked for video (on fal: Seedance 2.0, 2.0
@@ -1282,9 +1288,8 @@ on the UI thread and run it off it:
   on a video track free over its length (else a new one on top), its sound
   on an audio track beside it. The media pool's Video form makes the same
   request, starting on a pool picture or the frame at the playhead. However
-  a generated item reaches the pool (the media pool, an approval, or an
-  agent job the editor sees on its next pump), `analyze_generated` queues it
-  once: a video like footage when the analysis models are ready, a
+  a generated item reaches the pool (the media pool or an approval),
+  `analyze_generated` queues it once: a video like footage when the analysis models are ready, a
   voiceover when transcripts are on. Items already in a project when it
   opens are left as they were. Settings → Integrations has a "Video sound"
   switch under Video (`CloudSettings::silent_video`; sound costs more on
@@ -1298,6 +1303,135 @@ on the UI thread and run it off it:
   its own at or below it, else its smallest), the media pool's form starts
   on it, and the agent's videos use it when they ask for none. Auto leaves
   the model's default.
+* **Blockouts** (`flikk-core/src/blockout/`, `tools/video.rs`,
+  `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
+  expensive and each take invents camera, staging and timing again, so
+  `generate_video` takes a `blockout`: a rough 3D scene the agent writes
+  as JSON (`blockout::Scene`: objects, models, a camera, an optional sun
+  direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
+  in it is ready-made: there are no built-in people, props or actions,
+  so the agent is not held to what Flikk thought of. An object is a
+  plain solid (box, sphere, cylinder, cone, capsule, dome, wedge, roof,
+  pyramid), a joint with no shape that only carries others, or a copy of
+  a model. Things are built by hanging solids from one another
+  (`parent`: a part's place and turn are in its parent's space) at the
+  point they turn about (`anchor`: base, middle, or top for a limb hung
+  from its joint). They move by keys, for what happens once, and by a
+  `Cycle`, for what repeats: a few keys over one round, added to what
+  the keys make of the object, running by the clock (`seconds`) or by
+  the ground covered (`metres`: the round follows how far the thing the
+  part belongs to has travelled, so feet and wheels keep up with the
+  ground at any speed, and a round that returns to its start eases to
+  rest when the thing stands still). A thing built once goes under
+  `models` and is placed with `model`; a copy can be scaled and shaded,
+  and its `parts` give, by part name, the fields that replace the
+  model's (another pose, no walk). `build.rs` writes every copy out into
+  `Part`s named `copy/part`, swaps names for places in the list, gives
+  each joint the box its parts fill, and tabulates the ground each
+  moving thing has covered; `motion.rs` poses each part at a time. An
+  object may also face something about the vertical (`face`: the way it
+  travels, the camera, an object or a point), keep spinning, and come
+  and go (`hidden`). The camera has a place, a `look_at` point or
+  object, a field of view, a roll, a hand-held `shake`, and may ride an
+  object. Places follow a smooth path through their keys
+  (`motion::Track`: a Hermite curve that rests on a held key),
+  everything else goes straight from key to key, each arriving with an
+  ease: linear, in, out,
+  in-out, `back`, `bounce`, or `cut`, which holds and then jumps (a
+  camera's cut to another set-up). `Scene::render` draws a frame on the
+  CPU, one ray a pixel against the solids, with one light, a shadow,
+  metre tiles on the ground and haze. A ray from the camera tries only
+  the solids listed for its 16 px tile of the picture, and a ray toward
+  the light only those listed for its cell of a grid across the light
+  (`render::Cells`); rays any other way go through a tree of boxes
+  (`render::Solids`). All three are rebuilt each frame. `Detail::Full`
+  also darkens flat surfaces where another is close (five short rays
+  for every fourth pixel that has a solid near, shared with the pixels
+  around it on the same surface; on round solids so few rays show as
+  stripes) and draws edges again from four rays, where `Detail::Draft`
+  is what plays. With no GPU and no model, a 1280×720 frame of a market
+  street of forty-odd objects takes about 40 ms as a draft and 105 ms in
+  full on four cores, and its 8 s clip about 20 s to write.
+  `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
+  1280 px on the longer side. `Scene::review` says a scene in words for
+  a writer that can't watch it: what the camera sees at the start, the
+  middle, the end and after each cut (which things, where across the
+  picture, how tall, hidden behind what: found from spots on each thing
+  and from a spread of rays through the picture), what looks like a
+  mistake a viewer would see (`doubts`: the subject out of the opening
+  picture, a camera inside an object or under the ground, a walker
+  going sideways) and what could be tidied (`notes`: a thing never in
+  the picture, a key after the end). A thing is what a viewer would
+  name: what stands by itself, and each copy, not their parts.
+  `preview_blockout` (the Generate group, a read) gives the agent that
+  text with a collage of eight frames, so it looks at a scene and fixes
+  it before it asks for the video.
+  A scene is long to write and quick to change, so it is written whole
+  only once. `Scene::changed` (`change.rs`) makes a change that says
+  only what differs: the scene's JSON with `objects`, and each model's
+  parts, held by name; a name that is there has the fields given put in
+  place of its own, a new name is added, `null` removes. Every blockout
+  is kept on disk under a short id (`tools/drafts.rs`, the newest 40 in
+  `paths::cache()/blockouts`): `preview_blockout` keeps a scene given as
+  `blockout` and from then on takes `id` and `changes`, `generate_video`
+  takes `blockout_id`, and the request's summary names the id, so the
+  outcome the agent is told carries it. What the user changes on the
+  card goes into the same kept scene (`Blockout::with_scene`), and it
+  stays after they approve or deny, so another take, or the next try
+  after a denial, starts from the scene as it was left. The backend runs
+  that change a scene in the dialog, and the second look at a drafted
+  one, answer with a change too.
+  A `video::Shot` is the request with what it is made from: the
+  `GenerateRequest::Video` as the user reads it, the frames to grab, the
+  placement, and the `Blockout` (scene, clip path under
+  `paths::cache()/upload`, clip size). Models follow references or start
+  on a frame, not both, so `Shot::sent` lowers it for the provider: the
+  blockout's clip is the first clip followed (`@Video1`) and a first
+  frame the first picture (`@Image1`); `parse` adds a line to the prompt
+  saying what each is unless the prompt names them. `Shot::check` refuses
+  what the model can't make (a model that follows no clips, a last
+  frame), and `Shot::prepare` grabs the frames and writes the clip just
+  before the provider is called, in the approval's job or the tool's.
+  The request waiting on the user is a card of its own (`ShotCard`, one
+  entity per waiting `generate_video`, kept by `ChatPanel::sync_shots`):
+  the blockout playing in a loop (`BlockoutPlayer`: draft frames drawn
+  off the UI thread, the newest wanted next, narrower while drawing
+  can't keep up, and the frame it stops on drawn again in full), a tile for the first frame and each reference with the tag the
+  prompt calls it, and the prompt as it is sent, in a field. A tile's menu
+  fills it with a picture made for it (`EditorState::generate_then`, the
+  user's own generation: it runs as a row of the media pool, lands in the
+  Images Generated bin and fills the tile; an empty first frame beside a
+  blockout is made after the blockout's opening frame, a filled tile
+  after its picture), the program's frame at the playhead (grabbed at
+  once) or a pool item, or empties it. Frames the agent named by time are
+  grabbed when the card appears, so the tiles show what is sent. Every
+  change is written into the waiting request
+  (`AgentHost::revise_approval`), so Approve makes what the card shows;
+  it is off while the model can't make the shot, with why beside it.
+  A request without a blockout has a Blockout tile whose button has one
+  written, for when the agent judged it not worth one, where the model
+  picked follows clips: `Reblock::draft` is the same kind of backend run,
+  given the shot's prompt without its role lines (`Shot::look`), its
+  length and its shape. A first draft whose review has doubts is handed
+  back once with the review to be put right, and stands if the second
+  answer has no scene. What it answers becomes the shot's blockout, and
+  an answer without a scene shows as why on the tile. Whenever a blockout
+  or a first frame beside one comes or goes on the card,
+  `Shot::settle_roles` puts the lines saying what `@Video1` and `@Image1`
+  are into the prompt, or takes its own lines out again. Tiles have one
+  size whatever the video's shape; the player paints its frame fitted
+  inside its box (`paint_image` on a canvas: an image element takes its
+  height from its width, so an upright frame overflowed a wide box).
+  Clicking the blockout opens its dialog (`blockout::editor`): the scene
+  large with play, seek and Undo, and a thread where the user says what
+  should change. Each ask is one backend run without tools
+  (`reblock::Reblock`: `TurnSpec::mcp` is `None`, so Claude gets an empty
+  MCP config and no allowed tools, Codex no MCP server) given the scene,
+  its review, the earlier asks and the format's schema; it answers with
+  a sentence
+  and a change to the scene, read from the reply's outermost braces and
+  made by `Scene::changed`. Save puts the scene into the shot, and into
+  the kept blockout, under a new clip path. Nothing in the dialog reaches a video provider.
 * **Generating pictures:** `Capability::Image` is a row in Settings →
   Integrations like video, with fal and Pika as providers. On fal: Nano
   Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and
@@ -1407,7 +1541,7 @@ on the UI thread and run it off it:
   the voice that read it. The agent's `find_voices` lists the user's
   library first, with how each reads, or searches the Voice Library with
   `library` and filters; `add_voice` and `design_voice` (Generate media,
-  so approved unless allowed) add or design one and keep it in the library.
+  so approved each time) add or design one and keep it in the library.
   Their approval cards are heard first: `find_voices` remembers where each
   voice listed can be heard and the request carries it, so the card of an
   `add_voice` or a voiceover plays the voice's sample (the library's copy
@@ -1429,11 +1563,10 @@ on the UI thread and run it off it:
   The agent's `replace_words` (`tools/respeak.rs`, Generate) takes the
   words by the times they start (`from`, `to`, checked against `words`),
   the new `text` and, without a linked voice, a `voice` from
-  `find_voices`; it can't clone. Asked each time, the approval card plays
-  the voice; approving makes the words off the UI thread
+  `find_voices`; it can't clone. The approval card plays the voice;
+  approving makes the words off the UI thread
   (`approve::Started::Respeak`), adds them to the pool and proposes the
-  `ReplaceSpeech` in the chat's set; allowed, it runs as a tool job
-  (`JobDone::Respoken`) and proposes the same.
+  `ReplaceSpeech` in the chat's set.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
   library and the project's audio by words (name, category, tags, what a
   provider was asked) and, where analysis left vectors, by how they sound;
@@ -1704,6 +1837,7 @@ see:
 | `FLIKK_DEMO_PERSON` | a video or picture file | That file over a gradient with a person mask, selected, on the real media engine and person masks |
 | `FLIKK_DEMO_HDR` | `1` | The selected clip's media is HDR (HLG): its pool badge and the Color tab's tone map |
 | `FLIKK_DEMO_GENERATE` | `music`, `sfx`, `voiceover`, `voices`, `voices-describe`, `voices-audio` | The media pool's Generate form, or the Voices dialog on that tab |
+| `FLIKK_DEMO_SHOT` | `card`, `blockout`, `upright`, `plain` | A video waiting on the user in the chat, with a blockout, a first frame and a reference; `blockout` opens the blockout's dialog; `upright` is the same in a 9:16 picture; `plain` is an upright video from its prompt alone, its tiles empty |
 
 ```sh
 FLIKK_DEMO=1 FLIKK_HOME=/tmp/flikk-demo cargo run -p flikk
@@ -1756,6 +1890,20 @@ there.
   `SetPlaylist` command and agent tool exist), voice cleanup, voice input.
 * Mouse and keyboard interactions (drags, drops, context menus, shortcuts)
   were checked by code review and screenshots of seeded states only.
+* Blockouts: only the agent's `generate_video` takes one; the media pool's
+  Video form does not. A scene asked for on the card or changed in the
+  dialog is written without being seen: that run has no tools, and reads
+  the scene's review instead, which says where things are but not
+  whether a limb bends the right way. Feet are moved by the cycle their
+  writer gave, not solved against the ground, so they slip where the
+  cycle's round doesn't match the stride. A scene with built characters
+  is long to write: a shot with a creature of twenty-odd parts took the
+  backend over three minutes. A blockout is
+  not kept in the pool or the project: it lives in the waiting request
+  and its clip in the upload scratch. Making a picture for a tile was
+  checked by code review only, as it needs an image provider's key. In a
+  debug build the scene is drawn coarse, since drawing is some twenty
+  times slower unoptimized.
 * Preview vs export: noise reduction previews with an expander (export uses
   `afftdn`); the limiter and time-stretch differ slightly in shape.
 * The FX code editor has no syntax highlighting (gpui-kit's `syntect`

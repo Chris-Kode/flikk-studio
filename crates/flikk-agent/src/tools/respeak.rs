@@ -3,16 +3,14 @@
 //! were (`flikk_core::respeak`). The voice is the one the user linked to that
 //! speaker (by fixing a word of theirs in the transcript, which clones it
 //! with their consent), or one the agent names from `find_voices`. It costs
-//! credits, so it waits for the user's approval unless they allowed
-//! generating; the new words land in the Voiceover Generated bin and the
-//! cut is proposed in the chat's change set.
+//! credits, so it waits for the user's approval; the new words land in the
+//! Voiceover Generated bin and the cut is proposed in the chat's change set.
 
-use super::{Done, Job, JobDone, Step, ToolCtx};
-use crate::args::{Args, ToolError, ToolResultOf, fail, short};
+use super::ToolCtx;
+use crate::args::{Args, ToolError, ToolResultOf, fail};
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::cloud::{Capability, Reading};
 use flikk_core::library::Library;
-use flikk_core::model::MediaItem;
 use flikk_core::query::{self, TimelineWord};
 use flikk_core::respeak::{self, Fix};
 use flikk_core::{MediaId, Time, TimeRange};
@@ -149,60 +147,6 @@ pub fn from_json(value: &Value) -> Option<(Fix, Reading)> {
         serde_json::from_value(value.get("fix")?.clone()).ok()?,
         serde_json::from_value(value.get("reading")?.clone()).ok()?,
     ))
-}
-
-/// With the user's leave: a job that has the words said and fitted, then
-/// comes back to the UI thread to add them to the pool and propose the cut.
-pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    let (fix, reading) = parse(ctx, args)?;
-    let Some(source) = ctx.project().media(fix.media).cloned() else {
-        return fail("the recording is not in the pool");
-    };
-    let services = ctx.services.clone();
-    let task = ctx.stop.task();
-    let job: Job = Box::new(move || {
-        let summary = summary(&fix, &reading);
-        match respeak::make(&fix, &source, &reading, &services, &task) {
-            Ok(item) => JobDone::Respoken {
-                item: Box::new(item),
-                fix: Box::new(fix),
-                summary,
-            },
-            Err(e) => JobDone::Done(Done::error(e)),
-        }
-    });
-    Ok(Step::Job(job))
-}
-
-/// Back on the UI thread with the new words: add them to the pool, and
-/// propose them in place of the old as `author` (none when the turn was
-/// cancelled).
-pub(crate) fn finish(
-    bus: &mut CommandBus,
-    author: Option<&Author>,
-    item: MediaItem,
-    fix: &Fix,
-    summary: &str,
-) -> Done {
-    let media = match super::generate::add_to_pool(bus, item, author) {
-        Ok(media) => media,
-        Err(e) => return Done::error(format!("Made it, but could not add it to the pool: {e}")),
-    };
-    let mut text = format!(
-        "Made it: media {} in the Voiceover Generated bin.",
-        short(media)
-    );
-    match author {
-        Some(author) => match propose(bus, author, media, fix, summary) {
-            Ok(placed) => {
-                text.push(' ');
-                text.push_str(&placed);
-            }
-            Err(e) => text.push_str(&format!(" Could not cut it in: {e}")),
-        },
-        None => text.push_str(" The turn was cancelled, so it was not cut in."),
-    }
-    Done::text(format!("fixed {}", fix.summary()), text)
 }
 
 /// Propose `media`, the new words of `fix`, in place of the old ones as
