@@ -2,17 +2,23 @@
 //! cycle adds to them, and everything's place at one moment with what it
 //! rides and faces ([`Moment`]), the camera's view with it.
 
-use super::build::{Facing, Part};
+use super::build::{AimAt, Facing, Goal, Limb, Part};
 use super::solid::Solid;
 use super::space::{Place, Turn, Vec3, smoothstep};
 use super::{
     Camera, Cycle, CycleKey, Ease, FPS, Frame, MID_GREY, NORMAL_FOV, Object, Scene, Shape, Side,
     Target, finite, wide,
 };
+use std::f32::consts::PI;
 
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
 const TURN: f64 = 0.6;
+/// Seconds a limb takes to bring its end to what it reaches, and back.
+const REACH_TIME: f64 = 0.35;
+/// As far as an aim turns a thing from the way it would else face, in
+/// radians: about what a neck does.
+const AIM_REACH: f32 = 1.48;
 /// Metres a second below which motion paced by the ground is at rest,
 /// and above which it is in full swing.
 const STILL: f32 = 0.05;
@@ -334,6 +340,8 @@ pub(super) struct Moves {
     hidden: Vec<(f64, bool)>,
     /// What tells its shake from any other's.
     seed: u32,
+    /// When each of its keys is reached.
+    pub times: Vec<f64>,
 }
 
 impl Moves {
@@ -356,6 +364,7 @@ impl Moves {
             starts_hidden: object.hidden,
             hidden: timed().filter_map(|(t, k)| Some((t, k.hidden?))).collect(),
             seed: (object.name.bytes()).fold(0x811c_9dc5, |seed, byte| mixed(seed ^ byte as u32)),
+            times,
         }
     }
 
@@ -555,6 +564,8 @@ impl Scene {
         let mut places = vec![Place::ORIGIN; count];
         let mut sizes = vec![Vec3::ZERO; count];
         let mut placed = vec![false; count];
+        // How the lower part of a limb is turned, once the limb is bent.
+        let mut bent: Vec<Option<Turn>> = vec![None; count];
         for &index in &self.order {
             let part = &self.parts[index];
             let rides = part.parent.map_or(Place::ORIGIN, |parent| places[parent]);
@@ -568,11 +579,21 @@ impl Scene {
                     (false, Some(rough)) => rough.places[other],
                     _ => places[other],
                 };
-                let mut rotate = pose.rotate;
-                rotate[1] += self.turn_to_face(index, t, place.at, rides, stands);
-                place.turn = rides.turn.then(Turn::of(rotate));
+                match bent[index] {
+                    Some(turn) => place.turn = turn,
+                    None => {
+                        let mut rotate = pose.rotate;
+                        rotate[1] += self.turn_to_face(index, t, place.at, rides, stands);
+                        place.turn = rides.turn.then(Turn::of(rotate));
+                        place.turn = self.aimed(index, t, place, stands);
+                    }
+                }
                 if let Some(rough) = rough {
                     place.at.y += self.lift(index, t, (place, pose.at[1] as f32), rough, stands);
+                }
+                if let Some((upper, lower)) = self.bend(index, t, place, stands) {
+                    place.turn = upper;
+                    bent[part.limb.as_ref().map_or(index, |limb| limb.lower)] = Some(lower);
                 }
             }
             places[index] = place;
@@ -580,6 +601,102 @@ impl Scene {
             placed[index] = true;
         }
         Standing { places, sizes }
+    }
+
+    /// How part `index`, standing at `place`, and the part that rides it
+    /// are turned at `t` for the end of the limb they make to be where it
+    /// is brought; `None` when they make no limb, or it is brought
+    /// nowhere now. `stands` says where another part is.
+    fn bend(
+        &self,
+        index: usize,
+        t: f64,
+        place: Place,
+        stands: impl Fn(usize) -> Place,
+    ) -> Option<(Turn, Turn)> {
+        let limb = self.parts[index].limb.as_ref()?;
+        // As the limb is posed: where it bends and where it ends.
+        let (lower, end) = (self.pose(limb.lower, t), self.pose(limb.end, t));
+        let posed = place.then(Place {
+            at: Vec3::of(lower.at),
+            turn: Turn::of(lower.rotate),
+        });
+        let (root, joint, tip) = (place.at, posed.at, posed.point(Vec3::of(end.at)));
+        let (upper_long, lower_long) = ((joint - root).length(), (tip - joint).length());
+        if upper_long < 1e-4 || lower_long < 1e-4 {
+            return None;
+        }
+        let to = self.goal(limb, t, tip, &stands)?;
+        // No further than it reaches, no nearer than it folds.
+        let whole = upper_long + lower_long;
+        let folded = (upper_long - lower_long).abs();
+        let far = (to - root)
+            .length()
+            .clamp(folded + whole * 0.01, whole * 0.999);
+        let way = (to - root).unit_or((tip - root).unit_or(-Vec3::UP));
+        // It bends the way it is posed bent; posed straight, a limb that
+        // hangs bends forward, as a knee, and one held out back, as an
+        // elbow.
+        let aside = |v: Vec3| v - way * v.dot(way);
+        let front = self.parts[index]
+            .parent
+            .map_or(Turn::NONE, |part| stands(part).turn)
+            .z;
+        let knee = aside(front * if way.y < -0.5 { 1.0 } else { -1.0 });
+        let out = Some(aside(joint - root))
+            .filter(|out| out.length() > upper_long * 0.02)
+            .unwrap_or(knee)
+            .unit_or(aside(Vec3::new(0.3, 0.1, 0.95)).unit_or(Vec3::UP));
+        let along = (upper_long * upper_long + far * far - lower_long * lower_long)
+            / (2.0 * upper_long * far);
+        let along = along.clamp(-1.0, 1.0);
+        let bent_at = root + (way * along + out * (1.0 - along * along).sqrt()) * upper_long;
+        let upper = Turn::toward(
+            (joint - root).unit_or(way),
+            (bent_at - root).unit_or(way),
+            PI,
+        )
+        .then(place.turn);
+        let hung = upper.then(Turn::of(lower.rotate));
+        let ends = root + way * far;
+        let lower = Turn::toward(
+            hung.outward(Vec3::of(end.at)).unit_or(way),
+            (ends - bent_at).unit_or(way),
+            PI,
+        )
+        .then(hung);
+        Some((upper, lower))
+    }
+
+    /// Where the end of `limb`, which its pose has at `tip`, is to be at
+    /// `t`; `None` when where its pose has it.
+    fn goal(
+        &self,
+        limb: &Limb,
+        t: f64,
+        tip: Vec3,
+        stands: impl Fn(usize) -> Place,
+    ) -> Option<Vec3> {
+        match &limb.goal {
+            Goal::Reach { to, from, until } => {
+                // There between the two times, on its way a moment either
+                // side.
+                let since = |at: f64| smoothstep(at as f32, (at + REACH_TIME) as f32, t as f32);
+                let arriving = from.map_or(1.0, |from| since(from - REACH_TIME));
+                let leaving = until.map_or(0.0, since);
+                let there = arriving * (1.0 - leaving);
+                let to = match to {
+                    AimAt::Part(part) => self.middle(*part, stands(*part)),
+                    AimAt::Point(point) => Vec3::of(*point),
+                    AimAt::Camera => {
+                        let rig = self.rig(t);
+                        rig.mount.map_or(Place::ORIGIN, &stands).point(rig.at(t))
+                    }
+                    AimAt::Ahead => return None,
+                };
+                (there > 0.0).then(|| tip + (to - tip) * there)
+            }
+        }
     }
 
     /// Degrees part `index`, at `at` on what stands at `rides`, turns
@@ -612,6 +729,36 @@ impl Scene {
             Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
         };
         faced.unwrap_or(0.0)
+    }
+
+    /// How part `index`, standing at `place`, is turned at `t` once its
+    /// front is on what it aims at: as far as [`AIM_REACH`] from the way
+    /// it would else face. `stands` says where another part is.
+    fn aimed(&self, index: usize, t: f64, place: Place, stands: impl Fn(usize) -> Place) -> Turn {
+        let aims = &self.parts[index].aims;
+        let Some((_, first, _)) = aims.first() else {
+            return place.turn;
+        };
+        // Each is where it is now, so a look goes from one moving thing
+        // to another.
+        let point = |aim: &AimAt| {
+            let point = match aim {
+                AimAt::Ahead => place.point(Vec3::AHEAD * 10.0),
+                AimAt::Camera => {
+                    let rig = self.rig(t);
+                    rig.mount.map_or(Place::ORIGIN, &stands).point(rig.at(t))
+                }
+                AimAt::Part(aimed) => self.middle(*aimed, stands(*aimed)),
+                AimAt::Point(point) => Vec3::of(*point),
+            };
+            [point.x as f64, point.y as f64, point.z as f64]
+        };
+        let later = aims[1..]
+            .iter()
+            .map(|(at, aim, ease)| (*at, point(aim), *ease));
+        let aimed_at = Vec3::of(Track::new(point(first), later).at(t));
+        let way = (aimed_at - place.at).unit_or(place.turn.z);
+        Turn::toward(place.turn.z, way, AIM_REACH).then(place.turn)
     }
 
     /// How far up part `index` is to go at `t` to rest on what it stands

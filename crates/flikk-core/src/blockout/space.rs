@@ -144,6 +144,33 @@ impl Turn {
         }
     }
 
+    /// A turn of `radians` about `axis`, one unit long.
+    pub fn about(axis: Vec3, radians: f32) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        // Each axis turned: what of it lies along `axis` stays.
+        let turned = |v: Vec3| v * cos + axis.cross(v) * sin + axis * (axis.dot(v) * (1.0 - cos));
+        Self {
+            x: turned(Self::NONE.x),
+            y: turned(Self::NONE.y),
+            z: turned(Self::NONE.z),
+        }
+    }
+
+    /// The least turn that takes the direction `from` toward `to` (one
+    /// unit each), by no more than `most` radians.
+    pub fn toward(from: Vec3, to: Vec3, most: f32) -> Self {
+        let across = from.cross(to);
+        let apart = across.length().atan2(from.dot(to)).min(most);
+        // Facing straight away from it, any way round is as short.
+        let other = if from.x.abs() < 0.9 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::UP
+        };
+        let axis = across.unit_or(from.cross(other).unit_or(Vec3::UP));
+        Self::about(axis, apart)
+    }
+
     /// A direction of its own, in the space it stands in.
     pub fn outward(&self, v: Vec3) -> Vec3 {
         self.x * v.x + self.y * v.y + self.z * v.z

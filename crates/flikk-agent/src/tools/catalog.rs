@@ -73,6 +73,7 @@ fn curve(desc: &str) -> Value {
 pub(crate) const BLOCKOUT_GRAMMAR: &str = "Nothing in a blockout is ready-made: build every thing from plain solids, so any character, creature, machine or set can be shown, moving any way the shot asks.\n\
 Building: a thing is solids that ride one another. With `parent`, a part's `at` and `rotate` are in its parent's own space, and it moves and turns with it. An object with no `shape` is a joint: nothing is drawn, it only carries others (hips that carry a body and two legs). `anchor` says which point of a solid `at` places and `rotate` turns about: \"top\" hangs it from its joint, as a limb from a shoulder or a hip, so `rotate` swings it. Things face +Z. Turning about X by a positive angle tips a thing's top toward +Z, so the free end of a limb hung from its top swings back, and a negative angle swings it forward; about Z, positive tips the top toward -X.\n\
 Moving: `keys` say what an object is at given seconds, for what happens once (it crosses the room, an arm rises at 2 s, it sits down). A `cycle` is motion that repeats, added on top of the keys: a swing, a step, a breath, a wing beat, a wheel turning. It runs by the clock (`seconds` a round) or by the ground covered (`metres` a round): then it follows how far the thing it is part of has travelled, so feet and wheels keep up with the ground at any speed, and it comes to rest when the thing stands still. `shift` 0.5 puts the other leg half a round behind. Give a thing that walks `\"on\": \"ground\"` (or the object it walks on): its lowest foot then stays on the surface through every step, up a ramp or a stair too, and how high its hips are need not be worked out.\n\
+Touching and looking: don't work out a limb's angles to touch something. Give its end `reach` and the limb bends to put it there; give a head `aim` and it looks there.\n\
 Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
 An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"leg l\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0],\"cycle\":{\"metres\":1.4,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}},{\"name\":\"leg r\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0],\"cycle\":{\"metres\":1.4,\"shift\":0.5,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"on\":\"ground\",\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"on\":\"ground\",\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"leg l\":{\"cycle\":null,\"rotate\":[-80,0,0]}}}],\"camera\":{\"at\":[0,1.5,7],\"look_at\":\"guard\"}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
 
@@ -152,6 +153,7 @@ pub(crate) fn blockout() -> Value {
                 "size": point("Its size then"),
                 "shade": number("Its grey then"),
                 "hidden": boolean("Gone (true) or there (false) from here on"),
+                "aim": target("What its front turns to by then"),
                 "ease": ease(arrives)
             }
         }
@@ -234,6 +236,17 @@ pub(crate) fn blockout() -> Value {
                         "parent": string("The object it rides, by name"),
                         "on": string("What it stands on: \"ground\", or an object's name (a stage, a ramp, a table top, a lift). Its lowest point, with all that rides it, then rests on that surface wherever it is and whatever its limbs do, and the height in `at` is how far above that it is: 0 standing, more in a jump. Give it to whatever walks, and to what is set down on something"),
                         "face": target("What it turns to about the vertical, on top of `rotate`: \"path\" (the way it travels: give it to whatever walks, runs, rides or drives), \"camera\", an object's name, or a point [x, y, z]"),
+                        "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
+                        "reach": {
+                            "type": "object",
+                            "description": "Brings it somewhere as the end of a limb: the part it rides and the part that one rides bend, as an arm or a leg does, to put it there, and follow as either moves. Give it to a hand (a small solid or a joint at the end of the forearm) or a foot: a hand on a door's handle, on a wheel, held out to shake; a foot on a pedal. Out of reach the limb goes straight toward it: pointing. It bends the way its pose has it bent",
+                            "properties": {
+                                "to": target("An object's name (put a joint on a thing where a hand goes, and name that), \"camera\", or a point [x, y, z]"),
+                                "from": number("The second it is there from (default the start): it moves there over the moment before"),
+                                "until": number("The second it lets go (default the end)")
+                            },
+                            "required": ["to"]
+                        },
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
                         "cycle": cycle,

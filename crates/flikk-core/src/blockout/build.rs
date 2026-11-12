@@ -7,7 +7,10 @@
 
 use super::motion::{Moves, Rig, Track};
 use super::space::Vec3;
-use super::{Anchor, CAMERA, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
+use super::{
+    AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, Object, PATH, Scene,
+    Target,
+};
 use std::collections::{HashMap, VecDeque};
 
 /// How deep a model may hold copies of models.
@@ -28,6 +31,12 @@ pub(super) struct Part {
     /// holds that.
     pub thing: usize,
     pub facing: Facing,
+    /// What its front turns to, when it says, and what its keys have it
+    /// turn to later.
+    pub aims: Vec<(f64, AimAt, Ease)>,
+    /// The limb it is the upper part of, when the end of one is brought
+    /// somewhere.
+    pub limb: Option<Limb>,
     /// What it stands on, when it says.
     pub rest: Option<Rest>,
     /// How its keys move it.
@@ -49,6 +58,37 @@ pub(super) enum Facing {
     Camera,
     Part(usize),
     Point([f64; 3]),
+}
+
+/// What a part's front turns to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum AimAt {
+    /// Where it faces anyway.
+    Ahead,
+    Camera,
+    Part(usize),
+    Point([f64; 3]),
+}
+
+/// A limb of two parts whose end is brought somewhere: this part, the
+/// one that rides it, and the end that rides that.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Limb {
+    pub lower: usize,
+    pub end: usize,
+    pub goal: Goal,
+}
+
+/// Where a limb's end is brought.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Goal {
+    /// To something, from one time until another: the start and the end
+    /// where none is given.
+    Reach {
+        to: AimAt,
+        from: Option<f64>,
+        until: Option<f64>,
+    },
 }
 
 /// What a part stands on, and what of it could touch that.
@@ -125,14 +165,41 @@ impl Scene {
                     )
                 })?),
             };
+            let aim = |target: &Target| match target {
+                Target::Point(point) => Ok(AimAt::Point(*point)),
+                Target::Object(aimed) if aimed == AHEAD => Ok(AimAt::Ahead),
+                Target::Object(aimed) if aimed == CAMERA => Ok(AimAt::Camera),
+                Target::Object(aimed) => (place(aimed).map(AimAt::Part)).ok_or_else(|| {
+                    format!(
+                        "`{name}` aims at `{aimed}`, which is no object's name, `{CAMERA}` or \
+                         `{AHEAD}`"
+                    )
+                }),
+            };
+            let moves = Moves::of(&out.object, self.duration);
+            // From the start it aims at what it says, or ahead until a key
+            // says.
+            let keyed = (moves.times.iter().zip(&out.object.keys))
+                .filter_map(|(t, key)| Some((*t, key.aim.as_ref()?, key.ease)));
+            let first = (out.object.aim.as_ref()).map(|target| (0.0, target, Ease::Linear));
+            let mut aims = first
+                .into_iter()
+                .chain(keyed)
+                .map(|(t, target, ease)| Ok((t, aim(target)?, ease)))
+                .collect::<Result<Vec<_>, String>>()?;
+            if aims.first().is_some_and(|(t, ..)| *t > 0.0) {
+                aims.insert(0, (0.0, AimAt::Ahead, Ease::Linear));
+            }
             parts.push(Part {
                 object: out.object.clone(),
                 parent,
                 whole: 0,
                 thing: 0,
                 facing,
+                aims,
+                limb: None,
                 rest: None,
-                moves: Moves::of(&out.object, self.duration),
+                moves,
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
             });
@@ -164,6 +231,29 @@ impl Scene {
             if parts[whole].travelled.is_empty() {
                 parts[whole].travelled = travelled(&parts[whole].moves.places, self.duration);
             }
+        }
+        for end in 0..parts.len() {
+            let Some(reach) = &parts[end].object.reach else {
+                continue;
+            };
+            let name = &parts[end].object.name;
+            let to = match &reach.to {
+                Target::Point(point) => AimAt::Point(*point),
+                Target::Object(to) if to == CAMERA => AimAt::Camera,
+                Target::Object(to) => AimAt::Part(place(to).ok_or_else(|| {
+                    format!("`{name}` reaches to `{to}`, which is no object's name or `{CAMERA}`")
+                })?),
+            };
+            let limb = Limb {
+                lower: 0,
+                end,
+                goal: Goal::Reach {
+                    to,
+                    from: reach.from,
+                    until: reach.until,
+                },
+            };
+            hang_limb(&mut parts, limb)?;
         }
         let rig = |camera, what: &str| {
             Rig::of(camera, what, self.duration, place, |whole| {
@@ -251,16 +341,22 @@ impl Scene {
             Some(parent) => Some(parent.clone()),
             None => prefix.strip_suffix('/').map(str::to_owned),
         };
-        if let Some(Target::Object(faced)) = &mut out.face
-            && is_beside(faced)
-        {
-            *faced = format!("{prefix}{faced}");
+        // A part names those beside it without the copy's name.
+        let in_full = |named: &mut String| {
+            if is_beside(named) {
+                *named = format!("{prefix}{named}");
+            }
+        };
+        let targets = (out.face.iter_mut())
+            .chain(&mut out.aim)
+            .chain(out.reach.iter_mut().map(|reach| &mut reach.to))
+            .chain(out.keys.iter_mut().filter_map(|key| key.aim.as_mut()));
+        for target in targets {
+            if let Target::Object(named) = target {
+                in_full(named);
+            }
         }
-        if let Some(stood_on) = &mut out.on
-            && is_beside(stood_on)
-        {
-            *stood_on = format!("{prefix}{stood_on}");
-        }
+        out.on.iter_mut().for_each(in_full);
         out.name = name.clone();
         (out.model, out.parts, out.scale) = (None, Default::default(), 1.0);
         let grow = |v: &mut [f64; 3]| v.iter_mut().for_each(|n| *n *= scale);
@@ -415,6 +511,29 @@ fn solid_bounds(object: &Object) -> ([f64; 3], [f64; 3]) {
     ([-w * 0.5, under, -d * 0.5], [w * 0.5, under + h, d * 0.5])
 }
 
+/// Give the part two above the end of `limb` the limb: the end rides
+/// its lower part, and that its upper. Refused where there are not two
+/// parts above it, or the upper already has a limb.
+fn hang_limb(parts: &mut [Part], mut limb: Limb) -> Result<(), String> {
+    let name = &parts[limb.end].object.name;
+    let above = |part: usize| parts[part].parent;
+    let (Some(lower), Some(upper)) = (above(limb.end), above(limb.end).and_then(above)) else {
+        return Err(format!(
+            "`{name}` is brought somewhere as the end of a limb, so it rides a part that rides \
+             another: a hand its forearm, and that its upper arm"
+        ));
+    };
+    if let Some(other) = &parts[upper].limb {
+        return Err(format!(
+            "`{name}` and `{}` are both brought somewhere by bending `{}`: one limb has one end",
+            parts[other.end].object.name, parts[upper].object.name
+        ));
+    }
+    limb.lower = lower;
+    parts[upper].limb = Some(limb);
+    Ok(())
+}
+
 /// Whether part `index` is `whole`, or rides it.
 fn rides(parts: &[Part], index: usize, whole: usize) -> bool {
     let mut above = Some(index);
@@ -439,10 +558,23 @@ fn solids_of(parts: &[Part], whole: usize) -> Vec<usize> {
 /// loop; whether some did. `mounts` are the parts cameras ride, which
 /// whatever faces the camera is placed after.
 fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
-    let faced = |part: &Part| match part.facing {
-        Facing::Part(faced) => vec![faced],
-        Facing::Camera => mounts.to_vec(),
-        Facing::Nothing | Facing::Path | Facing::Point(_) => Vec::new(),
+    let faced = |part: &Part| {
+        let mut faced = match part.facing {
+            Facing::Part(faced) => vec![faced],
+            Facing::Camera => mounts.to_vec(),
+            Facing::Nothing | Facing::Path | Facing::Point(_) => Vec::new(),
+        };
+        let reached = part.limb.iter().map(|limb| match &limb.goal {
+            Goal::Reach { to, .. } => to,
+        });
+        for aim in part.aims.iter().map(|(_, aim, _)| aim).chain(reached) {
+            match aim {
+                AimAt::Part(aimed) => faced.push(*aimed),
+                AimAt::Camera => faced.extend(mounts),
+                AimAt::Ahead | AimAt::Point(_) => {}
+            }
+        }
+        faced
     };
     let mut waits = vec![0usize; parts.len()];
     let mut waited_on: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];

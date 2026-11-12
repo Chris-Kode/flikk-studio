@@ -170,6 +170,17 @@ pub struct Object {
     /// (the way it travels), `"camera"`, an object by name, or a point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<Target>,
+    /// What its front (+Z) turns to, up and down as well as round, as far
+    /// as a neck goes: a head to who it looks at, a lamp to what it
+    /// lights. `"camera"`, an object by name, a point, or `"ahead"`: not
+    /// turned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim: Option<Target>,
+    /// What it is brought to, as the end of a limb: the part it rides and
+    /// the part that one rides bend, as an arm or a leg does, to put it
+    /// there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
     /// Degrees a second it keeps turning about X, Y and Z.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spin: [f64; 3],
@@ -207,6 +218,9 @@ pub struct ObjectKey {
     /// Gone (true) or there (false) from here on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// What its front turns to by then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim: Option<Target>,
     /// How the move to this key is timed.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
@@ -250,6 +264,23 @@ pub struct CycleKey {
     /// How it arrives at this key: starting and ending slowly unless said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ease: Option<Ease>,
+}
+
+/// The end of a limb brought to something: a hand to a door's handle, a
+/// foot to a pedal. Out of the limb's reach, it goes as far as it can:
+/// an arm held out, pointing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reach {
+    /// What it is brought to: an object by name, `"camera"`, or a point.
+    pub to: Target,
+    /// The seconds it is there from and until: the start and the end
+    /// when left out. It moves there, and back to how its limb is posed,
+    /// over a moment before and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<f64>,
 }
 
 /// Unsteady motion that never repeats: an engine's rumble, a boat on a
@@ -596,6 +627,8 @@ const MAIN: &str = "main";
 /// the camera.
 const PATH: &str = "path";
 const CAMERA: &str = "camera";
+/// What an object can aim at that is no object: where it faces anyway.
+const AHEAD: &str = "ahead";
 /// What an object can stand on that is no object: the floor at `y = 0`.
 const GROUND: &str = "ground";
 
@@ -761,6 +794,15 @@ impl Object {
         in_order(&mut self.keys, &what, |key| (key.t, key.at.is_some()))?;
         if let Some(cycle) = self.cycle.as_mut() {
             cycle.settle(&what)?;
+        }
+        if let Some(reach) = &self.reach {
+            finite(
+                &what,
+                &[reach.from.unwrap_or(0.0), reach.until.unwrap_or(0.0)],
+            )?;
+            if let Target::Point(point) = &reach.to {
+                finite(&what, point)?;
+            }
         }
         if let Some(shake) = self.shake.as_mut() {
             finite(&what, &shake.at)?;
