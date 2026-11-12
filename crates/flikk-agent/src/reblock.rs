@@ -256,7 +256,9 @@ const CRAFT: &str = "Write it as a director blocks a shot. Design the characters
     no `t` are passed at an even pace. Build the set too: the walls, the street, the furniture \
     the action touches or the camera passes, enough for depth and for the move to read against, \
     in shades that tell the subject from the set: characters light (0.75 or more) so their \
-    limbs read, the set darker. Time the beats with keys, ease the moves that start or stop, \
+    limbs read, the set darker. Write what there is many of once and lay it out with `repeat` \
+    (a street of stalls, a wood, a crowd), `cut` doors and windows out of walls the action \
+    goes through or is seen through, and give open country `hills` when it should not be flat. Time the beats with keys, ease the moves that start or stop, \
     and give the camera one clear idea a shot, said as a shot is called (`frame`: a medium \
     close-up of her, on the left) in place of a worked-out distance: a dolly, an orbit, a \
     crane, a camera that rides its subject (`parent`), hand-held (`shake`), or a cut between \

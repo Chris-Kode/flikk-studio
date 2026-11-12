@@ -16,10 +16,13 @@
 //! [`Step`], a hand is brought somewhere ([`Reach`]), a head looks
 //! (`aim`), a key hands a thing to another. Cameras are framed as shots
 //! are called ([`Frame`]) and cut between. A thing built once is a model, placed as many
-//! times as the shot needs, each copy free to differ. `build` writes the
+//! times as the shot needs, each copy free to differ; what there is many
+//! of is laid out by a [`Repeat`], openings are `cut` out of walls, and
+//! the ground can roll ([`Hills`]). `build` writes the
 //! copies out into the parts that are drawn, `motion` says where each is
 //! at a time, `world` is the scene at that time as rays meet it, and
-//! `render` makes the picture.
+//! `render` makes the picture: the shot, a [`Pass`] of it, or the set
+//! from [`Outside`] the shot for whoever stages it.
 //!
 //! Space is in metres: X to the right, Y up, the ground at `y = 0`. An
 //! object's `at` is the middle of its base unless it says otherwise, so

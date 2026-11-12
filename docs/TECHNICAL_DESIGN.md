@@ -1545,6 +1545,39 @@ on the UI thread and run it off it:
   the next (`render::Sheets`). With no GPU and no model, a 1280×720
   frame of the demo shot takes about 36 ms as a draft and 85 ms in full
   on four cores.
+  Larger worlds are written short. A box, a cylinder or a capsule takes
+  a `taper` (its top against its base, inside the same size): cylinder,
+  cone and capsule share one ray test for a round side whose radius
+  changes with height. `repeat` (`repeat.rs`) lays one object out as a
+  row or a grid (`step`), a `ring` or a scatter over an `area` (each
+  place the candidate, of twelve, furthest from those before it), every
+  copy the whole object with its keys moved over, called `name 1` and
+  on and riding a joint of the object's name that stands for them all;
+  `vary` turns, scales, shades and puts each out of step by a hash of
+  the name and the copy's number. A solid with `cut` is not drawn but
+  taken out of the object it names: every solid is convex, so a ray is
+  inside one over a single stretch (`Solid::span`, the ordinary test
+  from outside each way), and a ray that meets a cut solid in a hole
+  goes on to where it leaves the hole, the hole's far side turned round
+  being the surface seen. `hills` (`land.rs`) makes the ground roll:
+  smooth noise on a 256 × 256 grid that repeats beyond the haze, walked
+  by rays in strides four times what its steepest slope makes sure is
+  clear and met between the last two places; every height is then above
+  the ground under that thing (`Part::lands`, cameras and points too),
+  so scenes are written as on a level floor. A scene holds 6000 parts.
+  What made more slow was measured: the tree of boxes is rebuilt in
+  under 3 ms at 13 000 parts, so it still is each frame; parts nothing
+  ever moves are placed once (`Part::still`), and the review sets its
+  moments up on several threads.
+  `Scene::render_outside` draws the scene from outside its shot
+  (`Outside`: around, above, how near), toward the middle of a ball that
+  holds the scene over its whole length, with the shot's camera, its
+  move and the way each travelling thing goes, a tick a second, stroked
+  over the picture against its depth. `Scene::render_pass` draws the
+  shot as its depth, its lines or each thing in a colour of its own
+  (`Pass`), and `Scene::thing_at` names what a place in the shot shows.
+  Passes are shown, not sent: whether a video model follows one better
+  than the greys is untested.
   `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
   1280 px on the longer side. `Scene::review` says a scene in words for
   a writer that can't watch it: what the camera sees at the start, the
@@ -1564,10 +1597,12 @@ on the UI thread and run it off it:
   walker with its feet off the ground and no `on`; a limb short of what
   it reaches for. What the camera looks at is named as a shot is called
   from its height in the picture. A thing is what a viewer would
-  name: what stands by itself, and each copy, not their parts.
+  name: what stands by itself, and each copy, not their parts; the
+  copies of a repeat are said as one, with how many of them show.
   `preview_blockout` (the Generate group, a read) gives the agent that
-  text with a collage of eight frames, so it looks at a scene and fixes
-  it before it asks for the video.
+  text with a collage of eight frames and the set from straight above
+  with the camera drawn in, so it looks at a scene and fixes it before
+  it asks for the video.
   A scene is long to write and quick to change, so it is written whole
   only once. `Scene::changed` (`change.rs`) makes a change that says
   only what differs: the scene's JSON with `objects`, and each model's
@@ -1626,7 +1661,11 @@ on the UI thread and run it off it:
   height from its width, so an upright frame overflowed a wide box).
   Clicking the blockout opens its dialog (`blockout::editor`): the scene
   large with play, seek and Undo, and a thread where the user says what
-  should change. Each ask is one backend run without tools
+  should change. Above the picture the player's `Looking` is chosen:
+  the shot, the set from outside (dragged round, the wheel bringing it
+  nearer), or the shot's depth, lines or parts; a button lays the thirds
+  over the shot, and a click on a thing in the shot puts its name into
+  the ask (`Picked`). Each ask is one backend run without tools
   (`reblock::Reblock`: `TurnSpec::mcp` is `None`, so Claude gets an empty
   MCP config and no allowed tools, Codex no MCP server) given the scene,
   its review, the earlier asks and the format's schema; it answers with
