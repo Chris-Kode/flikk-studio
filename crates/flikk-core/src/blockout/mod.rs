@@ -222,6 +222,16 @@ pub struct Object {
     /// to keep it there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<Step>,
+    /// How strongly it falls once a key lets it go or throws it, against
+    /// the Earth's pull: 1 unless said. At 0 it floats, as a thing in
+    /// space or one that hovers: it goes on as it was going, or stays
+    /// where it was let go at rest. Under 0 it rises. `false` is 0.
+    #[serde(
+        default = "one",
+        deserialize_with = "strength",
+        skip_serializing_if = "is_one"
+    )]
+    pub gravity: f64,
     /// Many of it, laid out: each is this object over again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<Repeat>,
@@ -717,6 +727,21 @@ fn is_one(value: &f64) -> bool {
     *value == 1.0
 }
 
+/// How strong something is, said as a number or as whether it is there
+/// at all.
+fn strength<'de, D: serde::Deserializer<'de>>(said: D) -> Result<f64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Said {
+        Whether(bool),
+        Much(f64),
+    }
+    Ok(match Said::deserialize(said)? {
+        Said::Whether(there) => f64::from(u8::from(there)),
+        Said::Much(much) => much,
+    })
+}
+
 /// The grey of a solid that gives none.
 const MID_GREY: f64 = 0.62;
 
@@ -883,6 +908,7 @@ impl Object {
             parent,
             scale: 1.0,
             taper: 1.0,
+            gravity: 1.0,
             ..Self::default()
         }
     }
@@ -912,7 +938,8 @@ impl Object {
                 "{what} is `cut` out of something, so it is a solid: give it a `shape`"
             ));
         }
-        finite(&what, &[self.taper])?;
+        finite(&what, &[self.taper, self.gravity])?;
+        self.gravity = self.gravity.clamp(-5.0, 5.0);
         let narrows = matches!(
             self.shape,
             Some(Shape::Box | Shape::Cylinder | Shape::Capsule)

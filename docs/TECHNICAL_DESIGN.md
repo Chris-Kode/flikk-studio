@@ -1579,7 +1579,9 @@ on the UI thread and run it off it:
   comes to rest is found once at build, frame by frame, as its lowest
   point comes down on a solid that is not its own or its thrower's, or
   on the ground; thrown to an object it is caught, a hold by that object
-  timed by the flight. The review says when each lands or is caught,
+  timed by the flight. An object's `gravity` says how strongly it falls
+  against the Earth's pull: at 0 it goes on in a straight line or stays
+  where it was let go at rest, under 0 it rises. The review says when each lands or is caught,
   and doubts a throw over 30 m/s or one still in the air at the end.
   `Scene::render_outside` draws the scene from outside its shot
   (`Outside`: around, above, how near), toward the middle of a ball that

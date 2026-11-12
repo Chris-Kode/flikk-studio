@@ -392,6 +392,9 @@ impl Scene {
                     None if over => {
                         format!("is let go at {left:.1} s and comes to rest at {ends:.1} s")
                     }
+                    Some(_) if flight.pull <= 0.0 => {
+                        format!("is thrown at {left:.1} s and goes on in a straight line")
+                    }
                     Some(_) => {
                         review.doubts.push(format!(
                             "`{name}`, thrown at {left:.1} s, is still in the air when the scene \
@@ -400,6 +403,13 @@ impl Scene {
                             self.duration
                         ));
                         continue;
+                    }
+                    None if flight.pull <= 0.0 => {
+                        // What floats was never going to land.
+                        match flight.speed.length() > 0.05 {
+                            true => format!("is let go at {left:.1} s and drifts on"),
+                            false => continue,
+                        }
                     }
                     None => format!("is let go at {left:.1} s and is still falling at the end"),
                 };

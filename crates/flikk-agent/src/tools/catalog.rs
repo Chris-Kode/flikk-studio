@@ -317,6 +317,7 @@ pub(crate) fn blockout() -> Value {
                         "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
                         "reach": reach,
                         "step": step,
+                        "gravity": { "type": ["number", "boolean"], "description": "How strongly it falls once a key lets it go or throws it, against the Earth's pull (default 1). 0 or false for what floats: a thing in space, a balloon, a drone that hovers; it then goes on in a straight line as it was going, stays where it was let go at rest, and a throw sends it straight. 0.17 on the Moon, below 0 for what rises" },
                         "repeat": repeat,
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),

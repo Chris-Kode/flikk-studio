@@ -8,8 +8,12 @@ use super::motion::Standing;
 use super::space::{Place, Vec3};
 use super::{FPS, Scene};
 
-/// Metres a second faster that a thing falls, each second.
+/// Metres a second faster that a thing falls, each second, and the
+/// least of that for which a throw is an arc: under it a thing is sent
+/// straight, at [`TOSS`] metres a second.
 const GRAVITY: f32 = 9.81;
+const ARC: f32 = 0.5;
+const TOSS: f32 = 6.0;
 /// The fastest a thing leaves what let it go, in metres a second: the
 /// last move of a hand is not a throw.
 const LET_GO: f32 = 12.0;
@@ -25,6 +29,9 @@ pub(super) struct Flight {
     from: Vec3,
     /// Metres a second, as it left.
     pub speed: Vec3,
+    /// Metres a second faster that it falls, each second: nothing for
+    /// what floats.
+    pub pull: f32,
     /// Seconds until it comes to rest, or is caught: never, for one
     /// still in the air when the scene ends.
     pub lasts: f64,
@@ -43,7 +50,7 @@ impl Flight {
 
     /// Where its speed and gravity have it after `seconds` in the air.
     fn through(&self, seconds: f32) -> Vec3 {
-        self.from + self.speed * seconds - Vec3::UP * (0.5 * GRAVITY * seconds * seconds)
+        self.from + self.speed * seconds - Vec3::UP * (0.5 * self.pull * seconds * seconds)
     }
 }
 
@@ -61,18 +68,21 @@ impl Scene {
             .rev()
             .find_map(|before| before.at.and(before.by))
             .map(|by| self.parts[by].thing);
+        let pull = GRAVITY * self.parts[part].object.gravity as f32;
+        let launch = |to: &AimAt, seconds: Option<f64>| self.launch((from, pull), t, to, seconds);
         let mut flight = Flight {
             from,
             speed: match thrown {
-                Some((to, seconds)) => self.launch(from, t, to, *seconds).0,
+                Some((to, seconds)) => launch(to, *seconds).0,
                 None => self.speed_of(part, t, from),
             },
+            pull,
             lasts: f64::INFINITY,
             rest: from,
         };
         // Thrown to a thing, it is caught: that has it from then on.
         if let Some((to @ AimAt::Part(_), seconds)) = thrown {
-            flight.lasts = self.launch(from, t, to, *seconds).1 as f64;
+            flight.lasts = launch(to, *seconds).1 as f64;
             flight.rest = flight.through(flight.lasts as f32);
             return flight;
         }
@@ -96,7 +106,7 @@ impl Scene {
                 break;
             }
             let at = flight.through(seconds);
-            let falling = flight.speed.y - GRAVITY * seconds <= 1e-3;
+            let falling = flight.speed.y - pull * seconds <= 1e-3;
             let standing = self.stand(time.min(self.duration));
             let floor = self.floor_under(&standing, time, at - Vec3::UP * under, lands_on);
             let gap = floor.map(|floor| at.y - under - floor);
@@ -133,11 +143,17 @@ impl Scene {
         }
     }
 
-    /// The speed a thing leaves `from` with at `t` to come to `to`, and
-    /// the seconds it is in the air: `seconds` when that is said, else
-    /// what the easiest throw takes. What it is thrown to is aimed at
-    /// where it will be by then.
-    fn launch(&self, from: Vec3, t: f64, to: &AimAt, seconds: Option<f64>) -> (Vec3, f32) {
+    /// The speed a thing leaves `from` with at `t` to come to `to`,
+    /// falling by `pull`, and the seconds it is in the air: `seconds`
+    /// when that is said, else what the easiest throw takes. What it is
+    /// thrown to is aimed at where it will be by then.
+    fn launch(
+        &self,
+        (from, pull): (Vec3, f32),
+        t: f64,
+        to: &AimAt,
+        seconds: Option<f64>,
+    ) -> (Vec3, f32) {
         let aimed = |after: f32| {
             let time = (t + after as f64).min(self.duration);
             match to {
@@ -155,7 +171,7 @@ impl Scene {
         };
         let flies = |off: Vec3| match seconds {
             Some(seconds) => seconds as f32,
-            None => easiest(off),
+            None => easiest(off, pull),
         };
         let mut lasts = flies(aimed(0.0) - from);
         for _ in 0..3 {
@@ -163,7 +179,7 @@ impl Scene {
         }
         let lasts = lasts.clamp(FLIGHT.0, FLIGHT.1);
         let off = aimed(lasts) - from;
-        let up = (off.y + 0.5 * GRAVITY * lasts * lasts) / lasts;
+        let up = (off.y + 0.5 * pull * lasts * lasts) / lasts;
         (Vec3::new(off.x / lasts, up, off.z / lasts), lasts)
     }
 
@@ -191,16 +207,20 @@ impl Scene {
 }
 
 /// The seconds in the air of the throw that takes the least speed to
-/// come to a place `off` from where it starts: half way between straight
-/// at it and straight up.
-fn easiest(off: Vec3) -> f32 {
+/// come to a place `off` from where it starts, falling by `pull`: half
+/// way between straight at it and straight up. What hardly falls is sent
+/// straight there.
+fn easiest(off: Vec3, pull: f32) -> f32 {
+    if pull < ARC {
+        return off.length() / TOSS;
+    }
     let (level, up) = (off.x.hypot(off.z), off.y);
     if level < 0.05 {
         // Straight up to where it stops rising, or straight down.
-        return (2.0 * up.abs() / GRAVITY).sqrt();
+        return (2.0 * up.abs() / pull).sqrt();
     }
     let angle = std::f32::consts::FRAC_PI_4 + up.atan2(level) * 0.5;
     let speed_squared =
-        GRAVITY * level * level / (2.0 * angle.cos().powi(2) * (level * angle.tan() - up));
+        pull * level * level / (2.0 * angle.cos().powi(2) * (level * angle.tan() - up));
     level / (speed_squared.max(1e-6).sqrt() * angle.cos())
 }
