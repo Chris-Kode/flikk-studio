@@ -2,8 +2,8 @@
 //! looks like a mistake. Whoever writes a scene as JSON can't watch it
 //! play; this is read instead.
 
-use super::render::{Detail, World};
 use super::space::Vec3;
+use super::world::World;
 use super::{Scene, Target};
 
 /// The most moments described, and the most objects named at each.
@@ -104,7 +104,7 @@ impl Scene {
             }
         };
         for (i, t) in moments.iter().enumerate() {
-            let world = World::of(self, *t, size[0], size[1], Detail::Draft);
+            let world = World::of(self, *t, size[0], size[1]);
             let sights = self.sights(&world, size);
             note(&sights);
             tread(&world, *t);
@@ -114,7 +114,7 @@ impl Scene {
                 review
                     .doubts
                     .push(format!("At {t:.1} s the camera is inside `{name}`."));
-            } else if self.ground && world.eye().y < 0.02 {
+            } else if self.ground && world.eye.y < 0.02 {
                 review
                     .doubts
                     .push(format!("At {t:.1} s the camera is under the ground."));
@@ -126,7 +126,7 @@ impl Scene {
         // Between those moments, only whether each is in the picture.
         for step in 1..8 {
             let t = self.duration * step as f64 / 8.0;
-            let world = World::of(self, t, size[0], size[1], Detail::Draft);
+            let world = World::of(self, t, size[0], size[1]);
             note(&self.sights(&world, size));
             tread(&world, t);
         }

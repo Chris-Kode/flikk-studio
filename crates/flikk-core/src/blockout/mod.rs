@@ -31,6 +31,7 @@ mod render;
 mod review;
 mod solid;
 mod space;
+mod world;
 
 pub use render::Detail;
 pub use review::Review;

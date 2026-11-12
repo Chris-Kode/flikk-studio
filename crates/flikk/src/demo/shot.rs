@@ -57,7 +57,7 @@ const SCENE: &str = r#"{
   "objects": [
     {"name": "runner", "model": "person", "at": [-11, 0, 0.5], "on": "ground", "face": "path", "shade": 0.8,
      "keys": [{"t": 6, "at": [11, 0, -0.5]}]},
-    {"name": "attendant", "model": "person", "at": [6.2, 0, -3.2], "on": "kerb", "face": "runner", "scale": 1.05,
+    {"name": "attendant", "model": "person", "at": [6.2, 0, -3.2], "on": "ground", "face": "runner", "scale": 1.05,
      "parts": {"arm r": {"rotate": [0, 0, -150], "cycle": null},
                "forearm r": {"rotate": [0, 0, 0], "cycle": {"seconds": 0.7, "keys": [{"t": 0, "rotate": [0, 0, -25]}, {"t": 0.5, "rotate": [0, 0, 25]}]}}}},
     {"name": "car", "model": "car", "at": [3.2, 0, -5.5], "rotate": [0, 90, 0], "shade": 0.42},

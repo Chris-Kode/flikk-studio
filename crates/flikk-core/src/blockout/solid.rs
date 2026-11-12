@@ -7,13 +7,6 @@ use super::{Anchor, Shape};
 /// How near a hit counts, so a surface doesn't meet itself.
 pub(super) const NEAR: f32 = 1e-3;
 
-impl Shape {
-    /// Whether every side of it is flat.
-    pub(super) fn is_flat(self) -> bool {
-        matches!(self, Self::Box | Self::Wedge | Self::Roof | Self::Pyramid)
-    }
-}
-
 /// One solid placed in the scene.
 pub(super) struct Solid {
     pub shape: Shape,
@@ -22,9 +15,10 @@ pub(super) struct Solid {
     half: Vec3,
     /// A sphere about `centre` holding it, for a quick miss.
     reach: f32,
-    /// Its grey, and the thing a viewer would name it as (its place among
-    /// the parts): what a picture of it needs. Nothing until given.
-    pub shade: f32,
+    /// How much of the light on it it gives back, and the thing a viewer
+    /// would name it as (its place among the parts): what a picture of it
+    /// needs. Nothing until given.
+    pub tone: f32,
     pub owner: u16,
 }
 
@@ -43,7 +37,7 @@ impl Solid {
             turn: place.turn,
             half,
             reach: half.length(),
-            shade: 0.0,
+            tone: 0.0,
             owner: 0,
         }
     }
