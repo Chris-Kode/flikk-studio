@@ -14,6 +14,9 @@ use std::f32::consts::PI;
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
 const TURN: f64 = 0.6;
+/// Seconds motion that repeats takes to come in at its start and die away
+/// at its end, where it has them.
+const CYCLE_TIME: f64 = 0.3;
 /// The ground a foot that steps stays down over, in leg lengths, and the
 /// share of a leg's full length it is stretched to before the body sinks.
 const STANCE: f32 = 0.75;
@@ -496,8 +499,13 @@ impl Scene {
             true => smoothstep(STILL, MOVING, speed) as f64,
             false => 1.0,
         };
+        // And any goes on only between its two times, in and out over a
+        // moment.
+        let since = |at: f64| smoothstep(at as f32, (at + CYCLE_TIME) as f32, t as f32) as f64;
+        let on = cycle.from.map_or(1.0, since) * (1.0 - cycle.until.map_or(0.0, since));
+        let swing = swing * on;
         let (rounds, swing) = match (cycle.seconds, cycle.metres, cycle.strides) {
-            (Some(seconds), ..) => (t / seconds, 1.0),
+            (Some(seconds), ..) => ((t - cycle.from.unwrap_or(0.0)) / seconds, on),
             (None, Some(metres), _) => (gone / metres, swing),
             (None, None, Some(strides)) => {
                 let taken = &self.parts[part.whole].strides;

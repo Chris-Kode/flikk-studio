@@ -124,6 +124,8 @@ pub(crate) fn blockout() -> Value {
             "seconds": number("How long a round takes; or give `metres`"),
             "metres": number("The ground a round covers: a wheel's rim, a caterpillar's ripple"),
             "strides": number("The strides a round takes, of the feet that `step` on the thing it is part of: 1 for arms that swing in time with the legs at any pace"),
+            "from": number("The second it starts (default the start): a wave from 2 s. It comes in over a moment"),
+            "until": number("The second it stops (default the end), dying away over a moment"),
             "shift": number("How far into its round it starts, 0 to 1"),
             "keys": {
                 "type": "array",

@@ -255,6 +255,13 @@ pub struct Cycle {
     /// pace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strides: Option<f64>,
+    /// The seconds it goes on from and until: the start and the end when
+    /// left out. It comes in and dies away over a moment, and one by the
+    /// clock starts its first round at `from`: a wave from 2 s until 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<f64>,
     /// How far into its round it starts, 0..1: half a round for the
     /// other leg.
     #[serde(default, skip_serializing_if = "is_nothing")]
@@ -879,7 +886,14 @@ impl Cycle {
         if !round.is_finite() || round <= 0.0 {
             return Err(format!("{what}'s `cycle` has a round of no length"));
         }
-        finite(what, &[self.shift])?;
+        finite(
+            what,
+            &[
+                self.shift,
+                self.from.unwrap_or(0.0),
+                self.until.unwrap_or(0.0),
+            ],
+        )?;
         for key in &mut self.keys {
             finite(what, &[key.t])?;
             key.t = key.t.clamp(0.0, 1.0);
