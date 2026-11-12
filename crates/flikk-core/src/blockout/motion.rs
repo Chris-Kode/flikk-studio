@@ -920,7 +920,7 @@ impl Scene {
     }
 
     /// The solid part `of` is, standing at `place` with `size`.
-    fn solid(&self, of: usize, place: Place, size: Vec3) -> Solid {
+    pub(super) fn solid(&self, of: usize, place: Place, size: Vec3) -> Solid {
         let object = &self.parts[of].object;
         Solid::standing(
             object.shape.unwrap_or(Shape::Box),
@@ -1016,7 +1016,7 @@ impl Scene {
     }
 
     /// The camera the picture is from at `t`.
-    fn rig(&self, t: f64) -> &Rig {
+    pub(super) fn rig(&self, t: f64) -> &Rig {
         let cut_to = self.live.iter().take_while(|(at, _)| *at <= t).last();
         &self.rigs[cut_to.map_or(0, |(_, rig)| *rig)]
     }
@@ -1318,12 +1318,19 @@ impl Rig {
     }
 
     /// Where its keys have it at `t`, in the space of what it rides.
-    fn at(&self, t: f64) -> Vec3 {
+    pub(super) fn at(&self, t: f64) -> Vec3 {
         Vec3::of(self.places.at(t))
+    }
+
+    /// The way its keys take it through the scene, when they alone say
+    /// where it is: it rides nothing and no `frame` moves it.
+    pub(super) fn track(&self) -> Option<&Track> {
+        (self.mount.is_none() && self.framings.is_empty()).then_some(&self.places)
     }
 }
 
 /// Where the camera is and what it sees at a time.
+#[derive(Clone, Copy)]
 pub(super) struct View {
     pub eye: Vec3,
     /// The way it looks, and the picture's right and top: one unit each.

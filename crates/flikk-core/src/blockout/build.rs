@@ -441,6 +441,7 @@ impl Scene {
         self.bound_joints();
         self.take_hold();
         self.keep_still();
+        self.measure();
         Ok(())
     }
 

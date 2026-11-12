@@ -3,6 +3,7 @@
 //! picture, and the way to the light.
 
 use super::motion::{Moment, View};
+use super::outside::Outside;
 use super::render::to_light;
 use super::solid::Solid;
 use super::space::{Turn, Vec3};
@@ -414,8 +415,30 @@ pub(super) struct World {
 }
 
 impl World {
+    /// The scene at `t` through the camera of its shot.
     pub fn of(scene: &Scene, t: f64, width: u32, height: u32) -> Self {
         let moment = scene.moment(t, (width, height));
+        let view = moment.view;
+        Self::viewed(scene, t, moment, view, (width, height))
+    }
+
+    /// The scene at `t` from outside its shot. Its `moment` still has
+    /// what the shot's camera sees.
+    pub fn outside(scene: &Scene, t: f64, width: u32, height: u32, from: &Outside) -> Self {
+        let moment = scene.moment(t, (width, height));
+        let view = scene.outside_view(from);
+        Self::viewed(scene, t, moment, view, (width, height))
+    }
+
+    /// The scene at `t`, standing as `moment` has it, seen as `view` in
+    /// a picture of `size`.
+    fn viewed(
+        scene: &Scene,
+        t: f64,
+        moment: Moment,
+        view: View,
+        (width, height): (u32, u32),
+    ) -> Self {
         let mut solids = Vec::new();
         let standing = |index: usize| {
             let object = &scene.parts[index].object;
@@ -444,7 +467,7 @@ impl World {
             right,
             up,
             fov,
-        } = moment.view;
+        } = view;
         let pixel = 2.0 * (fov.to_radians() * 0.5).tan() / width.max(height) as f32;
         let [around, above] = scene.sun.unwrap_or(SUN).map(|d| d.to_radians() as f32);
         let light = Vec3::new(

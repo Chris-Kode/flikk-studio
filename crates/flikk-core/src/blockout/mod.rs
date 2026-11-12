@@ -30,6 +30,7 @@ mod build;
 mod change;
 mod clip;
 mod motion;
+mod outside;
 mod render;
 mod repeat;
 mod review;
@@ -37,7 +38,8 @@ mod solid;
 mod space;
 mod world;
 
-pub use render::Detail;
+pub use outside::Outside;
+pub use render::{Detail, Pass};
 pub use repeat::{Count, Repeat, Vary};
 pub use review::Review;
 
@@ -99,6 +101,10 @@ pub struct Scene {
     rigs: Vec<Rig>,
     #[serde(skip)]
     live: Vec<(f64, usize)>,
+    /// The ball that holds all of it over all of its length: its middle
+    /// and how far out it goes.
+    #[serde(skip)]
+    extent: (space::Vec3, f32),
 }
 
 /// A scene as its JSON has it, before it is checked and built.
@@ -738,6 +744,7 @@ impl TryFrom<Written> for Scene {
             rough: false,
             rigs: Vec::new(),
             live: Vec::new(),
+            extent: (space::Vec3::ZERO, 1.0),
         };
         if !scene.duration.is_finite() || scene.duration <= 0.0 {
             return Err("`duration` is in seconds, more than 0".into());

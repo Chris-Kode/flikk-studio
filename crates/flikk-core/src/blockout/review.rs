@@ -401,7 +401,7 @@ impl Scene {
 
     /// Whether part `index` rides nothing: it has no parent, or is one of
     /// a repeat that has none.
-    fn stands_alone(&self, index: usize) -> bool {
+    pub(super) fn stands_alone(&self, index: usize) -> bool {
         let part = &self.parts[index];
         match (part.parent, part.one_of) {
             (None, _) => true,

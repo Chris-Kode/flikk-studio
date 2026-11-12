@@ -9,6 +9,7 @@
 //! greys a screen shows at the end.
 
 use super::Scene;
+use super::outside::{Guide, Outside};
 use super::space::Vec3;
 use super::world::World;
 use crate::services::Frame;
@@ -72,21 +73,68 @@ pub enum Detail {
     Full,
 }
 
+/// What a picture of the shot shows in place of its lit greys: what
+/// tools that follow a clip are given beside it, or in its place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    /// How near each surface is: light near the camera, dark far off,
+    /// the sky black.
+    Depth,
+    /// The lines round things and between their parts, white on black.
+    Lines,
+    /// Each thing in a colour of its own, the ground grey, the sky
+    /// black.
+    Things,
+}
+
 impl Scene {
     /// The scene at `t` seconds, `width` × `height` pixels, opaque.
     pub fn render(&self, t: f64, width: u32, height: u32, detail: Detail) -> Frame {
         let (width, height) = (width.max(1), height.max(1));
         let world = World::of(self, t.clamp(0.0, self.duration), width, height);
-        let picture = Picture::of(&world, width as usize, height as usize);
-        let mut rgba = vec![0u8; width as usize * height as usize * 4];
-        let mut sheets = Sheets::spare();
-        picture.draw(detail, &mut sheets, rgba.as_chunks_mut::<4>().0);
-        sheets.keep();
-        Frame {
-            width,
-            height,
-            rgba: rgba.into(),
-        }
+        Picture::of(&world, width as usize, height as usize)
+            .frame(|picture, sheets, pixels| picture.draw(detail, sheets, pixels))
+    }
+
+    /// The scene at `t` seconds as `pass` shows it.
+    pub fn render_pass(&self, t: f64, width: u32, height: u32, pass: Pass) -> Frame {
+        let (width, height) = (width.max(1), height.max(1));
+        let world = World::of(self, t.clamp(0.0, self.duration), width, height);
+        let near = self.reach() * 0.5;
+        Picture::of(&world, width as usize, height as usize)
+            .frame(|picture, sheets, pixels| picture.pass(pass, near, sheets, pixels))
+    }
+
+    /// The scene at `t` seconds seen from `from`, outside its shot, with
+    /// the shot's camera and the way each thing goes drawn into it.
+    pub fn render_outside(
+        &self,
+        t: f64,
+        (width, height): (u32, u32),
+        from: &Outside,
+        detail: Detail,
+    ) -> Frame {
+        let (width, height) = (width.max(1), height.max(1));
+        let t = t.clamp(0.0, self.duration);
+        let world = World::outside(self, t, width, height, from);
+        let guides = self.guides(t, &world.moment.view, (width, height));
+        Picture::of(&world, width as usize, height as usize).frame(|picture, sheets, pixels| {
+            picture.draw(detail, sheets, pixels);
+            for guide in &guides {
+                picture.stroke(&sheets.seens, pixels, guide);
+            }
+        })
+    }
+
+    /// The name of the thing that shows in the shot's picture at `t`, `at`
+    /// a place 0 to 1 across it and down it: `None` for the sky and the
+    /// ground. `shape` is the picture's, width to height.
+    pub fn thing_at(&self, t: f64, shape: (u32, u32), at: (f32, f32)) -> Option<&str> {
+        let longer = shape.0.max(shape.1).max(1) as f32;
+        let [wide, high] = [shape.0, shape.1].map(|side| (side as f32 / longer * 320.0).max(8.0));
+        let world = World::of(self, t.clamp(0.0, self.duration), wide as u32, high as u32);
+        let thing = world.thing_at(at.0 * wide, at.1 * high)?;
+        Some(self.parts[thing as usize].object.name.as_str())
     }
 }
 
@@ -281,6 +329,107 @@ impl<'a> Picture<'a> {
             right,
             up,
             faint: (row.max(rows) as f32 / LINE_SIDE).clamp(0.4, 1.0),
+        }
+    }
+
+    /// The picture as `draw` draws it into pixels, with the sheets kept
+    /// from the last one.
+    fn frame(&self, draw: impl FnOnce(&Self, &mut Sheets, &mut [[u8; 4]])) -> Frame {
+        let mut rgba = vec![0u8; self.row * self.rows * 4];
+        let mut sheets = Sheets::spare();
+        draw(self, &mut sheets, rgba.as_chunks_mut::<4>().0);
+        sheets.keep();
+        Frame {
+            width: self.row as u32,
+            height: self.rows as u32,
+            rgba: rgba.into(),
+        }
+    }
+
+    /// Draw the shot as `pass` shows it into `pixels`. `near` is the
+    /// distance at which its depth is half way from light to dark.
+    fn pass(&self, pass: Pass, near: f32, sheets: &mut Sheets, pixels: &mut [[u8; 4]]) {
+        let seens = sized(&mut sheets.seens, self.row * self.rows);
+        self.each(seens, |x, y, seen| {
+            *seen = self.look(x as f32 + 0.5, y as f32 + 0.5, None);
+        });
+        let seens = &*seens;
+        self.each(pixels, |x, y, pixel| {
+            let seen = &seens[y * self.row + x];
+            let grey = |light: f32| {
+                let value = (light.clamp(0.0, 1.0) * 255.0) as u8;
+                [value, value, value, 255]
+            };
+            *pixel = match pass {
+                Pass::Depth => grey(near / (near + seen.depth)),
+                Pass::Lines => {
+                    let edge = [(1, 0), (0, 1)].iter().any(|(dx, dy)| {
+                        (self.at(seens, x as isize + dx, y as isize + dy))
+                            .is_some_and(|other| !other.same_surface(seen))
+                    });
+                    grey(f32::from(edge))
+                }
+                Pass::Things => match seen.thing {
+                    SKY => grey(0.0),
+                    GROUND => grey(0.25),
+                    thing => own_colour(thing),
+                },
+            };
+        });
+    }
+
+    /// Draw `guide` over `pixels`, the picture drawn of `seens`: faint
+    /// where it runs behind something.
+    fn stroke(&self, seens: &[Seen], pixels: &mut [[u8; 4]], guide: &Guide) {
+        let world = self.world;
+        // Only what is ahead of the camera can be drawn.
+        const AHEAD: f32 = 0.1;
+        let ahead = |point: Vec3| (point - world.eye).dot(world.ahead);
+        let (mut from, mut to) = (guide.from, guide.to);
+        let (a, b) = (ahead(from), ahead(to));
+        if a < AHEAD && b < AHEAD {
+            return;
+        }
+        let cut =
+            |near: Vec3, far: Vec3, a: f32, b: f32| near + (far - near) * ((AHEAD - a) / (b - a));
+        if a < AHEAD {
+            from = cut(from, to, a, b);
+        } else if b < AHEAD {
+            to = cut(to, from, b, a);
+        }
+        let (Some(start), Some(end)) = (world.pixel_of(from), world.pixel_of(to)) else {
+            return;
+        };
+        let value = if guide.light { 245.0 } else { 28.0 };
+        let wide = if self.row.max(self.rows) > 800 { 2 } else { 1 };
+        let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()).ceil()).min(8192.0);
+        // Along X for a line that runs mostly down the picture.
+        let steep = (end.1 - start.1).abs() > (end.0 - start.0).abs();
+        for step in 0..=steps as usize {
+            let along = step as f32 / steps.max(1.0);
+            let (x, y) = (
+                start.0 + (end.0 - start.0) * along,
+                start.1 + (end.1 - start.1) * along,
+            );
+            // Depth runs evenly across the picture as its inverse does.
+            let depth = 1.0 / (1.0 / start.2 + (1.0 / end.2 - 1.0 / start.2) * along);
+            for more in 0..wide {
+                let (x, y) = match steep {
+                    true => (x as isize + more, y as isize),
+                    false => (x as isize, y as isize + more),
+                };
+                let Some(under) = self.at(seens, x, y) else {
+                    continue;
+                };
+                let shows = if depth > under.depth + 0.05 {
+                    0.22
+                } else {
+                    0.9
+                };
+                let pixel = &mut pixels[y as usize * self.row + x as usize];
+                let mixed = pixel[0] as f32 + (value - pixel[0] as f32) * shows;
+                *pixel = [mixed as u8, mixed as u8, mixed as u8, 255];
+            }
         }
     }
 
@@ -655,6 +804,26 @@ impl<'a> Picture<'a> {
         let bent = (bend * 0.3).clamp(-VALLEY, RIDGE);
         light * (1.0 + bent)
     }
+}
+
+/// A colour for thing `thing`, unlike those of the things counted next
+/// to it.
+fn own_colour(thing: u16) -> [u8; 4] {
+    // A step of the golden ratio round the colours for each.
+    let hue = (thing as f32 * 0.618_034).fract() * 6.0;
+    let rising = (hue.fract() * 255.0) as u8;
+    let (full, low) = (240, 70);
+    let mix =
+        |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * rising as f32 / 255.0) as u8;
+    let [r, g, b] = match hue as u32 {
+        0 => [full, mix(low, full), low],
+        1 => [mix(full, low), full, low],
+        2 => [low, full, mix(low, full)],
+        3 => [low, mix(full, low), full],
+        4 => [mix(low, full), low, full],
+        _ => [full, low, mix(full, low)],
+    };
+    [r, g, b, 255]
 }
 
 /// [`LOOKS`] places spread evenly over a disc, its edge one unit out.

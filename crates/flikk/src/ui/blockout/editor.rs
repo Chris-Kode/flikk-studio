@@ -4,15 +4,15 @@
 //! (`flikk_agent::reblock`); nothing here reaches a video provider. Save
 //! hands the scene back to whoever opened the dialog.
 
-use super::BlockoutPlayer;
+use super::{BlockoutPlayer, Looking, Picked};
 use crate::state::EditorState;
 use crate::ui::kit::play::{play_button, seek_bar};
 use crate::ui::kit::{
-    Button, DialogExt as _, IconName, Input, ScrollableElement as _, Spinner, h_flex, theme as t,
-    v_flex,
+    Button, DialogExt as _, IconName, Input, ScrollableElement as _, Segmented, Spinner, h_flex,
+    theme as t, v_flex,
 };
 use flikk_agent::reblock::{Exchange, Reblock, Reblocked};
-use flikk_core::blockout::Scene;
+use flikk_core::blockout::{Outside, Pass, Scene};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -27,6 +27,8 @@ const WIDTH: u32 = 960;
 const STAGE: Pixels = px(340.);
 /// How wide the thread beside it is.
 const THREAD: Pixels = px(296.);
+/// The ways the scene is looked at, as the dialog offers them.
+const LOOKS: [&str; 5] = ["Shot", "Set", "Depth", "Lines", "Parts"];
 
 /// Called with the scene the user saved.
 pub type OnSave = Rc<dyn Fn(Scene, &mut Window, &mut App)>;
@@ -80,6 +82,9 @@ impl BlockoutEditor {
         });
         let _subscriptions = vec![
             cx.observe(&player, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&player, window, |this, _, picked: &Picked, window, cx| {
+                this.name(&picked.0, window, cx);
+            }),
             cx.subscribe_in(
                 &ask,
                 window,
@@ -115,6 +120,35 @@ impl BlockoutEditor {
     fn typing(&self, window: &Window, cx: &App) -> bool {
         self.ask.read(cx).focus_handle(cx).is_focused(window)
             && !self.ask.read(cx).value().trim().is_empty()
+    }
+
+    /// Put `name`, a thing the user pointed at, into the ask being typed.
+    fn name(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.ask.read(cx).value().to_string();
+        let gap = if typed.is_empty() || typed.ends_with(' ') {
+            ""
+        } else {
+            " "
+        };
+        let named = format!("{typed}{gap}{name} ");
+        self.ask.update(cx, |input, cx| {
+            input.set_value(named, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Show the scene the `choice`th way of [`LOOKS`].
+    fn show(&mut self, choice: usize, cx: &mut Context<Self>) {
+        let looking = match choice {
+            1 => Looking::Set(Outside::default()),
+            2 => Looking::Pass(Pass::Depth),
+            3 => Looking::Pass(Pass::Lines),
+            4 => Looking::Pass(Pass::Things),
+            _ => Looking::Shot,
+        };
+        self.player
+            .update(cx, |player, cx| player.look(looking, cx));
     }
 
     /// Ask for what is typed.
@@ -213,10 +247,44 @@ impl BlockoutEditor {
         let (at, length) = player.time();
         let playing = player.is_playing();
         let seek = self.player.clone();
+        let looking = match player.looking() {
+            Looking::Shot => 0,
+            Looking::Set(_) => 1,
+            Looking::Pass(Pass::Depth) => 2,
+            Looking::Pass(Pass::Lines) => 3,
+            Looking::Pass(Pass::Things) => 4,
+        };
+        let thirds = player.has_thirds();
         v_flex()
             .flex_1()
             .min_w_0()
             .gap(px(8.))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        Segmented::new("blockout-look")
+                            .compact()
+                            .items(LOOKS)
+                            .selected(looking)
+                            .on_click(cx.listener(|this, choice: &usize, _, cx| {
+                                this.show(*choice, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("blockout-thirds")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Grid3x3)
+                            .tooltip("Thirds")
+                            .selected(thirds)
+                            .accent(thirds)
+                            .disabled(looking == 1)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.player.update(cx, |p, cx| p.toggle_thirds(cx));
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .w_full()
