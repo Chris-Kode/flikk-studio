@@ -2,12 +2,14 @@
 //! sorted so a ray tries few of them, the camera's rays through the
 //! picture, and the way to the light.
 
+use super::land::Land;
 use super::motion::{Moment, View};
 use super::outside::Outside;
 use super::render::to_light;
 use super::solid::Solid;
 use super::space::{Turn, Vec3};
 use super::{Scene, Shape};
+use std::sync::Arc;
 
 /// Where the light comes from unless a scene says: around the vertical
 /// from +Z, and above the horizon, in degrees.
@@ -399,6 +401,8 @@ pub(super) struct World {
     tiles: Cells,
     shade: Shade,
     ground: bool,
+    /// The ground's heights, where it has hills.
+    land: Option<Arc<Land>>,
     /// What the ground's darker and lighter tiles give back of the light.
     floor: [f32; 2],
     /// The way to the light.
@@ -485,6 +489,7 @@ impl World {
             tiles: Cells::empty(cols, rows),
             solids,
             ground: scene.ground,
+            land: scene.land.clone(),
             floor: [-TILE_GREY, TILE_GREY].map(|off| to_light(GROUND_GREY + off)),
             light,
             eye,
@@ -605,11 +610,15 @@ impl World {
     /// `first`, the solid a ray met, or the ground where that is nearer
     /// and within `reach`.
     fn or_floor(&self, first: Option<Hit>, origin: Vec3, dir: Vec3, reach: f32) -> Option<Hit> {
-        let floor = (self.ground && dir.y < -1e-6 && origin.y > 0.0).then(|| -origin.y / dir.y);
         let nearest = first.as_ref().map_or(reach, |f| f.distance);
+        let floor = match &self.land {
+            Some(land) => land.met(origin, dir, nearest),
+            None => (self.ground && dir.y < -1e-6 && origin.y > 0.0).then(|| -origin.y / dir.y),
+        };
         match floor {
             Some(distance) if distance < nearest => {
                 let at = origin + dir * distance;
+                let normal = (self.land.as_ref()).map_or(Vec3::UP, |land| land.normal(at.x, at.z));
                 // Metre tiles a touch lighter and darker, so a camera move
                 // reads against the ground, fading out before they shimmer.
                 let odd = (at.x.floor() as i64 + at.z.floor() as i64) & 1;
@@ -617,7 +626,7 @@ impl World {
                 let fade = (-distance / 30.0).exp();
                 Some(Hit {
                     distance,
-                    normal: Vec3::UP,
+                    normal,
                     tone: even_tone + (self.floor[odd as usize] - even_tone) * fade,
                     owner: None,
                     solid: None,

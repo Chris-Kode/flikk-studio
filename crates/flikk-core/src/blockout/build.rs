@@ -11,7 +11,7 @@ use super::{
     AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, NONE, Object, PATH, Scene,
     Target,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// How deep a model may hold copies of models.
 const MAX_NESTING: usize = 4;
@@ -62,6 +62,9 @@ pub(super) struct Part {
     pub still: Option<(Place, Vec3)>,
     /// The parts cut out of it.
     pub holes: Vec<usize>,
+    /// Whether its height is above the ground under it: it rides
+    /// nothing, as a thing of the scene or one of a repeat of them.
+    pub lands: bool,
 }
 
 impl Part {
@@ -292,6 +295,7 @@ impl Scene {
                 one_of: out.one_of,
                 still: None,
                 holes: Vec::new(),
+                lands: false,
             });
         }
         for index in 0..parts.len() {
@@ -373,6 +377,16 @@ impl Scene {
                 ));
             };
             live.push((cut.t, rig));
+        }
+        let repeats: HashSet<usize> = parts.iter().filter_map(|part| part.one_of).collect();
+        for index in 0..parts.len() {
+            let part = &parts[index];
+            parts[index].lands = match (part.parent, part.one_of) {
+                // The joint of a repeat only stands for its copies.
+                (None, _) => !repeats.contains(&index),
+                (Some(parent), Some(all)) => parent == all && parts[all].parent.is_none(),
+                (Some(_), None) => false,
+            };
         }
         for hole in 0..parts.len() {
             let Some(cut) = &parts[hole].object.cut else {

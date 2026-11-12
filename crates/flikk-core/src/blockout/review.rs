@@ -370,6 +370,7 @@ impl Scene {
         (self.parts.iter().enumerate())
             .filter(move |(index, part)| {
                 self.ground
+                    && self.hills.is_none()
                     && part.thing == *index
                     && part.parent.is_none()
                     && part.rest.is_none()
@@ -403,11 +404,7 @@ impl Scene {
     /// a repeat that has none.
     pub(super) fn stands_alone(&self, index: usize) -> bool {
         let part = &self.parts[index];
-        match (part.parent, part.one_of) {
-            (None, _) => true,
-            (Some(parent), Some(all)) => parent == all && self.parts[all].parent.is_none(),
-            (Some(_), None) => false,
-        }
+        part.lands || part.parent.is_none()
     }
 
     /// How each thing a viewer would name shows at `t`: what stands by

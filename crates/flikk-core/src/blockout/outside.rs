@@ -130,7 +130,7 @@ impl Scene {
         let at = |step: usize| (step as f64 * PATH_STEP).min(self.duration);
         if let Some(track) = self.rig(t).track() {
             for step in 0..steps {
-                let ends = [at(step), at(step + 1)].map(|t| Vec3::of(track.at(t)));
+                let ends = [at(step), at(step + 1)].map(|t| self.over_land(Vec3::of(track.at(t))));
                 line(ends[0], ends[1], true);
             }
         }
@@ -143,7 +143,7 @@ impl Scene {
         };
         for index in (0..self.parts.len()).filter(travels) {
             let places = &self.parts[index].moves.places;
-            let lifted = |t: f64| Vec3::of(places.at(t)) + Vec3::UP * 0.03;
+            let lifted = |t: f64| self.over_land(Vec3::of(places.at(t))) + Vec3::UP * 0.03;
             let mut second = 1.0;
             for step in 0..steps {
                 let (from, to) = (lifted(at(step)), lifted(at(step + 1)));

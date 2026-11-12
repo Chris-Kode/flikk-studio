@@ -29,6 +29,7 @@
 mod build;
 mod change;
 mod clip;
+mod land;
 mod motion;
 mod outside;
 mod render;
@@ -38,12 +39,14 @@ mod solid;
 mod space;
 mod world;
 
+pub use land::Hills;
 pub use outside::Outside;
 pub use render::{Detail, Pass};
 pub use repeat::{Count, Repeat, Vary};
 pub use review::Review;
 
 use build::Part;
+use land::Land;
 use motion::Rig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -80,6 +83,9 @@ pub struct Scene {
     /// A floor at `y = 0`; off for a scene in the air or in space.
     #[serde(skip_serializing_if = "is_true")]
     pub ground: bool,
+    /// Ground that rises and falls, in place of a level floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hills: Option<Hills>,
     /// Where the light comes from: degrees around the vertical (0 from
     /// +Z, 90 from +X) and degrees above the horizon.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +111,9 @@ pub struct Scene {
     /// and how far out it goes.
     #[serde(skip)]
     extent: (space::Vec3, f32),
+    /// The heights of its ground, where that has hills.
+    #[serde(skip)]
+    land: Option<std::sync::Arc<Land>>,
 }
 
 /// A scene as its JSON has it, before it is checked and built.
@@ -123,6 +132,8 @@ struct Written {
     cuts: Vec<Cut>,
     #[serde(default = "yes")]
     ground: bool,
+    #[serde(default)]
+    hills: Option<Hills>,
     #[serde(default)]
     sun: Option<[f64; 2]>,
 }
@@ -728,6 +739,7 @@ impl TryFrom<Written> for Scene {
             cameras,
             cuts,
             ground,
+            hills,
             sun,
         } = written;
         let mut scene = Self {
@@ -738,6 +750,7 @@ impl TryFrom<Written> for Scene {
             cameras,
             cuts,
             ground,
+            hills,
             sun,
             parts: Vec::new(),
             order: Vec::new(),
@@ -745,6 +758,7 @@ impl TryFrom<Written> for Scene {
             rigs: Vec::new(),
             live: Vec::new(),
             extent: (space::Vec3::ZERO, 1.0),
+            land: None,
         };
         if !scene.duration.is_finite() || scene.duration <= 0.0 {
             return Err("`duration` is in seconds, more than 0".into());
@@ -757,6 +771,12 @@ impl TryFrom<Written> for Scene {
                 scene.objects.len()
             ));
         }
+        if let Some(hills) = scene.hills.as_mut() {
+            hills.settle()?;
+        }
+        // Hills are the ground's: there are none in the air.
+        let hills = scene.hills.as_ref().filter(|_| scene.ground);
+        scene.land = hills.map(|hills| std::sync::Arc::new(Land::of(hills)));
         if let Some(sun) = scene.sun.as_mut() {
             finite("`sun`", sun)?;
             sun[1] = sun[1].clamp(5.0, 90.0);

@@ -610,6 +610,9 @@ impl Scene {
                     at: Vec3::of(pose.at),
                     turn: Turn::of(pose.rotate),
                 });
+                if part.lands {
+                    place.at = self.over_land(place.at);
+                }
                 if let Some((by, within, _)) = held {
                     // It goes with that from where it was when taken, and
                     // with nothing else.
@@ -753,7 +756,7 @@ impl Scene {
                         }
                         _ => self.middle(*part, stands(*part)),
                     },
-                    AimAt::Point(point) => Vec3::of(*point),
+                    AimAt::Point(point) => self.over_land(Vec3::of(*point)),
                     AimAt::Camera => {
                         let rig = self.rig(t);
                         rig.mount.map_or(Place::ORIGIN, &stands).point(rig.at(t))
@@ -860,8 +863,9 @@ impl Scene {
                     let surface = (rest.surface.iter())
                         .filter(|of| !self.hidden(**of, t))
                         .map(|of| self.solid(*of, stands(*of), rough.sizes[*of]));
-                    top_under(surface, spot) + root.moves.places.at(t)[1] as f32
+                    self.top_under(surface, spot) + root.moves.places.at(t)[1] as f32
                 }
+                None if root.lands => self.over_land(under.at).y,
                 None => under.at.y,
             };
             Vec3::new(spot.x, floor, spot.z)
@@ -949,7 +953,7 @@ impl Scene {
                     rig.mount.map_or(Place::ORIGIN, &stands).point(rig.at(t))
                 }
                 AimAt::Part(aimed) => self.middle(*aimed, stands(*aimed)),
-                AimAt::Point(point) => Vec3::of(*point),
+                AimAt::Point(point) => self.over_land(Vec3::of(*point)),
             };
             [point.x as f64, point.y as f64, point.z as f64]
         };
@@ -988,7 +992,7 @@ impl Scene {
         };
         let surface = (rest.surface.iter().filter(there))
             .map(|of| self.solid(*of, stands(*of), rough.sizes[*of]));
-        let standing = top_under(surface, lowest) + height - lowest.y;
+        let standing = self.top_under(surface, lowest) + height - lowest.y;
         // And no higher than its legs reach down to where its feet step:
         // it sinks between strides, as a walk does.
         let travelling = smoothstep(STILL, MOVING, self.travel(index, t).1);
@@ -1086,16 +1090,29 @@ fn when_reached(counted: &[f32], count: f64) -> Option<f64> {
     Some((before as f64 + (count - from) / (to - from).max(1e-9)) / FPS as f64)
 }
 
-/// How high the top of `surface` is under (or over) `point`; the ground
-/// where none of it is.
-fn top_under(surface: impl Iterator<Item = Solid>, point: Vec3) -> f32 {
-    // From well over it, near enough to measure finely.
-    let from = Vec3::new(point.x, point.y + 200.0, point.z);
-    surface
-        .filter_map(|solid| solid.hit(from, -Vec3::UP))
-        .map(|(down, _)| from.y - down)
-        .reduce(f32::max)
-        .unwrap_or(0.0)
+impl Scene {
+    /// How high the top of `surface` is under (or over) `point`; the
+    /// ground where none of it is.
+    fn top_under(&self, surface: impl Iterator<Item = Solid>, point: Vec3) -> f32 {
+        // From well over it, near enough to measure finely.
+        let from = Vec3::new(point.x, point.y + 200.0, point.z);
+        surface
+            .filter_map(|solid| solid.hit(from, -Vec3::UP))
+            .map(|(down, _)| from.y - down)
+            .reduce(f32::max)
+            .unwrap_or_else(|| self.ground_at(point.x, point.z))
+    }
+
+    /// How high the ground is at (`x`, `z`): nothing where it is level.
+    pub(super) fn ground_at(&self, x: f32, z: f32) -> f32 {
+        (self.land.as_ref()).map_or(0.0, |land| land.height(x, z))
+    }
+
+    /// `point`, its height taken as above the ground under it: itself
+    /// where the ground is level.
+    pub(super) fn over_land(&self, point: Vec3) -> Vec3 {
+        point + Vec3::UP * self.ground_at(point.x, point.z)
+    }
 }
 
 /// Where every part stands at a moment, and its size.
@@ -1350,8 +1367,13 @@ impl Scene {
         let mount = rig.mount.map_or(Place::ORIGIN, |part| places[part]);
         // Each target is where it is now, so a camera between two objects
         // follows both as they move.
+        // What rides nothing has its height above the ground under it.
+        let landed = |point: Vec3| match rig.mount {
+            Some(_) => point,
+            None => self.over_land(point),
+        };
         let point = |aim: &Aim| match aim {
-            Aim::Point(point) => mount.point(Vec3::of(*point)),
+            Aim::Point(point) => landed(mount.point(Vec3::of(*point))),
             Aim::Part(part) => self.middle(*part, places[*part]),
             Aim::Held(framing) => {
                 let framing = &rig.framings[*framing];
@@ -1366,7 +1388,7 @@ impl Scene {
         let shake = Handheld::of(rig.shake, t as f32, rig.seed);
         let roll = (rig.rolls.at(t)[0] as f32 + shake.roll).to_radians();
 
-        let eye = mount.point(self.stood(rig, t, shape));
+        let eye = landed(mount.point(self.stood(rig, t, shape)));
         let level = mount.turn.y;
         let ahead = (Vec3::of(target) - eye).unit_or(-Vec3::AHEAD);
         // Looking straight up or down, any level direction is to the right.
@@ -1415,7 +1437,16 @@ impl Scene {
                 across * if framing.aside { 0.6 } else { 0.9 },
                 up * framing.fills,
             );
-            let eye = framed_from(mount.point(Vec3::of(written)), held, room);
+            let from = mount.point(Vec3::of(written));
+            let eye = match rig.mount {
+                Some(_) => framed_from(from, held, room),
+                // Over the ground, and said again as above the ground
+                // under where it comes to stand.
+                None => {
+                    let eye = framed_from(self.over_land(from), held, room);
+                    eye - Vec3::UP * self.ground_at(eye.x, eye.z)
+                }
+            };
             let within = mount.turn.inward(eye - mount.at);
             [within.x as f64, within.y as f64, within.z as f64]
         };
