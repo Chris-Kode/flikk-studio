@@ -578,41 +578,69 @@ impl Scene {
         let mut placed = vec![false; count];
         // How the lower part of a limb is turned, once the limb is bent.
         let mut bent: Vec<Option<Turn>> = vec![None; count];
-        for &index in &self.order {
-            let part = &self.parts[index];
-            let rides = part.parent.map_or(Place::ORIGIN, |parent| places[parent]);
-            let pose = self.pose(index, t);
-            let mut place = rides.then(Place {
-                at: Vec3::of(pose.at),
-                turn: Turn::of(pose.rotate),
-            });
-            if let Placing::Fully(rough) = placing {
-                let stands = |other: usize| match (placed[other], rough) {
-                    (false, Some(rough)) => rough.places[other],
-                    _ => places[other],
-                };
-                match bent[index] {
-                    Some(turn) => place.turn = turn,
-                    None => {
-                        let mut rotate = pose.rotate;
-                        rotate[1] += self.turn_to_face(index, t, place.at, rides, stands);
-                        place.turn = rides.turn.then(Turn::of(rotate));
-                        place.turn = self.aimed(index, t, place, stands);
+        // What has been given to another to go with is placed last, with
+        // all that rides it: after whatever holds it, wherever that is in
+        // the order.
+        let mut last = vec![false; count];
+        for lasts in [false, true] {
+            for &index in &self.order {
+                let part = &self.parts[index];
+                let held = self.taken(index, t);
+                if !lasts && (held.is_some() || part.parent.is_some_and(|parent| last[parent])) {
+                    last[index] = true;
+                }
+                if last[index] != lasts {
+                    continue;
+                }
+                let pose = self.pose(index, t);
+                let rides = part.parent.map_or(Place::ORIGIN, |parent| places[parent]);
+                let mut place = rides.then(Place {
+                    at: Vec3::of(pose.at),
+                    turn: Turn::of(pose.rotate),
+                });
+                if let Some((by, within, _)) = held {
+                    // It goes with that from where it was when taken, and
+                    // with nothing else.
+                    place = by.map_or(within, |by| places[by].then(within));
+                } else if let Placing::Fully(rough) = placing {
+                    let stands = |other: usize| match (placed[other], rough) {
+                        (false, Some(rough)) => rough.places[other],
+                        _ => places[other],
+                    };
+                    match bent[index] {
+                        Some(turn) => place.turn = turn,
+                        None => {
+                            let mut rotate = pose.rotate;
+                            rotate[1] += self.turn_to_face(index, t, place.at, rides, stands);
+                            place.turn = rides.turn.then(Turn::of(rotate));
+                            place.turn = self.aimed(index, t, place, stands);
+                        }
+                    }
+                    if let Some(rough) = rough {
+                        let stood = (place, pose.at[1] as f32);
+                        place.at.y += self.lift(index, t, stood, rough, stands);
+                    }
+                    if let Some((upper, lower)) = self.bend(index, t, place, (rough, &stands)) {
+                        place.turn = upper;
+                        bent[part.limb.as_ref().map_or(index, |limb| limb.lower)] = Some(lower);
                     }
                 }
-                if let Some(rough) = rough {
-                    place.at.y += self.lift(index, t, (place, pose.at[1] as f32), rough, stands);
-                }
-                if let Some((upper, lower)) = self.bend(index, t, place, (rough, &stands)) {
-                    place.turn = upper;
-                    bent[part.limb.as_ref().map_or(index, |limb| limb.lower)] = Some(lower);
-                }
+                places[index] = place;
+                sizes[index] = Vec3::of(pose.size);
+                placed[index] = true;
             }
-            places[index] = place;
-            sizes[index] = Vec3::of(pose.size);
-            placed[index] = true;
         }
         Standing { places, sizes }
+    }
+
+    /// What part `index` goes with at `t`, when a key has given it to
+    /// something (`None` once let go): that, where the part is within it,
+    /// and where it was in the scene when taken.
+    fn taken(&self, index: usize, t: f64) -> Option<(Option<usize>, Place, Place)> {
+        (self.parts[index].held.iter())
+            .take_while(|held| held.t <= t)
+            .filter_map(|held| held.at.map(|(within, was)| (held.by, within, was)))
+            .last()
     }
 
     /// How part `index`, standing at `place`, and the part that rides it
@@ -705,7 +733,14 @@ impl Scene {
                 let leaving = until.map_or(0.0, since);
                 let there = arriving * (1.0 - leaving);
                 let to = match to {
-                    AimAt::Part(part) => self.middle(*part, stands(*part)),
+                    // What the limb has taken goes with it: it leaves for
+                    // where it took it from.
+                    AimAt::Part(part) => match self.taken(*part, t) {
+                        Some((Some(by), _, was)) if self.rides(by, limb.lower) => {
+                            self.middle(*part, was)
+                        }
+                        _ => self.middle(*part, stands(*part)),
+                    },
                     AimAt::Point(point) => Vec3::of(*point),
                     AimAt::Camera => {
                         let rig = self.rig(t);
@@ -834,6 +869,18 @@ impl Scene {
         // comes back to it over the last.
         let grounded = (1.0 - swing * 4.0).max(swing * 4.0 - 3.0).max(0.0);
         (from + (to - from) * swung + up, grounded)
+    }
+
+    /// Whether part `index` is `whole`, or rides it.
+    fn rides(&self, index: usize, whole: usize) -> bool {
+        let mut above = Some(index);
+        while let Some(part) = above {
+            if part == whole {
+                return true;
+            }
+            above = self.parts[part].parent;
+        }
+        false
     }
 
     /// The solid part `of` is, standing at `place` with `size`.

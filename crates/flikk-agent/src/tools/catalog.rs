@@ -156,6 +156,7 @@ pub(crate) fn blockout() -> Value {
                 "shade": number("Its grey then"),
                 "hidden": boolean("Gone (true) or there (false) from here on"),
                 "aim": target("What its front turns to by then"),
+                "parent": string("The object it goes with from here on, from where it is at this moment: picked up by a hand (`copy/hand r`), put in a car, set on a tray. \"none\" lets it go and it stays where it is. Bring the hand to it first with `reach`, until this second. Its own keys move it no more"),
                 "ease": ease(arrives)
             }
         }

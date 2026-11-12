@@ -6,9 +6,9 @@
 //! fills, the ground each has covered) is worked out once.
 
 use super::motion::{Moves, Rig, Track, rest_place};
-use super::space::Vec3;
+use super::space::{Place, Vec3};
 use super::{
-    AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, Object, PATH, Scene,
+    AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, NONE, Object, PATH, Scene,
     Target,
 };
 use std::collections::{HashMap, VecDeque};
@@ -34,6 +34,8 @@ pub(super) struct Part {
     /// What its front turns to, when it says, and what its keys have it
     /// turn to later.
     pub aims: Vec<(f64, AimAt, Ease)>,
+    /// What its keys have it go with, in order of time.
+    pub held: Vec<Held>,
     /// The limb it is the upper part of, when the end of one is brought
     /// somewhere.
     pub limb: Option<Limb>,
@@ -71,6 +73,18 @@ pub(super) enum AimAt {
     Camera,
     Part(usize),
     Point([f64; 3]),
+}
+
+/// A part going with another from a time on, or with nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Held {
+    pub t: f64,
+    /// What it goes with; `None` once let go.
+    pub by: Option<usize>,
+    /// Where it is within that (in the scene, once let go), and where it
+    /// was in the scene at the moment. Not known until the scene is built
+    /// that far.
+    pub at: Option<(Place, Place)>,
 }
 
 /// A limb of two parts whose end is brought somewhere: this part, the
@@ -230,6 +244,21 @@ impl Scene {
                 thing: 0,
                 facing,
                 aims,
+                held: (moves.times.iter().zip(&out.object.keys))
+                    .filter_map(|(t, key)| Some((*t, key.parent.as_ref()?)))
+                    .map(|(t, by)| {
+                        let by = match by.as_str() {
+                            NONE => None,
+                            by => Some(place(by).ok_or_else(|| {
+                                format!(
+                                    "a key has `{name}` go with `{by}`, which is no object's name \
+                                     or `{NONE}`"
+                                )
+                            })?),
+                        };
+                        Ok(Held { t, by, at: None })
+                    })
+                    .collect::<Result<_, String>>()?,
                 limb: None,
                 rest: None,
                 moves,
@@ -367,6 +396,7 @@ impl Scene {
         (self.rigs, self.live) = (rigs, live);
         self.parts = parts;
         self.bound_joints();
+        self.take_hold();
         Ok(())
     }
 
@@ -467,6 +497,9 @@ impl Scene {
             }
         }
         out.on.iter_mut().for_each(in_full);
+        (out.keys.iter_mut())
+            .filter_map(|key| key.parent.as_mut())
+            .for_each(in_full);
         out.name = name.clone();
         (out.model, out.parts, out.scale) = (None, Default::default(), 1.0);
         let grow = |v: &mut [f64; 3]| v.iter_mut().for_each(|n| *n *= scale);
@@ -541,6 +574,24 @@ impl Scene {
             self.write_out(&part, within, outs)?;
         }
         Ok(())
+    }
+
+    /// Work out where each part that goes with another is within it: where
+    /// it was at the moment it was taken, each in order of time, the scene
+    /// built as far as the one before.
+    fn take_hold(&mut self) {
+        let mut taken: Vec<(f64, usize, usize)> = (self.parts.iter().enumerate())
+            .flat_map(|(part, held)| (0..held.held.len()).map(move |i| (held.held[i].t, part, i)))
+            .collect();
+        taken.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (t, part, hold) in taken {
+            let places = self.stand(t).places;
+            let within = match self.parts[part].held[hold].by {
+                Some(by) => places[by].holds(places[part]),
+                None => places[part],
+            };
+            self.parts[part].held[hold].at = Some((within, places[part]));
+        }
     }
 
     /// Give each joint and copy the box that holds what rides it as the
@@ -684,6 +735,7 @@ fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
             Goal::Reach { to, .. } => Some(to),
             Goal::Step(_) => None,
         });
+        faced.extend(part.held.iter().filter_map(|held| held.by));
         // A leg that steps comes down on what its thing stands on.
         let trodden = (part.limb.iter())
             .filter_map(|limb| parts[limb.steps()?.root].rest.as_ref())

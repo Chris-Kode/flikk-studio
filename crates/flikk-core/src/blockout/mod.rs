@@ -226,6 +226,12 @@ pub struct ObjectKey {
     /// What its front turns to by then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aim: Option<Target>,
+    /// The object it goes with from here on, by name, from where it is at
+    /// this moment: picked up, or set down on something that moves.
+    /// `"none"` lets it go, and it stays where it is. Its own keys move it
+    /// no more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// How the move to this key is timed.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
@@ -657,6 +663,8 @@ const MAIN: &str = "main";
 /// the camera.
 const PATH: &str = "path";
 const CAMERA: &str = "camera";
+/// What a key can have an object go with that is no object: nothing.
+const NONE: &str = "none";
 /// What an object can aim at that is no object: where it faces anyway.
 const AHEAD: &str = "ahead";
 /// What an object can stand on that is no object: the floor at `y = 0`.
