@@ -154,6 +154,9 @@ pub struct Object {
     /// Motion that repeats, on top of what the keys make of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cycle: Option<Cycle>,
+    /// Unsteady motion that never repeats, on top of both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake: Option<Shake>,
     /// What it is later: its place, turn, size and grey each follow a
     /// smooth curve through their keys that never goes past one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -222,6 +225,23 @@ pub struct CycleKey {
     /// How it arrives at this key: starting and ending slowly unless said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ease: Option<Ease>,
+}
+
+/// Unsteady motion that never repeats: an engine's rumble, a boat on a
+/// swell, a flag, someone who can't stand still. Each copy of a model
+/// shakes its own way.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shake {
+    /// The most it adds to its place, in metres either way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub at: [f64; 3],
+    /// The most it adds to its turn, in degrees either way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotate: [f64; 3],
+    /// About how long one wobble takes, in seconds.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub seconds: f64,
 }
 
 /// The solids things are built from.
@@ -294,7 +314,8 @@ pub struct Camera {
     /// Degrees it is rolled clockwise: a Dutch angle.
     #[serde(default, skip_serializing_if = "is_nothing")]
     pub roll: f64,
-    /// How much a hand holds it, 0 (locked off) to 1 (running with it).
+    /// How much a hand holds it, 0 (locked off) to 1 (running with it):
+    /// it drifts and wobbles without ever repeating.
     #[serde(default, skip_serializing_if = "is_nothing")]
     pub shake: f64,
     /// The object it rides: `at`, and a point it looks at, are then in
@@ -574,6 +595,12 @@ impl Object {
         in_order(&mut self.keys, &what, |key| (key.t, key.at.is_some()))?;
         if let Some(cycle) = self.cycle.as_mut() {
             cycle.settle(&what)?;
+        }
+        if let Some(shake) = self.shake.as_mut() {
+            finite(&what, &shake.at)?;
+            finite(&what, &shake.rotate)?;
+            finite(&what, &[shake.seconds])?;
+            shake.seconds = shake.seconds.clamp(0.02, 60.0);
         }
         Ok(())
     }

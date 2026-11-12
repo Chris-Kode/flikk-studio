@@ -220,6 +220,15 @@ pub(crate) fn blockout() -> Value {
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
                         "cycle": cycle,
+                        "shake": {
+                            "type": "object",
+                            "description": "Unsteady motion that never repeats, on top of the keys and the cycle: an engine's rumble, a boat on a swell, a flag, someone who can't stand still",
+                            "properties": {
+                                "at": point("The most it adds to its place, metres either way"),
+                                "rotate": point("The most it adds to its turn, degrees either way"),
+                                "seconds": number("About how long one wobble takes (default 1): 0.1 rumbles, 3 sways")
+                            }
+                        },
                         "keys": keys
                     },
                     "required": ["name"]

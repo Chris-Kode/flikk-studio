@@ -328,6 +328,8 @@ pub(super) struct Moves {
     /// Whether it starts out of the scene, and when it goes and comes.
     starts_hidden: bool,
     hidden: Vec<(f64, bool)>,
+    /// What tells its shake from any other's.
+    seed: u32,
 }
 
 impl Moves {
@@ -349,6 +351,7 @@ impl Moves {
             spin: object.spin,
             starts_hidden: object.hidden,
             hidden: timed().filter_map(|(t, k)| Some((t, k.hidden?))).collect(),
+            seed: (object.name.bytes()).fold(0x811c_9dc5, |seed, byte| mixed(seed ^ byte as u32)),
         }
     }
 
@@ -461,7 +464,7 @@ fn heading(places: &Track, t: f64) -> Option<f64> {
 impl Scene {
     /// How part `index` is at `t`: as its keys have it, with what its
     /// cycle adds.
-    fn pose(&self, index: usize, t: f64) -> Pose {
+    fn cycled(&self, index: usize, t: f64) -> Pose {
         let part = &self.parts[index];
         let mut pose = part.moves.keyed(t);
         let Some(cycle) = &part.object.cycle else {
@@ -486,6 +489,21 @@ impl Scene {
             pose.at[c] += added.at[c] * swing;
             pose.rotate[c] += added.rotate[c] * swing;
             pose.size[c] = (pose.size[c] + added.size[c] * swing).max(0.005);
+        }
+        pose
+    }
+
+    /// How part `index` is at `t`: as its keys have it, with what its
+    /// cycle and its shake add.
+    fn pose(&self, index: usize, t: f64) -> Pose {
+        let part = &self.parts[index];
+        let mut pose = self.cycled(index, t);
+        if let Some(shake) = &part.object.shake {
+            let at = t / shake.seconds;
+            for c in 0..3 {
+                pose.at[c] += shake.at[c] * wander(at, part.moves.seed ^ c as u32);
+                pose.rotate[c] += shake.rotate[c] * wander(at, part.moves.seed ^ (c as u32 + 3));
+            }
         }
         pose
     }
@@ -680,7 +698,7 @@ impl Scene {
             .filter_map(|(at, k)| Some((*at, in_f64(point(k.look_at.as_ref()?)), k.ease)));
         let target = Track::new(in_f64(point(&camera.look_at)), targets).at(t);
         let fov = (moves.fovs.at(t)[0] as f32).clamp(5.0, 140.0);
-        let shake = Shake::of(camera.shake as f32, t as f32);
+        let shake = Handheld::of(camera.shake as f32, t as f32);
         let roll = (moves.rolls.at(t)[0] as f32 + shake.roll).to_radians();
 
         let eye = mount.point(self.camera_at(t));
@@ -705,7 +723,7 @@ impl Scene {
 }
 
 /// What a hand does to a camera at a moment.
-struct Shake {
+struct Handheld {
     /// Turns to the right and up, as slopes.
     pan: f32,
     tilt: f32,
@@ -716,19 +734,57 @@ struct Shake {
     bob: f32,
 }
 
-impl Shake {
+impl Handheld {
     fn of(amount: f32, t: f32) -> Self {
-        // A few slow waves that never line up: the drift of a held camera.
-        let wave = |seed: f32| {
-            let part = |rate: f32, weight: f32| (t * rate + seed * 12.9).sin() * weight;
-            part(1.9 + seed, 0.55) + part(4.3 + seed * 1.7, 0.3) + part(9.7 - seed, 0.15)
-        };
+        // The drift of a held camera: a wobble every second and a half
+        // or so, with quicker ones in it.
+        let moved = |seed: u32, most: f32| amount * most * wander(t as f64 * 0.65, seed) as f32;
         Self {
-            pan: amount * 0.022 * wave(0.3),
-            tilt: amount * 0.018 * wave(1.1),
-            roll: amount * 0.9 * wave(2.3),
-            sway: amount * 0.04 * wave(3.7),
-            bob: amount * 0.04 * wave(5.2),
+            pan: moved(1, 0.036),
+            tilt: moved(2, 0.03),
+            roll: moved(3, 1.5),
+            sway: moved(4, 0.065),
+            bob: moved(5, 0.065),
         }
     }
+}
+
+/// A value that wanders between -1 and 1 and never repeats, `at` counted
+/// in wobbles; `seed` tells one wanderer from another. Smooth noise at
+/// three rates at once, each twice as quick and half as strong as the
+/// last: the fractal noise Blender's noise modifier adds to a curve.
+fn wander(at: f64, seed: u32) -> f64 {
+    let (mut sum, mut strength, mut rate) = (0.0, 1.0, 1.0);
+    for octave in 0..3 {
+        // Each starts somewhere of its own, so they never fall in step.
+        let seed = mixed(seed.wrapping_add(octave));
+        sum += strength * noise(at * rate + (seed & 0xffff) as f64 / 256.0, seed);
+        strength *= 0.5;
+        rate *= 2.0;
+    }
+    // Three rates seldom pull the same way: this far it does reach.
+    sum / 1.2
+}
+
+/// Smooth noise between -1 and 1: nothing at each whole `x`, a slope of
+/// its own there, eased from one to the next (Perlin's, along a line).
+fn noise(x: f64, seed: u32) -> f64 {
+    let cell = x.floor();
+    let within = x - cell;
+    let slope = |cell: f64| {
+        let mixed = mixed(seed ^ (cell as i64 as u32).wrapping_mul(0x9e37_79b9));
+        mixed as f64 / u32::MAX as f64 * 2.0 - 1.0
+    };
+    let (from, to) = (slope(cell) * within, slope(cell + 1.0) * (within - 1.0));
+    let eased = within * within * within * (within * (within * 6.0 - 15.0) + 10.0);
+    2.0 * (from + (to - from) * eased)
+}
+
+/// `n` with its bits well mixed.
+fn mixed(mut n: u32) -> u32 {
+    n ^= n >> 16;
+    n = n.wrapping_mul(0x7feb_352d);
+    n ^= n >> 15;
+    n = n.wrapping_mul(0x846c_a68b);
+    n ^ (n >> 16)
 }

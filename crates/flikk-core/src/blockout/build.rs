@@ -211,6 +211,9 @@ impl Scene {
         for key in out.cycle.iter_mut().flat_map(|cycle| &mut cycle.keys) {
             key.at.iter_mut().chain(&mut key.size).for_each(grow);
         }
+        if let Some(shake) = out.shake.as_mut() {
+            grow(&mut shake.at);
+        }
         out.shade = object
             .shape
             .map(|_| (object.shade.unwrap_or(MID_GREY) * tone).clamp(0.0, 1.0));
