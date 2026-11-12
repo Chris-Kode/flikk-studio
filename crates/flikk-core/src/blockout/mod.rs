@@ -168,6 +168,11 @@ pub struct Object {
     /// own space, and it moves and turns with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The object it is cut out of, by name: nothing is drawn of this
+    /// solid, and where it is, that object and all that rides it have a
+    /// hole. A doorway, a window, an arch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<String>,
     /// What it stands on: `"ground"`, or an object by name. Its lowest
     /// point, and that of all that rides it, then rests on that surface
     /// wherever it is and whatever its limbs do, and the height `at`
@@ -849,6 +854,11 @@ impl Object {
         if let Some(size) = self.size.as_mut() {
             finite(&what, size)?;
             in_range(size);
+        }
+        if self.cut.is_some() && self.shape.is_none() {
+            return Err(format!(
+                "{what} is `cut` out of something, so it is a solid: give it a `shape`"
+            ));
         }
         finite(&what, &[self.taper])?;
         let narrows = matches!(

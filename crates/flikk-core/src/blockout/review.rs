@@ -433,7 +433,8 @@ impl Scene {
         let mut sights: Vec<Sight> = Vec::new();
         let mut said: HashMap<usize, usize> = HashMap::new();
         for (index, part) in self.parts.iter().enumerate() {
-            if part.thing != index || world.moment.gone[index] || repeats[index] {
+            let hole = part.object.cut.is_some();
+            if part.thing != index || world.moment.gone[index] || repeats[index] || hole {
                 continue;
             }
             let place = world.moment.places[index];
@@ -611,9 +612,15 @@ impl Scene {
             (self.parts.iter())
                 .any(|p| p.thing == index && p.object.keys.iter().any(|k| k.hidden.is_some()))
         };
+        // Only what has something to draw could have been.
+        let mut drawn = vec![false; self.parts.len()];
+        for part in self.parts.iter().filter(|part| part.is_solid()) {
+            drawn[self.said_as(part.thing)] = true;
+        }
         let unseen: Vec<_> = things()
             .filter(|(index, part)| {
                 !ever[*index]
+                    && drawn[*index]
                     && part.parent.is_none()
                     && !self.hidden(*index, 0.0)
                     && !shown_later(*index)

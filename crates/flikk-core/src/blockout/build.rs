@@ -60,6 +60,16 @@ pub(super) struct Part {
     /// Where it stands and its size, when nothing ever moves it: worked
     /// out once.
     pub still: Option<(Place, Vec3)>,
+    /// The parts cut out of it.
+    pub holes: Vec<usize>,
+}
+
+impl Part {
+    /// Whether something of it is drawn: it is a solid, and not one cut
+    /// out of another.
+    pub fn is_solid(&self) -> bool {
+        self.object.shape.is_some() && self.object.cut.is_none()
+    }
 }
 
 /// What a part turns to about the vertical.
@@ -281,6 +291,7 @@ impl Scene {
                 stagger: out.stagger,
                 one_of: out.one_of,
                 still: None,
+                holes: Vec::new(),
             });
         }
         for index in 0..parts.len() {
@@ -362,6 +373,20 @@ impl Scene {
                 ));
             };
             live.push((cut.t, rig));
+        }
+        for hole in 0..parts.len() {
+            let Some(cut) = &parts[hole].object.cut else {
+                continue;
+            };
+            let Some(cut) = place(cut) else {
+                return Err(format!(
+                    "`{}` is cut out of `{cut}`, which is no object's name",
+                    parts[hole].object.name
+                ));
+            };
+            for solid in solids_of(&parts, cut) {
+                parts[solid].holes.push(hole);
+            }
         }
         for index in 0..parts.len() {
             let Some(stood_on) = &parts[index].object.on else {
@@ -547,7 +572,7 @@ impl Scene {
                 in_full(named);
             }
         }
-        out.on.iter_mut().for_each(in_full);
+        out.on.iter_mut().chain(&mut out.cut).for_each(in_full);
         (out.keys.iter_mut())
             .filter_map(|key| key.parent.as_mut())
             .for_each(in_full);
@@ -678,7 +703,7 @@ impl Scene {
         let places = self.stand(0.0).places;
         let mut boxes: Vec<Option<(Vec3, Vec3)>> = vec![None; self.parts.len()];
         for (index, part) in self.parts.iter().enumerate() {
-            if part.object.shape.is_none() {
+            if !part.is_solid() {
                 continue;
             }
             let (low, high) = (Vec3::of(part.bounds.0), Vec3::of(part.bounds.1));
@@ -794,7 +819,7 @@ fn rides(parts: &[Part], index: usize, whole: usize) -> bool {
 /// The solids of part `whole`: itself and all that rides it.
 fn solids_of(parts: &[Part], whole: usize) -> Vec<usize> {
     (0..parts.len())
-        .filter(|index| parts[*index].object.shape.is_some() && rides(parts, *index, whole))
+        .filter(|index| parts[*index].is_solid() && rides(parts, *index, whole))
         .collect()
 }
 

@@ -6,6 +6,8 @@ use super::{Anchor, Shape};
 
 /// How near a hit counts, so a surface doesn't meet itself.
 pub(super) const NEAR: f32 = 1e-3;
+/// How near the edge of a hole counts as in it.
+const EDGE: f32 = 1e-4;
 
 /// One solid placed in the scene.
 pub(super) struct Solid {
@@ -18,6 +20,8 @@ pub(super) struct Solid {
     ends: (f32, f32),
     /// A sphere about `centre` holding it, for a quick miss.
     reach: f32,
+    /// The solids cut out of it, where it has holes.
+    holes: Option<Box<[Solid]>>,
     /// How much of the light on it it gives back, and the thing a viewer
     /// would name it as (its place among the parts): what a picture of it
     /// needs. Nothing until given.
@@ -41,6 +45,7 @@ impl Solid {
             half,
             ends: (1.0, 1.0),
             reach: half.length(),
+            holes: None,
             tone: 0.0,
             owner: 0,
         }
@@ -53,7 +58,13 @@ impl Solid {
         self
     }
 
-    /// Its lowest point: where it would touch a floor.
+    /// It with `holes` cut out of it; whole when there are none.
+    pub fn cut_by(mut self, holes: Vec<Solid>) -> Self {
+        self.holes = (!holes.is_empty()).then(|| holes.into_boxed_slice());
+        self
+    }
+
+    /// Its lowest point, taken whole: where it would touch a floor.
     pub fn lowest(&self) -> Vec3 {
         let h = self.half;
         // Straight down, in its own axes.
@@ -166,6 +177,54 @@ impl Solid {
     /// Where the ray from `origin` along `dir` (one unit long) first meets
     /// it: how far, and the surface's direction there.
     pub fn hit(&self, origin: Vec3, dir: Vec3) -> Option<(f32, Vec3)> {
+        let Some(holes) = &self.holes else {
+            return self.hit_whole(origin, dir);
+        };
+        // Most rays meet it where no hole is.
+        let first = self.hit_whole(origin, dir);
+        if let Some((distance, _)) = first
+            && !holes
+                .iter()
+                .any(|hole| hole.holds_whole(origin + dir * distance))
+        {
+            return first;
+        }
+        let (enter, leave, _) = self.span(origin, dir)?;
+        // From where the ray comes into it, on through each hole that
+        // is there to where the ray leaves that hole: one may run on
+        // into another.
+        let mut at = enter.max(0.0);
+        let mut faces = None;
+        for _ in 0..=holes.len() {
+            let through = (holes.iter())
+                .filter_map(|hole| hole.span(origin, dir))
+                .find(|(from, to, _)| *from <= at + EDGE && *to > at + EDGE);
+            let Some((_, to, out)) = through else {
+                break;
+            };
+            (at, faces) = (to, Some(-out));
+        }
+        if at >= leave - EDGE || at <= NEAR {
+            return None;
+        }
+        faces.map(|normal| (at, normal))
+    }
+
+    /// How far along the ray it is inside this, taken whole, from and to
+    /// (from before the ray's start when that is inside), and the way the
+    /// surface faces where the ray leaves.
+    fn span(&self, origin: Vec3, dir: Vec3) -> Option<(f32, f32, Vec3)> {
+        // Looked at from outside it, either way along the ray: each is
+        // then the first surface met.
+        let middle = (self.centre - origin).dot(dir);
+        let back = self.reach * 2.0 + 0.01;
+        let (enter, _) = self.hit_whole(origin + dir * (middle - back), dir)?;
+        let (leave, out) = self.hit_whole(origin + dir * (middle + back), -dir)?;
+        Some((middle - back + enter, middle + back - leave, out))
+    }
+
+    /// Where the ray first meets it, taken whole.
+    fn hit_whole(&self, origin: Vec3, dir: Vec3) -> Option<(f32, Vec3)> {
         let to = self.centre - origin;
         let along = to.dot(dir);
         if along < -self.reach || to.dot(to) - along * along > self.reach * self.reach {
@@ -191,7 +250,17 @@ impl Solid {
 
     /// Whether `point` is inside it.
     pub fn holds(&self, point: Vec3) -> bool {
-        let p = self.turn.inward(point - self.centre);
+        let in_hole = || (self.holes.iter().flatten()).any(|hole| hole.holds_whole(point));
+        self.holds_whole(point) && !in_hole()
+    }
+
+    /// Whether `point` is inside it, taken whole.
+    fn holds_whole(&self, point: Vec3) -> bool {
+        let off = point - self.centre;
+        if off.dot(off) > self.reach * self.reach {
+            return false;
+        }
+        let p = self.turn.inward(off);
         let h = self.half;
         let round = |x: f32, z: f32| (p.x / x) * (p.x / x) + (p.z / z) * (p.z / z);
         // How wide a narrowed solid is at the point's height.

@@ -2,11 +2,11 @@
 //! sorted so a ray tries few of them, the camera's rays through the
 //! picture, and the way to the light.
 
-use super::Scene;
 use super::motion::{Moment, View};
 use super::render::to_light;
 use super::solid::Solid;
 use super::space::{Turn, Vec3};
+use super::{Scene, Shape};
 
 /// Where the light comes from unless a scene says: around the vertical
 /// from +Z, and above the horizon, in degrees.
@@ -417,20 +417,23 @@ impl World {
     pub fn of(scene: &Scene, t: f64, width: u32, height: u32) -> Self {
         let moment = scene.moment(t, (width, height));
         let mut solids = Vec::new();
-        for (index, part) in scene.parts.iter().enumerate() {
-            let Some(shape) = part.object.shape else {
-                continue;
-            };
-            if moment.gone[index] {
-                continue;
-            }
-            let mut solid = Solid::standing(
+        let standing = |index: usize| {
+            let object = &scene.parts[index].object;
+            let shape = object.shape.unwrap_or(Shape::Box);
+            Solid::standing(
                 shape,
-                part.object.anchor,
+                object.anchor,
                 moment.places[index],
                 moment.sizes[index],
             )
-            .tapered(part.object.taper as f32);
+            .tapered(object.taper as f32)
+        };
+        for (index, part) in scene.parts.iter().enumerate() {
+            if !part.is_solid() || moment.gone[index] {
+                continue;
+            }
+            let holes = (part.holes.iter()).filter(|hole| !moment.gone[**hole]);
+            let mut solid = standing(index).cut_by(holes.map(|hole| standing(*hole)).collect());
             solid.tone = to_light(part.moves.shade(t) as f32);
             solid.owner = part.thing as u16;
             solids.push(solid);
