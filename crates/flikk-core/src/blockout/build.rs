@@ -5,7 +5,7 @@
 //! part's keys move it, the order parts are placed in, the box each thing
 //! fills, the ground each has covered) is worked out once.
 
-use super::motion::{Moves, Track};
+use super::motion::{CameraMoves, Moves, Track};
 use super::space::Vec3;
 use super::{Anchor, CAMERA, FPS, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
 use std::collections::{HashMap, VecDeque};
@@ -120,7 +120,7 @@ impl Scene {
                 whole: 0,
                 thing: 0,
                 facing,
-                moves: Moves::of(&out.object),
+                moves: Moves::of(&out.object, self.duration),
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
             });
@@ -159,6 +159,7 @@ impl Scene {
             })?),
             None => None,
         };
+        self.camera_moves = CameraMoves::of(&self.camera, self.duration);
         (self.order, self.loops) = placing_order(&parts, self.mount);
         self.parts = parts;
         self.bound_joints();
@@ -398,10 +399,10 @@ fn placing_order(parts: &[Part], mount: Option<usize>) -> (Vec<usize>, bool) {
 fn travelled(places: &Track, duration: f64) -> Vec<f32> {
     let frames = (duration * FPS as f64).ceil() as usize + 1;
     let mut gone = 0.0;
-    let mut was = places.path(0.0);
+    let mut was = places.at(0.0);
     (0..=frames)
         .map(|frame| {
-            let is = places.path(frame as f64 / FPS as f64);
+            let is = places.at(frame as f64 / FPS as f64);
             gone += (is[0] - was[0]).hypot(is[2] - was[2]);
             was = is;
             gone as f32

@@ -109,7 +109,8 @@ pub(crate) fn blockout() -> Value {
     use flikk_core::blockout::{Anchor, Ease, Shape};
     let point = |d: &str| numbers(3, d);
     let ease = |d: &str| one_of(&Ease::NAMES, d);
-    let arrives = "How it arrives here (default linear): `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
+    let arrives = "How the move to here is timed. Left out (`linear`), it keeps the pace the keys give: through a key without stopping, slowing to a stop only where it turns back or rests. `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
+    let when = "Seconds. Leave it out of a key that gives `at`, and that place is passed on the way at an even pace between the timed keys either side of it (the start and the end where there is none): a winding walk or an orbit is then a list of places";
     let target = |d: &str| json!({ "type": ["array", "string"], "description": d });
     let description = format!(
         "A rough 3D scene for the video to follow, when camera, staging, action or timing matter: grey stand-ins you build and move yourself, and a moving camera, drawn by Flikk for nothing and shown to the user, who can change it by asking, before anything is spent. Metres; X is right, Y up, +Z toward a camera placed at +Z; the ground is y 0. Block what the shot needs: who and what matters and the set they move through, where they go and when, one clear camera idea a shot, everything that matters in view at the start. A key gives a time and what is different then; each thing a key gives moves there from the key before that gave it. It needs a model that follows clips (Seedance, Kling, Wan). In the prompt the blockout is @Video1, and a first frame given with it @Image1 (then `references` count on from @Image2 and @Video2); say what each stand-in is (\"the tall figure is the runner, the dark box the taxi\") and describe the look, which the blockout does not carry. {BLOCKOUT_GRAMMAR}"
@@ -141,19 +142,18 @@ pub(crate) fn blockout() -> Value {
     });
     let keys = json!({
         "type": "array",
-        "description": "What it is later; it moves along a smooth path through the places",
+        "description": "What it is later. Its place, turn, size and grey each follow a smooth curve through their keys that never goes past one, so nothing has to be eased by hand to keep it from overshooting. Angles are taken as written: 350 and then 10 turns back through 340 degrees, so write 370 to go on round",
         "items": {
             "type": "object",
             "properties": {
-                "t": number("Seconds"),
+                "t": number(when),
                 "at": point("Its place then"),
                 "rotate": point("Its turn then"),
                 "size": point("Its size then"),
                 "shade": number("Its grey then"),
                 "hidden": boolean("Gone (true) or there (false) from here on"),
                 "ease": ease(arrives)
-            },
-            "required": ["t"]
+            }
         }
     });
     let camera = json!({
@@ -167,18 +167,17 @@ pub(crate) fn blockout() -> Value {
             "parent": string("The object it rides: `at`, and a point it looks at, are then in that object's own space: a dashboard, a shoulder, a chase behind a car"),
             "keys": {
                 "type": "array",
-                "description": "Its move: a dolly, an orbit (a few keys around the subject), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
+                "description": "Its move, along a smooth curve through the keys: a dolly, an orbit (a few places around the subject, with no `t`), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "t": number("Seconds"),
+                        "t": number(when),
                         "at": point("Where it is then"),
                         "look_at": target("What it looks at then"),
                         "fov": number("Its field of view then"),
                         "roll": number("Its roll then"),
                         "ease": ease(arrives)
-                    },
-                    "required": ["t"]
+                    }
                 }
             }
         },

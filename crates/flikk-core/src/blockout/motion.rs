@@ -4,7 +4,7 @@
 
 use super::build::{Facing, Part};
 use super::space::{Place, Turn, Vec3, smoothstep};
-use super::{Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Target};
+use super::{Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Target};
 
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
@@ -42,23 +42,52 @@ impl Ease {
     }
 }
 
-type Knot = (f64, [f64; 3], Ease);
+/// One key of a track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Knot {
+    t: f64,
+    value: [f64; 3],
+    /// How fast the value passes through here, a second.
+    slope: [f64; 3],
+    /// How the move from the knot before arrives.
+    ease: Ease,
+}
 
 /// A value its keys move: what it starts as, then its keys in order. A
 /// key at the start replaces the start.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// It follows a smooth curve through its keys that never goes past one:
+/// where the value turns back or rests it slows to a stop, and between
+/// such stops its speed changes without a jolt (how Blender's animation
+/// curves set and clamp their handles). Two keys give a straight move, a
+/// few around a subject an orbit. An ease times one stretch of that
+/// curve, and a cut ends one curve and starts the next.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Track {
     knots: Vec<Knot>,
 }
 
 impl Track {
-    pub fn new(base: [f64; 3], keys: impl Iterator<Item = Knot>) -> Self {
-        let mut knots = vec![(0.0, base, Ease::Linear)];
+    pub fn new(base: [f64; 3], keys: impl Iterator<Item = (f64, [f64; 3], Ease)>) -> Self {
+        let knot = |(t, value, ease)| Knot {
+            t,
+            value,
+            slope: [0.0; 3],
+            ease,
+        };
+        let mut knots = vec![knot((0.0, base, Ease::Linear))];
         for key in keys {
             if key.0 <= 0.0 {
-                knots[0] = (0.0, key.1, Ease::Linear);
+                knots[0] = knot((0.0, key.1, Ease::Linear));
             } else {
-                knots.push(key);
+                knots.push(knot(key));
+            }
+        }
+        let mut start = 0;
+        for end in 1..=knots.len() {
+            if end == knots.len() || knots[end].ease == Ease::Cut {
+                smooth(&mut knots[start..end]);
+                start = end;
             }
         }
         Self { knots }
@@ -72,69 +101,164 @@ impl Track {
         )
     }
 
-    /// The two knots `t` is between, and how far the move from one to the
-    /// other is, eased; `None` before the first and after the last.
-    fn span(&self, t: f64) -> Option<(usize, f64)> {
-        let next = self.knots.iter().position(|k| k.0 > t)?;
-        let from = next.checked_sub(1)?;
-        let (start, end) = (self.knots[from].0, self.knots[next].0);
-        let u = ((t - start) / (end - start).max(1e-9)).clamp(0.0, 1.0);
-        Some((from, self.knots[next].2.at(u)))
+    /// When its last key is.
+    fn end(&self) -> f64 {
+        self.knots[self.knots.len() - 1].t
     }
 
-    /// What it is before its first knot and after its last.
-    fn outside(&self, t: f64) -> [f64; 3] {
-        if t <= 0.0 {
-            self.knots[0].1
-        } else {
-            self.knots[self.knots.len() - 1].1
-        }
-    }
-
-    /// The value at `t`, going straight from key to key.
-    pub fn straight(&self, t: f64) -> [f64; 3] {
-        match self.span(t) {
-            Some((i, u)) => std::array::from_fn(|c| {
-                let (a, b) = (self.knots[i].1[c], self.knots[i + 1].1[c]);
-                a + (b - a) * u
-            }),
-            None => self.outside(t),
-        }
-    }
-
-    /// The place at `t` on a smooth path through its keys: a curve through
-    /// three or more, so an orbit takes a few keys, and a straight line
-    /// between two. A key held (the same place twice) is left and reached
-    /// without overshoot, and a cut ends one path and starts the next.
-    pub fn path(&self, t: f64) -> [f64; 3] {
-        let Some((i, u)) = self.span(t) else {
-            return self.outside(t);
+    /// The value at `t`.
+    pub fn at(&self, t: f64) -> [f64; 3] {
+        let Some(next) = self.knots.iter().position(|knot| knot.t > t) else {
+            return self.knots[self.knots.len() - 1].value;
         };
-        let knots = &self.knots;
-        let place = |k: usize| knots[k].1;
-        let cut_to = |k: usize| knots[k].2 == Ease::Cut;
-        // The direction it passes knot `k` in: toward the next from the one
-        // before, none where it rests.
-        let tangent = |k: usize, c: usize| {
-            let before = k.checked_sub(1).filter(|_| !cut_to(k)).map(place);
-            let after = (k + 1 < knots.len() && !cut_to(k + 1)).then(|| place(k + 1));
-            match (before, after) {
-                (Some(b), Some(a)) if b == place(k) || a == place(k) => 0.0,
-                (Some(b), Some(a)) => (a[c] - b[c]) * 0.5,
-                (None, Some(a)) => a[c] - place(k)[c],
-                (Some(b), None) => place(k)[c] - b[c],
-                (None, None) => 0.0,
-            }
+        let Some(from) = next.checked_sub(1) else {
+            return self.knots[0].value;
         };
-        let (u2, u3) = (u * u, u * u * u);
+        let (a, b) = (&self.knots[from], &self.knots[next]);
+        let span = (b.t - a.t).max(1e-9);
+        // How far along the stretch of curve it is: past its end for an
+        // ease that overshoots.
+        let e = b.ease.at(((t - a.t) / span).clamp(0.0, 1.0));
+        let (e2, e3) = (e * e, e * e * e);
         std::array::from_fn(|c| {
-            let (p0, p1) = (place(i)[c], place(i + 1)[c]);
-            (2.0 * u3 - 3.0 * u2 + 1.0) * p0
-                + (u3 - 2.0 * u2 + u) * tangent(i, c)
-                + (-2.0 * u3 + 3.0 * u2) * p1
-                + (u3 - u2) * tangent(i + 1, c)
+            (2.0 * e3 - 3.0 * e2 + 1.0) * a.value[c]
+                + (e3 - 2.0 * e2 + e) * span * a.slope[c]
+                + (-2.0 * e3 + 3.0 * e2) * b.value[c]
+                + (e3 - e2) * span * b.slope[c]
         })
     }
+}
+
+/// Give each knot of one curve the pace the value passes it at.
+fn smooth(run: &mut [Knot]) {
+    let last = run.len() - 1;
+    if last == 0 {
+        return;
+    }
+    let spans: Vec<f64> = (run.windows(2))
+        .map(|pair| (pair[1].t - pair[0].t).max(1e-9))
+        .collect();
+    for c in 0..3 {
+        // The pace of each stretch, were it straight.
+        let straight: Vec<f64> = (run.windows(2).zip(&spans))
+            .map(|(pair, span)| (pair[1].value[c] - pair[0].value[c]) / span)
+            .collect();
+        // Where the value turns back or rests, it stops.
+        let stops = |i: usize| i > 0 && i < last && straight[i - 1] * straight[i] <= 0.0;
+        // Within three times the straight pace either side, the curve
+        // stays between its keys.
+        let held = |pace: f64, i: usize| {
+            let beside = [i.checked_sub(1), (i < last).then_some(i)];
+            (beside.into_iter().flatten()).fold(pace, |pace, stretch| {
+                let most = 3.0 * straight[stretch].abs();
+                match pace * straight[stretch] > 0.0 {
+                    true => pace.clamp(-most, most),
+                    false => 0.0,
+                }
+            })
+        };
+        let mut from = 0;
+        for to in 1..=last {
+            if to < last && !stops(to) {
+                continue;
+            }
+            let ends = (stops(from), stops(to));
+            let paces = flowing(&spans[from..to], &straight[from..to], ends);
+            for (i, pace) in (from..=to).zip(paces) {
+                run[i].slope[c] = held(pace, i);
+            }
+            from = to;
+        }
+    }
+}
+
+/// The paces through the knots of a stretch of curve that change the
+/// least from knot to knot: its speed has no jolt anywhere. `spans` and
+/// `straight` are the time and the straight pace between each two knots,
+/// and `rests` says whether it stands still at its first and last knot;
+/// where it doesn't, it bends no further there.
+fn flowing(spans: &[f64], straight: &[f64], rests: (bool, bool)) -> Vec<f64> {
+    let last = spans.len();
+    // One row a knot of `below·before + on·pace + above·after = wanted`.
+    let mut rows: Vec<[f64; 4]> = (0..=last)
+        .map(|i| match i {
+            0 if rests.0 => [0.0, 1.0, 0.0, 0.0],
+            0 => [0.0, 2.0, 1.0, 3.0 * straight[0]],
+            i if i == last && rests.1 => [0.0, 1.0, 0.0, 0.0],
+            i if i == last => [1.0, 2.0, 0.0, 3.0 * straight[last - 1]],
+            i => {
+                let (before, after) = (spans[i - 1], spans[i]);
+                let wanted = 3.0 * (after * straight[i - 1] + before * straight[i]);
+                [after, 2.0 * (before + after), before, wanted]
+            }
+        })
+        .collect();
+    for i in 1..=last {
+        let [_, on, above, wanted] = rows[i - 1];
+        let share = rows[i][0] / on;
+        rows[i][1] -= share * above;
+        rows[i][3] -= share * wanted;
+    }
+    let mut paces = vec![0.0; last + 1];
+    for i in (0..=last).rev() {
+        let after = paces.get(i + 1).copied().unwrap_or(0.0);
+        paces[i] = (rows[i][3] - rows[i][2] * after) / rows[i][1];
+    }
+    paces
+}
+
+/// When each of `keys` (the time it gives, and the place) is reached. A
+/// key that gives no time is passed on the way: at an even pace over the
+/// ground between the timed keys either side of it, the start and the end
+/// of `duration` seconds standing in where there is none. `start` is
+/// where the thing is before its keys.
+pub(super) fn key_times(
+    start: [f64; 3],
+    keys: &[(Option<f64>, Option<[f64; 3]>)],
+    duration: f64,
+) -> Vec<f64> {
+    let apart = |a: [f64; 3], b: [f64; 3]| {
+        (0..3)
+            .map(|c| (b[c] - a[c]) * (b[c] - a[c]))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let mut times = vec![0.0; keys.len()];
+    let (mut from, mut was) = (0.0, start);
+    let mut i = 0;
+    while i < keys.len() {
+        if let (Some(t), place) = keys[i] {
+            (times[i], from, was) = (t, t, place.unwrap_or(was));
+            i += 1;
+            continue;
+        }
+        // The keys passed on the way to the next timed one, or to the end.
+        let next = (i..keys.len()).find(|k| keys[*k].0.is_some());
+        let passed = i..next.unwrap_or(keys.len());
+        let mut gone = Vec::with_capacity(passed.len());
+        let mut far = 0.0;
+        for k in passed.clone() {
+            let place = keys[k].1.unwrap_or(was);
+            far += apart(was, place);
+            gone.push(far);
+            was = place;
+        }
+        let (until, whole) = match next.map(|k| keys[k]) {
+            Some((Some(t), place)) => (t, far + place.map_or(0.0, |place| apart(was, place))),
+            _ => (duration, far),
+        };
+        let until = until.max(from);
+        for (n, k) in passed.clone().enumerate() {
+            let share = match whole > 1e-9 {
+                true => gone[n] / whole,
+                false => (n + 1) as f64 / passed.len() as f64,
+            };
+            times[k] = from + (until - from) * share;
+        }
+        from = times[passed.end - 1];
+        i = passed.end;
+    }
+    times
 }
 
 /// How a part is at a moment, in the space it stands in.
@@ -207,12 +331,16 @@ pub(super) struct Moves {
 }
 
 impl Moves {
-    pub fn of(object: &Object) -> Self {
+    /// How `object`'s keys move it over a scene of `duration` seconds.
+    pub fn of(object: &Object, duration: f64) -> Self {
         let keys = &object.keys;
-        let places = keys.iter().filter_map(|k| Some((k.t, k.at?, k.ease)));
-        let turns = keys.iter().filter_map(|k| Some((k.t, k.rotate?, k.ease)));
-        let sizes = keys.iter().filter_map(|k| Some((k.t, k.size?, k.ease)));
-        let shades = keys.iter().filter_map(|k| Some((k.t, k.shade?, k.ease)));
+        let given: Vec<_> = keys.iter().map(|key| (key.t, key.at)).collect();
+        let times = key_times(object.at, &given, duration);
+        let timed = || times.iter().copied().zip(keys);
+        let places = timed().filter_map(|(t, k)| Some((t, k.at?, k.ease)));
+        let turns = timed().filter_map(|(t, k)| Some((t, k.rotate?, k.ease)));
+        let sizes = timed().filter_map(|(t, k)| Some((t, k.size?, k.ease)));
+        let shades = timed().filter_map(|(t, k)| Some((t, k.shade?, k.ease)));
         Self {
             places: Track::new(object.at, places),
             turns: Track::new(object.rotate, turns),
@@ -220,25 +348,40 @@ impl Moves {
             shades: Track::of_number(object.shade.unwrap_or(MID_GREY), shades),
             spin: object.spin,
             starts_hidden: object.hidden,
-            hidden: (keys.iter())
-                .filter_map(|k| Some((k.t, k.hidden?)))
-                .collect(),
+            hidden: timed().filter_map(|(t, k)| Some((t, k.hidden?))).collect(),
         }
     }
 
     /// How the keys have it at `t`, before any cycle.
     fn keyed(&self, t: f64) -> Pose {
-        let turned = self.turns.straight(t);
+        let turned = self.turns.at(t);
         Pose {
-            at: self.places.path(t),
+            at: self.places.at(t),
             rotate: std::array::from_fn(|c| turned[c] + self.spin[c] * t),
-            size: self.sizes.straight(t),
+            // An ease that overshoots may take a size past nothing.
+            size: self.sizes.at(t).map(|side| side.max(0.0)),
         }
+    }
+
+    /// The first turn its keys make that goes most of the way round and
+    /// stops short: the times it is between, the degrees turned, and the
+    /// angle to write at its end for the short way round. A turn written
+    /// as 350 and then 10 goes back through 340 degrees, not on through 20.
+    pub fn long_turn(&self) -> Option<(f64, f64, f64, f64)> {
+        (self.turns.knots.windows(2)).find_map(|pair| {
+            (0..3).find_map(|c| {
+                let turned = pair[1].value[c] - pair[0].value[c];
+                let short = shortest(turned);
+                // A whole number of turns is a spin that was meant.
+                (pair[1].ease != Ease::Cut && turned.abs() >= 270.0 && short.abs() > 1.0)
+                    .then(|| (pair[0].t, pair[1].t, turned, pair[0].value[c] + short))
+            })
+        })
     }
 
     /// Its grey at `t`.
     pub fn shade(&self, t: f64) -> f64 {
-        self.shades.straight(t)[0]
+        self.shades.at(t)[0].clamp(0.0, 1.0)
     }
 
     /// Whether it says it is out of the scene at `t`.
@@ -273,7 +416,7 @@ impl Part {
 /// Metres a second over the ground at `t`, measured across `window`
 /// seconds either side.
 fn speed(places: &Track, t: f64, window: f64) -> f32 {
-    let (a, b) = (places.path(t - window), places.path(t + window));
+    let (a, b) = (places.at(t - window), places.at(t + window));
     ((b[0] - a[0]).hypot(b[2] - a[2]) / (2.0 * window)) as f32
 }
 
@@ -289,14 +432,14 @@ fn shortest(degrees: f64) -> f64 {
 fn heading(places: &Track, t: f64) -> Option<f64> {
     let step = 1.0 / FPS as f64;
     let going = |t: f64| {
-        let (a, b) = (places.path(t - step * 0.5), places.path(t + step * 0.5));
+        let (a, b) = (places.at(t - step * 0.5), places.at(t + step * 0.5));
         let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
         (dx.hypot(dz) > 1e-5).then(|| dx.atan2(dz).to_degrees())
     };
     if let Some(now) = going(t) {
         return Some(now);
     }
-    let last = places.knots[places.knots.len() - 1].0;
+    let last = places.end();
     // The nearest moments it moves, before and after this rest.
     let from = t.clamp(0.0, last);
     let seek = |forward: bool| {
@@ -443,9 +586,14 @@ impl Scene {
     /// Where the camera's keys have it at `t`, in the space of what it
     /// rides.
     fn camera_at(&self, t: f64) -> Vec3 {
-        let camera = &self.camera;
-        let at = (camera.keys.iter()).filter_map(|k| Some((k.t, k.at?, k.ease)));
-        Vec3::of(Track::new(camera.at, at).path(t))
+        Vec3::of(self.camera_moves.places.at(t))
+    }
+
+    /// When the camera cuts to a new set-up.
+    pub(super) fn cuts(&self) -> impl Iterator<Item = f64> + '_ {
+        let keys = self.camera_moves.times.iter().zip(&self.camera.keys);
+        keys.filter(|(_, key)| key.ease == Ease::Cut)
+            .map(|(t, _)| *t)
     }
 
     /// Everything at `t`: where each part stands, and what the camera
@@ -473,6 +621,35 @@ pub(super) struct Moment {
     pub view: View,
 }
 
+/// How the camera's keys move it, worked out once when the scene is
+/// built. What it looks at is found each frame: it may be moving.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct CameraMoves {
+    places: Track,
+    fovs: Track,
+    rolls: Track,
+    /// When each of its keys is reached.
+    times: Vec<f64>,
+}
+
+impl CameraMoves {
+    pub fn of(camera: &Camera, duration: f64) -> Self {
+        let keys = &camera.keys;
+        let given: Vec<_> = keys.iter().map(|key| (key.t, key.at)).collect();
+        let times = key_times(camera.at, &given, duration);
+        let timed = || times.iter().copied().zip(keys);
+        let places = timed().filter_map(|(t, k)| Some((t, k.at?, k.ease)));
+        let fovs = timed().filter_map(|(t, k)| Some((t, k.fov?, k.ease)));
+        let rolls = timed().filter_map(|(t, k)| Some((t, k.roll?, k.ease)));
+        Self {
+            places: Track::new(camera.at, places),
+            fovs: Track::of_number(camera.fov, fovs),
+            rolls: Track::of_number(camera.roll, rolls),
+            times,
+        }
+    }
+}
+
 /// Where the camera is and what it sees at a time.
 pub(super) struct View {
     pub eye: Vec3,
@@ -498,16 +675,13 @@ impl Scene {
             }
         };
         let in_f64 = |v: Vec3| [v.x as f64, v.y as f64, v.z as f64];
-        let targets = (camera.keys.iter())
-            .filter_map(|k| Some((k.t, in_f64(point(k.look_at.as_ref()?)), k.ease)));
-        let target = Track::new(in_f64(point(&camera.look_at)), targets).straight(t);
-        let number = |base: f64, of: fn(&super::CameraKey) -> Option<f64>| {
-            let keys = (camera.keys.iter()).filter_map(|k| Some((k.t, of(k)?, k.ease)));
-            Track::of_number(base, keys).straight(t)[0] as f32
-        };
-        let fov = number(camera.fov, |k| k.fov);
+        let moves = &self.camera_moves;
+        let targets = (moves.times.iter().zip(&camera.keys))
+            .filter_map(|(at, k)| Some((*at, in_f64(point(k.look_at.as_ref()?)), k.ease)));
+        let target = Track::new(in_f64(point(&camera.look_at)), targets).at(t);
+        let fov = (moves.fovs.at(t)[0] as f32).clamp(5.0, 140.0);
         let shake = Shake::of(camera.shake as f32, t as f32);
-        let roll = (number(camera.roll, |k| k.roll) + shake.roll).to_radians();
+        let roll = (moves.rolls.at(t)[0] as f32 + shake.roll).to_radians();
 
         let eye = mount.point(self.camera_at(t));
         let level = mount.turn.y;

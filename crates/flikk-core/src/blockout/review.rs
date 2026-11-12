@@ -4,7 +4,7 @@
 
 use super::render::{Detail, World};
 use super::space::Vec3;
-use super::{Ease, Scene, Target};
+use super::{Scene, Target};
 
 /// The most moments described, and the most objects named at each.
 const MOMENTS: usize = 6;
@@ -75,9 +75,8 @@ impl Scene {
 
         // The start, the middle and the end, and each shot a cut starts.
         let mut moments = vec![0.0, self.duration * 0.5, self.duration];
-        let cuts = (self.camera.keys.iter())
-            .filter(|k| k.ease == Ease::Cut && k.t > 0.0 && k.t < self.duration);
-        moments.extend(cuts.map(|k| k.t).take(MOMENTS - 3));
+        let cuts = self.cuts().filter(|t| *t > 0.0 && *t < self.duration);
+        moments.extend(cuts.take(MOMENTS - 3));
         moments.sort_by(f64::total_cmp);
         moments.dedup_by(|a, b| (*a - *b).abs() < 0.05);
 
@@ -298,10 +297,18 @@ impl Scene {
         }
         for (index, part) in self.parts.iter().enumerate() {
             let (name, object) = (&part.object.name, &part.object);
-            if let Some(late) = object.keys.iter().find(|k| k.t > self.duration + 1e-6) {
+            if let Some(late) = late(object.keys.iter().map(|k| k.t), self.duration) {
                 notes.push(format!(
-                    "`{name}` has a key at {:.1} s, after the end at {:.1} s: it is never reached.",
-                    late.t, self.duration
+                    "`{name}` has a key at {late:.1} s, after the end at {:.1} s: it is never \
+                     reached.",
+                    self.duration
+                ));
+            }
+            if let Some((from, to, turned, short)) = part.moves.long_turn() {
+                doubts.push(format!(
+                    "`{name}` turns {:.0}° between {from:.1} s and {to:.1} s, the long way round: \
+                     angles are taken as written, so write {short:.0} there for the short way.",
+                    turned.abs()
                 ));
             }
             if part.thing != index {
@@ -321,11 +328,18 @@ impl Scene {
                 ));
             }
         }
-        if let Some(late) = self.camera.keys.iter().find(|k| k.t > self.duration + 1e-6) {
+        if let Some(late) = late(self.camera.keys.iter().map(|k| k.t), self.duration) {
             notes.push(format!(
-                "The camera has a key at {:.1} s, after the end at {:.1} s: it is never reached.",
-                late.t, self.duration
+                "The camera has a key at {late:.1} s, after the end at {:.1} s: it is never \
+                 reached.",
+                self.duration
             ));
         }
     }
+}
+
+/// The first of the times keys give that is after the end of `duration`
+/// seconds.
+fn late(times: impl Iterator<Item = Option<f64>>, duration: f64) -> Option<f64> {
+    times.flatten().find(|t| *t > duration + 1e-6)
 }

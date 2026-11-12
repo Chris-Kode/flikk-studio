@@ -34,6 +34,7 @@ pub use render::Detail;
 pub use review::Review;
 
 use build::Part;
+use motion::CameraMoves;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -75,9 +76,11 @@ pub struct Scene {
     /// Whether parts face one another in a loop.
     #[serde(skip)]
     loops: bool,
-    /// The part the camera rides.
+    /// The part the camera rides, and how its keys move it.
     #[serde(skip)]
     mount: Option<usize>,
+    #[serde(skip)]
+    camera_moves: CameraMoves,
 }
 
 /// A scene as its JSON has it, before it is checked and built.
@@ -151,7 +154,8 @@ pub struct Object {
     /// Motion that repeats, on top of what the keys make of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cycle: Option<Cycle>,
-    /// What it is later; between keys it moves along a smooth path.
+    /// What it is later: its place, turn, size and grey each follow a
+    /// smooth curve through their keys that never goes past one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<ObjectKey>,
 }
@@ -160,7 +164,10 @@ pub struct Object {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectKey {
-    pub t: f64,
+    /// When, in seconds. A key with a place and no time is passed on the
+    /// way, at an even pace between the timed keys either side of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,7 +179,7 @@ pub struct ObjectKey {
     /// Gone (true) or there (false) from here on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
-    /// How it arrives at this key.
+    /// How the move to this key is timed.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
 }
@@ -303,7 +310,10 @@ pub struct Camera {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CameraKey {
-    pub t: f64,
+    /// When, in seconds; a key with a place and no time is passed on the
+    /// way, as an object's is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,7 +322,7 @@ pub struct CameraKey {
     pub fov: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roll: Option<f64>,
-    /// How it arrives at this key; [`Ease::Cut`] is a cut to it.
+    /// How the move to this key is timed; [`Ease::Cut`] is a cut to it.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
 }
@@ -326,11 +336,12 @@ pub enum Target {
     Object(String),
 }
 
-/// How a move arrives at a key.
+/// How the move to a key is timed along the curve through the keys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ease {
-    /// At one speed.
+    /// At the pace the keys give: through a key without stopping, slowing
+    /// only where the value turns back or rests.
     #[default]
     Linear,
     /// Starting slowly.
@@ -443,6 +454,7 @@ impl TryFrom<Written> for Scene {
             order: Vec::new(),
             loops: false,
             mount: None,
+            camera_moves: CameraMoves::default(),
         };
         if !scene.duration.is_finite() || scene.duration <= 0.0 {
             return Err("`duration` is in seconds, more than 0".into());
@@ -488,6 +500,41 @@ fn finite(what: &str, v: &[f64]) -> Result<(), String> {
     }
 }
 
+/// Put `keys` in the order they are reached. When each gives its time
+/// (`of` says a key's time, and whether it gives a place) that is by time.
+/// A key with no time is passed between those written either side of it,
+/// so then the order written stands, and has to make sense.
+fn in_order<K>(
+    keys: &mut [K],
+    what: &str,
+    of: impl Fn(&K) -> (Option<f64>, bool),
+) -> Result<(), String> {
+    if keys.iter().all(|key| of(key).0.is_some()) {
+        keys.sort_by(|a, b| of(a).0.unwrap_or(0.0).total_cmp(&of(b).0.unwrap_or(0.0)));
+        return Ok(());
+    }
+    let mut latest = 0.0;
+    for key in keys.iter() {
+        match of(key) {
+            (None, false) => {
+                return Err(format!(
+                    "{what} has a key with no `t` and no `at`: a key without a time is a place \
+                     passed on the way"
+                ));
+            }
+            (Some(t), _) if t < latest => {
+                return Err(format!(
+                    "{what} has keys without `t`, which are passed in the order written, so its \
+                     timed keys have to be in order too: {t} comes after {latest}"
+                ));
+            }
+            (Some(t), _) => latest = t,
+            (None, true) => {}
+        }
+    }
+    Ok(())
+}
+
 /// A size no smaller or larger than can be drawn.
 fn in_range(size: &mut [f64; 3]) {
     size.iter_mut().for_each(|n| *n = n.clamp(0.005, 1000.0));
@@ -515,7 +562,7 @@ impl Object {
             in_range(size);
         }
         for key in &mut self.keys {
-            finite(&what, &[key.t, key.shade.unwrap_or(0.0)])?;
+            finite(&what, &[key.t.unwrap_or(0.0), key.shade.unwrap_or(0.0)])?;
             for v in [&key.at, &key.rotate, &key.size].into_iter().flatten() {
                 finite(&what, v)?;
             }
@@ -524,7 +571,7 @@ impl Object {
                 in_range(size);
             }
         }
-        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        in_order(&mut self.keys, &what, |key| (key.t, key.at.is_some()))?;
         if let Some(cycle) = self.cycle.as_mut() {
             cycle.settle(&what)?;
         }
@@ -566,14 +613,12 @@ impl Camera {
         self.fov = self.fov.clamp(5.0, 140.0);
         self.shake = self.shake.clamp(0.0, 1.0);
         for key in &mut self.keys {
-            finite(
-                what,
-                &[key.t, key.fov.unwrap_or(0.0), key.roll.unwrap_or(0.0)],
-            )?;
+            let numbers = [key.t, key.fov, key.roll].map(|n| n.unwrap_or(0.0));
+            finite(what, &numbers)?;
             finite(what, &key.at.unwrap_or_default())?;
             key.fov = key.fov.map(|f| f.clamp(5.0, 140.0));
         }
-        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        in_order(&mut self.keys, what, |key| (key.t, key.at.is_some()))?;
         Ok(())
     }
 }
