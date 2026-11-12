@@ -3,6 +3,7 @@
 //! play; this is read instead.
 
 use super::Scene;
+use super::build::AimAt;
 use super::space::Vec3;
 use super::world::World;
 use std::collections::HashMap;
@@ -26,10 +27,13 @@ const WATCHED: f64 = 12.0;
 const SPRINT: f32 = 12.5;
 /// Metres a walker's lowest point may be off the ground and go unsaid.
 const OFF_GROUND: f32 = 0.06;
+/// The fastest a thing is thrown by hand, in metres a second.
+const HARD_THROW: f32 = 30.0;
 /// What a blockout's camera sees, said for its writer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Review {
-    /// What is in the picture at a few moments, one line each.
+    /// What is in the picture at a few moments, one line each, and when
+    /// each thing let go lands or is caught.
     pub seen: Vec<String>,
     /// What looks like a mistake a viewer would see. Nothing here stops
     /// the scene being used: a reveal hides its subject on purpose.
@@ -359,7 +363,56 @@ impl Scene {
         }
         watch.say(self, &mut review.doubts);
         self.doubts(&watch.ever, &watch.largest, &mut review);
+        self.say_flights(&mut review);
         review
+    }
+
+    /// Say when each thing let go leaves and when it is caught or comes
+    /// to rest, which its writer can't know before: a line each in what
+    /// is seen, and a doubt for a throw no arm makes or one cut off by
+    /// the end.
+    fn say_flights(&self, review: &mut Review) {
+        for part in &self.parts {
+            let name = &part.object.name;
+            let flights = (part.held.iter())
+                .filter_map(|held| Some((held, held.flight.as_ref()?)))
+                .filter(|(held, _)| held.t <= self.duration);
+            for (held, flight) in flights {
+                let (left, ends) = (held.t, held.t + flight.lasts);
+                let over = ends <= self.duration;
+                let how = match &held.thrown {
+                    Some((AimAt::Part(catcher), _)) if over => format!(
+                        "is thrown at {left:.1} s and `{}` has it at {ends:.1} s",
+                        self.parts[*catcher].object.name
+                    ),
+                    Some(_) if over => {
+                        format!("is thrown at {left:.1} s and comes to rest at {ends:.1} s")
+                    }
+                    None if over && flight.lasts < 0.2 => continue,
+                    None if over => {
+                        format!("is let go at {left:.1} s and comes to rest at {ends:.1} s")
+                    }
+                    Some(_) => {
+                        review.doubts.push(format!(
+                            "`{name}`, thrown at {left:.1} s, is still in the air when the scene \
+                             ends at {:.1} s: throw it sooner, or give its `throw` fewer \
+                             `seconds`.",
+                            self.duration
+                        ));
+                        continue;
+                    }
+                    None => format!("is let go at {left:.1} s and is still falling at the end"),
+                };
+                review.seen.push(format!("`{name}` {how}."));
+                let speed = flight.speed.length();
+                if held.thrown.is_some() && speed > HARD_THROW {
+                    review.doubts.push(format!(
+                        "`{name}` is thrown at {speed:.0} m/s at {left:.1} s, harder than an arm \
+                         throws: bring the two nearer, or give its `throw` more `seconds`."
+                    ));
+                }
+            }
+        }
     }
 
     /// The things that walk on the ground and could be off it: what is

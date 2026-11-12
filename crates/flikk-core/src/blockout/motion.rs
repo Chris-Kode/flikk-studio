@@ -654,7 +654,12 @@ impl Scene {
     fn taken(&self, index: usize, t: f64) -> Option<(Option<usize>, Place, Place)> {
         (self.parts[index].held.iter())
             .take_while(|held| held.t <= t)
-            .filter_map(|held| held.at.map(|(within, was)| (held.by, within, was)))
+            .filter_map(|held| {
+                let (within, was) = held.at?;
+                // Let go, it is where its way through the air has it.
+                let at = (held.flight.as_ref()).map_or(within.at, |flight| flight.at(t - held.t));
+                Some((held.by, Place { at, ..within }, was))
+            })
             .last()
     }
 
@@ -1014,7 +1019,7 @@ impl Scene {
 
     /// The middle of part `index` standing at `place`: what a camera
     /// looking at it looks at.
-    fn middle(&self, index: usize, place: Place) -> Vec3 {
+    pub(super) fn middle(&self, index: usize, place: Place) -> Vec3 {
         let (low, high) = self.parts[index].bounds;
         place.point(Vec3::of(std::array::from_fn(|c| (low[c] + high[c]) * 0.5)))
     }

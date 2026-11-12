@@ -74,7 +74,7 @@ pub(crate) const BLOCKOUT_GRAMMAR: &str = "Nothing in a blockout is ready-made: 
 Building: a thing is solids that ride one another. With `parent`, a part's `at` and `rotate` are in its parent's own space, and it moves and turns with it. An object with no `shape` is a joint: nothing is drawn, it only carries others (hips that carry a body and two legs). `anchor` says which point of a solid `at` places and `rotate` turns about: \"top\" hangs it from its joint, as a limb from a shoulder or a hip, so `rotate` swings it. Things face +Z. Turning about X by a positive angle tips a thing's top toward +Z, so the free end of a limb hung from its top swings back, and a negative angle swings it forward; about Z, positive tips the top toward -X.\n\
 Moving: `keys` say what an object is at given seconds, for what happens once (it crosses the room, an arm rises at 2 s, it sits down). A `cycle` is motion that repeats, added on top of the keys: a swing, a breath, a wing beat, a wheel turning. It runs by the clock (`seconds` a round), by the ground covered (`metres` a round: a wheel keeps up with the road at any speed) or by the strides taken (`strides`), and one that follows the ground or the strides comes to rest when the thing stands still. `shift` 0.5 puts the other arm half a round behind.\n\
 Walking: build a leg as thigh, shin and foot, each hung from the one above, and give each foot `\"step\": {}` and the thing `\"on\": \"ground\"` (or the object it walks on). The feet then land, stay put while the body passes over them and swing on, the knees bend, the body rises and sinks, and a run leaves the ground, all from where the thing's keys take it and how fast: no cycle on the legs, no hip height to work out, up a ramp or a stair too.\n\
-Touching and looking: don't work out a limb's angles to touch something. Give its end `reach` and the limb bends to put it there; give a head `aim` and it looks there.\n\
+Touching and looking: don't work out a limb's angles to touch something. Give its end `reach` and the limb bends to put it there; give a head `aim` and it looks there. A key hands a thing to a hand (`parent`), lets it fall (`\"parent\": \"none\"`) or throws it (`throw`), and gravity does the rest.\n\
 Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
 Openings: a solid with `cut` is not drawn but taken out of the object it names, so a wall has a doorway to walk through and windows to see through: a box for a door, a cylinder on its side over a box for an arch.\n\
 Many: `repeat` lays one object out many times, in a row or a grid (`step`), a `ring`, or scattered over an `area`, and its `vary` makes each a little its own: a street of stalls, the windows of a front, a wood, an audience. Each is the whole object, its keys too, so a walker repeated over an area is a crowd that walks. Don't write the same thing out many times.\n\
@@ -160,7 +160,16 @@ pub(crate) fn blockout() -> Value {
                 "shade": number("Its grey then"),
                 "hidden": boolean("Gone (true) or there (false) from here on"),
                 "aim": target("What its front turns to by then"),
-                "parent": string("The object it goes with from here on, from where it is at this moment: picked up by a hand (`copy/hand r`), put in a car, set on a tray. \"none\" lets it go and it stays where it is. Bring the hand to it first with `reach`, until this second. Its own keys move it no more"),
+                "parent": string("The object it goes with from here on, from where it is at this moment: picked up by a hand (`copy/hand r`), put in a car, set on a table (name the table). \"none\" lets it go: it falls from there under gravity, keeping the speed it was carried at, and comes to rest on what is under it. Bring the hand to it first with `reach`, until this second. Its own keys move it no more"),
+                "throw": {
+                    "type": "object",
+                    "description": "Throws it from where it is at this moment, in the arc gravity gives it: don't key a throw's path. Thrown to an object, it is caught: it goes with that object from when it gets there, aimed at where that will be. Thrown to a point or the camera, it flies on and comes to rest on what it lands on. The preview says when it arrives, to time what happens next",
+                    "properties": {
+                        "to": target("An object's name (a hand, a basket), \"camera\", or a point [x, y, z]"),
+                        "seconds": number("How long it is in the air (default: an easy lob, about 1 s over 5 m): less for a hard flat throw, more for a high one")
+                    },
+                    "required": ["to"]
+                },
                 "ease": ease(arrives)
             }
         }

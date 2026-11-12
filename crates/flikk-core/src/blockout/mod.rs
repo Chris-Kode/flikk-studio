@@ -14,7 +14,8 @@
 //! `anchor`), and moves them with keys and with motion that repeats
 //! ([`Cycle`]). What a figure does is said rather than posed: feet
 //! [`Step`], a hand is brought somewhere ([`Reach`]), a head looks
-//! (`aim`), a key hands a thing to another. Cameras are framed as shots
+//! (`aim`), a key hands a thing to another, lets it fall or throws it
+//! ([`Throw`]). Cameras are framed as shots
 //! are called ([`Frame`]) and cut between. A thing built once is a model, placed as many
 //! times as the shot needs, each copy free to differ; what there is many
 //! of is laid out by a [`Repeat`], openings are `cut` out of walls, and
@@ -32,6 +33,7 @@
 mod build;
 mod change;
 mod clip;
+mod flight;
 mod land;
 mod motion;
 mod outside;
@@ -265,13 +267,33 @@ pub struct ObjectKey {
     pub aim: Option<Target>,
     /// The object it goes with from here on, by name, from where it is at
     /// this moment: picked up, or set down on something that moves.
-    /// `"none"` lets it go, and it stays where it is. Its own keys move it
-    /// no more.
+    /// `"none"` lets it go: it falls from there, with the speed it had,
+    /// and comes to rest on what is under it. Its own keys move it no
+    /// more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// It is thrown from where it is at this moment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throw: Option<Throw>,
     /// How the move to this key is timed.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
+}
+
+/// A thing let go into the air to come to something, in the arc gravity
+/// gives it: a ball to a hand, a stone at a window. Thrown to an object,
+/// it goes with that object from when it gets there: caught. Thrown to a
+/// point or the camera, it flies on through it and comes to rest on what
+/// it lands on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Throw {
+    /// What it is thrown to: an object by name, `"camera"`, or a point.
+    pub to: Target,
+    /// How long it is in the air. Left out, as long as the easiest throw
+    /// takes: a lob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
 }
 
 /// Motion that repeats: a swing, a step, a turn of a wheel, a breath. Its
@@ -909,6 +931,19 @@ impl Object {
             key.shade = key.shade.map(|s| s.clamp(0.0, 1.0));
             if let Some(size) = key.size.as_mut() {
                 in_range(size);
+            }
+            if let Some(throw) = key.throw.as_mut() {
+                if key.parent.as_deref().is_some_and(|parent| parent != NONE) {
+                    return Err(format!(
+                        "{what} has a key that throws it and hands it to something: a key does \
+                         one"
+                    ));
+                }
+                finite(&what, &[throw.seconds.unwrap_or(0.0)])?;
+                if let Target::Point(point) = &throw.to {
+                    finite(&what, point)?;
+                }
+                throw.seconds = throw.seconds.map(|seconds| seconds.clamp(0.05, 10.0));
             }
         }
         in_order(&mut self.keys, &what, |key| (key.t, key.at.is_some()))?;

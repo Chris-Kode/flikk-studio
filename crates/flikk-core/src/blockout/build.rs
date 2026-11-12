@@ -5,6 +5,7 @@
 //! part's keys move it, the order parts are placed in, the box each thing
 //! fills, the ground each has covered) is worked out once.
 
+use super::flight::Flight;
 use super::motion::{Moves, Rig, Track, rest_place};
 use super::space::{Place, Vec3};
 use super::{
@@ -106,6 +107,24 @@ pub(super) struct Held {
     /// was in the scene at the moment. Not known until the scene is built
     /// that far.
     pub at: Option<(Place, Place)>,
+    /// What it is thrown to as it is let go, and for how many seconds
+    /// when that is said.
+    pub thrown: Option<(AimAt, Option<f64>)>,
+    /// How it goes through the air once let go; worked out with `at`.
+    pub flight: Option<Flight>,
+}
+
+impl Held {
+    /// A part going with `by` from `t`, or let go.
+    fn from(t: f64, by: Option<usize>) -> Self {
+        Self {
+            t,
+            by,
+            at: None,
+            thrown: None,
+            flight: None,
+        }
+    }
 }
 
 /// A limb of two parts whose end is brought somewhere: this part, the
@@ -270,21 +289,42 @@ impl Scene {
                 thing: 0,
                 facing,
                 aims,
-                held: (moves.times.iter().zip(&out.object.keys))
-                    .filter_map(|(t, key)| Some((*t, key.parent.as_ref()?)))
-                    .map(|(t, by)| {
-                        let by = match by.as_str() {
-                            NONE => None,
-                            by => Some(place(by).ok_or_else(|| {
-                                format!(
-                                    "a key has `{name}` go with `{by}`, which is no object's name \
-                                     or `{NONE}`"
-                                )
-                            })?),
-                        };
-                        Ok(Held { t, by, at: None })
-                    })
-                    .collect::<Result<_, String>>()?,
+                held: {
+                    let mut held = Vec::new();
+                    for (t, key) in moves.times.iter().zip(&out.object.keys) {
+                        if let Some(throw) = &key.throw {
+                            let to = match aim(&throw.to)? {
+                                AimAt::Ahead => {
+                                    return Err(format!(
+                                        "a key throws `{name}` `{AHEAD}`: say what at"
+                                    ));
+                                }
+                                to => to,
+                            };
+                            held.push(Held {
+                                thrown: Some((to, throw.seconds)),
+                                ..Held::from(*t, None)
+                            });
+                            // What it is thrown to has it from when it
+                            // gets there, which its flight will say.
+                            if let AimAt::Part(catcher) = to {
+                                held.push(Held::from(f64::INFINITY, Some(catcher)));
+                            }
+                        } else if let Some(by) = &key.parent {
+                            let by = match by.as_str() {
+                                NONE => None,
+                                by => Some(place(by).ok_or_else(|| {
+                                    format!(
+                                        "a key has `{name}` go with `{by}`, which is no object's \
+                                         name or `{NONE}`"
+                                    )
+                                })?),
+                            };
+                            held.push(Held::from(*t, by));
+                        }
+                    }
+                    held
+                },
                 limb: None,
                 rest: None,
                 moves,
@@ -581,7 +621,10 @@ impl Scene {
         let targets = (out.face.iter_mut())
             .chain(&mut out.aim)
             .chain(out.reach.iter_mut().map(|reach| &mut reach.to))
-            .chain(out.keys.iter_mut().filter_map(|key| key.aim.as_mut()));
+            .chain(out.keys.iter_mut().flat_map(|key| {
+                let thrown = key.throw.iter_mut().map(|throw| &mut throw.to);
+                key.aim.iter_mut().chain(thrown)
+            }));
         for target in targets {
             if let Target::Object(named) = target {
                 in_full(named);
@@ -698,17 +741,40 @@ impl Scene {
     /// it was at the moment it was taken, each in order of time, the scene
     /// built as far as the one before.
     fn take_hold(&mut self) {
-        let mut taken: Vec<(f64, usize, usize)> = (self.parts.iter().enumerate())
-            .flat_map(|(part, held)| (0..held.held.len()).map(move |i| (held.held[i].t, part, i)))
-            .collect();
-        taken.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (t, part, hold) in taken {
-            let places = self.stand(t).places;
-            let within = match self.parts[part].held[hold].by {
+        // The earliest not yet worked out, until none is left: a catch
+        // gets its time from the throw before it.
+        let next = |parts: &[Part]| {
+            let waiting = (parts.iter().enumerate()).flat_map(|(part, held)| {
+                (held.held.iter().enumerate())
+                    .filter(|(_, held)| held.at.is_none() && held.t.is_finite())
+                    .map(move |(hold, held)| (held.t, part, hold))
+            });
+            waiting.min_by(|a, b| a.0.total_cmp(&b.0))
+        };
+        while let Some((t, part, hold)) = next(&self.parts) {
+            let now = self.stand(t);
+            let places = &now.places;
+            let by = self.parts[part].held[hold].by;
+            let within = match by {
                 Some(by) => places[by].holds(places[part]),
                 None => places[part],
             };
             self.parts[part].held[hold].at = Some((within, places[part]));
+            if by.is_some() {
+                continue;
+            }
+            // Let go, it goes as its speed and gravity take it.
+            let flight = self.flown(part, hold, t, &now);
+            let held = &mut self.parts[part].held;
+            let caught = held[hold].thrown.as_ref().map(|(to, _)| *to);
+            if let Some(AimAt::Part(catcher)) = caught
+                && let Some(catch) =
+                    (held.iter_mut()).find(|held| held.t.is_infinite() && held.by == Some(catcher))
+            {
+                catch.t = t + flight.lasts;
+            }
+            held[hold].flight = Some(flight);
+            held.sort_by(|a, b| a.t.total_cmp(&b.t));
         }
     }
 

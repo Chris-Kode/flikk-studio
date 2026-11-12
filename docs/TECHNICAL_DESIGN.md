@@ -1569,6 +1569,18 @@ on the UI thread and run it off it:
   under 3 ms at 13 000 parts, so it still is each frame; parts nothing
   ever moves are placed once (`Part::still`), and the review sets its
   moments up on several threads.
+  Nothing is simulated, but what is let go falls (`flight.rs`): a key
+  with `"parent": "none"` leaves a thing with the speed it was carried
+  at over the frame before, and a key with `throw` gives it the speed
+  that brings it to an object, the camera or a point, after the seconds
+  it says or those of the throw that takes the least speed, aimed at
+  where a moving target will be. From there its place at any time is
+  its speed and gravity, so a frame still draws on its own. Where it
+  comes to rest is found once at build, frame by frame, as its lowest
+  point comes down on a solid that is not its own or its thrower's, or
+  on the ground; thrown to an object it is caught, a hold by that object
+  timed by the flight. The review says when each lands or is caught,
+  and doubts a throw over 30 m/s or one still in the air at the end.
   `Scene::render_outside` draws the scene from outside its shot
   (`Outside`: around, above, how near), toward the middle of a ball that
   holds the scene over its whole length, with the shot's camera, its
