@@ -206,6 +206,34 @@ pub(crate) fn blockout() -> Value {
         },
         "required": ["at"]
     });
+    let reach = json!({
+        "type": "object",
+        "description": "Brings it somewhere as the end of a limb: the part it rides and the part that one rides bend, as an arm or a leg does, to put it there, and follow as either moves. Give it to a hand (a small solid or a joint at the end of the forearm) or a foot: a hand on a door's handle, on a wheel, held out to shake; a foot on a pedal. Out of reach the limb goes straight toward it: pointing. It bends the way its pose has it bent",
+        "properties": {
+            "to": target("An object's name (put a joint on a thing where a hand goes, and name that), \"camera\", or a point [x, y, z]"),
+            "from": number("The second it is there from (default the start): it moves there over the moment before"),
+            "until": number("The second it lets go (default the end)")
+        },
+        "required": ["to"]
+    });
+    let step = json!({
+        "type": "object",
+        "description": "Makes it a foot that steps: as the thing it is part of travels, it stays where it lands while the body passes over it, then swings to its next landing, and the two parts above it (shin and thigh) bend as a leg. Feet don't slide, stride and pace follow the speed (a walk at 1.4 m/s, a run with both feet off the ground at 4), it stands still when the thing does, and it climbs what the thing is `on`. Give it to each foot, as {}, and no cycle to the legs",
+        "properties": {
+            "metres": number("The ground from one landing of this foot to its next, where the pace should not follow the speed: short for a shuffle, long for a bound"),
+            "shift": number("How far into a stride it starts, 0 to 1 (default: the feet of one thing take turns in the order written; give a four-legged gait its own)"),
+            "lift": number("How high it is lifted as it swings (default an eighth of the leg)")
+        }
+    });
+    let shake = json!({
+        "type": "object",
+        "description": "Unsteady motion that never repeats, on top of the keys and the cycle: an engine's rumble, a boat on a swell, a flag, someone who can't stand still",
+        "properties": {
+            "at": point("The most it adds to its place, metres either way"),
+            "rotate": point("The most it adds to its turn, degrees either way"),
+            "seconds": number("About how long one wobble takes (default 1): 0.1 rumbles, 3 sways")
+        }
+    });
     json!({
         "type": "object",
         "description": description,
@@ -234,6 +262,7 @@ pub(crate) fn blockout() -> Value {
                             "additionalProperties": { "type": "object" }
                         },
                         "size": point("Width, height, depth of a solid (default 1 1 1)"),
+                        "taper": number("How wide the top of a box, a cylinder or a capsule is against its base (default 1), inside the same `size`: 0.6 for a trunk, a lampshade, a plinth, a forearm that thins to the wrist standing up; over 1 it narrows downward: a cup, and a limb hung from its top (1.4 for a thigh)"),
                         "at": point("Where its anchor is, in the space of what it rides: y 0 stands a thing on the ground"),
                         "rotate": point("Degrees about X, Y and Z, about its anchor; Y turns it about the vertical"),
                         "anchor": one_of(&Anchor::NAMES, "The point of a solid `at` places and `rotate` turns about: the middle of its underside (base, the default), its middle, or the middle of its top"),
@@ -242,37 +271,12 @@ pub(crate) fn blockout() -> Value {
                         "on": string("What it stands on: \"ground\", or an object's name (a stage, a ramp, a table top, a lift). Its lowest point, with all that rides it, then rests on that surface wherever it is and whatever its limbs do, and the height in `at` is how far above that it is: 0 standing, more in a jump. Give it to whatever walks, and to what is set down on something"),
                         "face": target("What it turns to about the vertical, on top of `rotate`: \"path\" (the way it travels: give it to whatever walks, runs, rides or drives), \"camera\", an object's name, or a point [x, y, z]"),
                         "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
-                        "reach": {
-                            "type": "object",
-                            "description": "Brings it somewhere as the end of a limb: the part it rides and the part that one rides bend, as an arm or a leg does, to put it there, and follow as either moves. Give it to a hand (a small solid or a joint at the end of the forearm) or a foot: a hand on a door's handle, on a wheel, held out to shake; a foot on a pedal. Out of reach the limb goes straight toward it: pointing. It bends the way its pose has it bent",
-                            "properties": {
-                                "to": target("An object's name (put a joint on a thing where a hand goes, and name that), \"camera\", or a point [x, y, z]"),
-                                "from": number("The second it is there from (default the start): it moves there over the moment before"),
-                                "until": number("The second it lets go (default the end)")
-                            },
-                            "required": ["to"]
-                        },
-                        "step": {
-                            "type": "object",
-                            "description": "Makes it a foot that steps: as the thing it is part of travels, it stays where it lands while the body passes over it, then swings to its next landing, and the two parts above it (shin and thigh) bend as a leg. Feet don't slide, stride and pace follow the speed (a walk at 1.4 m/s, a run with both feet off the ground at 4), it stands still when the thing does, and it climbs what the thing is `on`. Give it to each foot, as {}, and no cycle to the legs",
-                            "properties": {
-                                "metres": number("The ground from one landing of this foot to its next, where the pace should not follow the speed: short for a shuffle, long for a bound"),
-                                "shift": number("How far into a stride it starts, 0 to 1 (default: the feet of one thing take turns in the order written; give a four-legged gait its own)"),
-                                "lift": number("How high it is lifted as it swings (default an eighth of the leg)")
-                            }
-                        },
+                        "reach": reach,
+                        "step": step,
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
                         "cycle": cycle,
-                        "shake": {
-                            "type": "object",
-                            "description": "Unsteady motion that never repeats, on top of the keys and the cycle: an engine's rumble, a boat on a swell, a flag, someone who can't stand still",
-                            "properties": {
-                                "at": point("The most it adds to its place, metres either way"),
-                                "rotate": point("The most it adds to its turn, degrees either way"),
-                                "seconds": number("About how long one wobble takes (default 1): 0.1 rumbles, 3 sways")
-                            }
-                        },
+                        "shake": shake,
                         "keys": keys
                     },
                     "required": ["name"]

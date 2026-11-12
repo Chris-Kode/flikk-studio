@@ -144,6 +144,11 @@ pub struct Object {
     /// left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f64; 3]>,
+    /// How wide the top of a box, a cylinder or a capsule is against its
+    /// base: under 1 it narrows upward, over 1 downward, inside the same
+    /// `size`. A limb, a trunk, a lampshade, a plinth.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub taper: f64,
     /// Where its anchor is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub at: [f64; 3],
@@ -828,6 +833,17 @@ impl Object {
             finite(&what, size)?;
             in_range(size);
         }
+        finite(&what, &[self.taper])?;
+        let narrows = matches!(
+            self.shape,
+            Some(Shape::Box | Shape::Cylinder | Shape::Capsule)
+        );
+        if self.taper != 1.0 && !narrows {
+            return Err(format!(
+                "{what} has a `taper`, which narrows a box, a cylinder or a capsule"
+            ));
+        }
+        self.taper = self.taper.clamp(0.02, 50.0);
         for key in &mut self.keys {
             finite(&what, &[key.t.unwrap_or(0.0), key.shade.unwrap_or(0.0)])?;
             for v in [&key.at, &key.rotate, &key.size].into_iter().flatten() {

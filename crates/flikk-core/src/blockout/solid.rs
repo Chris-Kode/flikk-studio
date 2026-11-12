@@ -13,6 +13,9 @@ pub(super) struct Solid {
     pub centre: Vec3,
     turn: Turn,
     half: Vec3,
+    /// How wide its base and its top are against `half`: one of them
+    /// narrowed, on a box, a cylinder or a capsule.
+    ends: (f32, f32),
     /// A sphere about `centre` holding it, for a quick miss.
     reach: f32,
     /// How much of the light on it it gives back, and the thing a viewer
@@ -36,10 +39,18 @@ impl Solid {
             centre: place.point(Vec3::new(0.0, above, 0.0)),
             turn: place.turn,
             half,
+            ends: (1.0, 1.0),
             reach: half.length(),
             tone: 0.0,
             owner: 0,
         }
+    }
+
+    /// It with its top `taper` times as wide as its base: the narrower
+    /// end drawn in, so it still fills the box of its size.
+    pub fn tapered(mut self, taper: f32) -> Self {
+        self.ends = ((1.0 / taper).min(1.0), taper.min(1.0));
+        self
     }
 
     /// Its lowest point: where it would touch a floor.
@@ -68,8 +79,14 @@ impl Solid {
             [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
                 .map(|(x, z)| Vec3::new(x * h.x, y, z * h.z))
         };
+        let (low, high) = self.ends;
         let own = match self.shape {
-            Shape::Box => Vec3::new(sign(d.x) * h.x, sign(d.y) * h.y, sign(d.z) * h.z),
+            Shape::Box => {
+                let corner = |wide: f32, y: f32| {
+                    Vec3::new(sign(d.x) * h.x * wide, y, sign(d.z) * h.z * wide)
+                };
+                furthest(&[corner(low, -h.y), corner(high, h.y)])
+            }
             Shape::Sphere => {
                 let far = Vec3::new(h.x * d.x, h.y * d.y, h.z * d.z)
                     .length()
@@ -78,15 +95,21 @@ impl Solid {
             }
             Shape::Cylinder => {
                 let (x, z) = rim(h.x, h.z);
-                Vec3::new(x, sign(d.y) * h.y, z)
+                furthest(&[
+                    Vec3::new(x * low, -h.y, z * low),
+                    Vec3::new(x * high, h.y, z * high),
+                ])
             }
             Shape::Cone => {
                 let (x, z) = rim(h.x, h.z);
                 furthest(&[Vec3::new(0.0, h.y, 0.0), Vec3::new(x, -h.y, z)])
             }
             Shape::Capsule => {
-                let radius = h.x.min(h.z).min(h.y);
-                Vec3::new(0.0, sign(d.y) * (h.y - radius), 0.0) + d * radius
+                let balls = Balls::of(h, self.ends);
+                furthest(&[
+                    Vec3::new(0.0, balls.low.0, 0.0) + d * balls.low.1,
+                    Vec3::new(0.0, balls.high.0, 0.0) + d * balls.high.1,
+                ])
             }
             Shape::Dome => {
                 let (x, z) = rim(h.x, h.z);
@@ -154,11 +177,12 @@ impl Solid {
         );
         let h = self.half;
         let (t, normal) = match self.shape {
-            Shape::Box => hit_box(o, d, h),
+            Shape::Box if self.ends == (1.0, 1.0) => hit_box(o, d, h),
+            Shape::Box => hit_hull(o, d, &narrowed_box(h, self.ends)),
             Shape::Sphere => hit_ellipsoid(o, d, h),
-            Shape::Cylinder => hit_cylinder(o, d, h),
-            Shape::Cone => hit_cone(o, d, h),
-            Shape::Capsule => hit_capsule(o, d, h),
+            Shape::Cylinder => hit_frustum(o, d, h, self.ends),
+            Shape::Cone => hit_frustum(o, d, h, (1.0, 0.0)),
+            Shape::Capsule => hit_capsule(o, d, &Balls::of(h, self.ends)),
             Shape::Dome => hit_dome(o, d, h),
             Shape::Wedge | Shape::Roof | Shape::Pyramid => hit_hull(o, d, &faces(self.shape, h)),
         }?;
@@ -170,17 +194,22 @@ impl Solid {
         let p = self.turn.inward(point - self.centre);
         let h = self.half;
         let round = |x: f32, z: f32| (p.x / x) * (p.x / x) + (p.z / z) * (p.z / z);
+        // How wide a narrowed solid is at the point's height.
+        let (low, high) = self.ends;
+        let wide = low + (high - low) * ((p.y + h.y) / (2.0 * h.y)).clamp(0.0, 1.0);
         match self.shape {
-            Shape::Box => p.x.abs() <= h.x && p.y.abs() <= h.y && p.z.abs() <= h.z,
+            Shape::Box => p.x.abs() <= h.x * wide && p.y.abs() <= h.y && p.z.abs() <= h.z * wide,
             Shape::Sphere => round(h.x, h.z) + (p.y / h.y) * (p.y / h.y) <= 1.0,
-            Shape::Cylinder => p.y.abs() <= h.y && round(h.x, h.z) <= 1.0,
+            Shape::Cylinder => p.y.abs() <= h.y && round(h.x, h.z) <= wide * wide,
             Shape::Cone => {
                 let narrowed = (h.y - p.y) / (2.0 * h.y);
                 p.y.abs() <= h.y && round(h.x, h.z) <= narrowed * narrowed
             }
             Shape::Capsule => {
-                let radius = h.x.min(h.z).min(h.y);
-                let along = p.y.clamp(radius - h.y, h.y - radius);
+                let balls = Balls::of(h, self.ends);
+                let along = p.y.clamp(balls.low.0, balls.high.0);
+                let up = (along - balls.low.0) / (balls.high.0 - balls.low.0).max(1e-6);
+                let radius = balls.low.1 + (balls.high.1 - balls.low.1) * up;
                 (p - Vec3::new(0.0, along, 0.0)).length() <= radius
             }
             Shape::Dome => {
@@ -323,17 +352,53 @@ fn hit_dome(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
         .then_some((under, Vec3::new(0.0, -1.0, 0.0)))
 }
 
-fn hit_cylinder(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
+/// The six faces of a box of half size `h` whose base and top are
+/// `ends` as wide as it.
+fn narrowed_box(h: Vec3, (low, high): (f32, f32)) -> [Face; 6] {
+    let lean = low - high;
+    let (x, z) = (h.x * h.y * (low + high), h.z * h.y * (low + high));
+    [
+        base(h),
+        (Vec3::UP, h.y),
+        (Vec3::new(2.0 * h.y, lean * h.x, 0.0), x),
+        (Vec3::new(-2.0 * h.y, lean * h.x, 0.0), x),
+        (Vec3::new(0.0, lean * h.z, 2.0 * h.y), z),
+        (Vec3::new(0.0, lean * h.z, -2.0 * h.y), z),
+    ]
+}
+
+/// Where a ray comes in through the side of a round solid about the
+/// vertical whose radius is `wide` at the ray's start and `slope` more
+/// for each metre up: how far, at the nearer root of
+/// `a·t² + 2·b·t + c = 0` where the ray is going inward.
+fn into_side(a: f32, b: f32, c: f32) -> Option<f32> {
+    if a.abs() < 1e-9 {
+        // Along its slope: it meets the side once.
+        return (b < -1e-9).then(|| -c / (2.0 * b));
+    }
+    let disc = b * b - a * c;
+    (disc >= 0.0).then(|| (-b - disc.sqrt()) / a)
+}
+
+/// A cylinder of half size `half` whose base and top are `ends` as wide
+/// as it: a cone's top is nothing wide.
+fn hit_frustum(o: Vec3, d: Vec3, half: Vec3, (low, high): (f32, f32)) -> Option<(f32, Vec3)> {
     let (ox, oz, dx, dz) = (o.x / half.x, o.z / half.z, d.x / half.x, d.z / half.z);
-    let side = roots(
-        dx * dx + dz * dz,
-        ox * dx + oz * dz,
-        ox * ox + oz * oz - 1.0,
+    let slope = (high - low) / (2.0 * half.y);
+    let wide = low + slope * (o.y + half.y);
+    let side = into_side(
+        dx * dx + dz * dz - slope * slope * d.y * d.y,
+        ox * dx + oz * dz - wide * slope * d.y,
+        ox * ox + oz * oz - wide * wide,
     )
-    .map(|(t, _)| t)
     .filter(|t| *t > NEAR && (o.y + d.y * t).abs() <= half.y)
     .map(|t| {
-        let normal = Vec3::new((ox + dx * t) / half.x, 0.0, (oz + dz * t) / half.z);
+        let radius = wide + slope * d.y * t;
+        let normal = Vec3::new(
+            (ox + dx * t) / half.x,
+            -radius * slope,
+            (oz + dz * t) / half.z,
+        );
         (t, normal)
     });
     // The end it comes in through, if it comes in through one.
@@ -342,61 +407,69 @@ fn hit_cylinder(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
             let y = -half.y * d.y.signum();
             ((y - o.y) / d.y, Vec3::new(0.0, y.signum(), 0.0))
         })
-        .filter(|(t, _)| {
+        .filter(|(t, normal)| {
             let (x, z) = (ox + dx * t, oz + dz * t);
-            *t > NEAR && x * x + z * z <= 1.0
+            let radius = if normal.y > 0.0 { high } else { low };
+            *t > NEAR && x * x + z * z <= radius * radius
         });
     nearer(side, end)
 }
 
-fn hit_cone(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
-    let (ox, oz, dx, dz) = (o.x / half.x, o.z / half.z, d.x / half.x, d.z / half.z);
-    // Its radius is 1 at the base and 0 at the point: `k` a metre down.
-    let k = 1.0 / (2.0 * half.y);
-    let k2 = k * k;
-    let below = half.y - o.y;
-    let (a, b, c) = (
-        dx * dx + dz * dz - k2 * d.y * d.y,
-        ox * dx + oz * dz + k2 * below * d.y,
-        ox * ox + oz * oz - k2 * below * below,
-    );
-    let on_side = |t: &f32| *t > NEAR && (o.y + d.y * t).abs() <= half.y;
-    let side = match roots(a, b, c) {
-        Some((t0, t1)) => [t0, t1].into_iter().find(on_side),
-        // Along its slope: it meets the side once.
-        None if a.abs() < 1e-9 && b.abs() > 1e-9 => Some(-c / (2.0 * b)).filter(on_side),
-        None => None,
-    }
-    .map(|t| {
-        let (x, z) = (ox + dx * t, oz + dz * t);
-        let down = half.y - (o.y + d.y * t);
-        (t, Vec3::new(x / half.x, k2 * down, z / half.z))
-    });
-    let base = (d.y > 1e-9)
-        .then(|| ((-half.y - o.y) / d.y, Vec3::new(0.0, -1.0, 0.0)))
-        .filter(|(t, _)| {
-            let (x, z) = (ox + dx * t, oz + dz * t);
-            *t > NEAR && x * x + z * z <= 1.0
-        });
-    nearer(side, base)
+/// A capsule as the two balls at its ends, each how high its middle is
+/// and its radius, and the side that runs between them: from where it
+/// leaves the lower ball to where it meets the upper, each how high and
+/// how wide there.
+struct Balls {
+    low: (f32, f32),
+    high: (f32, f32),
+    side: ((f32, f32), (f32, f32)),
 }
 
-fn hit_capsule(o: Vec3, d: Vec3, half: Vec3) -> Option<(f32, Vec3)> {
-    let radius = half.x.min(half.z).min(half.y);
-    // Its spine runs from one ball's middle to the other's.
-    let reach = half.y - radius;
-    let side = roots(d.x * d.x + d.z * d.z, o.x * d.x + o.z * d.z, {
-        o.x * o.x + o.z * o.z - radius * radius
-    })
-    .map(|(t, _)| t)
-    .filter(|t| *t > NEAR && (o.y + d.y * t).abs() <= reach)
-    .map(|t| (t, Vec3::new(o.x + d.x * t, 0.0, o.z + d.z * t)));
-    let ball = |y: f32| {
+impl Balls {
+    /// Those of a capsule of half size `half`, its lower and upper ends
+    /// `ends` as wide as it.
+    fn of(half: Vec3, ends: (f32, f32)) -> Self {
+        let radius = half.x.min(half.z).min(half.y);
+        let (low, high) = (radius * ends.0, radius * ends.1);
+        let (from, to) = (low - half.y, half.y - high);
+        // The side leans in toward the smaller ball, and leaves each a
+        // little off its widest.
+        let lean = ((low - high) / (to - from).max(1e-6)).clamp(-0.99, 0.99);
+        let level = (1.0 - lean * lean).sqrt();
+        Self {
+            low: (from, low),
+            high: (to, high),
+            side: (
+                (from + low * lean, low * level),
+                (to + high * lean, high * level),
+            ),
+        }
+    }
+}
+
+fn hit_capsule(o: Vec3, d: Vec3, balls: &Balls) -> Option<(f32, Vec3)> {
+    let ((from, low), (to, high)) = balls.side;
+    let slope = (high - low) / (to - from).max(1e-6);
+    let wide = low + slope * (o.y - from);
+    let side = into_side(
+        d.x * d.x + d.z * d.z - slope * slope * d.y * d.y,
+        o.x * d.x + o.z * d.z - wide * slope * d.y,
+        o.x * o.x + o.z * o.z - wide * wide,
+    )
+    .filter(|t| *t > NEAR && (from..=to).contains(&(o.y + d.y * t)))
+    .map(|t| {
+        let radius = wide + slope * d.y * t;
+        (t, Vec3::new(o.x + d.x * t, -radius * slope, o.z + d.z * t))
+    });
+    // Each ball shows past its end of the side.
+    let ball = |(y, radius): (f32, f32)| {
         let from = Vec3::new(o.x, o.y - y, o.z);
         let (t, _) = roots(1.0, from.dot(d), from.dot(from) - radius * radius)?;
         (t > NEAR).then(|| (t, from + d * t))
     };
-    nearer(side, nearer(ball(reach), ball(-reach)))
+    let below = ball(balls.low).filter(|(t, _)| o.y + d.y * t <= from);
+    let above = ball(balls.high).filter(|(t, _)| o.y + d.y * t >= to);
+    nearer(side, nearer(below, above))
 }
 
 fn nearer<T>(a: Option<(f32, T)>, b: Option<(f32, T)>) -> Option<(f32, T)> {

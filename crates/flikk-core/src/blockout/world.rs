@@ -400,7 +400,8 @@ impl World {
                 part.object.anchor,
                 moment.places[index],
                 moment.sizes[index],
-            );
+            )
+            .tapered(part.object.taper as f32);
             solid.tone = to_light(part.moves.shade(t) as f32);
             solid.owner = part.thing as u16;
             solids.push(solid);

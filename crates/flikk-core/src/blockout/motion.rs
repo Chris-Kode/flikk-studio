@@ -924,6 +924,7 @@ impl Scene {
             place,
             size,
         )
+        .tapered(object.taper as f32)
     }
 
     /// How part `index`, standing at `place`, is turned at `t` once its
