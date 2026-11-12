@@ -91,6 +91,11 @@ pub struct Scene {
     /// Ground that rises and falls, in place of a level floor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hills: Option<Hills>,
+    /// How strongly things fall once a key lets them go or throws them,
+    /// against the Earth's pull: 1 unless said, 0 in space. An object
+    /// can say its own.
+    #[serde(skip_serializing_if = "is_one")]
+    pub gravity: f64,
     /// Where the light comes from: degrees around the vertical (0 from
     /// +Z, 90 from +X) and degrees above the horizon.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +144,8 @@ struct Written {
     ground: bool,
     #[serde(default)]
     hills: Option<Hills>,
+    #[serde(default = "one", deserialize_with = "strength")]
+    gravity: f64,
     #[serde(default)]
     sun: Option<[f64; 2]>,
 }
@@ -223,15 +230,16 @@ pub struct Object {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<Step>,
     /// How strongly it falls once a key lets it go or throws it, against
-    /// the Earth's pull: 1 unless said. At 0 it floats, as a thing in
-    /// space or one that hovers: it goes on as it was going, or stays
-    /// where it was let go at rest. Under 0 it rises. `false` is 0.
+    /// the Earth's pull, where that is not as the scene's `gravity` has
+    /// it. At 0 it floats, as a thing in space or one that hovers: it
+    /// goes on as it was going, or stays where it was let go at rest.
+    /// Under 0 it rises. `false` is 0 and `true` 1.
     #[serde(
-        default = "one",
-        deserialize_with = "strength",
-        skip_serializing_if = "is_one"
+        default,
+        deserialize_with = "strength_said",
+        skip_serializing_if = "Option::is_none"
     )]
-    pub gravity: f64,
+    pub gravity: Option<f64>,
     /// Many of it, laid out: each is this object over again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<Repeat>,
@@ -729,18 +737,33 @@ fn is_one(value: &f64) -> bool {
 
 /// How strong something is, said as a number or as whether it is there
 /// at all.
-fn strength<'de, D: serde::Deserializer<'de>>(said: D) -> Result<f64, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Said {
-        Whether(bool),
-        Much(f64),
-    }
-    Ok(match Said::deserialize(said)? {
-        Said::Whether(there) => f64::from(u8::from(there)),
-        Said::Much(much) => much,
-    })
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Strength {
+    Whether(bool),
+    Much(f64),
 }
+
+impl Strength {
+    fn as_number(self) -> f64 {
+        match self {
+            Self::Whether(there) => f64::from(u8::from(there)),
+            Self::Much(much) => much,
+        }
+    }
+}
+
+fn strength<'de, D: serde::Deserializer<'de>>(said: D) -> Result<f64, D::Error> {
+    Strength::deserialize(said).map(Strength::as_number)
+}
+
+/// A strength where one is said.
+fn strength_said<'de, D: serde::Deserializer<'de>>(said: D) -> Result<Option<f64>, D::Error> {
+    Ok(Option::<Strength>::deserialize(said)?.map(Strength::as_number))
+}
+
+/// The most gravity pulls, or pushes, against the Earth's.
+const GRAVITY_RANGE: f64 = 5.0;
 
 /// The grey of a solid that gives none.
 const MID_GREY: f64 = 0.62;
@@ -790,6 +813,7 @@ impl TryFrom<Written> for Scene {
             cuts,
             ground,
             hills,
+            gravity,
             sun,
         } = written;
         let mut scene = Self {
@@ -801,6 +825,7 @@ impl TryFrom<Written> for Scene {
             cuts,
             ground,
             hills,
+            gravity,
             sun,
             parts: Vec::new(),
             order: Vec::new(),
@@ -824,6 +849,8 @@ impl TryFrom<Written> for Scene {
         if let Some(hills) = scene.hills.as_mut() {
             hills.settle()?;
         }
+        finite("`gravity`", &[scene.gravity])?;
+        scene.gravity = scene.gravity.clamp(-GRAVITY_RANGE, GRAVITY_RANGE);
         // Hills are the ground's: there are none in the air.
         let hills = scene.hills.as_ref().filter(|_| scene.ground);
         scene.land = hills.map(|hills| std::sync::Arc::new(Land::of(hills)));
@@ -908,7 +935,6 @@ impl Object {
             parent,
             scale: 1.0,
             taper: 1.0,
-            gravity: 1.0,
             ..Self::default()
         }
     }
@@ -938,8 +964,8 @@ impl Object {
                 "{what} is `cut` out of something, so it is a solid: give it a `shape`"
             ));
         }
-        finite(&what, &[self.taper, self.gravity])?;
-        self.gravity = self.gravity.clamp(-5.0, 5.0);
+        finite(&what, &[self.taper, self.gravity.unwrap_or(0.0)])?;
+        self.gravity = (self.gravity).map(|pull| pull.clamp(-GRAVITY_RANGE, GRAVITY_RANGE));
         let narrows = matches!(
             self.shape,
             Some(Shape::Box | Shape::Cylinder | Shape::Capsule)

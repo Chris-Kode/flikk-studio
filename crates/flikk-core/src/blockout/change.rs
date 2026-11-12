@@ -71,10 +71,10 @@ impl Scene {
                         }
                     }
                 }
-                ("duration" | "ground" | "hills" | "sun" | "cuts", Value::Null) => {
+                ("duration" | "ground" | "hills" | "gravity" | "sun" | "cuts", Value::Null) => {
                     scene.remove(field);
                 }
-                ("duration" | "ground" | "hills" | "sun" | "cuts", value) => {
+                ("duration" | "ground" | "hills" | "gravity" | "sun" | "cuts", value) => {
                     scene.insert(field.clone(), value.clone());
                 }
                 ("models" | "camera" | "cameras", _) => {
@@ -85,7 +85,7 @@ impl Scene {
                 _ => {
                     return Err(format!(
                         "blockout: `changes` can hold objects, models, camera, cameras, cuts, \
-                         duration, ground, hills and sun, not `{field}`"
+                         duration, ground, hills, gravity and sun, not `{field}`"
                     ));
                 }
             }

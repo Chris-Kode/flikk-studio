@@ -82,7 +82,7 @@ An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"w
 
 /// How a change to a blockout is written (`Scene::changed`): what its
 /// writer is told, whoever it is.
-pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ, and `cameras` each camera's by name (a new name adds one, null removes one); `cuts`, `duration`, `ground`, `hills` and `sun` are given as they should be.";
+pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ, and `cameras` each camera's by name (a new name adds one, null removes one); `cuts`, `duration`, `ground`, `hills`, `gravity` and `sun` are given as they should be.";
 
 /// How a video's prompt is written: what its writer is told, whoever it
 /// is. Video models follow a short brief (roles, the clip in a sentence,
@@ -283,6 +283,7 @@ pub(crate) fn blockout() -> Value {
                 },
                 "required": ["height"]
             },
+            "gravity": { "type": ["number", "boolean"], "description": "How strongly things fall once a key lets them go or throws them, against the Earth's pull (default 1): 0 or false in space or under water, where they go on in a straight line or stay where they are let go; 0.17 on the Moon. An object's own `gravity` says otherwise for that object" },
             "sun": numbers(2, "Where the light comes from: degrees around the vertical (0 from +Z, 90 from +X) and above the horizon (default 47, 55). Low for long shadows; behind the subject for a backlit shot"),
             "models": {
                 "type": "object",
@@ -317,7 +318,7 @@ pub(crate) fn blockout() -> Value {
                         "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
                         "reach": reach,
                         "step": step,
-                        "gravity": { "type": ["number", "boolean"], "description": "How strongly it falls once a key lets it go or throws it, against the Earth's pull (default 1). 0 or false for what floats: a thing in space, a balloon, a drone that hovers; it then goes on in a straight line as it was going, stays where it was let go at rest, and a throw sends it straight. 0.17 on the Moon, below 0 for what rises" },
+                        "gravity": { "type": ["number", "boolean"], "description": "How strongly this one falls once a key lets it go or throws it, where that is not as the scene's `gravity` has it. 0 or false for what floats: a balloon, a drone that hovers; it then goes on in a straight line as it was going, stays where it was let go at rest, and a throw sends it straight. Below 0 for what rises, and 1 or true for what does fall in a scene without gravity" },
                         "repeat": repeat,
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),

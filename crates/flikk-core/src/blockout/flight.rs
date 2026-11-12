@@ -68,7 +68,8 @@ impl Scene {
             .rev()
             .find_map(|before| before.at.and(before.by))
             .map(|by| self.parts[by].thing);
-        let pull = GRAVITY * self.parts[part].object.gravity as f32;
+        // Its own pull, or the scene's.
+        let pull = GRAVITY * self.parts[part].object.gravity.unwrap_or(self.gravity) as f32;
         let launch = |to: &AimAt, seconds: Option<f64>| self.launch((from, pull), t, to, seconds);
         let mut flight = Flight {
             from,
