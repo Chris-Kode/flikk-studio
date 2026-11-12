@@ -745,7 +745,7 @@ enum Strength {
 }
 
 impl Strength {
-    fn as_number(self) -> f64 {
+    fn into_number(self) -> f64 {
         match self {
             Self::Whether(there) => f64::from(u8::from(there)),
             Self::Much(much) => much,
@@ -754,12 +754,12 @@ impl Strength {
 }
 
 fn strength<'de, D: serde::Deserializer<'de>>(said: D) -> Result<f64, D::Error> {
-    Strength::deserialize(said).map(Strength::as_number)
+    Strength::deserialize(said).map(Strength::into_number)
 }
 
 /// A strength where one is said.
 fn strength_said<'de, D: serde::Deserializer<'de>>(said: D) -> Result<Option<f64>, D::Error> {
-    Ok(Option::<Strength>::deserialize(said)?.map(Strength::as_number))
+    Ok(Option::<Strength>::deserialize(said)?.map(Strength::into_number))
 }
 
 /// The most gravity pulls, or pushes, against the Earth's.
