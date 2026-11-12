@@ -2,9 +2,9 @@
 //! looks like a mistake. Whoever writes a scene as JSON can't watch it
 //! play; this is read instead.
 
+use super::Scene;
 use super::space::Vec3;
 use super::world::World;
-use super::{Scene, Target};
 
 /// The most moments described, and the most objects named at each.
 const MOMENTS: usize = 6;
@@ -105,7 +105,7 @@ impl Scene {
         };
         for (i, t) in moments.iter().enumerate() {
             let world = World::of(self, *t, size[0], size[1]);
-            let sights = self.sights(&world, size);
+            let sights = self.sights(&world, *t, size);
             note(&sights);
             tread(&world, *t);
             review.seen.push(self.line(*t, &sights));
@@ -127,7 +127,7 @@ impl Scene {
         for step in 1..8 {
             let t = self.duration * step as f64 / 8.0;
             let world = World::of(self, t, size[0], size[1]);
-            note(&self.sights(&world, size));
+            note(&self.sights(&world, t, size));
             tread(&world, t);
         }
         for (index, off) in off_ground.iter().enumerate() {
@@ -177,7 +177,7 @@ impl Scene {
 
     /// How each thing a viewer would name shows at `t`: what stands by
     /// itself, and each copy of a model, not their parts.
-    fn sights(&self, world: &World, size: [u32; 2]) -> Vec<Sight> {
+    fn sights(&self, world: &World, t: f64, size: [u32; 2]) -> Vec<Sight> {
         let (wide, high) = (size[0] as f32, size[1] as f32);
         // What a spread of rays through the picture meets: a thing too
         // large or too far to one side for its spots still shows.
@@ -243,10 +243,7 @@ impl Scene {
         // What the camera looks at first, then what was built of parts
         // (the shot's characters and things), then the plain set; the
         // larger first among each.
-        let looked_at = match &self.camera.look_at {
-            Target::Object(name) => self.find(name).map(|found| self.parts[found].thing),
-            Target::Point(_) => None,
-        };
+        let looked_at = self.subject(t).map(|found| self.parts[found].thing);
         let rank = |sight: &Sight| match self.parts[sight.index].object.shape {
             _ if Some(sight.index) == looked_at => 2,
             None => 1,
@@ -296,10 +293,9 @@ impl Scene {
     /// What is wrong with the opening picture: the object the camera
     /// looks at should be in it.
     fn start_doubt(&self, sights: &[Sight]) -> Option<String> {
-        let Target::Object(name) = &self.camera.look_at else {
-            return None;
-        };
-        let index = self.parts[self.find(name)?].thing;
+        let subject = self.subject(0.0)?;
+        let name = &self.parts[subject].object.name;
+        let index = self.parts[subject].thing;
         match sights.iter().find(|s| s.index == index) {
             Some(sight) if sight.clear > 0 => None,
             Some(Sight {
@@ -342,8 +338,8 @@ impl Scene {
         if !unseen.is_empty() {
             notes.push(format!("Never in the picture: {}.", unseen.join(", ")));
         }
-        if let Target::Object(name) = &self.camera.look_at
-            && let Some(index) = self.find(name).map(|found| self.parts[found].thing)
+        if let Some(subject) = self.subject(0.0)
+            && let (name, index) = (&self.parts[subject].object.name, self.parts[subject].thing)
             && ever[index]
             && largest[index] < 0.04
         {
@@ -386,11 +382,32 @@ impl Scene {
                 ));
             }
         }
-        if let Some(late) = late(self.camera.keys.iter().map(|k| k.t), self.duration) {
+        let main = std::iter::once(("The camera".to_owned(), &self.camera));
+        let others =
+            (self.cameras.iter()).map(|(name, camera)| (format!("Camera `{name}`"), camera));
+        for (what, camera) in main.chain(others) {
+            if let Some(late) = late(camera.keys.iter().map(|k| k.t), self.duration) {
+                notes.push(format!(
+                    "{what} has a key at {late:.1} s, after the end at {:.1} s: it is never \
+                     reached.",
+                    self.duration
+                ));
+            }
+        }
+        if let Some(late) = self.cuts.iter().find(|cut| cut.t > self.duration + 1e-6) {
             notes.push(format!(
-                "The camera has a key at {late:.1} s, after the end at {:.1} s: it is never \
-                 reached.",
-                self.duration
+                "The cut to `{}` at {:.1} s is after the end at {:.1} s: it is never reached.",
+                late.camera, late.t, self.duration
+            ));
+        }
+        let cut_to: Vec<&str> = self.cuts.iter().map(|cut| cut.camera.as_str()).collect();
+        for name in self
+            .cameras
+            .keys()
+            .filter(|name| !cut_to.contains(&name.as_str()))
+        {
+            notes.push(format!(
+                "Camera `{name}` is never cut to: give it a place in `cuts`."
             ));
         }
     }

@@ -5,9 +5,9 @@
 //! part's keys move it, the order parts are placed in, the box each thing
 //! fills, the ground each has covered) is worked out once.
 
-use super::motion::{CameraMoves, Moves, Track};
+use super::motion::{Moves, Rig, Track};
 use super::space::Vec3;
-use super::{Anchor, CAMERA, FPS, GROUND, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
+use super::{Anchor, CAMERA, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
 use std::collections::{HashMap, VecDeque};
 
 /// How deep a model may hold copies of models.
@@ -165,13 +165,29 @@ impl Scene {
                 parts[whole].travelled = travelled(&parts[whole].moves.places, self.duration);
             }
         }
-        self.mount = match &self.camera.parent {
-            Some(parent) => Some(place(parent).ok_or_else(|| {
-                format!("the camera rides `{parent}`, which is no object's name")
-            })?),
-            None => None,
+        let rig = |camera, what: &str| Rig::of(camera, what, self.duration, place);
+        let mut rigs = vec![rig(&self.camera, "the camera")?];
+        for (name, camera) in &self.cameras {
+            rigs.push(rig(camera, &format!("camera `{name}`"))?);
+        }
+        let named = |name: &str| match name {
+            MAIN => Some(0),
+            name => self
+                .cameras
+                .keys()
+                .position(|other| other == name)
+                .map(|i| i + 1),
         };
-        self.camera_moves = CameraMoves::of(&self.camera, self.duration);
+        let mut live = Vec::with_capacity(self.cuts.len());
+        for cut in &self.cuts {
+            let Some(rig) = named(&cut.camera) else {
+                return Err(format!(
+                    "a cut goes to camera `{}`, which is none of `cameras` or `{MAIN}`",
+                    cut.camera
+                ));
+            };
+            live.push((cut.t, rig));
+        }
         for index in 0..parts.len() {
             let Some(stood_on) = &parts[index].object.on else {
                 continue;
@@ -196,9 +212,11 @@ impl Scene {
                 solids: solids_of(&parts, index),
             });
         }
-        let (order, loops) = placing_order(&parts, self.mount);
+        let mounts: Vec<usize> = rigs.iter().filter_map(|rig| rig.mount).collect();
+        let (order, loops) = placing_order(&parts, &mounts);
         self.rough = loops || parts.iter().any(|part| part.rest.is_some());
         self.order = order;
+        (self.rigs, self.live) = (rigs, live);
         self.parts = parts;
         self.bound_joints();
         Ok(())
@@ -414,13 +432,13 @@ fn solids_of(parts: &[Part], whole: usize) -> Vec<usize> {
 
 /// The order parts are placed in at a moment: each after what it rides,
 /// and after what it faces and stands on, unless that goes round in a
-/// loop; whether some did. `mount` is the part the camera rides, which
+/// loop; whether some did. `mounts` are the parts cameras ride, which
 /// whatever faces the camera is placed after.
-fn placing_order(parts: &[Part], mount: Option<usize>) -> (Vec<usize>, bool) {
+fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
     let faced = |part: &Part| match part.facing {
-        Facing::Part(faced) => Some(faced),
-        Facing::Camera => mount,
-        Facing::Nothing | Facing::Path | Facing::Point(_) => None,
+        Facing::Part(faced) => vec![faced],
+        Facing::Camera => mounts.to_vec(),
+        Facing::Nothing | Facing::Path | Facing::Point(_) => Vec::new(),
     };
     let mut waits = vec![0usize; parts.len()];
     let mut waited_on: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];

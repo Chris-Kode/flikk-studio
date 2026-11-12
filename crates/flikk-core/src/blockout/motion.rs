@@ -5,7 +5,10 @@
 use super::build::{Facing, Part};
 use super::solid::Solid;
 use super::space::{Place, Turn, Vec3, smoothstep};
-use super::{Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Shape, Target};
+use super::{
+    Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, NORMAL_FOV, Object, Scene, Shape, Target, finite,
+    wide,
+};
 
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
@@ -601,8 +604,9 @@ impl Scene {
             Facing::Point(point) => toward(Vec3::of(point)),
             Facing::Path => heading(&part.moves.places, t),
             Facing::Camera => {
-                let mount = self.mount.map_or(Place::ORIGIN, &stands);
-                toward(mount.point(self.camera_at(t)))
+                let rig = self.rig(t);
+                let mount = rig.mount.map_or(Place::ORIGIN, &stands);
+                toward(mount.point(rig.at(t)))
             }
             Facing::Part(faced) if faced == index => None,
             Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
@@ -652,17 +656,27 @@ impl Scene {
         place.point(Vec3::of(std::array::from_fn(|c| (low[c] + high[c]) * 0.5)))
     }
 
-    /// Where the camera's keys have it at `t`, in the space of what it
-    /// rides.
-    fn camera_at(&self, t: f64) -> Vec3 {
-        Vec3::of(self.camera_moves.places.at(t))
+    /// The camera the picture is from at `t`.
+    fn rig(&self, t: f64) -> &Rig {
+        let cut_to = self.live.iter().take_while(|(at, _)| *at <= t).last();
+        &self.rigs[cut_to.map_or(0, |(_, rig)| *rig)]
     }
 
-    /// When the camera cuts to a new set-up.
+    /// When the picture cuts: to another camera, or one camera to a new
+    /// set-up.
     pub(super) fn cuts(&self) -> impl Iterator<Item = f64> + '_ {
-        let keys = self.camera_moves.times.iter().zip(&self.camera.keys);
-        keys.filter(|(_, key)| key.ease == Ease::Cut)
-            .map(|(t, _)| *t)
+        let own = self.rigs.iter().flat_map(|rig| rig.cuts.iter().copied());
+        own.chain(self.live.iter().map(|(t, _)| *t))
+    }
+
+    /// The object the camera looks at at `t`, when it looks at one.
+    pub(super) fn subject(&self, t: f64) -> Option<usize> {
+        let rig = self.rig(t);
+        let aimed = rig.aims.iter().take_while(|(at, ..)| *at <= t).last();
+        match aimed.map_or(rig.aim, |(_, aim, _)| *aim) {
+            Aim::Part(part) => Some(part),
+            Aim::Point(_) => None,
+        }
     }
 
     /// Everything at `t`: where each part stands, and what the camera
@@ -720,32 +734,90 @@ pub(super) struct Moment {
     pub view: View,
 }
 
-/// How the camera's keys move it, worked out once when the scene is
-/// built. What it looks at is found each frame: it may be moving.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct CameraMoves {
+/// A camera as it is worked with: how its keys move it and what it
+/// looks at and rides, names swapped for places among the parts, worked
+/// out once when the scene is built.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Rig {
     places: Track,
     fovs: Track,
     rolls: Track,
-    /// When each of its keys is reached.
-    times: Vec<f64>,
+    /// What it looks at, and what its keys have it look at later. Where
+    /// that is, is found each frame: it may be moving.
+    aim: Aim,
+    aims: Vec<(f64, Aim, Ease)>,
+    /// When its keys cut to a new set-up.
+    cuts: Vec<f64>,
+    /// How much a hand holds it, and what tells its shake from another's.
+    shake: f32,
+    seed: u32,
+    /// The part it rides.
+    pub mount: Option<usize>,
 }
 
-impl CameraMoves {
-    pub fn of(camera: &Camera, duration: f64) -> Self {
+/// What a camera looks at: a point, in the space of what it rides, or a
+/// part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Aim {
+    Point([f64; 3]),
+    Part(usize),
+}
+
+impl Rig {
+    /// `camera`, called `what`, in a scene of `duration` seconds; `part`
+    /// says where an object is among the parts by its name. Refused when
+    /// it names an object there is none of.
+    pub fn of(
+        camera: &Camera,
+        what: &str,
+        duration: f64,
+        part: impl Fn(&str) -> Option<usize>,
+    ) -> Result<Self, String> {
         let keys = &camera.keys;
         let given: Vec<_> = keys.iter().map(|key| (key.t, key.at)).collect();
         let times = key_times(camera.at, &given, duration);
         let timed = || times.iter().copied().zip(keys);
         let places = timed().filter_map(|(t, k)| Some((t, k.at?, k.ease)));
-        let fovs = timed().filter_map(|(t, k)| Some((t, k.fov?, k.ease)));
+        let fovs = timed().filter_map(|(t, k)| Some((t, wide(k.lens, k.fov)?, k.ease)));
         let rolls = timed().filter_map(|(t, k)| Some((t, k.roll?, k.ease)));
-        Self {
+        let aim = |target: &Target| match target {
+            Target::Point(point) => {
+                finite(&format!("{what}'s `look_at`"), point)?;
+                Ok(Aim::Point(*point))
+            }
+            Target::Object(name) => (part(name).map(Aim::Part))
+                .ok_or_else(|| format!("{what} looks at `{name}`, which is no object's name")),
+        };
+        let aims = timed()
+            .filter_map(|(t, k)| Some((t, k.look_at.as_ref()?, k.ease)))
+            .map(|(t, target, ease)| Ok((t, aim(target)?, ease)))
+            .collect::<Result<_, String>>()?;
+        let mount = match &camera.parent {
+            Some(parent) => Some(
+                part(parent)
+                    .ok_or_else(|| format!("{what} rides `{parent}`, which is no object's name"))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
             places: Track::new(camera.at, places),
-            fovs: Track::of_number(camera.fov, fovs),
+            fovs: Track::of_number(wide(camera.lens, camera.fov).unwrap_or(NORMAL_FOV), fovs),
             rolls: Track::of_number(camera.roll, rolls),
-            times,
-        }
+            aim: aim(&camera.look_at)?,
+            aims,
+            cuts: timed()
+                .filter(|(_, k)| k.ease == Ease::Cut)
+                .map(|(t, _)| t)
+                .collect(),
+            shake: camera.shake as f32,
+            seed: what.bytes().fold(0, |seed, byte| mixed(seed ^ byte as u32)) & 0xfff0,
+            mount,
+        })
+    }
+
+    /// Where its keys have it at `t`, in the space of what it rides.
+    fn at(&self, t: f64) -> Vec3 {
+        Vec3::of(self.places.at(t))
     }
 }
 
@@ -763,26 +835,22 @@ pub(super) struct View {
 impl Scene {
     /// What the camera sees at `t`, the parts standing at `places`.
     fn view(&self, t: f64, places: &[Place]) -> View {
-        let camera = &self.camera;
-        let mount = self.mount.map_or(Place::ORIGIN, |part| places[part]);
+        let rig = self.rig(t);
+        let mount = rig.mount.map_or(Place::ORIGIN, |part| places[part]);
         // Each target is where it is now, so a camera between two objects
         // follows both as they move.
-        let point = |target: &Target| match target {
-            Target::Point(p) => mount.point(Vec3::of(*p)),
-            Target::Object(name) => {
-                (self.find(name)).map_or(Vec3::ZERO, |i| self.middle(i, places[i]))
-            }
+        let point = |aim: &Aim| match aim {
+            Aim::Point(point) => mount.point(Vec3::of(*point)),
+            Aim::Part(part) => self.middle(*part, places[*part]),
         };
         let in_f64 = |v: Vec3| [v.x as f64, v.y as f64, v.z as f64];
-        let moves = &self.camera_moves;
-        let targets = (moves.times.iter().zip(&camera.keys))
-            .filter_map(|(at, k)| Some((*at, in_f64(point(k.look_at.as_ref()?)), k.ease)));
-        let target = Track::new(in_f64(point(&camera.look_at)), targets).at(t);
-        let fov = (moves.fovs.at(t)[0] as f32).clamp(5.0, 140.0);
-        let shake = Handheld::of(camera.shake as f32, t as f32);
-        let roll = (moves.rolls.at(t)[0] as f32 + shake.roll).to_radians();
+        let targets = (rig.aims.iter()).map(|(at, aim, ease)| (*at, in_f64(point(aim)), *ease));
+        let target = Track::new(in_f64(point(&rig.aim)), targets).at(t);
+        let fov = (rig.fovs.at(t)[0] as f32).clamp(5.0, 140.0);
+        let shake = Handheld::of(rig.shake, t as f32, rig.seed);
+        let roll = (rig.rolls.at(t)[0] as f32 + shake.roll).to_radians();
 
-        let eye = mount.point(self.camera_at(t));
+        let eye = mount.point(rig.at(t));
         let level = mount.turn.y;
         let ahead = (Vec3::of(target) - eye).unit_or(-Vec3::AHEAD);
         // Looking straight up or down, any level direction is to the right.
@@ -816,10 +884,14 @@ struct Handheld {
 }
 
 impl Handheld {
-    fn of(amount: f32, t: f32) -> Self {
+    /// What a hand holding it `amount` does at `t`; `seed` tells one
+    /// camera's from another's.
+    fn of(amount: f32, t: f32, seed: u32) -> Self {
         // The drift of a held camera: a wobble every second and a half
         // or so, with quicker ones in it.
-        let moved = |seed: u32, most: f32| amount * most * wander(t as f64 * 0.65, seed) as f32;
+        let moved = |channel: u32, most: f32| {
+            amount * most * wander(t as f64 * 0.65, seed + channel) as f32
+        };
         Self {
             pan: moved(1, 0.036),
             tilt: moved(2, 0.03),

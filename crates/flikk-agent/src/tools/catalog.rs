@@ -78,7 +78,7 @@ An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"w
 
 /// How a change to a blockout is written (`Scene::changed`): what its
 /// writer is told, whoever it is.
-pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ; `duration`, `ground` and `sun` are given as they should be.";
+pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ, and `cameras` each camera's by name (a new name adds one, null removes one); `cuts`, `duration`, `ground` and `sun` are given as they should be.";
 
 /// How a video's prompt is written: what its writer is told, whoever it
 /// is. Video models follow a short brief (roles, the clip in a sentence,
@@ -161,7 +161,8 @@ pub(crate) fn blockout() -> Value {
         "properties": {
             "at": point("Where it is; 1.6 high is eye level"),
             "look_at": target("A point [x, y, z], or an object's name, which it then follows"),
-            "fov": number("Degrees across the longer side: 74 is a 24 mm lens, 54 a 35 mm (the default), 40 a 50 mm, 24 an 85 mm"),
+            "lens": number("Its lens in millimetres, as on a film camera: 18 very wide, 24 wide, 35 (the default) and 50 as an eye sees, 85 a portrait, 135 and up long and flat"),
+            "fov": number("Or how wide it sees in degrees across the longer side, in place of `lens`"),
             "roll": number("Degrees it is rolled: a Dutch angle"),
             "shake": number("How much a hand holds it, 0 (locked off, the default) to 1 (running with it)"),
             "parent": string("The object it rides: `at`, and a point it looks at, are then in that object's own space: a dashboard, a shoulder, a chase behind a car"),
@@ -174,7 +175,8 @@ pub(crate) fn blockout() -> Value {
                         "t": number(when),
                         "at": point("Where it is then"),
                         "look_at": target("What it looks at then"),
-                        "fov": number("Its field of view then"),
+                        "lens": number("Its lens then: a zoom"),
+                        "fov": number("Or its field of view then"),
                         "roll": number("Its roll then"),
                         "ease": ease(arrives)
                     }
@@ -235,7 +237,24 @@ pub(crate) fn blockout() -> Value {
                     "required": ["name"]
                 }
             },
-            "camera": camera
+            "camera": camera,
+            "cameras": {
+                "type": "object",
+                "description": "More cameras, by name, each written as `camera` is, for a shot that cuts between set-ups (a wide, a close-up, over a shoulder). Each goes on moving whether or not the picture is its own",
+                "additionalProperties": { "type": "object" }
+            },
+            "cuts": {
+                "type": "array",
+                "description": "When the picture goes over to another camera: the shot opens on `camera`, called \"main\"",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "t": number("Seconds"),
+                        "camera": string("The camera cut to, by name, or \"main\"")
+                    },
+                    "required": ["t", "camera"]
+                }
+            }
         },
         "required": ["camera"]
     })

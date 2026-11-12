@@ -38,7 +38,7 @@ pub use render::Detail;
 pub use review::Review;
 
 use build::Part;
-use motion::CameraMoves;
+use motion::Rig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -62,7 +62,15 @@ pub struct Scene {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, Vec<Object>>,
     pub objects: Vec<Object>,
+    /// The camera the shot opens on: `main` to a cut.
     pub camera: Camera,
+    /// Other cameras, by name. Each goes on moving whether or not the
+    /// picture is its own.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub cameras: BTreeMap<String, Camera>,
+    /// When the picture goes over to another camera.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cuts: Vec<Cut>,
     /// A floor at `y = 0`; off for a scene in the air or in space.
     #[serde(skip_serializing_if = "is_true")]
     pub ground: bool,
@@ -81,11 +89,12 @@ pub struct Scene {
     /// a loop, or stand on something.
     #[serde(skip)]
     rough: bool,
-    /// The part the camera rides, and how its keys move it.
+    /// The cameras as they are worked with, the one the shot opens on
+    /// first, and which of them the picture is from each cut on.
     #[serde(skip)]
-    mount: Option<usize>,
+    rigs: Vec<Rig>,
     #[serde(skip)]
-    camera_moves: CameraMoves,
+    live: Vec<(f64, usize)>,
 }
 
 /// A scene as its JSON has it, before it is checked and built.
@@ -98,6 +107,10 @@ struct Written {
     #[serde(default)]
     objects: Vec<Object>,
     camera: Camera,
+    #[serde(default)]
+    cameras: BTreeMap<String, Camera>,
+    #[serde(default)]
+    cuts: Vec<Cut>,
     #[serde(default = "yes")]
     ground: bool,
     #[serde(default)]
@@ -313,16 +326,22 @@ impl Anchor {
     }
 }
 
-/// The camera: where it is, what it looks at and how wide it sees.
+/// A camera: where it is, what it looks at and how wide it sees.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Camera {
     pub at: [f64; 3],
     pub look_at: Target,
-    /// Degrees across the frame's longer side: 74 is a 24 mm lens, 54 a
-    /// 35 mm, 40 a 50 mm, 24 an 85 mm.
-    #[serde(default = "normal_fov")]
-    pub fov: f64,
+    /// How wide it sees, as the lens of a film camera in millimetres (on
+    /// a frame 36 mm along its longer side): 24 is wide, 35 and 50 as an
+    /// eye sees, 85 and up long. Or give `fov`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<f64>,
+    /// Or in degrees across the frame's longer side: 74 is a 24 mm lens,
+    /// 54 a 35 mm, 40 a 50 mm, 24 an 85 mm. A 35 mm lens when neither is
+    /// given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov: Option<f64>,
     /// Degrees it is rolled clockwise: a Dutch angle.
     #[serde(default, skip_serializing_if = "is_nothing")]
     pub roll: f64,
@@ -352,12 +371,25 @@ pub struct CameraKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look_at: Option<Target>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fov: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roll: Option<f64>,
     /// How the move to this key is timed; [`Ease::Cut`] is a cut to it.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
+}
+
+/// The picture going over to another camera.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cut {
+    /// When, in seconds.
+    pub t: f64,
+    /// The camera it goes to, by name: `main` is the one the shot opens
+    /// on.
+    pub camera: String,
 }
 
 /// What a camera looks at, or an object faces: a point, or an object by
@@ -434,9 +466,10 @@ fn is_one(value: &f64) -> bool {
 /// The grey of a solid that gives none.
 const MID_GREY: f64 = 0.62;
 
-fn normal_fov() -> f64 {
-    54.0
-}
+/// The field of view of a camera that gives none: a 35 mm lens.
+const NORMAL_FOV: f64 = 54.4;
+/// The name of the camera the shot opens on.
+const MAIN: &str = "main";
 
 /// What an object can face that is no object: the way it travels, and
 /// the camera.
@@ -457,11 +490,6 @@ impl Scene {
     pub fn frames(&self) -> u32 {
         ((self.duration * FPS as f64).round() as u32).max(1)
     }
-
-    /// Where the part called `name` is among the parts drawn.
-    fn find(&self, name: &str) -> Option<usize> {
-        self.parts.iter().position(|part| part.object.name == name)
-    }
 }
 
 impl TryFrom<Written> for Scene {
@@ -475,6 +503,8 @@ impl TryFrom<Written> for Scene {
             models,
             objects,
             camera,
+            cameras,
+            cuts,
             ground,
             sun,
         } = written;
@@ -483,13 +513,15 @@ impl TryFrom<Written> for Scene {
             models,
             objects,
             camera,
+            cameras,
+            cuts,
             ground,
             sun,
             parts: Vec::new(),
             order: Vec::new(),
             rough: false,
-            mount: None,
-            camera_moves: CameraMoves::default(),
+            rigs: Vec::new(),
+            live: Vec::new(),
         };
         if !scene.duration.is_finite() || scene.duration <= 0.0 {
             return Err("`duration` is in seconds, more than 0".into());
@@ -509,21 +541,20 @@ impl TryFrom<Written> for Scene {
         for object in written {
             object.settle()?;
         }
-        scene.camera.settle()?;
-        scene.build()?;
-        let targets = std::iter::once(&scene.camera.look_at)
-            .chain(scene.camera.keys.iter().filter_map(|k| k.look_at.as_ref()));
-        for target in targets {
-            match target {
-                Target::Point(p) => finite("the camera's `look_at`", p)?,
-                Target::Object(name) if scene.find(name).is_none() => {
-                    return Err(format!(
-                        "the camera looks at `{name}`, which is no object's name"
-                    ));
-                }
-                Target::Object(_) => {}
+        scene.camera.settle("the camera")?;
+        for (name, camera) in &mut scene.cameras {
+            if name == MAIN {
+                return Err(format!(
+                    "`{MAIN}` is the camera the shot opens on: give the others names of their own"
+                ));
             }
+            camera.settle(&format!("camera `{name}`"))?;
         }
+        for cut in &scene.cuts {
+            finite("a cut", &[cut.t])?;
+        }
+        scene.cuts.sort_by(|a, b| a.t.total_cmp(&b.t));
+        scene.build()?;
         Ok(scene)
     }
 }
@@ -647,19 +678,40 @@ impl Cycle {
 }
 
 impl Camera {
-    fn settle(&mut self) -> Result<(), String> {
-        let what = "the camera";
+    fn settle(&mut self, what: &str) -> Result<(), String> {
         finite(what, &self.at)?;
-        finite(what, &[self.fov, self.roll, self.shake])?;
-        self.fov = self.fov.clamp(5.0, 140.0);
+        finite(what, &[self.roll, self.shake])?;
         self.shake = self.shake.clamp(0.0, 1.0);
+        in_range_wide(what, &mut self.lens, &mut self.fov)?;
         for key in &mut self.keys {
-            let numbers = [key.t, key.fov, key.roll].map(|n| n.unwrap_or(0.0));
+            let numbers = [key.t, key.roll].map(|n| n.unwrap_or(0.0));
             finite(what, &numbers)?;
             finite(what, &key.at.unwrap_or_default())?;
-            key.fov = key.fov.map(|f| f.clamp(5.0, 140.0));
+            in_range_wide(what, &mut key.lens, &mut key.fov)?;
         }
         in_order(&mut self.keys, what, |key| (key.t, key.at.is_some()))?;
         Ok(())
     }
+}
+
+/// Bring the `lens` or the `fov` a camera gives into range; it gives one
+/// or neither.
+fn in_range_wide(what: &str, lens: &mut Option<f64>, fov: &mut Option<f64>) -> Result<(), String> {
+    finite(what, &[lens.unwrap_or(0.0), fov.unwrap_or(0.0)])?;
+    if lens.is_some() && fov.is_some() {
+        return Err(format!(
+            "{what} gives a `lens` and a `fov`: one says the other"
+        ));
+    }
+    *lens = lens.map(|lens| lens.clamp(6.0, 400.0));
+    *fov = fov.map(|fov| fov.clamp(5.0, 140.0));
+    Ok(())
+}
+
+/// Degrees a camera sees across the frame's longer side, from the `lens`
+/// or the `fov` it gives; `None` when it gives neither.
+fn wide(lens: Option<f64>, fov: Option<f64>) -> Option<f64> {
+    // A frame 36 mm along its longer side.
+    let through = lens.map(|lens| 2.0 * (18.0 / lens).atan().to_degrees());
+    through.or(fov).map(|fov| fov.clamp(5.0, 140.0))
 }
