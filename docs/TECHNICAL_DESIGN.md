@@ -1425,32 +1425,74 @@ on the UI thread and run it off it:
   `models` and is placed with `model`; a copy can be scaled and shaded,
   and its `parts` give, by part name, the fields that replace the
   model's (another pose, no walk). `build.rs` writes every copy out into
-  `Part`s named `copy/part`, swaps names for places in the list, gives
-  each joint the box its parts fill, and tabulates the ground each
-  moving thing has covered; `motion.rs` poses each part at a time. An
-  object may also face something about the vertical (`face`: the way it
-  travels, the camera, an object or a point), keep spinning, and come
-  and go (`hidden`). The camera has a place, a `look_at` point or
+  `Part`s named `copy/part`, swaps names for places in the list, works
+  out how each part's keys move it (`motion::Moves`) and the order parts
+  are placed in, gives each joint the box its parts fill, and tabulates
+  the ground each moving thing has covered. An object may also face
+  something about the vertical (`face`: the way it travels, the camera,
+  an object or a point), keep spinning, come and go (`hidden`), shake
+  without repeating (`shake`: metres and degrees either way, and about
+  how long a wobble takes), and say what it stands on (`on`: the ground
+  or an object by name). The camera has a place, a `look_at` point or
   object, a field of view, a roll, a hand-held `shake`, and may ride an
-  object. Places follow a smooth path through their keys
-  (`motion::Track`: a Hermite curve that rests on a held key),
-  everything else goes straight from key to key, each arriving with an
-  ease: linear, in, out,
-  in-out, `back`, `bounce`, or `cut`, which holds and then jumps (a
-  camera's cut to another set-up). `Scene::render` draws a frame on the
-  CPU, one ray a pixel against the solids, with one light, a shadow,
-  metre tiles on the ground and haze. A ray from the camera tries only
-  the solids listed for its 16 px tile of the picture, and a ray toward
-  the light only those listed for its cell of a grid across the light
-  (`render::Cells`); rays any other way go through a tree of boxes
-  (`render::Solids`). All three are rebuilt each frame. `Detail::Full`
-  also darkens flat surfaces where another is close (five short rays
-  for every fourth pixel that has a solid near, shared with the pixels
-  around it on the same surface; on round solids so few rays show as
-  stripes) and draws edges again from four rays, where `Detail::Draft`
-  is what plays. With no GPU and no model, a 1280×720 frame of a market
-  street of forty-odd objects takes about 40 ms as a draft and 105 ms in
-  full on four cores, and its 8 s clip about 20 s to write.
+  object.
+  Everything keys move follows a smooth curve through them
+  (`motion::Track`), place, turn, size, grey, and the camera's field of
+  view, roll and what it looks at: where a value turns back or rests it
+  stops, between stops its pace changes least from key to key (a
+  tridiagonal solve, as Blender's animation curves place their handles),
+  and each pace is held within three times the straight one either
+  side, so the curve never goes past a key. Two keys give a straight
+  move. An ease times one stretch of the curve (linear, in, out, in-out,
+  `back`, `bounce`) and `cut` holds and then jumps, ending one curve and
+  starting the next (a camera's cut to another set-up). A key with a
+  place and no time is passed on the way: `motion::key_times` spreads
+  such keys by the ground between them, between the timed keys either
+  side, so an orbit or a route is a list of places. Angles are taken as
+  written (a wheel turns from 0 to 360); the review says when a turn of
+  270 degrees or more stops short of a whole one. Shake, the camera's
+  and an object's, is fractal noise: smooth noise at three rates, each
+  twice as quick and half as strong as the last, seeded for an object
+  by its name.
+  At a time, `Scene::moment` places every part once, in the order built
+  (`build::placing_order`): each after what it rides, and after what it
+  faces and stands on. Where that goes round in a loop (two people
+  facing each other) the part placed first turns to where the other
+  stands before anything faces, which a first, rough pass gives. A part
+  with `on` is set down: its solids are put where its limbs have them,
+  the lowest point of them is found (`Solid::lowest`) and a ray is cast
+  down from over it onto the solids of what it stands on, the ground
+  where it meets none, so a walker's feet stay on a ramp or a stage and
+  the height written is how far above that it is. `solid.rs` has the
+  solids: where a ray meets each and its lowest point.
+  `world::World` is the scene at a moment as rays meet it: the solids
+  where they stand, a ray from the camera trying only those listed for
+  its 16 px tile of the picture, a ray toward the sun only those listed
+  for its cell of a grid across the light (`world::Cells`, each solid's
+  cells widened by as far as a ray toward the sun's edge strays), and
+  rays any other way a tree of boxes (`world::Solids`). All three are
+  rebuilt each frame. `Scene::render` (`render.rs`) makes the picture on
+  the CPU: one ray a pixel, lit by the sun, the sky from above, the
+  ground from below and a fill from across the sun that reaches round
+  what turns from it, with metre tiles on the ground and haze. Light is
+  worked out as light and turned into screen greys at the end, pixels
+  between two greys scattered so gradients show no steps. Every picture
+  has lines, from which solid each pixel shows: darker than both sides,
+  a pixel wide on the side away from the camera, strong round a thing
+  and light between its parts, and a solid's own edges a little lighter
+  where they stick out. `Detail::Full` also softens shadows (one ray a
+  pixel toward a spot on the sun's disc, seven more where the pixels
+  around disagree, evened out over 5 px on the same surface), darkens
+  surfaces where the picture shows another close (eight looks along a
+  spiral within 0.7 m at every fourth pixel, shared with the pixels
+  around on the same surface, round solids too), and draws pixels an
+  edge runs through again from four rays, the line taking the share of
+  the pixel the nearer solid leaves and the rest of its width in the
+  pixel outside. `Detail::Draft` is what plays. The values kept a pixel
+  on the way (about 50 bytes in full) stay allocated from one picture to
+  the next (`render::Sheets`). With no GPU and no model, a 1280×720
+  frame of the demo shot takes about 36 ms as a draft and 85 ms in full
+  on four cores.
   `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
   1280 px on the longer side. `Scene::review` says a scene in words for
   a writer that can't watch it: what the camera sees at the start, the
@@ -1459,7 +1501,8 @@ on the UI thread and run it off it:
   and from a spread of rays through the picture), what looks like a
   mistake a viewer would see (`doubts`: the subject out of the opening
   picture, a camera inside an object or under the ground, a walker
-  going sideways) and what could be tidied (`notes`: a thing never in
+  going sideways or with its feet off the ground and no `on`, a turn
+  the long way round) and what could be tidied (`notes`: a thing never in
   the picture, a key after the end). A thing is what a viewer would
   name: what stands by itself, and each copy, not their parts.
   `preview_blockout` (the Generate group, a read) gives the agent that

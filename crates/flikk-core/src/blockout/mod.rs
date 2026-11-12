@@ -15,8 +15,9 @@
 //! ([`Cycle`]): by the clock, or by the ground covered, so that feet and
 //! wheels keep up with it. A thing built once is a model, placed as many
 //! times as the shot needs, each copy free to differ. `build` writes the
-//! copies out into the parts that are drawn, and `motion` says where each
-//! is at a time.
+//! copies out into the parts that are drawn, `motion` says where each is
+//! at a time, `world` is the scene at that time as rays meet it, and
+//! `render` makes the picture.
 //!
 //! Space is in metres: X to the right, Y up, the ground at `y = 0`. An
 //! object's `at` is the middle of its base unless it says otherwise, so

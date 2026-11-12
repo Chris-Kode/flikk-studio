@@ -250,7 +250,9 @@ const CRAFT: &str = "Write it as a director blocks a shot. Design the characters
     shot is about yourself, as models of a few solids with joints where they bend, and give them \
     the motion the description asks for: a gait of their own by the ground they cover, a gesture \
     in keys, a breath or a sway by the clock. Give whatever travels `\"face\": \"path\"` and keys \
-    for where it goes and when (a walk is about 1.4 m/s, a run 3 to 6). Build the set too: the \
+    for where it goes and when (a walk is about 1.4 m/s, a run 3 to 6), and whatever walks \
+    `\"on\": \"ground\"` (or what it walks on), which keeps its feet on it. A route is a list of \
+    places: keys with `at` and no `t` are passed at an even pace. Build the set too: the \
     walls, the street, the furniture the action touches or the camera passes, enough for depth \
     and for the move to read against, in shades that tell the subject from the set: characters \
     light (0.75 or more) so their limbs read, the set darker. Time the beats with keys, ease the \
