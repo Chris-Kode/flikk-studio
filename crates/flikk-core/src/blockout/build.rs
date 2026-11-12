@@ -312,7 +312,7 @@ impl Scene {
     /// Give each joint and copy the box that holds what rides it as the
     /// scene starts, in its own space.
     fn bound_joints(&mut self) {
-        let places = self.stand(0.0).0;
+        let places = self.stand(0.0).places;
         let mut boxes: Vec<Option<(Vec3, Vec3)>> = vec![None; self.parts.len()];
         for (index, part) in self.parts.iter().enumerate() {
             if part.object.shape.is_none() {

@@ -537,27 +537,17 @@ impl Scene {
     }
 
     /// Where every part stands at `t`, and its size then.
-    pub(super) fn stand(&self, t: f64) -> (Vec<Place>, Vec<Vec3>) {
+    pub(super) fn stand(&self, t: f64) -> Standing {
         // Parts that face one another go round in a loop: there, the one
         // placed first turns to where the other is before anything faces.
         // And what stands on something is set down as its limbs are.
-        let rough = match self.rough {
-            true => Some(self.stand_given(t, None)),
-            false => None,
-        };
-        self.stand_given(t, Some(rough.as_ref()))
+        let rough = self.rough.then(|| self.stand_as(t, Placing::Roughly));
+        self.stand_as(t, Placing::Fully(rough.as_ref()))
     }
 
     /// Every part's place and size at `t`, each placed after what it
-    /// rides. Given `rough` (the places and sizes without it, where a
-    /// scene needs those), each also turns to what it faces and comes to
-    /// rest on what it stands on: where that stands already, else where
-    /// `rough` has it. Given nothing, nothing faces or rests.
-    fn stand_given(
-        &self,
-        t: f64,
-        rough: Option<Option<&(Vec<Place>, Vec<Vec3>)>>,
-    ) -> (Vec<Place>, Vec<Vec3>) {
+    /// rides.
+    fn stand_as(&self, t: f64, placing: Placing) -> Standing {
         let count = self.parts.len();
         let mut places = vec![Place::ORIGIN; count];
         let mut sizes = vec![Vec3::ZERO; count];
@@ -566,67 +556,93 @@ impl Scene {
             let part = &self.parts[index];
             let rides = part.parent.map_or(Place::ORIGIN, |parent| places[parent]);
             let pose = self.pose(index, t);
-            let at = Vec3::of(pose.at);
-            let mut rotate = pose.rotate;
             let mut place = rides.then(Place {
-                at,
-                turn: Turn::of(rotate),
+                at: Vec3::of(pose.at),
+                turn: Turn::of(pose.rotate),
             });
-            if let Some(rough) = rough {
+            if let Placing::Fully(rough) = placing {
                 let stands = |other: usize| match (placed[other], rough) {
-                    (false, Some(rough)) => rough.0[other],
+                    (false, Some(rough)) => rough.places[other],
                     _ => places[other],
                 };
-                // Toward a point of the scene, as a turn in the space it
-                // stands in.
-                let toward = |point: Vec3| {
-                    let way = rides.turn.inward(point - rides.point(at));
-                    (way.x.hypot(way.z) > 1e-5).then(|| (way.x.atan2(way.z) as f64).to_degrees())
-                };
-                let faced = match part.facing {
-                    Facing::Nothing => None,
-                    Facing::Point(point) => toward(Vec3::of(point)),
-                    Facing::Path => heading(&part.moves.places, t),
-                    Facing::Camera => {
-                        let mount = self.mount.map_or(Place::ORIGIN, stands);
-                        toward(mount.point(self.camera_at(t)))
-                    }
-                    Facing::Part(faced) if faced == index => None,
-                    Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
-                };
-                rotate[1] += faced.unwrap_or(0.0);
-                place = rides.then(Place {
-                    at,
-                    turn: Turn::of(rotate),
-                });
-                if let (Some(rest), Some(rough)) = (&part.rest, rough) {
-                    // Its own solids ride it as they did in the rough.
-                    let solid = |of: usize, place: Place, size: Vec3| {
-                        let object = &self.parts[of].object;
-                        let shape = object.shape.unwrap_or(Shape::Box);
-                        Solid::standing(shape, object.anchor, place, size)
-                    };
-                    let own = (rest.solids.iter())
-                        .filter(|of| !self.hidden(**of, t))
-                        .map(|of| {
-                            let rode = rough.0[index].holds(rough.0[*of]);
-                            solid(*of, place.then(rode), rough.1[*of]).lowest()
-                        });
-                    let lowest = own.reduce(|a, b| if b.y < a.y { b } else { a });
-                    if let Some(lowest) = lowest {
-                        let surface = (rest.surface.iter())
-                            .filter(|of| !self.hidden(**of, t))
-                            .map(|of| solid(*of, stands(*of), rough.1[*of]));
-                        let floor = top_under(surface, lowest);
-                        place.at.y += floor + pose.at[1] as f32 - lowest.y;
-                    }
+                let mut rotate = pose.rotate;
+                rotate[1] += self.turn_to_face(index, t, place.at, rides, stands);
+                place.turn = rides.turn.then(Turn::of(rotate));
+                if let Some(rough) = rough {
+                    place.at.y += self.lift(index, t, (place, pose.at[1] as f32), rough, stands);
                 }
             }
             places[index] = place;
             sizes[index] = Vec3::of(pose.size);
             placed[index] = true;
         }
-        (places, sizes)
+        Standing { places, sizes }
+    }
+
+    /// Degrees part `index`, at `at` on what stands at `rides`, turns
+    /// about the vertical to what it faces at `t`; `stands` says where
+    /// another part is.
+    fn turn_to_face(
+        &self,
+        index: usize,
+        t: f64,
+        at: Vec3,
+        rides: Place,
+        stands: impl Fn(usize) -> Place,
+    ) -> f64 {
+        let part = &self.parts[index];
+        // Toward a point of the scene, as a turn in the space it stands in.
+        let toward = |point: Vec3| {
+            let way = rides.turn.inward(point - at);
+            (way.x.hypot(way.z) > 1e-5).then(|| (way.x.atan2(way.z) as f64).to_degrees())
+        };
+        let faced = match part.facing {
+            Facing::Nothing => None,
+            Facing::Point(point) => toward(Vec3::of(point)),
+            Facing::Path => heading(&part.moves.places, t),
+            Facing::Camera => {
+                let mount = self.mount.map_or(Place::ORIGIN, &stands);
+                toward(mount.point(self.camera_at(t)))
+            }
+            Facing::Part(faced) if faced == index => None,
+            Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
+        };
+        faced.unwrap_or(0.0)
+    }
+
+    /// How far up part `index` is to go at `t` to rest on what it stands
+    /// on: nothing when it says nothing of that. `stood` is where it
+    /// stands and the height it was written at, how far over the surface
+    /// its lowest point then is. `rough` has its solids as its limbs hold
+    /// them, and `stands` says where another part is.
+    fn lift(
+        &self,
+        index: usize,
+        t: f64,
+        stood: (Place, f32),
+        rough: &Standing,
+        stands: impl Fn(usize) -> Place,
+    ) -> f32 {
+        let Some(rest) = &self.parts[index].rest else {
+            return 0.0;
+        };
+        let (place, height) = stood;
+        let solid = |of: usize, place: Place| {
+            let object = &self.parts[of].object;
+            let shape = object.shape.unwrap_or(Shape::Box);
+            Solid::standing(shape, object.anchor, place, rough.sizes[of])
+        };
+        let there = |of: &&usize| !self.hidden(**of, t);
+        // Its own solids ride it as they did in the rough.
+        let own = rest.solids.iter().filter(there).map(|of| {
+            let rode = rough.places[index].holds(rough.places[*of]);
+            solid(*of, place.then(rode)).lowest()
+        });
+        let Some(lowest) = own.reduce(|a, b| if b.y < a.y { b } else { a }) else {
+            return 0.0;
+        };
+        let surface = (rest.surface.iter().filter(there)).map(|of| solid(*of, stands(*of)));
+        top_under(surface, lowest) + height - lowest.y
     }
 
     /// The middle of part `index` standing at `place`: what a camera
@@ -652,7 +668,7 @@ impl Scene {
     /// Everything at `t`: where each part stands, and what the camera
     /// sees.
     pub(super) fn moment(&self, t: f64) -> Moment {
-        let (places, sizes) = self.stand(t);
+        let Standing { places, sizes } = self.stand(t);
         let gone = (0..self.parts.len()).map(|i| self.hidden(i, t)).collect();
         let view = self.view(t, &places);
         Moment {
@@ -674,6 +690,24 @@ fn top_under(surface: impl Iterator<Item = Solid>, point: Vec3) -> f32 {
         .map(|(down, _)| from.y - down)
         .reduce(f32::max)
         .unwrap_or(0.0)
+}
+
+/// Where every part stands at a moment, and its size.
+pub(super) struct Standing {
+    pub places: Vec<Place>,
+    pub sizes: Vec<Vec3>,
+}
+
+/// How parts are placed.
+#[derive(Clone, Copy)]
+enum Placing<'a> {
+    /// Each where its keys, its cycle and what it rides have it: nothing
+    /// faces or rests.
+    Roughly,
+    /// Each also turned to what it faces and set down on what it stands
+    /// on: found where that stands already, else where the rough places,
+    /// worked out first in a scene that needs them, have it.
+    Fully(Option<&'a Standing>),
 }
 
 /// A scene at one moment.
