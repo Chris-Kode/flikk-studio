@@ -5,7 +5,7 @@
 //! part's keys move it, the order parts are placed in, the box each thing
 //! fills, the ground each has covered) is worked out once.
 
-use super::motion::{Moves, Rig, Track};
+use super::motion::{Moves, Rig, Track, rest_place};
 use super::space::Vec3;
 use super::{
     AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, Object, PATH, Scene,
@@ -47,6 +47,9 @@ pub(super) struct Part {
     /// Metres its keys have moved it over the ground by each frame; empty
     /// when no motion asks.
     pub travelled: Vec<f32>,
+    /// The strides its feet that step have taken by each frame; empty
+    /// when it has none.
+    pub strides: Vec<f32>,
 }
 
 /// What a part turns to about the vertical.
@@ -89,6 +92,34 @@ pub(super) enum Goal {
         from: Option<f64>,
         until: Option<f64>,
     },
+    /// To where a foot that steps is.
+    Step(Stepping),
+}
+
+/// How a foot steps.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Stepping {
+    /// The thing that travels: what the foot is part of.
+    pub root: usize,
+    /// The strides it has taken by each frame, and how far into one it
+    /// starts.
+    pub strides: Vec<f32>,
+    pub shift: f64,
+    /// How long its leg is, and how high it is lifted as it swings.
+    pub leg: f32,
+    pub lift: f32,
+    /// Where it stands under that thing, to its right and ahead of it.
+    pub rest: (f32, f32),
+}
+
+impl Limb {
+    /// How its end steps, when it is a foot that does.
+    pub fn steps(&self) -> Option<&Stepping> {
+        match &self.goal {
+            Goal::Step(stepping) => Some(stepping),
+            Goal::Reach { .. } => None,
+        }
+    }
 }
 
 /// What a part stands on, and what of it could touch that.
@@ -98,6 +129,8 @@ pub(super) struct Rest {
     pub surface: Vec<usize>,
     /// Its own solids: itself and all that rides it.
     pub solids: Vec<usize>,
+    /// The upper parts of its legs that step.
+    pub legs: Vec<usize>,
 }
 
 /// An object written out, with the copy of a model it is in and whether
@@ -202,6 +235,7 @@ impl Scene {
                 moves,
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
+                strides: Vec::new(),
             });
         }
         for index in 0..parts.len() {
@@ -304,15 +338,91 @@ impl Scene {
             parts[index].rest = Some(Rest {
                 surface,
                 solids: solids_of(&parts, index),
+                legs: Vec::new(),
             });
         }
+        self.hang_legs(&mut parts)?;
         let mounts: Vec<usize> = rigs.iter().filter_map(|rig| rig.mount).collect();
+        let in_step = |part: &Part| {
+            let paced = part
+                .object
+                .cycle
+                .as_ref()
+                .is_some_and(|cycle| cycle.strides.is_some());
+            paced && parts[part.whole].strides.is_empty()
+        };
+        if let Some(part) = parts.iter().find(|part| in_step(part)) {
+            return Err(format!(
+                "`{}` has a `cycle` by `strides`, and nothing of `{}` steps: give its feet `step`",
+                part.object.name, parts[part.whole].object.name
+            ));
+        }
         let (order, loops) = placing_order(&parts, &mounts);
-        self.rough = loops || parts.iter().any(|part| part.rest.is_some());
+        let stepping = |part: &Part| matches!(&part.limb, Some(limb) if limb.steps().is_some());
+        self.rough = loops
+            || parts
+                .iter()
+                .any(|part| part.rest.is_some() || stepping(part));
         self.order = order;
         (self.rigs, self.live) = (rigs, live);
         self.parts = parts;
         self.bound_joints();
+        Ok(())
+    }
+
+    /// Give each leg whose foot steps its limb: how long a stride is and
+    /// which foot goes first, where they don't say, and where the foot
+    /// stands under the thing it is part of.
+    fn hang_legs(&self, parts: &mut [Part]) -> Result<(), String> {
+        let feet: Vec<usize> = (0..parts.len())
+            .filter(|part| parts[*part].object.step.is_some())
+            .collect();
+        for &end in &feet {
+            let root = parts[end].whole;
+            let Some(step) = parts[end].object.step.clone() else {
+                continue;
+            };
+            if root == end {
+                return Err(format!(
+                    "`{}` steps, so it is part of a thing that travels: a foot of a model, or \
+                     riding what does the travelling",
+                    parts[end].object.name
+                ));
+            }
+            let above = |part: usize| parts[part].parent.unwrap_or(part);
+            let (lower, upper) = (above(end), above(above(end)));
+            let stands = |part: usize| rest_place(parts, part, root).at;
+            let (foot, knee, hip) = (stands(end), stands(lower), stands(upper));
+            let leg = ((knee - hip).length() + (foot - knee).length()) as f64;
+            // The feet of one thing take turns, in the order written.
+            let beside: Vec<usize> = (feet.iter().copied())
+                .filter(|other| parts[*other].whole == root)
+                .collect();
+            let turn = beside.iter().position(|other| *other == end).unwrap_or(0);
+            if parts[root].travelled.is_empty() {
+                parts[root].travelled = travelled(&parts[root].moves.places, self.duration);
+            }
+            let taken = strides(&parts[root].travelled, step.metres, leg);
+            if parts[root].strides.is_empty() {
+                parts[root].strides = taken.clone();
+            }
+            let limb = Limb {
+                lower,
+                end,
+                goal: Goal::Step(Stepping {
+                    root,
+                    strides: taken,
+                    shift: step.shift.unwrap_or(turn as f64 / beside.len() as f64),
+                    leg: leg as f32,
+                    lift: step.lift.map_or(leg as f32 * 0.12, |lift| lift as f32),
+                    rest: (foot.x, foot.z),
+                }),
+            };
+            hang_limb(parts, limb)?;
+            if let Some(rest) = parts[root].rest.as_mut() {
+                rest.legs.push(upper);
+            }
+        }
         Ok(())
     }
 
@@ -374,6 +484,12 @@ impl Scene {
         }
         if let Some(shake) = out.shake.as_mut() {
             grow(&mut shake.at);
+        }
+        if let Some(step) = out.step.as_mut() {
+            step.metres
+                .iter_mut()
+                .chain(&mut step.lift)
+                .for_each(|n| *n *= scale);
         }
         out.shade = object
             .shape
@@ -564,9 +680,15 @@ fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
             Facing::Camera => mounts.to_vec(),
             Facing::Nothing | Facing::Path | Facing::Point(_) => Vec::new(),
         };
-        let reached = part.limb.iter().map(|limb| match &limb.goal {
-            Goal::Reach { to, .. } => to,
+        let reached = part.limb.iter().filter_map(|limb| match &limb.goal {
+            Goal::Reach { to, .. } => Some(to),
+            Goal::Step(_) => None,
         });
+        // A leg that steps comes down on what its thing stands on.
+        let trodden = (part.limb.iter())
+            .filter_map(|limb| parts[limb.steps()?.root].rest.as_ref())
+            .flat_map(|rest| rest.surface.iter().copied());
+        faced.extend(trodden);
         for aim in part.aims.iter().map(|(_, aim, _)| aim).chain(reached) {
             match aim {
                 AimAt::Part(aimed) => faced.push(*aimed),
@@ -615,6 +737,29 @@ fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
         }
     }
     (order, loops)
+}
+
+/// The strides a leg `leg` metres long has taken by each frame, the
+/// thing it carries having `travelled` so far by each. A stride is
+/// `metres` when given. Else it is as long as legs of that length take at
+/// the speed: longer the faster, as Alexander measured of animals from
+/// their tracks (2.3 leg lengths times the 0.3rd power of speed squared
+/// over gravity and the leg's length): 1.3 m at a walk, 2.4 m at a run.
+fn strides(travelled: &[f32], metres: Option<f64>, leg: f64) -> Vec<f32> {
+    let mut taken = 0.0;
+    let mut strides = Vec::with_capacity(travelled.len());
+    strides.push(0.0);
+    for pair in travelled.windows(2) {
+        let covered = (pair[1] - pair[0]) as f64;
+        let speed = covered * FPS as f64;
+        let stride = metres.unwrap_or_else(|| {
+            let froude = speed * speed / (9.81 * leg.max(1e-3));
+            (2.3 * leg * froude.powf(0.3)).max(0.4 * leg)
+        });
+        taken += covered / stride.max(0.02);
+        strides.push(taken as f32);
+    }
+    strides
 }
 
 /// Metres the keys of `places` have moved a thing over the ground by each

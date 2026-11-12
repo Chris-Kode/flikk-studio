@@ -181,6 +181,16 @@ impl Turn {
         Vec3::new(self.x.dot(v), self.y.dot(v), self.z.dot(v))
     }
 
+    /// `other`, a turn of the space it stands in, in its own axes: what
+    /// [`Turn::then`] gives `other` back from.
+    pub fn inward_turn(&self, other: Turn) -> Turn {
+        Turn {
+            x: self.inward(other.x),
+            y: self.inward(other.y),
+            z: self.inward(other.z),
+        }
+    }
+
     /// `inner`, a turn in its axes, in the space it stands in.
     pub fn then(&self, inner: Turn) -> Turn {
         Turn {
@@ -220,14 +230,9 @@ impl Place {
     /// `other`, a place of the space it stands in, in its own axes: what
     /// [`Place::then`] gives `other` back from.
     pub fn holds(&self, other: Place) -> Place {
-        let inward = |v: Vec3| self.turn.inward(v);
         Place {
-            at: inward(other.at - self.at),
-            turn: Turn {
-                x: inward(other.turn.x),
-                y: inward(other.turn.y),
-                z: inward(other.turn.z),
-            },
+            at: self.turn.inward(other.at - self.at),
+            turn: self.turn.inward_turn(other.turn),
         }
     }
 }

@@ -2,7 +2,7 @@
 //! cycle adds to them, and everything's place at one moment with what it
 //! rides and faces ([`Moment`]), the camera's view with it.
 
-use super::build::{AimAt, Facing, Goal, Limb, Part};
+use super::build::{AimAt, Facing, Goal, Limb, Part, Stepping};
 use super::solid::Solid;
 use super::space::{Place, Turn, Vec3, smoothstep};
 use super::{
@@ -14,6 +14,10 @@ use std::f32::consts::PI;
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
 const TURN: f64 = 0.6;
+/// The ground a foot that steps stays down over, in leg lengths, and the
+/// share of a leg's full length it is stretched to before the body sinks.
+const STANCE: f32 = 0.75;
+const LEG_REACH: f32 = 0.985;
 /// Seconds a limb takes to bring its end to what it reaches, and back.
 const REACH_TIME: f64 = 0.35;
 /// As far as an aim turns a thing from the way it would else face, in
@@ -483,19 +487,27 @@ impl Scene {
         let Some(cycle) = &part.object.cycle else {
             return pose;
         };
-        // By the clock, or by the ground its whole has covered: then it
-        // comes to rest as the whole does, unless a round never returns.
-        let (rounds, swing) = match (cycle.seconds, cycle.metres) {
-            (Some(seconds), _) => (t / seconds, 1.0),
-            (None, Some(metres)) => {
-                let (gone, speed) = self.travel(part.whole, t);
-                let swing = match cycle.runs_on() {
-                    true => smoothstep(STILL, MOVING, speed) as f64,
-                    false => 1.0,
-                };
-                (gone / metres, swing)
+        // By the clock, by the ground its whole has covered, or by the
+        // strides its whole has taken.
+        // And one that follows the ground or the strides comes to rest as
+        // the whole does, unless a round never returns.
+        let (gone, speed) = self.travel(part.whole, t);
+        let swing = match cycle.runs_on() {
+            true => smoothstep(STILL, MOVING, speed) as f64,
+            false => 1.0,
+        };
+        let (rounds, swing) = match (cycle.seconds, cycle.metres, cycle.strides) {
+            (Some(seconds), ..) => (t / seconds, 1.0),
+            (None, Some(metres), _) => (gone / metres, swing),
+            (None, None, Some(strides)) => {
+                let taken = &self.parts[part.whole].strides;
+                let frame = (t * FPS as f64).clamp(0.0, taken.len().saturating_sub(1) as f64);
+                let at = |frame: f64| taken.get(frame as usize).copied().unwrap_or(0.0) as f64;
+                let so_far =
+                    at(frame.floor()) + (at(frame.ceil()) - at(frame.floor())) * frame.fract();
+                (so_far / strides, swing)
             }
-            (None, None) => return pose,
+            (None, None, None) => return pose,
         };
         let added = cycle.added(rounds);
         for c in 0..3 {
@@ -591,7 +603,7 @@ impl Scene {
                 if let Some(rough) = rough {
                     place.at.y += self.lift(index, t, (place, pose.at[1] as f32), rough, stands);
                 }
-                if let Some((upper, lower)) = self.bend(index, t, place, stands) {
+                if let Some((upper, lower)) = self.bend(index, t, place, (rough, &stands)) {
                     place.turn = upper;
                     bent[part.limb.as_ref().map_or(index, |limb| limb.lower)] = Some(lower);
                 }
@@ -612,7 +624,7 @@ impl Scene {
         index: usize,
         t: f64,
         place: Place,
-        stands: impl Fn(usize) -> Place,
+        (rough, stands): (Option<&Standing>, impl Fn(usize) -> Place),
     ) -> Option<(Turn, Turn)> {
         let limb = self.parts[index].limb.as_ref()?;
         // As the limb is posed: where it bends and where it ends.
@@ -626,7 +638,7 @@ impl Scene {
         if upper_long < 1e-4 || lower_long < 1e-4 {
             return None;
         }
-        let to = self.goal(limb, t, tip, &stands)?;
+        let to = self.goal(limb, t, tip, (rough, &stands))?;
         // No further than it reaches, no nearer than it folds.
         let whole = upper_long + lower_long;
         let folded = (upper_long - lower_long).abs();
@@ -675,9 +687,16 @@ impl Scene {
         limb: &Limb,
         t: f64,
         tip: Vec3,
-        stands: impl Fn(usize) -> Place,
+        (rough, stands): (Option<&Standing>, impl Fn(usize) -> Place),
     ) -> Option<Vec3> {
         match &limb.goal {
+            Goal::Step(step) => {
+                // A foot steps as its thing travels, and stands as posed
+                // when that stands still.
+                let travelling = smoothstep(STILL, MOVING, self.travel(step.root, t).1);
+                let (stepped, _) = self.planted(step, t, rough?, (stands, None));
+                (travelling > 0.0).then(|| tip + (stepped - tip) * travelling)
+            }
             Goal::Reach { to, from, until } => {
                 // There between the two times, on its way a moment either
                 // side.
@@ -731,6 +750,103 @@ impl Scene {
         faced.unwrap_or(0.0)
     }
 
+    /// Where a foot that steps is at `t`, and how much it is down (1 on
+    /// the ground, 0 in the middle of its swing): down where it last
+    /// landed while the thing it is part of passes over it, then swung to
+    /// where it lands next. `rough` has the sizes of what it treads on,
+    /// `stands` says where another part is, and `turned` how the thing is
+    /// turned while it is still being placed.
+    fn planted(
+        &self,
+        step: &Stepping,
+        t: f64,
+        rough: &Standing,
+        (stands, turned): (impl Fn(usize) -> Place, Option<Turn>),
+    ) -> (Vec3, f32) {
+        let root = &self.parts[step.root];
+        let rides = root.parent.map_or(Place::ORIGIN, &stands);
+        let last = step.strides.len().saturating_sub(1);
+        let taken = |frame: usize| step.strides[frame.min(last)] as f64;
+        let frame = (t * FPS as f64).clamp(0.0, last as f64);
+        let (before, after) = (taken(frame.floor() as usize), taken(frame.ceil() as usize));
+        let strides = before + (after - before) * frame.fract() + step.shift;
+        let (stride, within) = (strides.floor(), strides.fract() as f32);
+        // The share of a stride it is down for, as it was when the stride
+        // began: no more ground than the leg spans, so long strides have
+        // the foot in the air for most of them, as a run does.
+        let down_for = |stride: f64| {
+            let began = when_reached(&step.strides, stride - step.shift).unwrap_or(self.duration);
+            let frame = ((began * FPS as f64) as usize).min(last.saturating_sub(1));
+            let gone = |frame: usize| root.travelled.get(frame).copied().unwrap_or(0.0) as f64;
+            let covered = gone(frame + 1) - gone(frame);
+            let long = match taken(frame + 1) - taken(frame) {
+                strides if strides > 1e-6 => covered / strides,
+                _ => step.leg as f64 * 1.4,
+            };
+            (STANCE as f64 * step.leg as f64 / long.max(1e-3)).clamp(0.15, 0.6)
+        };
+        let lands = |stride: f64, down: f64| {
+            // Where the thing is half-way through the foot's time down:
+            // right over it.
+            let when = when_reached(&step.strides, stride - step.shift + down * 0.5)
+                .unwrap_or(self.duration);
+            let turn = match root.facing {
+                Facing::Path => {
+                    let turned = root.moves.keyed(when).rotate[1];
+                    let heading = heading(&root.moves.places, when).unwrap_or(0.0);
+                    Turn::of([0.0, turned + heading, 0.0])
+                }
+                // As it is turned now: what it faces is not known then.
+                _ => rides
+                    .turn
+                    .inward_turn(turned.unwrap_or_else(|| stands(step.root).turn)),
+            };
+            let under = rides.then(Place {
+                at: Vec3::of(root.moves.places.at(when)),
+                turn,
+            });
+            let spot = under.point(Vec3::new(step.rest.0, 0.0, step.rest.1));
+            // On what the thing stands on, as high over it as the thing
+            // is written now: in a jump the feet leave the ground too.
+            let floor = match &root.rest {
+                Some(rest) => {
+                    let surface = (rest.surface.iter())
+                        .filter(|of| !self.hidden(**of, t))
+                        .map(|of| self.solid(*of, stands(*of), rough.sizes[*of]));
+                    top_under(surface, spot) + root.moves.places.at(t)[1] as f32
+                }
+                None => under.at.y,
+            };
+            Vec3::new(spot.x, floor, spot.z)
+        };
+        let down = down_for(stride);
+        if within < down as f32 {
+            return (lands(stride, down), 1.0);
+        }
+        let swing = (within - down as f32) / (1.0 - down as f32);
+        let swung = smoothstep(0.0, 1.0, swing);
+        let (from, to) = (
+            lands(stride, down),
+            lands(stride + 1.0, down_for(stride + 1.0)),
+        );
+        let up = Vec3::UP * (step.lift * (PI * swung).sin());
+        // It leaves the ground over the first quarter of the swing and
+        // comes back to it over the last.
+        let grounded = (1.0 - swing * 4.0).max(swing * 4.0 - 3.0).max(0.0);
+        (from + (to - from) * swung + up, grounded)
+    }
+
+    /// The solid part `of` is, standing at `place` with `size`.
+    fn solid(&self, of: usize, place: Place, size: Vec3) -> Solid {
+        let object = &self.parts[of].object;
+        Solid::standing(
+            object.shape.unwrap_or(Shape::Box),
+            object.anchor,
+            place,
+            size,
+        )
+    }
+
     /// How part `index`, standing at `place`, is turned at `t` once its
     /// front is on what it aims at: as far as [`AIM_REACH`] from the way
     /// it would else face. `stands` says where another part is.
@@ -778,22 +894,34 @@ impl Scene {
             return 0.0;
         };
         let (place, height) = stood;
-        let solid = |of: usize, place: Place| {
-            let object = &self.parts[of].object;
-            let shape = object.shape.unwrap_or(Shape::Box);
-            Solid::standing(shape, object.anchor, place, rough.sizes[of])
-        };
         let there = |of: &&usize| !self.hidden(**of, t);
-        // Its own solids ride it as they did in the rough.
-        let own = rest.solids.iter().filter(there).map(|of| {
-            let rode = rough.places[index].holds(rough.places[*of]);
-            solid(*of, place.then(rode)).lowest()
-        });
+        // Its own parts ride it as they did in the rough.
+        let rode = |of: usize| place.then(rough.places[index].holds(rough.places[of]));
+        let own = (rest.solids.iter().filter(there))
+            .map(|of| self.solid(*of, rode(*of), rough.sizes[*of]).lowest());
         let Some(lowest) = own.reduce(|a, b| if b.y < a.y { b } else { a }) else {
             return 0.0;
         };
-        let surface = (rest.surface.iter().filter(there)).map(|of| solid(*of, stands(*of)));
-        top_under(surface, lowest) + height - lowest.y
+        let surface = (rest.surface.iter().filter(there))
+            .map(|of| self.solid(*of, stands(*of), rough.sizes[*of]));
+        let standing = top_under(surface, lowest) + height - lowest.y;
+        // And no higher than its legs reach down to where its feet step:
+        // it sinks between strides, as a walk does.
+        let travelling = smoothstep(STILL, MOVING, self.travel(index, t).1);
+        let reached = (rest.legs.iter())
+            .filter_map(|upper| {
+                let limb = self.parts[*upper].limb.as_ref()?;
+                let (hip, knee, foot) = (rode(*upper).at, rode(limb.lower).at, rode(limb.end).at);
+                let leg = ((knee - hip).length() + (foot - knee).length()) * LEG_REACH;
+                let turned = Some(place.turn);
+                let (stepped, down) = self.planted(limb.steps()?, t, rough, (&stands, turned));
+                let level = (stepped.x - hip.x).hypot(stepped.z - hip.z).min(leg * 0.85);
+                let reach = stepped.y + (leg * leg - level * level).sqrt() - hip.y;
+                // A foot in the air holds nothing down.
+                Some(standing + (reach - standing) * down)
+            })
+            .fold(standing, f32::min);
+        standing + (reached - standing) * travelling
     }
 
     /// The middle of part `index` standing at `place`: what a camera
@@ -842,6 +970,36 @@ impl Scene {
             view,
         }
     }
+}
+
+/// The place part `part` of `parts` stands at within the part `root` it
+/// rides, as its keys have each part between them at the start, before
+/// any motion that repeats: how a thing is built.
+pub(super) fn rest_place(parts: &[Part], part: usize, root: usize) -> Place {
+    let mut place = Place::ORIGIN;
+    let mut above = Some(part);
+    while let Some(index) = above.filter(|index| *index != root) {
+        let pose = parts[index].moves.keyed(0.0);
+        let own = Place {
+            at: Vec3::of(pose.at),
+            turn: Turn::of(pose.rotate),
+        };
+        place = own.then(place);
+        above = parts[index].parent;
+    }
+    place
+}
+
+/// The second at which `counted`, which only grows and has a value a
+/// frame, reaches `count`: the start where it begins past it, `None`
+/// where it never gets there.
+fn when_reached(counted: &[f32], count: f64) -> Option<f64> {
+    let frame = counted.partition_point(|so_far| (*so_far as f64) < count);
+    let Some(before) = frame.checked_sub(1) else {
+        return Some(0.0);
+    };
+    let (from, to) = (counted[before] as f64, *counted.get(frame)? as f64);
+    Some((before as f64 + (count - from) / (to - from).max(1e-9)) / FPS as f64)
 }
 
 /// How high the top of `surface` is under (or over) `point`; the ground

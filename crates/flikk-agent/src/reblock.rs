@@ -248,18 +248,20 @@ const BLOCKOUT: &str = "a blockout for the Flikk video editor: a rough 3D scene 
 /// How a scene is written well, whoever writes it.
 const CRAFT: &str = "Write it as a director blocks a shot. Design the characters and things the \
     shot is about yourself, as models of a few solids with joints where they bend, and give them \
-    the motion the description asks for: a gait of their own by the ground they cover, a gesture \
-    in keys, a breath or a sway by the clock. Give whatever travels `\"face\": \"path\"` and keys \
+    the motion the description asks for: feet that `step` under whatever walks or runs, a \
+    gesture in keys, a hand that reaches (`reach`) for what it touches, a head that looks \
+    (`aim`), a breath or a sway by the clock. Give whatever travels `\"face\": \"path\"` and keys \
     for where it goes and when (a walk is about 1.4 m/s, a run 3 to 6), and whatever walks \
-    `\"on\": \"ground\"` (or what it walks on), which keeps its feet on it. A route is a list of \
-    places: keys with `at` and no `t` are passed at an even pace. Build the set too: the \
-    walls, the street, the furniture the action touches or the camera passes, enough for depth \
-    and for the move to read against, in shades that tell the subject from the set: characters \
-    light (0.75 or more) so their limbs read, the set darker. Time the beats with keys, ease the \
-    moves that start or stop, and give the camera one clear idea a shot: a dolly, an orbit, a \
-    crane, a camera that rides its subject (`parent`), hand-held (`shake`), or cuts between \
-    set-ups (`ease` \"cut\"). Keep sizes, speeds and moves physically plausible, and everything \
-    that matters in view at the start. The look is not yours to show.";
+    `\"on\": \"ground\"` (or what it walks on). A route is a list of places: keys with `at` and \
+    no `t` are passed at an even pace. Build the set too: the walls, the street, the furniture \
+    the action touches or the camera passes, enough for depth and for the move to read against, \
+    in shades that tell the subject from the set: characters light (0.75 or more) so their \
+    limbs read, the set darker. Time the beats with keys, ease the moves that start or stop, \
+    and give the camera one clear idea a shot, said as a shot is called (`frame`: a medium \
+    close-up of her, on the left) in place of a worked-out distance: a dolly, an orbit, a \
+    crane, a camera that rides its subject (`parent`), hand-held (`shake`), or a cut between \
+    two cameras (`cameras` and `cuts`). Keep sizes, speeds and moves physically plausible, and \
+    everything that matters in view at the start. The look is not yours to show.";
 
 /// What a run that changes a scene is asked to do.
 const CHANGING: &str = "The user watches the blockout play and tells you what should be \

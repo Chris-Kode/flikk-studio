@@ -148,16 +148,7 @@ impl Scene {
     /// written at the ground's height, moves limbs by the ground it
     /// covers, and doesn't say what it stands on.
     fn walkers(&self) -> impl Iterator<Item = usize> + '_ {
-        let paced = |index: usize| {
-            (self.parts.iter()).any(|part| {
-                part.whole == index
-                    && part
-                        .object
-                        .cycle
-                        .as_ref()
-                        .is_some_and(|c| c.metres.is_some())
-            })
-        };
+        let paced = |index: usize| self.paced(index);
         (self.parts.iter().enumerate())
             .filter(move |(index, part)| {
                 self.ground
@@ -173,6 +164,16 @@ impl Scene {
                     && paced(*index)
             })
             .map(|(index, _)| index)
+    }
+
+    /// Whether part `index` moves over the ground as what walks or rolls
+    /// does: its feet step, or a part of it moves by the ground covered.
+    fn paced(&self, index: usize) -> bool {
+        let by_ground = |part: &super::build::Part| {
+            let cycle = part.object.cycle.as_ref();
+            part.whole == index && cycle.is_some_and(|cycle| cycle.metres.is_some())
+        };
+        !self.parts[index].strides.is_empty() || self.parts.iter().any(by_ground)
     }
 
     /// How each thing a viewer would name shows at `t`: what stands by
@@ -372,10 +373,7 @@ impl Scene {
                 notes.push(format!("`{name}` starts below the ground."));
             }
             // What steps or rolls with the ground it covers has a front.
-            let paced = (self.parts.iter()).any(|p| {
-                p.whole == index && p.object.cycle.as_ref().is_some_and(|c| c.metres.is_some())
-            });
-            if paced && part.off_course(self.duration).is_some_and(|off| off > 50.0) {
+            if self.paced(index) && part.off_course(self.duration).is_some_and(|off| off > 50.0) {
                 doubts.push(format!(
                     "`{name}` travels sideways or backwards: give it `\"face\": \"path\"` unless \
                      that is meant."

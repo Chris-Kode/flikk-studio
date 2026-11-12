@@ -181,6 +181,11 @@ pub struct Object {
     /// there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<Reach>,
+    /// That it is a foot that steps: it stays where it comes down while
+    /// the thing it is part of passes over it, and the leg above it bends
+    /// to keep it there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<Step>,
     /// Degrees a second it keeps turning about X, Y and Z.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spin: [f64; 3],
@@ -239,6 +244,11 @@ pub struct Cycle {
     /// when that stands still.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metres: Option<f64>,
+    /// Or the strides one round takes, of the feet that step on the thing
+    /// it is part of: arms that swing in time with the legs, whatever the
+    /// pace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strides: Option<f64>,
     /// How far into its round it starts, 0..1: half a round for the
     /// other leg.
     #[serde(default, skip_serializing_if = "is_nothing")]
@@ -281,6 +291,26 @@ pub struct Reach {
     pub from: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<f64>,
+}
+
+/// A foot that steps as the thing it is part of travels: down where it
+/// lands while the thing passes over it, then swung to where it lands
+/// next. The part it rides and the part that one rides are its leg.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    /// The ground covered from one landing of this foot to its next: a
+    /// stride. About one and a half times the leg's length when left out,
+    /// a walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metres: Option<f64>,
+    /// How far into a stride it starts, 0..1. Left out, the feet of one
+    /// thing take turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<f64>,
+    /// How high it is lifted as it swings, in metres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lift: Option<f64>,
 }
 
 /// Unsteady motion that never repeats: an engine's rumble, a boat on a
@@ -795,6 +825,17 @@ impl Object {
         if let Some(cycle) = self.cycle.as_mut() {
             cycle.settle(&what)?;
         }
+        if let Some(step) = self.step.as_mut() {
+            if self.reach.is_some() {
+                return Err(format!(
+                    "{what} has a `step` and a `reach`: its limb can do one"
+                ));
+            }
+            let given = [step.metres, step.shift, step.lift].map(|n| n.unwrap_or(0.0));
+            finite(&what, &given)?;
+            step.metres = step.metres.map(|metres| metres.clamp(0.02, 100.0));
+            step.lift = step.lift.map(|lift| lift.clamp(0.0, 10.0));
+        }
         if let Some(reach) = &self.reach {
             finite(
                 &what,
@@ -816,11 +857,14 @@ impl Object {
 
 impl Cycle {
     fn settle(&mut self, what: &str) -> Result<(), String> {
-        let round = match (self.seconds, self.metres) {
-            (Some(round), None) | (None, Some(round)) => round,
+        let round = match (self.seconds, self.metres, self.strides) {
+            (Some(round), None, None) | (None, Some(round), None) | (None, None, Some(round)) => {
+                round
+            }
             _ => {
                 return Err(format!(
-                    "{what}'s `cycle` needs how long a round is: `seconds`, or `metres` travelled"
+                    "{what}'s `cycle` needs how long a round is: `seconds`, `metres` travelled, \
+                     or `strides` taken"
                 ));
             }
         };

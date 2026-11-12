@@ -14,34 +14,29 @@ use flikk_core::command::ToolCategory;
 use flikk_core::model::MediaKind;
 
 /// A shot blocked the way the agent blocks one: its people and its car
-/// are models built here from plain solids, with a walk of their own.
+/// are models built here from plain solids, on feet that step.
 const SCENE: &str = r#"{
   "duration": 6,
   "sun": [120, 28],
   "models": {
     "person": [
-      {"name": "hips", "at": [0, 0.92, 0],
-       "cycle": {"metres": 0.75, "keys": [{"t": 0, "at": [0, -0.03, 0]}, {"t": 0.5, "at": [0, 0.02, 0]}]}},
+      {"name": "hips", "at": [0, 0.92, 0]},
       {"name": "pelvis", "shape": "sphere", "size": [0.34, 0.26, 0.24], "anchor": "middle", "parent": "hips"},
       {"name": "chest", "shape": "sphere", "size": [0.4, 0.56, 0.26], "parent": "hips", "at": [0, 0.04, 0], "rotate": [5, 0, 0]},
       {"name": "head", "shape": "sphere", "size": [0.2, 0.25, 0.22], "parent": "chest", "at": [0, 0.58, 0]},
       {"name": "visor", "shape": "box", "size": [0.15, 0.05, 0.05], "parent": "head", "at": [0, 0.12, 0.09], "shade": 0.25},
-      {"name": "thigh l", "shape": "capsule", "size": [0.15, 0.48, 0.15], "anchor": "top", "parent": "hips", "at": [0.1, 0, 0],
-       "cycle": {"metres": 1.5, "keys": [{"t": 0, "rotate": [-30, 0, 0]}, {"t": 0.5, "rotate": [22, 0, 0]}]}},
-      {"name": "shin l", "shape": "capsule", "size": [0.11, 0.48, 0.11], "anchor": "top", "parent": "thigh l", "at": [0, -0.44, 0],
-       "cycle": {"metres": 1.5, "keys": [{"t": 0, "rotate": [6, 0, 0]}, {"t": 0.5, "rotate": [10, 0, 0]}, {"t": 0.75, "rotate": [65, 0, 0]}]}},
-      {"name": "foot l", "shape": "box", "size": [0.1, 0.07, 0.26], "parent": "shin l", "at": [0, -0.5, 0.07]},
-      {"name": "thigh r", "shape": "capsule", "size": [0.15, 0.48, 0.15], "anchor": "top", "parent": "hips", "at": [-0.1, 0, 0],
-       "cycle": {"metres": 1.5, "shift": 0.5, "keys": [{"t": 0, "rotate": [-30, 0, 0]}, {"t": 0.5, "rotate": [22, 0, 0]}]}},
-      {"name": "shin r", "shape": "capsule", "size": [0.11, 0.48, 0.11], "anchor": "top", "parent": "thigh r", "at": [0, -0.44, 0],
-       "cycle": {"metres": 1.5, "shift": 0.5, "keys": [{"t": 0, "rotate": [6, 0, 0]}, {"t": 0.5, "rotate": [10, 0, 0]}, {"t": 0.75, "rotate": [65, 0, 0]}]}},
-      {"name": "foot r", "shape": "box", "size": [0.1, 0.07, 0.26], "parent": "shin r", "at": [0, -0.5, 0.07]},
+      {"name": "thigh l", "shape": "capsule", "size": [0.15, 0.48, 0.15], "anchor": "top", "parent": "hips", "at": [0.1, 0, 0]},
+      {"name": "shin l", "shape": "capsule", "size": [0.11, 0.48, 0.11], "anchor": "top", "parent": "thigh l", "at": [0, -0.44, 0]},
+      {"name": "foot l", "shape": "box", "size": [0.1, 0.07, 0.26], "parent": "shin l", "at": [0, -0.5, 0.07], "step": {}},
+      {"name": "thigh r", "shape": "capsule", "size": [0.15, 0.48, 0.15], "anchor": "top", "parent": "hips", "at": [-0.1, 0, 0]},
+      {"name": "shin r", "shape": "capsule", "size": [0.11, 0.48, 0.11], "anchor": "top", "parent": "thigh r", "at": [0, -0.44, 0]},
+      {"name": "foot r", "shape": "box", "size": [0.1, 0.07, 0.26], "parent": "shin r", "at": [0, -0.5, 0.07], "step": {}},
       {"name": "arm l", "shape": "capsule", "size": [0.09, 0.34, 0.09], "anchor": "top", "parent": "chest", "at": [0.24, 0.48, 0], "rotate": [0, 0, 8],
-       "cycle": {"metres": 1.5, "keys": [{"t": 0, "rotate": [24, 0, 0]}, {"t": 0.5, "rotate": [-24, 0, 0]}]}},
-      {"name": "forearm l", "shape": "capsule", "size": [0.08, 0.32, 0.08], "anchor": "top", "parent": "arm l", "at": [0, -0.3, 0], "rotate": [-25, 0, 0]},
+       "cycle": {"strides": 1, "keys": [{"t": 0, "rotate": [30, 0, 0]}, {"t": 0.5, "rotate": [-30, 0, 0]}]}},
+      {"name": "forearm l", "shape": "capsule", "size": [0.08, 0.32, 0.08], "anchor": "top", "parent": "arm l", "at": [0, -0.3, 0], "rotate": [-40, 0, 0]},
       {"name": "arm r", "shape": "capsule", "size": [0.09, 0.34, 0.09], "anchor": "top", "parent": "chest", "at": [-0.24, 0.48, 0], "rotate": [0, 0, -8],
-       "cycle": {"metres": 1.5, "shift": 0.5, "keys": [{"t": 0, "rotate": [24, 0, 0]}, {"t": 0.5, "rotate": [-24, 0, 0]}]}},
-      {"name": "forearm r", "shape": "capsule", "size": [0.08, 0.32, 0.08], "anchor": "top", "parent": "arm r", "at": [0, -0.3, 0], "rotate": [-25, 0, 0]}
+       "cycle": {"strides": 1, "shift": 0.5, "keys": [{"t": 0, "rotate": [30, 0, 0]}, {"t": 0.5, "rotate": [-30, 0, 0]}]}},
+      {"name": "forearm r", "shape": "capsule", "size": [0.08, 0.32, 0.08], "anchor": "top", "parent": "arm r", "at": [0, -0.3, 0], "rotate": [-40, 0, 0]}
     ],
     "car": [
       {"name": "body", "shape": "box", "size": [1.75, 0.55, 4.3], "at": [0, 0.28, 0]},
@@ -58,7 +53,8 @@ const SCENE: &str = r#"{
     {"name": "runner", "model": "person", "at": [-11, 0, 0.5], "on": "ground", "face": "path", "shade": 0.8,
      "keys": [{"t": 6, "at": [11, 0, -0.5]}]},
     {"name": "attendant", "model": "person", "at": [6.2, 0, -3.2], "on": "ground", "face": "runner", "scale": 1.05,
-     "parts": {"arm r": {"rotate": [0, 0, -150], "cycle": null},
+     "parts": {"head": {"aim": "runner"},
+               "arm r": {"rotate": [0, 0, -150], "cycle": null},
                "forearm r": {"rotate": [0, 0, 0], "cycle": {"seconds": 0.7, "keys": [{"t": 0, "rotate": [0, 0, -25]}, {"t": 0.5, "rotate": [0, 0, 25]}]}}}},
     {"name": "car", "model": "car", "at": [3.2, 0, -5.5], "rotate": [0, 90, 0], "shade": 0.42},
     {"name": "van", "shape": "box", "size": [2, 2.3, 5], "at": [-5.5, 0, -5.8], "shade": 0.55},
