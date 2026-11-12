@@ -1,13 +1,18 @@
 //! Writing a scene out into the parts that are drawn. Every copy of a
 //! model becomes its parts, named `copy/part`, scaled with the copy and
 //! with what the copy does its own way put in; names are swapped for
-//! places in the list; and what the motion needs every frame (the box
-//! each thing fills, the ground each has covered) is worked out once.
+//! places in the list; and what the motion needs every frame (how each
+//! part's keys move it, the order parts are placed in, the box each thing
+//! fills, the ground each has covered) is worked out once.
 
-use super::motion::Track;
-use super::space::Vec3;
-use super::{Anchor, CAMERA, FPS, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
-use std::collections::HashMap;
+use super::flight::Flight;
+use super::motion::{Moves, Rig, Track, rest_place};
+use super::space::{Place, Vec3};
+use super::{
+    AHEAD, Anchor, CAMERA, Ease, FPS, GROUND, MAIN, MAX_PARTS, MID_GREY, NONE, Object, PATH, Scene,
+    Target,
+};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// How deep a model may hold copies of models.
 const MAX_NESTING: usize = 4;
@@ -27,12 +32,48 @@ pub(super) struct Part {
     /// holds that.
     pub thing: usize,
     pub facing: Facing,
+    /// What its front turns to, when it says, and what its keys have it
+    /// turn to later.
+    pub aims: Vec<(f64, AimAt, Ease)>,
+    /// What its keys have it go with, in order of time.
+    pub held: Vec<Held>,
+    /// The limb it is the upper part of, when the end of one is brought
+    /// somewhere.
+    pub limb: Option<Limb>,
+    /// What it stands on, when it says.
+    pub rest: Option<Rest>,
+    /// How its keys move it.
+    pub moves: Moves,
     /// The box it fills in its own space, low corner and high. For a
     /// joint or a copy: what rides it, as the scene starts.
     pub bounds: ([f64; 3], [f64; 3]),
     /// Metres its keys have moved it over the ground by each frame; empty
     /// when no motion asks.
     pub travelled: Vec<f32>,
+    /// The strides its feet that step have taken by each frame; empty
+    /// when it has none.
+    pub strides: Vec<f32>,
+    /// How far into their rounds its cycle and its steps start, on top
+    /// of what they say: each one of a repeat its own.
+    pub stagger: f64,
+    /// The repeat it is one of: the joint that stands for them all.
+    pub one_of: Option<usize>,
+    /// Where it stands and its size, when nothing ever moves it: worked
+    /// out once.
+    pub still: Option<(Place, Vec3)>,
+    /// The parts cut out of it.
+    pub holes: Vec<usize>,
+    /// Whether its height is above the ground under it: it rides
+    /// nothing, as a thing of the scene or one of a repeat of them.
+    pub lands: bool,
+}
+
+impl Part {
+    /// Whether something of it is drawn: it is a solid, and not one cut
+    /// out of another.
+    pub fn is_solid(&self) -> bool {
+        self.object.shape.is_some() && self.object.cut.is_none()
+    }
 }
 
 /// What a part turns to about the vertical.
@@ -46,12 +87,114 @@ pub(super) enum Facing {
     Point([f64; 3]),
 }
 
+/// What a part's front turns to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum AimAt {
+    /// Where it faces anyway.
+    Ahead,
+    Camera,
+    Part(usize),
+    Point([f64; 3]),
+}
+
+/// A part going with another from a time on, or with nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Held {
+    pub t: f64,
+    /// What it goes with; `None` once let go.
+    pub by: Option<usize>,
+    /// Where it is within that (in the scene, once let go), and where it
+    /// was in the scene at the moment. Not known until the scene is built
+    /// that far.
+    pub at: Option<(Place, Place)>,
+    /// What it is thrown to as it is let go, and for how many seconds
+    /// when that is said.
+    pub thrown: Option<(AimAt, Option<f64>)>,
+    /// How it goes through the air once let go; worked out with `at`.
+    pub flight: Option<Flight>,
+}
+
+impl Held {
+    /// A part going with `by` from `t`, or let go.
+    fn from(t: f64, by: Option<usize>) -> Self {
+        Self {
+            t,
+            by,
+            at: None,
+            thrown: None,
+            flight: None,
+        }
+    }
+}
+
+/// A limb of two parts whose end is brought somewhere: this part, the
+/// one that rides it, and the end that rides that.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Limb {
+    pub lower: usize,
+    pub end: usize,
+    pub goal: Goal,
+}
+
+/// Where a limb's end is brought.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Goal {
+    /// To something, from one time until another: the start and the end
+    /// where none is given.
+    Reach {
+        to: AimAt,
+        from: Option<f64>,
+        until: Option<f64>,
+    },
+    /// To where a foot that steps is.
+    Step(Stepping),
+}
+
+/// How a foot steps.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Stepping {
+    /// The thing that travels: what the foot is part of.
+    pub root: usize,
+    /// The strides it has taken by each frame, and how far into one it
+    /// starts.
+    pub strides: Vec<f32>,
+    pub shift: f64,
+    /// How long its leg is, and how high it is lifted as it swings.
+    pub leg: f32,
+    pub lift: f32,
+    /// Where it stands under that thing, to its right and ahead of it.
+    pub rest: (f32, f32),
+}
+
+impl Limb {
+    /// How its end steps, when it is a foot that does.
+    pub fn steps(&self) -> Option<&Stepping> {
+        match &self.goal {
+            Goal::Step(stepping) => Some(stepping),
+            Goal::Reach { .. } => None,
+        }
+    }
+}
+
+/// What a part stands on, and what of it could touch that.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Rest {
+    /// The solids of what it stands on; none for the ground.
+    pub surface: Vec<usize>,
+    /// Its own solids: itself and all that rides it.
+    pub solids: Vec<usize>,
+    /// The upper parts of its legs that step.
+    pub legs: Vec<usize>,
+}
+
 /// An object written out, with the copy of a model it is in and whether
 /// it is one itself.
 struct Out {
     object: Object,
     inside: Option<usize>,
     is_copy: bool,
+    stagger: f64,
+    one_of: Option<usize>,
 }
 
 /// What a copy passes on to its parts.
@@ -66,6 +209,8 @@ struct Within<'a> {
     tone: f64,
     copy: Option<usize>,
     depth: usize,
+    /// How far into their rounds its cycles and steps start.
+    stagger: f64,
 }
 
 impl Scene {
@@ -78,6 +223,7 @@ impl Scene {
             tone: 1.0,
             copy: None,
             depth: 0,
+            stagger: 0.0,
         };
         let mut outs = Vec::new();
         for object in &self.objects {
@@ -111,14 +257,85 @@ impl Scene {
                     )
                 })?),
             };
+            let aim = |target: &Target| match target {
+                Target::Point(point) => Ok(AimAt::Point(*point)),
+                Target::Object(aimed) if aimed == AHEAD => Ok(AimAt::Ahead),
+                Target::Object(aimed) if aimed == CAMERA => Ok(AimAt::Camera),
+                Target::Object(aimed) => (place(aimed).map(AimAt::Part)).ok_or_else(|| {
+                    format!(
+                        "`{name}` aims at `{aimed}`, which is no object's name, `{CAMERA}` or \
+                         `{AHEAD}`"
+                    )
+                }),
+            };
+            let moves = Moves::of(&out.object, self.duration);
+            // From the start it aims at what it says, or ahead until a key
+            // says.
+            let keyed = (moves.times.iter().zip(&out.object.keys))
+                .filter_map(|(t, key)| Some((*t, key.aim.as_ref()?, key.ease)));
+            let first = (out.object.aim.as_ref()).map(|target| (0.0, target, Ease::Linear));
+            let mut aims = first
+                .into_iter()
+                .chain(keyed)
+                .map(|(t, target, ease)| Ok((t, aim(target)?, ease)))
+                .collect::<Result<Vec<_>, String>>()?;
+            if aims.first().is_some_and(|(t, ..)| *t > 0.0) {
+                aims.insert(0, (0.0, AimAt::Ahead, Ease::Linear));
+            }
             parts.push(Part {
                 object: out.object.clone(),
                 parent,
                 whole: 0,
                 thing: 0,
                 facing,
+                aims,
+                held: {
+                    let mut held = Vec::new();
+                    for (t, key) in moves.times.iter().zip(&out.object.keys) {
+                        if let Some(throw) = &key.throw {
+                            let to = match aim(&throw.to)? {
+                                AimAt::Ahead => {
+                                    return Err(format!(
+                                        "a key throws `{name}` `{AHEAD}`: say what at"
+                                    ));
+                                }
+                                to => to,
+                            };
+                            held.push(Held {
+                                thrown: Some((to, throw.seconds)),
+                                ..Held::from(*t, None)
+                            });
+                            // What it is thrown to has it from when it
+                            // gets there, which its flight will say.
+                            if let AimAt::Part(catcher) = to {
+                                held.push(Held::from(f64::INFINITY, Some(catcher)));
+                            }
+                        } else if let Some(by) = &key.parent {
+                            let by = match by.as_str() {
+                                NONE => None,
+                                by => Some(place(by).ok_or_else(|| {
+                                    format!(
+                                        "a key has `{name}` go with `{by}`, which is no object's \
+                                         name or `{NONE}`"
+                                    )
+                                })?),
+                            };
+                            held.push(Held::from(*t, by));
+                        }
+                    }
+                    held
+                },
+                limb: None,
+                rest: None,
+                moves,
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
+                strides: Vec::new(),
+                stagger: out.stagger,
+                one_of: out.one_of,
+                still: None,
+                holes: Vec::new(),
+                lands: false,
             });
         }
         for index in 0..parts.len() {
@@ -126,6 +343,8 @@ impl Scene {
             let whole = match (&outs[index], outs[index].inside) {
                 (out, _) if out.is_copy => index,
                 (_, Some(copy)) => copy,
+                // One of a repeat that rides nothing is a thing itself.
+                (out, None) if out.one_of == Some(top) => index,
                 (_, None) => top,
             };
             // Out of any copy that holds its whole.
@@ -146,11 +365,221 @@ impl Scene {
             .collect();
         for whole in paced {
             if parts[whole].travelled.is_empty() {
-                parts[whole].travelled = travelled(&parts[whole].object, self.duration);
+                parts[whole].travelled = travelled(&parts[whole].moves.places, self.duration);
             }
         }
+        for end in 0..parts.len() {
+            let Some(reach) = &parts[end].object.reach else {
+                continue;
+            };
+            let name = &parts[end].object.name;
+            let to = match &reach.to {
+                Target::Point(point) => AimAt::Point(*point),
+                Target::Object(to) if to == CAMERA => AimAt::Camera,
+                Target::Object(to) => AimAt::Part(place(to).ok_or_else(|| {
+                    format!("`{name}` reaches to `{to}`, which is no object's name or `{CAMERA}`")
+                })?),
+            };
+            let limb = Limb {
+                lower: 0,
+                end,
+                goal: Goal::Reach {
+                    to,
+                    from: reach.from,
+                    until: reach.until,
+                },
+            };
+            hang_limb(&mut parts, limb)?;
+        }
+        let rig = |camera, what: &str| {
+            Rig::of(camera, what, self.duration, place, |whole| {
+                solids_of(&parts, whole)
+            })
+        };
+        let mut rigs = vec![rig(&self.camera, "the camera")?];
+        for (name, camera) in &self.cameras {
+            rigs.push(rig(camera, &format!("camera `{name}`"))?);
+        }
+        let named = |name: &str| match name {
+            MAIN => Some(0),
+            name => self
+                .cameras
+                .keys()
+                .position(|other| other == name)
+                .map(|i| i + 1),
+        };
+        let mut live = Vec::with_capacity(self.cuts.len());
+        for cut in &self.cuts {
+            let Some(rig) = named(&cut.camera) else {
+                return Err(format!(
+                    "a cut goes to camera `{}`, which is none of `cameras` or `{MAIN}`",
+                    cut.camera
+                ));
+            };
+            live.push((cut.t, rig));
+        }
+        let repeats: HashSet<usize> = parts.iter().filter_map(|part| part.one_of).collect();
+        for index in 0..parts.len() {
+            let part = &parts[index];
+            parts[index].lands = match (part.parent, part.one_of) {
+                // The joint of a repeat only stands for its copies.
+                (None, _) => !repeats.contains(&index),
+                (Some(parent), Some(all)) => parent == all && parts[all].parent.is_none(),
+                (Some(_), None) => false,
+            };
+        }
+        for hole in 0..parts.len() {
+            let Some(cut) = &parts[hole].object.cut else {
+                continue;
+            };
+            let Some(cut) = place(cut) else {
+                return Err(format!(
+                    "`{}` is cut out of `{cut}`, which is no object's name",
+                    parts[hole].object.name
+                ));
+            };
+            for solid in solids_of(&parts, cut) {
+                parts[solid].holes.push(hole);
+            }
+        }
+        for index in 0..parts.len() {
+            let Some(stood_on) = &parts[index].object.on else {
+                continue;
+            };
+            let name = &parts[index].object.name;
+            let surface = match place(stood_on) {
+                Some(surface) if rides(&parts, surface, index) => {
+                    return Err(format!(
+                        "`{name}` stands on `{stood_on}`, which is part of it"
+                    ));
+                }
+                Some(surface) => solids_of(&parts, surface),
+                None if stood_on == GROUND => Vec::new(),
+                None => {
+                    return Err(format!(
+                        "`{name}` stands on `{stood_on}`, which is no object's name or `{GROUND}`"
+                    ));
+                }
+            };
+            parts[index].rest = Some(Rest {
+                surface,
+                solids: solids_of(&parts, index),
+                legs: Vec::new(),
+            });
+        }
+        self.hang_legs(&mut parts)?;
+        let mounts: Vec<usize> = rigs.iter().filter_map(|rig| rig.mount).collect();
+        let in_step = |part: &Part| {
+            let paced = part
+                .object
+                .cycle
+                .as_ref()
+                .is_some_and(|cycle| cycle.strides.is_some());
+            paced && parts[part.whole].strides.is_empty()
+        };
+        if let Some(part) = parts.iter().find(|part| in_step(part)) {
+            return Err(format!(
+                "`{}` has a `cycle` by `strides`, and nothing of `{}` steps: give its feet `step`",
+                part.object.name, parts[part.whole].object.name
+            ));
+        }
+        let (order, loops) = placing_order(&parts, &mounts);
+        let stepping = |part: &Part| matches!(&part.limb, Some(limb) if limb.steps().is_some());
+        self.rough = loops
+            || parts
+                .iter()
+                .any(|part| part.rest.is_some() || stepping(part));
+        self.order = order;
+        (self.rigs, self.live) = (rigs, live);
         self.parts = parts;
         self.bound_joints();
+        self.take_hold();
+        self.keep_still();
+        self.measure();
+        Ok(())
+    }
+
+    /// Work out once where each part stands that nothing ever moves:
+    /// most of a set.
+    fn keep_still(&mut self) {
+        let standing = self.stand(0.0);
+        for index in self.order.clone() {
+            let part = &self.parts[index];
+            let object = &part.object;
+            let keyed = (object.keys.iter())
+                .any(|key| key.at.is_some() || key.rotate.is_some() || key.size.is_some());
+            let moved = keyed
+                || object.spin != [0.0; 3]
+                || object.cycle.is_some()
+                || object.shake.is_some()
+                || part.facing != Facing::Nothing
+                || !part.aims.is_empty()
+                || !part.held.is_empty()
+                || part.limb.is_some()
+                || part.rest.is_some();
+            let carried = part
+                .parent
+                .is_some_and(|parent| self.parts[parent].still.is_none());
+            if !moved && !carried {
+                self.parts[index].still = Some((standing.places[index], standing.sizes[index]));
+            }
+        }
+    }
+
+    /// Give each leg whose foot steps its limb: how long a stride is and
+    /// which foot goes first, where they don't say, and where the foot
+    /// stands under the thing it is part of.
+    fn hang_legs(&self, parts: &mut [Part]) -> Result<(), String> {
+        let feet: Vec<usize> = (0..parts.len())
+            .filter(|part| parts[*part].object.step.is_some())
+            .collect();
+        for &end in &feet {
+            let root = parts[end].whole;
+            let Some(step) = parts[end].object.step.clone() else {
+                continue;
+            };
+            if root == end {
+                return Err(format!(
+                    "`{}` steps, so it is part of a thing that travels: a foot of a model, or \
+                     riding what does the travelling",
+                    parts[end].object.name
+                ));
+            }
+            let above = |part: usize| parts[part].parent.unwrap_or(part);
+            let (lower, upper) = (above(end), above(above(end)));
+            let stands = |part: usize| rest_place(parts, part, root).at;
+            let (foot, knee, hip) = (stands(end), stands(lower), stands(upper));
+            let leg = ((knee - hip).length() + (foot - knee).length()) as f64;
+            // The feet of one thing take turns, in the order written.
+            let beside: Vec<usize> = (feet.iter().copied())
+                .filter(|other| parts[*other].whole == root)
+                .collect();
+            let turn = beside.iter().position(|other| *other == end).unwrap_or(0);
+            if parts[root].travelled.is_empty() {
+                parts[root].travelled = travelled(&parts[root].moves.places, self.duration);
+            }
+            let taken = strides(&parts[root].travelled, step.metres, leg);
+            if parts[root].strides.is_empty() {
+                parts[root].strides = taken.clone();
+            }
+            let limb = Limb {
+                lower,
+                end,
+                goal: Goal::Step(Stepping {
+                    root,
+                    strides: taken,
+                    shift: step.shift.unwrap_or(turn as f64 / beside.len() as f64)
+                        + parts[end].stagger,
+                    leg: leg as f32,
+                    lift: step.lift.map_or(leg as f32 * 0.12, |lift| lift as f32),
+                    rest: (foot.x, foot.z),
+                }),
+            };
+            hang_limb(parts, limb)?;
+            if let Some(rest) = parts[root].rest.as_mut() {
+                rest.legs.push(upper);
+            }
+        }
         Ok(())
     }
 
@@ -161,6 +590,9 @@ impl Scene {
         within: Within,
         outs: &mut Vec<Out>,
     ) -> Result<(), String> {
+        if let Some(copies) = object.repeated() {
+            return self.write_repeat(object, copies, within, outs);
+        }
         let Within {
             prefix,
             beside,
@@ -168,6 +600,7 @@ impl Scene {
             tone,
             copy,
             depth,
+            stagger,
         } = within;
         let name = format!("{prefix}{}", object.name);
         let is_beside = |other: &str| beside.iter().any(|part| part.name == other);
@@ -179,11 +612,28 @@ impl Scene {
             Some(parent) => Some(parent.clone()),
             None => prefix.strip_suffix('/').map(str::to_owned),
         };
-        if let Some(Target::Object(faced)) = &mut out.face
-            && is_beside(faced)
-        {
-            *faced = format!("{prefix}{faced}");
+        // A part names those beside it without the copy's name.
+        let in_full = |named: &mut String| {
+            if is_beside(named) {
+                *named = format!("{prefix}{named}");
+            }
+        };
+        let targets = (out.face.iter_mut())
+            .chain(&mut out.aim)
+            .chain(out.reach.iter_mut().map(|reach| &mut reach.to))
+            .chain(out.keys.iter_mut().flat_map(|key| {
+                let thrown = key.throw.iter_mut().map(|throw| &mut throw.to);
+                key.aim.iter_mut().chain(thrown)
+            }));
+        for target in targets {
+            if let Target::Object(named) = target {
+                in_full(named);
+            }
         }
+        out.on.iter_mut().chain(&mut out.cut).for_each(in_full);
+        (out.keys.iter_mut())
+            .filter_map(|key| key.parent.as_mut())
+            .for_each(in_full);
         out.name = name.clone();
         (out.model, out.parts, out.scale) = (None, Default::default(), 1.0);
         let grow = |v: &mut [f64; 3]| v.iter_mut().for_each(|n| *n *= scale);
@@ -199,6 +649,15 @@ impl Scene {
         for key in out.cycle.iter_mut().flat_map(|cycle| &mut cycle.keys) {
             key.at.iter_mut().chain(&mut key.size).for_each(grow);
         }
+        if let Some(shake) = out.shake.as_mut() {
+            grow(&mut shake.at);
+        }
+        if let Some(step) = out.step.as_mut() {
+            step.metres
+                .iter_mut()
+                .chain(&mut step.lift)
+                .for_each(|n| *n *= scale);
+        }
         out.shade = object
             .shape
             .map(|_| (object.shade.unwrap_or(MID_GREY) * tone).clamp(0.0, 1.0));
@@ -212,6 +671,8 @@ impl Scene {
             object: out,
             inside: copy,
             is_copy: object.model.is_some(),
+            stagger,
+            one_of: None,
         });
         let Some(model) = &object.model else {
             return Ok(());
@@ -240,6 +701,7 @@ impl Scene {
             tone: tone * object.shade.map_or(1.0, |shade| shade / MID_GREY),
             copy: Some(index),
             depth: depth + 1,
+            stagger,
         };
         for part in parts {
             let part = match object.parts.get(&part.name) {
@@ -251,13 +713,78 @@ impl Scene {
         Ok(())
     }
 
+    /// Add the `copies` that `object` repeats as, each riding a joint of
+    /// its name that stands for them all.
+    fn write_repeat(
+        &self,
+        object: &Object,
+        copies: Vec<(Object, f64)>,
+        within: Within,
+        outs: &mut Vec<Out>,
+    ) -> Result<(), String> {
+        let all = outs.len();
+        let joint = Object::joint(object.name.clone(), object.parent.clone());
+        self.write_out(&joint, within, outs)?;
+        for (copy, stagger) in copies {
+            let index = outs.len();
+            let within = Within {
+                stagger: within.stagger + stagger,
+                ..within
+            };
+            self.write_out(&copy, within, outs)?;
+            outs[index].one_of = Some(all);
+        }
+        Ok(())
+    }
+
+    /// Work out where each part that goes with another is within it: where
+    /// it was at the moment it was taken, each in order of time, the scene
+    /// built as far as the one before.
+    fn take_hold(&mut self) {
+        // The earliest not yet worked out, until none is left: a catch
+        // gets its time from the throw before it.
+        let next = |parts: &[Part]| {
+            let waiting = (parts.iter().enumerate()).flat_map(|(part, held)| {
+                (held.held.iter().enumerate())
+                    .filter(|(_, held)| held.at.is_none() && held.t.is_finite())
+                    .map(move |(hold, held)| (held.t, part, hold))
+            });
+            waiting.min_by(|a, b| a.0.total_cmp(&b.0))
+        };
+        while let Some((t, part, hold)) = next(&self.parts) {
+            let now = self.stand(t);
+            let places = &now.places;
+            let by = self.parts[part].held[hold].by;
+            let within = match by {
+                Some(by) => places[by].holds(places[part]),
+                None => places[part],
+            };
+            self.parts[part].held[hold].at = Some((within, places[part]));
+            if by.is_some() {
+                continue;
+            }
+            // Let go, it goes as its speed and gravity take it.
+            let flight = self.flown(part, hold, t, &now);
+            let held = &mut self.parts[part].held;
+            let caught = held[hold].thrown.as_ref().map(|(to, _)| *to);
+            if let Some(AimAt::Part(catcher)) = caught
+                && let Some(catch) =
+                    (held.iter_mut()).find(|held| held.t.is_infinite() && held.by == Some(catcher))
+            {
+                catch.t = t + flight.lasts;
+            }
+            held[hold].flight = Some(flight);
+            held.sort_by(|a, b| a.t.total_cmp(&b.t));
+        }
+    }
+
     /// Give each joint and copy the box that holds what rides it as the
     /// scene starts, in its own space.
     fn bound_joints(&mut self) {
-        let places: Vec<_> = (0..self.parts.len()).map(|i| self.place(i, 0.0)).collect();
+        let places = self.stand(0.0).places;
         let mut boxes: Vec<Option<(Vec3, Vec3)>> = vec![None; self.parts.len()];
         for (index, part) in self.parts.iter().enumerate() {
-            if part.object.shape.is_none() {
+            if !part.is_solid() {
                 continue;
             }
             let (low, high) = (Vec3::of(part.bounds.0), Vec3::of(part.bounds.1));
@@ -335,16 +862,151 @@ fn solid_bounds(object: &Object) -> ([f64; 3], [f64; 3]) {
     ([-w * 0.5, under, -d * 0.5], [w * 0.5, under + h, d * 0.5])
 }
 
-/// Metres `object`'s keys have moved it over the ground by each frame of
-/// `duration` seconds.
-fn travelled(object: &Object, duration: f64) -> Vec<f32> {
-    let places = Track::places(object);
+/// Give the part two above the end of `limb` the limb: the end rides
+/// its lower part, and that its upper. Refused where there are not two
+/// parts above it, or the upper already has a limb.
+fn hang_limb(parts: &mut [Part], mut limb: Limb) -> Result<(), String> {
+    let name = &parts[limb.end].object.name;
+    let above = |part: usize| parts[part].parent;
+    let (Some(lower), Some(upper)) = (above(limb.end), above(limb.end).and_then(above)) else {
+        return Err(format!(
+            "`{name}` is brought somewhere as the end of a limb, so it rides a part that rides \
+             another: a hand its forearm, and that its upper arm"
+        ));
+    };
+    if let Some(other) = &parts[upper].limb {
+        return Err(format!(
+            "`{name}` and `{}` are both brought somewhere by bending `{}`: one limb has one end",
+            parts[other.end].object.name, parts[upper].object.name
+        ));
+    }
+    limb.lower = lower;
+    parts[upper].limb = Some(limb);
+    Ok(())
+}
+
+/// Whether part `index` is `whole`, or rides it.
+fn rides(parts: &[Part], index: usize, whole: usize) -> bool {
+    let mut above = Some(index);
+    while let Some(part) = above {
+        if part == whole {
+            return true;
+        }
+        above = parts[part].parent;
+    }
+    false
+}
+
+/// The solids of part `whole`: itself and all that rides it.
+fn solids_of(parts: &[Part], whole: usize) -> Vec<usize> {
+    (0..parts.len())
+        .filter(|index| parts[*index].is_solid() && rides(parts, *index, whole))
+        .collect()
+}
+
+/// The order parts are placed in at a moment: each after what it rides,
+/// and after what it faces and stands on, unless that goes round in a
+/// loop; whether some did. `mounts` are the parts cameras ride, which
+/// whatever faces the camera is placed after.
+fn placing_order(parts: &[Part], mounts: &[usize]) -> (Vec<usize>, bool) {
+    let faced = |part: &Part| {
+        let mut faced = match part.facing {
+            Facing::Part(faced) => vec![faced],
+            Facing::Camera => mounts.to_vec(),
+            Facing::Nothing | Facing::Path | Facing::Point(_) => Vec::new(),
+        };
+        let reached = part.limb.iter().filter_map(|limb| match &limb.goal {
+            Goal::Reach { to, .. } => Some(to),
+            Goal::Step(_) => None,
+        });
+        faced.extend(part.held.iter().filter_map(|held| held.by));
+        // A leg that steps comes down on what its thing stands on.
+        let trodden = (part.limb.iter())
+            .filter_map(|limb| parts[limb.steps()?.root].rest.as_ref())
+            .flat_map(|rest| rest.surface.iter().copied());
+        faced.extend(trodden);
+        for aim in part.aims.iter().map(|(_, aim, _)| aim).chain(reached) {
+            match aim {
+                AimAt::Part(aimed) => faced.push(*aimed),
+                AimAt::Camera => faced.extend(mounts),
+                AimAt::Ahead | AimAt::Point(_) => {}
+            }
+        }
+        faced
+    };
+    let mut waits = vec![0usize; parts.len()];
+    let mut waited_on: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];
+    for (index, part) in parts.iter().enumerate() {
+        let stood_on = part
+            .rest
+            .iter()
+            .flat_map(|rest| rest.surface.iter().copied());
+        for other in (part.parent.into_iter().chain(faced(part))).chain(stood_on) {
+            if other != index {
+                waits[index] += 1;
+                waited_on[other].push(index);
+            }
+        }
+    }
+    let mut ready: VecDeque<usize> = (0..parts.len()).filter(|i| waits[*i] == 0).collect();
+    let mut placed = vec![false; parts.len()];
+    let mut order = Vec::with_capacity(parts.len());
+    let mut loops = false;
+    while order.len() < parts.len() {
+        let Some(index) = ready.pop_front().or_else(|| {
+            // All that is left waits on a loop of facing: break it at a
+            // part whose parent is placed, which then faces as best it can.
+            loops = true;
+            (0..parts.len()).find(|i| !placed[*i] && parts[*i].parent.is_none_or(|p| placed[p]))
+        }) else {
+            break;
+        };
+        if std::mem::replace(&mut placed[index], true) {
+            continue;
+        }
+        order.push(index);
+        for &waiting in &waited_on[index] {
+            waits[waiting] -= 1;
+            if waits[waiting] == 0 && !placed[waiting] {
+                ready.push_back(waiting);
+            }
+        }
+    }
+    (order, loops)
+}
+
+/// The strides a leg `leg` metres long has taken by each frame, the
+/// thing it carries having `travelled` so far by each. A stride is
+/// `metres` when given. Else it is as long as legs of that length take at
+/// the speed: longer the faster, as Alexander measured of animals from
+/// their tracks (2.3 leg lengths times the 0.3rd power of speed squared
+/// over gravity and the leg's length): 1.3 m at a walk, 2.4 m at a run.
+fn strides(travelled: &[f32], metres: Option<f64>, leg: f64) -> Vec<f32> {
+    let mut taken = 0.0;
+    let mut strides = Vec::with_capacity(travelled.len());
+    strides.push(0.0);
+    for pair in travelled.windows(2) {
+        let covered = (pair[1] - pair[0]) as f64;
+        let speed = covered * FPS as f64;
+        let stride = metres.unwrap_or_else(|| {
+            let froude = speed * speed / (9.81 * leg.max(1e-3));
+            (2.3 * leg * froude.powf(0.3)).max(0.4 * leg)
+        });
+        taken += covered / stride.max(0.02);
+        strides.push(taken as f32);
+    }
+    strides
+}
+
+/// Metres the keys of `places` have moved a thing over the ground by each
+/// frame of `duration` seconds.
+fn travelled(places: &Track, duration: f64) -> Vec<f32> {
     let frames = (duration * FPS as f64).ceil() as usize + 1;
     let mut gone = 0.0;
-    let mut was = places.path(0.0);
+    let mut was = places.at(0.0);
     (0..=frames)
         .map(|frame| {
-            let is = places.path(frame as f64 / FPS as f64);
+            let is = places.at(frame as f64 / FPS as f64);
             gone += (is[0] - was[0]).hypot(is[2] - was[2]);
             was = is;
             gone as f32

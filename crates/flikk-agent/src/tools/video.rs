@@ -22,7 +22,7 @@ use super::view::{image_content, save_png};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, secs, track_id};
 use crate::bridge::{Content, ToolResult};
-use flikk_core::blockout::{Detail, Scene};
+use flikk_core::blockout::{Detail, Outside, Scene};
 use flikk_core::cloud::{
     CloudError, GenerateRequest, GenerationService, VideoModel, VideoReference,
 };
@@ -549,12 +549,23 @@ fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
     let times: Vec<f64> = (0..PREVIEW_FRAMES)
         .map(|i| scene.duration * i as f64 / (PREVIEW_FRAMES - 1) as f64)
         .collect();
-    let tiles: Vec<_> = (times.iter())
+    let mut tiles: Vec<_> = (times.iter())
         .map(|t| {
             let frame = scene.render(*t, size[0], size[1], Detail::Full);
             (frame, format!("{t:.1}s"))
         })
         .collect();
+    let moments = tiles.len();
+    // And the set from straight above, where what the shot's own camera
+    // hides (who is where, how far the camera is) shows.
+    let above = Outside {
+        around: 0.0,
+        above: 90.0,
+        closer: 1.0,
+    };
+    let middle = scene.duration * 0.5;
+    let plan = scene.render_outside(middle, (size[0], size[1]), &above, Detail::Full);
+    tiles.push((plan, "plan".into()));
     let image = save_png(&collage(&tiles, (size[0], size[1])))
         .and_then(|path| Ok((image_content(&path)?, path)));
     let (image, path) = match image {
@@ -564,12 +575,14 @@ fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
     let cols = columns(tiles.len());
     let review = scene.review((wide, high)).text();
     let text = format!(
-        "Blockout `{id}`, {:.1} s, at {} moments: {cols} columns × {} rows, left to right then \
-         top to bottom, each stamped with its time. What its camera sees:\n{review}\n\nIt is kept \
+        "Blockout `{id}`, {:.1} s, at {moments} moments: {cols} columns × {} rows, left to right \
+         then top to bottom, each stamped with its time. The last, `plan`, is the set from \
+         straight above at {middle:.1} s (+X to the right, +Z toward the bottom): the camera in \
+         white with the way it goes, and in black the way each thing goes, a tick a second. \
+         What its camera sees:\n{review}\n\nIt is kept \
          as `{id}`. To fix what is not as the shot needs, call this again with `id` and `changes` \
          (only what differs), not the whole scene; then ask for the video with `blockout_id`.",
         scene.duration,
-        tiles.len(),
         tiles.len().div_ceil(cols),
     );
     Done {
@@ -577,7 +590,7 @@ fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
             content: vec![Content::Text { text }, image],
             is_error: false,
         },
-        summary: format!("Blockout, {:.0} s: {} frames", scene.duration, tiles.len()),
+        summary: format!("Blockout, {:.0} s: {moments} frames", scene.duration),
         images: vec![path],
         ..Default::default()
     }

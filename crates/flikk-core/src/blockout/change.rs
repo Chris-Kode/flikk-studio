@@ -3,9 +3,9 @@
 //! a change names what it touches and leaves the rest as it is.
 //!
 //! A change is the scene's JSON with only what differs, where `objects`,
-//! and the parts of each model under `models`, are held by name: a name
-//! that is there has the fields given put in place of its own, one that
-//! is not yet there is added, and `null` takes it away.
+//! the parts of each model under `models`, and `cameras` are held by
+//! name: a name that is there has the fields given put in place of its
+//! own, one that is not yet there is added, and `null` takes it away.
 
 use super::Scene;
 use serde_json::{Map, Value};
@@ -47,24 +47,45 @@ impl Scene {
                 }
                 ("camera", Value::Object(fields)) => {
                     if let Some(Value::Object(camera)) = scene.get_mut("camera") {
-                        put_fields(camera, fields);
+                        put_camera_fields(camera, fields);
                     }
                 }
-                ("duration" | "ground" | "sun", Value::Null) => {
+                ("cameras", Value::Object(cameras)) => {
+                    let held = scene
+                        .entry("cameras")
+                        .or_insert_with(|| Value::Object(Map::new()));
+                    let Value::Object(held) = held else {
+                        continue;
+                    };
+                    for (name, fields) in cameras {
+                        match (held.get_mut(name), fields) {
+                            (_, Value::Null) => {
+                                held.remove(name);
+                            }
+                            (Some(Value::Object(camera)), Value::Object(fields)) => {
+                                put_camera_fields(camera, fields);
+                            }
+                            (_, fields) => {
+                                held.insert(name.clone(), fields.clone());
+                            }
+                        }
+                    }
+                }
+                ("duration" | "ground" | "hills" | "gravity" | "sun" | "cuts", Value::Null) => {
                     scene.remove(field);
                 }
-                ("duration" | "ground" | "sun", value) => {
+                ("duration" | "ground" | "hills" | "gravity" | "sun" | "cuts", value) => {
                     scene.insert(field.clone(), value.clone());
                 }
-                ("models" | "camera", _) => {
+                ("models" | "camera" | "cameras", _) => {
                     return Err(format!(
                         "blockout: `{field}` in `changes` is an object holding what differs"
                     ));
                 }
                 _ => {
                     return Err(format!(
-                        "blockout: `changes` can hold objects, models, camera, duration, ground \
-                         and sun, not `{field}`"
+                        "blockout: `changes` can hold objects, models, camera, cameras, cuts, \
+                         duration, ground, hills, gravity and sun, not `{field}`"
                     ));
                 }
             }
@@ -121,6 +142,17 @@ fn change_named(list: &mut Value, change: &Value, what: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// Put each of `fields` in place of a camera's own. A `lens` takes the
+/// place of its `fov` and a `fov` of its `lens`: each says the other.
+fn put_camera_fields(camera: &mut Map<String, Value>, fields: &Map<String, Value>) {
+    for (given, other) in [("lens", "fov"), ("fov", "lens")] {
+        if fields.get(given).is_some_and(|value| !value.is_null()) {
+            camera.remove(other);
+        }
+    }
+    put_fields(camera, fields);
 }
 
 /// Put each of `fields` in place of `held`'s own; `null` takes one away.

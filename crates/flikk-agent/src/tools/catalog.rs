@@ -72,13 +72,17 @@ fn curve(desc: &str) -> Value {
 /// whoever it is.
 pub(crate) const BLOCKOUT_GRAMMAR: &str = "Nothing in a blockout is ready-made: build every thing from plain solids, so any character, creature, machine or set can be shown, moving any way the shot asks.\n\
 Building: a thing is solids that ride one another. With `parent`, a part's `at` and `rotate` are in its parent's own space, and it moves and turns with it. An object with no `shape` is a joint: nothing is drawn, it only carries others (hips that carry a body and two legs). `anchor` says which point of a solid `at` places and `rotate` turns about: \"top\" hangs it from its joint, as a limb from a shoulder or a hip, so `rotate` swings it. Things face +Z. Turning about X by a positive angle tips a thing's top toward +Z, so the free end of a limb hung from its top swings back, and a negative angle swings it forward; about Z, positive tips the top toward -X.\n\
-Moving: `keys` say what an object is at given seconds, for what happens once (it crosses the room, an arm rises at 2 s, it sits down). A `cycle` is motion that repeats, added on top of the keys: a swing, a step, a breath, a wing beat, a wheel turning. It runs by the clock (`seconds` a round) or by the ground covered (`metres` a round): then it follows how far the thing it is part of has travelled, so feet and wheels keep up with the ground at any speed, and it comes to rest when the thing stands still. `shift` 0.5 puts the other leg half a round behind.\n\
+Moving: `keys` say what an object is at given seconds, for what happens once (it crosses the room, an arm rises at 2 s, it sits down). A `cycle` is motion that repeats, added on top of the keys: a swing, a breath, a wing beat, a wheel turning. It runs by the clock (`seconds` a round), by the ground covered (`metres` a round: a wheel keeps up with the road at any speed) or by the strides taken (`strides`), and one that follows the ground or the strides comes to rest when the thing stands still. `shift` 0.5 puts the other arm half a round behind.\n\
+Walking: build a leg as thigh, shin and foot, each hung from the one above, and give each foot `\"step\": {}` and the thing `\"on\": \"ground\"` (or the object it walks on). The feet then land, stay put while the body passes over them and swing on, the knees bend, the body rises and sinks, and a run leaves the ground, all from where the thing's keys take it and how fast: no cycle on the legs, no hip height to work out, up a ramp or a stair too.\n\
+Touching and looking: don't work out a limb's angles to touch something. Give its end `reach` and the limb bends to put it there; give a head `aim` and it looks there. A key hands a thing to a hand (`parent`), lets it fall (`\"parent\": \"none\"`) or throws it (`throw`), and gravity does the rest.\n\
 Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
-An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"leg l\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0],\"cycle\":{\"metres\":1.4,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}},{\"name\":\"leg r\",\"shape\":\"capsule\",\"size\":[0.14,0.9,0.14],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0],\"cycle\":{\"metres\":1.4,\"shift\":0.5,\"keys\":[{\"t\":0,\"rotate\":[-28,0,0]},{\"t\":0.5,\"rotate\":[24,0,0]}]}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"leg l\":{\"cycle\":null,\"rotate\":[-80,0,0]}}}],\"camera\":{\"at\":[0,1.5,7],\"look_at\":\"guard\"}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
+Openings: a solid with `cut` is not drawn but taken out of the object it names, so a wall has a doorway to walk through and windows to see through: a box for a door, a cylinder on its side over a box for an arch.\n\
+Many: `repeat` lays one object out many times, in a row or a grid (`step`), a `ring`, or scattered over an `area`, and its `vary` makes each a little its own: a street of stalls, the windows of a front, a wood, an audience. Each is the whole object, its keys too, so a walker repeated over an area is a crowd that walks. Don't write the same thing out many times.\n\
+An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"arm l\",\"shape\":\"capsule\",\"size\":[0.1,0.6,0.1],\"anchor\":\"top\",\"parent\":\"body\",\"at\":[0.25,0.6,0],\"cycle\":{\"strides\":1,\"keys\":[{\"t\":0,\"rotate\":[25,0,0]},{\"t\":0.5,\"rotate\":[-25,0,0]}]}},{\"name\":\"thigh l\",\"shape\":\"capsule\",\"size\":[0.15,0.46,0.15],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0]},{\"name\":\"shin l\",\"shape\":\"capsule\",\"size\":[0.12,0.46,0.12],\"anchor\":\"top\",\"parent\":\"thigh l\",\"at\":[0,-0.44,0]},{\"name\":\"foot l\",\"shape\":\"box\",\"size\":[0.1,0.07,0.26],\"parent\":\"shin l\",\"at\":[0,-0.47,0.07],\"step\":{}},{\"name\":\"thigh r\",\"shape\":\"capsule\",\"size\":[0.15,0.46,0.15],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0]},{\"name\":\"shin r\",\"shape\":\"capsule\",\"size\":[0.12,0.46,0.12],\"anchor\":\"top\",\"parent\":\"thigh r\",\"at\":[0,-0.44,0]},{\"name\":\"foot r\",\"shape\":\"box\",\"size\":[0.1,0.07,0.26],\"parent\":\"shin r\",\"at\":[0,-0.47,0.07],\"step\":{}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"on\":\"ground\",\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"on\":\"ground\",\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"arm l\":{\"cycle\":null,\"rotate\":[0,0,150]},\"head\":{\"aim\":\"guard\"}}}],\"camera\":{\"at\":[0,1.5,7],\"frame\":{\"of\":\"guard\",\"size\":\"full\"}}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
 
 /// How a change to a blockout is written (`Scene::changed`): what its
 /// writer is told, whoever it is.
-pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ; `duration`, `ground` and `sun` are given as they should be.";
+pub(crate) const BLOCKOUT_CHANGES: &str = "A change is the scene's JSON with only what differs, so nothing else is touched and nothing has to be written twice. In it `objects` is held by name: {\"objects\": {\"runner\": {\"at\": [0, 0, 2]}}} gives the runner a new place and leaves the rest of it as it is; a name not yet there adds that object; null removes it. `models` likewise, by model and then by part: {\"models\": {\"walker\": {\"leg l\": {\"cycle\": null}}}}; a new name adds a model or a part, null removes one. A field given takes the place of that field whole (all of an object's `keys`, all of its `cycle`), and null takes a field away. `camera` holds the camera's fields that differ, and `cameras` each camera's by name (a new name adds one, null removes one); `cuts`, `duration`, `ground`, `hills`, `gravity` and `sun` are given as they should be.";
 
 /// How a video's prompt is written: what its writer is told, whoever it
 /// is. Video models follow a short brief (roles, the clip in a sentence,
@@ -106,10 +110,11 @@ Say what is there rather than what isn't (\"an empty street\", not \"no cars\"),
 
 /// A blockout as `generate_video` takes it (`flikk_core::blockout::Scene`).
 pub(crate) fn blockout() -> Value {
-    use flikk_core::blockout::{Anchor, Ease, Shape};
+    use flikk_core::blockout::{Anchor, Ease, Shape, ShotSize, Side};
     let point = |d: &str| numbers(3, d);
     let ease = |d: &str| one_of(&Ease::NAMES, d);
-    let arrives = "How it arrives here (default linear): `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
+    let arrives = "How the move to here is timed. Left out (`linear`), it keeps the pace the keys give: through a key without stopping, slowing to a stop only where it turns back or rests. `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
+    let when = "Seconds. Leave it out of a key that gives `at`, and that place is passed on the way at an even pace between the timed keys either side of it (the start and the end where there is none): a winding walk or an orbit is then a list of places";
     let target = |d: &str| json!({ "type": ["array", "string"], "description": d });
     let description = format!(
         "A rough 3D scene for the video to follow, when camera, staging, action or timing matter: grey stand-ins you build and move yourself, and a moving camera, drawn by Flikk for nothing and shown to the user, who can change it by asking, before anything is spent. Metres; X is right, Y up, +Z toward a camera placed at +Z; the ground is y 0. Block what the shot needs: who and what matters and the set they move through, where they go and when, one clear camera idea a shot, everything that matters in view at the start. A key gives a time and what is different then; each thing a key gives moves there from the key before that gave it. It needs a model that follows clips (Seedance, Kling, Wan). In the prompt the blockout is @Video1, and a first frame given with it @Image1 (then `references` count on from @Image2 and @Video2); say what each stand-in is (\"the tall figure is the runner, the dark box the taxi\") and describe the look, which the blockout does not carry. {BLOCKOUT_GRAMMAR}"
@@ -119,7 +124,10 @@ pub(crate) fn blockout() -> Value {
         "description": "Motion that repeats, added to what the keys make of it",
         "properties": {
             "seconds": number("How long a round takes; or give `metres`"),
-            "metres": number("The ground a round covers: a step cycle of two steps, a wheel's rim"),
+            "metres": number("The ground a round covers: a wheel's rim, a caterpillar's ripple"),
+            "strides": number("The strides a round takes, of the feet that `step` on the thing it is part of: 1 for arms that swing in time with the legs at any pace"),
+            "from": number("The second it starts (default the start): a wave from 2 s. It comes in over a moment"),
+            "until": number("The second it stops (default the end), dying away over a moment"),
             "shift": number("How far into its round it starts, 0 to 1"),
             "keys": {
                 "type": "array",
@@ -141,48 +149,123 @@ pub(crate) fn blockout() -> Value {
     });
     let keys = json!({
         "type": "array",
-        "description": "What it is later; it moves along a smooth path through the places",
+        "description": "What it is later. Its place, turn, size and grey each follow a smooth curve through their keys that never goes past one, so nothing has to be eased by hand to keep it from overshooting. Angles are taken as written: 350 and then 10 turns back through 340 degrees, so write 370 to go on round",
         "items": {
             "type": "object",
             "properties": {
-                "t": number("Seconds"),
+                "t": number(when),
                 "at": point("Its place then"),
                 "rotate": point("Its turn then"),
                 "size": point("Its size then"),
                 "shade": number("Its grey then"),
                 "hidden": boolean("Gone (true) or there (false) from here on"),
+                "aim": target("What its front turns to by then"),
+                "parent": string("The object it goes with from here on, from where it is at this moment: picked up by a hand (`copy/hand r`), put in a car, set on a table (name the table). \"none\" lets it go: it falls from there under gravity, keeping the speed it was carried at, and comes to rest on what is under it. Bring the hand to it first with `reach`, until this second. Its own keys move it no more"),
+                "throw": {
+                    "type": "object",
+                    "description": "Throws it from where it is at this moment, in the arc gravity gives it: don't key a throw's path. Thrown to an object, it is caught: it goes with that object from when it gets there, aimed at where that will be. Thrown to a point or the camera, it flies on and comes to rest on what it lands on. The preview says when it arrives, to time what happens next",
+                    "properties": {
+                        "to": target("An object's name (a hand, a basket), \"camera\", or a point [x, y, z]"),
+                        "seconds": number("How long it is in the air (default: an easy lob, about 1 s over 5 m): less for a hard flat throw, more for a high one")
+                    },
+                    "required": ["to"]
+                },
                 "ease": ease(arrives)
-            },
-            "required": ["t"]
+            }
         }
     });
+    let frame = |d: &str| {
+        json!({
+            "type": "object",
+            "description": d,
+            "properties": {
+                "of": json!({ "type": ["string", "array"], "description": "The object it holds, by name, or several: a two-shot" }),
+                "size": one_of(&ShotSize::NAMES, "How much of them (default medium): close_up is the head, medium_close_up head and shoulders, medium from the waist up, medium_wide from the knees, full all of them, wide all of them at half the picture's height, very_wide small in their surroundings"),
+                "side": one_of(&Side::NAMES, "Where across the picture they sit (default centre): left and right put them on that third")
+            },
+            "required": ["of"]
+        })
+    };
     let camera = json!({
         "type": "object",
         "properties": {
-            "at": point("Where it is; 1.6 high is eye level"),
-            "look_at": target("A point [x, y, z], or an object's name, which it then follows"),
-            "fov": number("Degrees across the longer side: 74 is a 24 mm lens, 54 a 35 mm (the default), 40 a 50 mm, 24 an 85 mm"),
+            "at": point("Where it is; 1.6 high is eye level. With a `frame`, the way it looks from: how far off it stands is worked out"),
+            "look_at": target("A point [x, y, z], or an object's name, which it then follows. Leave out with a `frame`"),
+            "frame": frame("What the picture holds, as a shot is called: the camera then stands as far off, along the way from `at`, as that takes, and looks at what it holds. Use it in place of working out a distance"),
+            "lens": number("Its lens in millimetres, as on a film camera: 18 very wide, 24 wide, 35 (the default) and 50 as an eye sees, 85 a portrait, 135 and up long and flat"),
+            "fov": number("Or how wide it sees in degrees across the longer side, in place of `lens`"),
             "roll": number("Degrees it is rolled: a Dutch angle"),
             "shake": number("How much a hand holds it, 0 (locked off, the default) to 1 (running with it)"),
             "parent": string("The object it rides: `at`, and a point it looks at, are then in that object's own space: a dashboard, a shoulder, a chase behind a car"),
             "keys": {
                 "type": "array",
-                "description": "Its move: a dolly, an orbit (a few keys around the subject), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
+                "description": "Its move, along a smooth curve through the keys: a dolly, an orbit (a few places around the subject, with no `t`), a crane, a zoom; a key with `ease` \"cut\" cuts to a new shot",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "t": number("Seconds"),
+                        "t": number(when),
                         "at": point("Where it is then"),
                         "look_at": target("What it looks at then"),
-                        "fov": number("Its field of view then"),
+                        "frame": frame("What the picture holds when it gets here, as things are then: a push in is a wide `frame` on the camera and a close one on a key"),
+                        "lens": number("Its lens then: a zoom"),
+                        "fov": number("Or its field of view then"),
                         "roll": number("Its roll then"),
                         "ease": ease(arrives)
-                    },
-                    "required": ["t"]
+                    }
                 }
             }
         },
-        "required": ["at", "look_at"]
+        "required": ["at"]
+    });
+    let reach = json!({
+        "type": "object",
+        "description": "Brings it somewhere as the end of a limb: the part it rides and the part that one rides bend, as an arm or a leg does, to put it there, and follow as either moves. Give it to a hand (a small solid or a joint at the end of the forearm) or a foot: a hand on a door's handle, on a wheel, held out to shake; a foot on a pedal. Out of reach the limb goes straight toward it: pointing. It bends the way its pose has it bent",
+        "properties": {
+            "to": target("An object's name (put a joint on a thing where a hand goes, and name that), \"camera\", or a point [x, y, z]"),
+            "from": number("The second it is there from (default the start): it moves there over the moment before"),
+            "until": number("The second it lets go (default the end)")
+        },
+        "required": ["to"]
+    });
+    let step = json!({
+        "type": "object",
+        "description": "Makes it a foot that steps: as the thing it is part of travels, it stays where it lands while the body passes over it, then swings to its next landing, and the two parts above it (shin and thigh) bend as a leg. Feet don't slide, stride and pace follow the speed (a walk at 1.4 m/s, a run with both feet off the ground at 4), it stands still when the thing does, and it climbs what the thing is `on`. Give it to each foot, as {}, and no cycle to the legs",
+        "properties": {
+            "metres": number("The ground from one landing of this foot to its next, where the pace should not follow the speed: short for a shuffle, long for a bound"),
+            "shift": number("How far into a stride it starts, 0 to 1 (default: the feet of one thing take turns in the order written; give a four-legged gait its own)"),
+            "lift": number("How high it is lifted as it swings (default an eighth of the leg)")
+        }
+    });
+    let shake = json!({
+        "type": "object",
+        "description": "Unsteady motion that never repeats, on top of the keys and the cycle: an engine's rumble, a boat on a swell, a flag, someone who can't stand still",
+        "properties": {
+            "at": point("The most it adds to its place, metres either way"),
+            "rotate": point("The most it adds to its turn, degrees either way"),
+            "seconds": number("About how long one wobble takes (default 1): 0.1 rumbles, 3 sways")
+        }
+    });
+    let repeat = json!({
+        "type": "object",
+        "description": "Many of it, laid out: each is this object over again, its keys too, moved over. They are called `name 1`, `name 2` and on, and the name alone stands for them all: a camera can `frame` it, and others can ride it. Give `count` and one of `step`, `ring` or `area`. A solid or a copy of a model: build a thing of several parts as a model first. In a model too: the legs of a table, the wheels of a train",
+        "properties": {
+            "count": { "type": ["number", "array"], "description": "How many; or [along X, up Y, along Z] for a grid" },
+            "step": point("Metres from each to the next, the first at `at`: a row along it. With a count along X, Y and Z, the metres between them along each: [3, 0, 4] spaces a grid on the ground, [2.5, 3, 0] the windows of a front"),
+            "ring": number("Or the radius of a ring around `at` they stand in, each turned to face its middle; `rotate` [0, 180, 0] on the object faces them out"),
+            "area": numbers(2, "Or the width (X) and depth (Z) of ground around `at` they are scattered over, keeping apart from one another"),
+            "vary": {
+                "type": "object",
+                "description": "How each differs from the others, the same every time it is drawn",
+                "properties": {
+                    "turn": number("The most each is turned about the vertical, degrees either way: 180 for trees, 15 for parked cars"),
+                    "scale": number("The most each is larger or smaller: 0.1 for people, 0.3 for trees"),
+                    "shade": number("The most each is lighter or darker: 0.1"),
+                    "shift": number("How far into their rounds each one's cycles and steps start, at most: 1 puts a crowd out of step")
+                }
+            },
+            "seed": number("Another whole number scatters and varies them another way")
+        },
+        "required": ["count"]
     });
     json!({
         "type": "object",
@@ -190,6 +273,17 @@ pub(crate) fn blockout() -> Value {
         "properties": {
             "duration": number("Seconds, at most 30 (default: the video's)"),
             "ground": boolean("A floor at y 0 (default true); false in the air or in space"),
+            "hills": {
+                "type": "object",
+                "description": "Ground that rises and falls in place of a level floor: dunes, a hillside, a rolling field. Every height is then above the ground under that thing, so nothing else changes: y 0 still stands a thing on the ground and a camera at 1.6 is at eye level wherever it is. Each thing is set on it where its `at` is, so a long wall or road doesn't bend to it: build those of short pieces with `repeat`",
+                "properties": {
+                    "height": number("Metres from its lowest to its highest: 1 for uneven ground, 5 for hills"),
+                    "across": number("About how many metres from one top to the next (default 30): 8 for dunes, 60 for a wide valley"),
+                    "seed": number("Another whole number shapes it another way")
+                },
+                "required": ["height"]
+            },
+            "gravity": { "type": ["number", "boolean"], "description": "How strongly things fall once a key lets them go or throws them, against the Earth's pull (default 1): 0 or false in space or under water, where they go on in a straight line or stay where they are let go; 0.17 on the Moon. An object's own `gravity` says otherwise for that object" },
             "sun": numbers(2, "Where the light comes from: degrees around the vertical (0 from +Z, 90 from +X) and above the horizon (default 47, 55). Low for long shadows; behind the subject for a backlit shot"),
             "models": {
                 "type": "object",
@@ -198,7 +292,7 @@ pub(crate) fn blockout() -> Value {
             },
             "objects": {
                 "type": "array",
-                "description": "What is in the scene: solids, joints, and copies of models. At most 256, and 1200 parts once the copies are written out",
+                "description": "What is in the scene: solids, joints, and copies of models. At most 256, and 6000 parts once copies and repeats are written out",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -212,21 +306,47 @@ pub(crate) fn blockout() -> Value {
                             "additionalProperties": { "type": "object" }
                         },
                         "size": point("Width, height, depth of a solid (default 1 1 1)"),
+                        "taper": number("How wide the top of a box, a cylinder or a capsule is against its base (default 1), inside the same `size`: 0.6 for a trunk, a lampshade, a plinth, a forearm that thins to the wrist standing up; over 1 it narrows downward: a cup, and a limb hung from its top (1.4 for a thigh)"),
                         "at": point("Where its anchor is, in the space of what it rides: y 0 stands a thing on the ground"),
                         "rotate": point("Degrees about X, Y and Z, about its anchor; Y turns it about the vertical"),
                         "anchor": one_of(&Anchor::NAMES, "The point of a solid `at` places and `rotate` turns about: the middle of its underside (base, the default), its middle, or the middle of its top"),
                         "shade": number("Its grey, 0 dark to 1 light (default 0.62): tell the subject from the set, and keep characters light (0.75 or more) so their limbs read. On a copy, how light the copy is"),
                         "parent": string("The object it rides, by name"),
+                        "cut": string("The object it is cut out of, by name: nothing is drawn of this solid, and that object, with all that rides it, has a hole where it is. Make it a little deeper than the wall it goes through. With `repeat`, a row of windows"),
+                        "on": string("What it stands on: \"ground\", or an object's name (a stage, a ramp, a table top, a lift). Its lowest point, with all that rides it, then rests on that surface wherever it is and whatever its limbs do, and the height in `at` is how far above that it is: 0 standing, more in a jump. Give it to whatever walks, and to what is set down on something"),
                         "face": target("What it turns to about the vertical, on top of `rotate`: \"path\" (the way it travels: give it to whatever walks, runs, rides or drives), \"camera\", an object's name, or a point [x, y, z]"),
+                        "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
+                        "reach": reach,
+                        "step": step,
+                        "gravity": { "type": ["number", "boolean"], "description": "How strongly this one falls once a key lets it go or throws it, where that is not as the scene's `gravity` has it. 0 or false for what floats: a balloon, a drone that hovers; it then goes on in a straight line as it was going, stays where it was let go at rest, and a throw sends it straight. Below 0 for what rises, and 1 or true for what does fall in a scene without gravity" },
+                        "repeat": repeat,
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
                         "cycle": cycle,
+                        "shake": shake,
                         "keys": keys
                     },
                     "required": ["name"]
                 }
             },
-            "camera": camera
+            "camera": camera,
+            "cameras": {
+                "type": "object",
+                "description": "More cameras, by name, each written as `camera` is, for a shot that cuts between set-ups (a wide, a close-up, over a shoulder). Each goes on moving whether or not the picture is its own",
+                "additionalProperties": { "type": "object" }
+            },
+            "cuts": {
+                "type": "array",
+                "description": "When the picture goes over to another camera: the shot opens on `camera`, called \"main\"",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "t": number("Seconds"),
+                        "camera": string("The camera cut to, by name, or \"main\"")
+                    },
+                    "required": ["t", "camera"]
+                }
+            }
         },
         "required": ["camera"]
     })

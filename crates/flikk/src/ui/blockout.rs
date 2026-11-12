@@ -1,13 +1,18 @@
 //! A blockout on screen: [`BlockoutPlayer`] draws a scene as it plays, in
 //! a tile of a video request's card and large in [`editor`], the dialog
-//! where the user changes the scene by asking.
+//! where the user changes the scene by asking. There it can also show the
+//! set from outside the shot, turned by dragging, and the shot as its
+//! depth, its lines or its things; a click on a thing in the shot names
+//! it.
 
 pub mod editor;
 
 use crate::ui::kit::theme as t;
 use crate::ui::viewer::latest::Latest;
-use flikk_core::blockout::{Detail, FPS, Scene};
+use flikk_core::blockout::{Detail, FPS, Outside, Pass, Scene};
 use gpui_kit::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +22,26 @@ const SLOW: Duration = Duration::from_millis(45);
 const FAST: Duration = Duration::from_millis(16);
 /// The narrowest a picture is drawn while it can't keep up.
 const NARROWEST: u32 = 192;
+/// Degrees the set turns for each pixel it is dragged.
+const TURN: f64 = 0.4;
+/// The lowest the set is looked at from, in degrees above the horizon.
+const LOWEST: f64 = 3.0;
+
+/// What a player shows of its scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Looking {
+    /// The shot: what a video model is given to follow.
+    Shot,
+    /// The set from outside the shot, with its camera drawn in.
+    Set(Outside),
+    /// The shot as one of its passes.
+    Pass(Pass),
+}
+
+/// The user pointed at a thing in the shot: its name.
+pub struct Picked(pub String);
+
+impl EventEmitter<Picked> for BlockoutPlayer {}
 
 /// A scene playing in a loop, drawn off the UI thread at the width it can
 /// keep up with; a frame it stops on is drawn again in full. It fills the
@@ -30,6 +55,14 @@ pub struct BlockoutPlayer {
     /// The widest it is drawn, and how wide it is drawn now.
     full_width: u32,
     width: u32,
+    looking: Looking,
+    /// Whether lines mark the thirds of the shot.
+    thirds: bool,
+    /// Where the picture is on screen.
+    drawn_in: Rc<Cell<Bounds<Pixels>>>,
+    /// While the set is dragged round: where the drag began, and how
+    /// the set was looked at then.
+    turning: Option<(Point<Pixels>, Outside)>,
     /// Seconds into the scene on screen.
     at: f64,
     /// While it plays: a moment, and where the scene was then.
@@ -63,6 +96,10 @@ impl BlockoutPlayer {
             shape: (shape.0.max(1), shape.1.max(1)),
             full_width: full_width.max(NARROWEST),
             width: full_width.max(NARROWEST),
+            looking: Looking::Shot,
+            thirds: false,
+            drawn_in: Rc::new(Cell::new(Bounds::default())),
+            turning: None,
             at: 0.0,
             playing: None,
             drawing: Latest::Idle,
@@ -87,6 +124,84 @@ impl BlockoutPlayer {
 
     pub fn is_playing(&self) -> bool {
         self.playing.is_some()
+    }
+
+    pub fn looking(&self) -> Looking {
+        self.looking
+    }
+
+    /// Show the scene as `looking` has it.
+    pub fn look(&mut self, looking: Looking, cx: &mut Context<Self>) {
+        if !matches!(looking, Looking::Set(_)) {
+            self.turning = None;
+        }
+        self.looking = looking;
+        // A picture of how it was looked at before is not shown.
+        self.version += 1;
+        self.draw(cx);
+    }
+
+    pub fn has_thirds(&self) -> bool {
+        self.thirds
+    }
+
+    pub fn toggle_thirds(&mut self, cx: &mut Context<Self>) {
+        self.thirds = !self.thirds;
+        cx.notify();
+    }
+
+    /// The left button went down on the picture: start turning the set,
+    /// or name the thing of the shot under the pointer.
+    fn pressed(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        match self.looking {
+            Looking::Set(from) => self.turning = Some((position, from)),
+            Looking::Shot => {
+                let picture = self.drawn_in.get();
+                if !picture.contains(&position) {
+                    return;
+                }
+                let across = (position.x - picture.origin.x) / picture.size.width;
+                let down = (position.y - picture.origin.y) / picture.size.height;
+                if let Some(name) = self.scene.thing_at(self.at, self.shape, (across, down)) {
+                    cx.emit(Picked(name.to_owned()));
+                }
+            }
+            Looking::Pass(_) => {}
+        }
+    }
+
+    /// The pointer moved: turn the set with it while it is dragged. A
+    /// move with the button up ends the drag.
+    fn moved(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((from, was)) = self.turning else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.turning = None;
+            return;
+        }
+        let dragged = event.position - from;
+        let turned = Outside {
+            around: was.around - f64::from(f32::from(dragged.x)) * TURN,
+            above: (was.above + f64::from(f32::from(dragged.y)) * TURN).clamp(LOWEST, 90.0),
+            ..was
+        };
+        // The drag goes on from where it began.
+        self.look(Looking::Set(turned), cx);
+        self.turning = Some((from, was));
+    }
+
+    /// The wheel turned over the set: go nearer or further off.
+    fn scrolled(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let Looking::Set(from) = self.looking else {
+            return;
+        };
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 20.0,
+        };
+        let closer = (from.closer * f64::from(lines * 0.12).exp()).clamp(0.3, 12.0);
+        self.look(Looking::Set(Outside { closer, ..from }), cx);
     }
 
     /// Seconds into the scene, and how long it runs.
@@ -145,7 +260,7 @@ impl BlockoutPlayer {
 
     fn start_drawing(&mut self, at: f64, detail: Detail, cx: &mut Context<Self>) {
         self.drawing.start();
-        let (scene, version) = (self.scene.clone(), self.version);
+        let (scene, version, looking) = (self.scene.clone(), self.version, self.looking);
         let width = match detail {
             Detail::Draft => self.width,
             Detail::Full => self.full_width,
@@ -153,9 +268,20 @@ impl BlockoutPlayer {
         let height = (width as u64 * self.shape.1 as u64 / self.shape.0 as u64).max(1) as u32;
         let drawn = cx.background_executor().spawn(async move {
             let began = Instant::now();
-            let frame = scene.render(at, width, height, detail);
-            // Greys read the same as RGBA and as the BGRA the GPU takes.
-            let picture = image::RgbaImage::from_raw(width, height, frame.rgba.to_vec())
+            let frame = match looking {
+                Looking::Shot => scene.render(at, width, height, detail),
+                Looking::Set(from) => scene.render_outside(at, (width, height), &from, detail),
+                Looking::Pass(pass) => scene.render_pass(at, width, height, pass),
+            };
+            // The GPU takes blue first; greys read the same either way.
+            let mut bgra = frame.rgba.to_vec();
+            if matches!(looking, Looking::Pass(_)) {
+                bgra.as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .for_each(|pixel| pixel.swap(0, 2));
+            }
+            let picture = image::RgbaImage::from_raw(width, height, bgra)
                 .map(|buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
             (picture, began.elapsed())
         });
@@ -196,24 +322,56 @@ impl BlockoutPlayer {
 }
 
 impl Render for BlockoutPlayer {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
         let (picture, shape) = (self.picture.clone(), self.shape);
+        let drawn_in = self.drawn_in.clone();
+        let thirds = self.thirds && matches!(self.looking, Looking::Shot | Looking::Pass(_));
         // Painted by hand: an image element takes its height from its
         // width and its own shape, so an upright picture overflowed a
         // wide box instead of fitting inside it.
         let paint = move |bounds: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App| {
+            let inside = fitted(bounds, shape);
+            drawn_in.set(inside);
             if let Some(picture) = picture.clone() {
-                let inside = fitted(bounds, shape);
                 let _ = window.paint_image(inside, inside, Corners::default(), picture, 0, false);
             }
+            if thirds {
+                let line = t::alpha(t::ON_AC, 0.3);
+                for third in [1. / 3., 2. / 3.] {
+                    let across =
+                        point(inside.origin.x + inside.size.width * third, inside.origin.y);
+                    let down = point(
+                        inside.origin.x,
+                        inside.origin.y + inside.size.height * third,
+                    );
+                    window.paint_quad(fill(
+                        Bounds::new(across, size(px(1.), inside.size.height)),
+                        line,
+                    ));
+                    window.paint_quad(fill(
+                        Bounds::new(down, size(inside.size.width, px(1.))),
+                        line,
+                    ));
+                }
+            }
         };
+        let end_turning = cx.listener(|this, _: &MouseUpEvent, _, _| this.turning = None);
         div()
             .relative()
             .size_full()
             .bg(t::SCOPE)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| this.pressed(event.position, cx)),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.moved(event, cx)))
+            .on_mouse_up(MouseButton::Left, end_turning)
+            .on_scroll_wheel(
+                cx.listener(|this, event: &ScrollWheelEvent, _, cx| this.scrolled(event, cx)),
+            )
             .child(canvas(|_, _, _| (), paint).absolute().inset_0())
     }
 }

@@ -1406,8 +1406,8 @@ on the UI thread and run it off it:
   `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
   expensive and each take invents camera, staging and timing again, so
   `generate_video` takes a `blockout`: a rough 3D scene the agent writes
-  as JSON (`blockout::Scene`: objects, models, a camera, an optional sun
-  direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
+  as JSON (`blockout::Scene`: objects, models, a camera or several with
+  the cuts between them, an optional sun direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
   in it is ready-made: there are no built-in people, props or actions,
   so the agent is not held to what Flikk thought of. An object is a
   plain solid (box, sphere, cylinder, cone, capsule, dome, wedge, roof,
@@ -1417,40 +1417,181 @@ on the UI thread and run it off it:
   point they turn about (`anchor`: base, middle, or top for a limb hung
   from its joint). They move by keys, for what happens once, and by a
   `Cycle`, for what repeats: a few keys over one round, added to what
-  the keys make of the object, running by the clock (`seconds`) or by
-  the ground covered (`metres`: the round follows how far the thing the
-  part belongs to has travelled, so feet and wheels keep up with the
-  ground at any speed, and a round that returns to its start eases to
-  rest when the thing stands still). A thing built once goes under
+  the keys make of the object, running by the clock (`seconds`), by the
+  ground covered (`metres`: the round follows how far the thing the part
+  belongs to has travelled, so a wheel keeps up with the road at any
+  speed) or by the strides its thing's feet have taken (`strides`: arms
+  in time with legs); a round that returns to its start eases to rest
+  when the thing stands still, and `from` and `until` have a cycle go on
+  between two times only, in and out over 0.3 s. A thing built once goes under
   `models` and is placed with `model`; a copy can be scaled and shaded,
   and its `parts` give, by part name, the fields that replace the
   model's (another pose, no walk). `build.rs` writes every copy out into
-  `Part`s named `copy/part`, swaps names for places in the list, gives
-  each joint the box its parts fill, and tabulates the ground each
-  moving thing has covered; `motion.rs` poses each part at a time. An
-  object may also face something about the vertical (`face`: the way it
-  travels, the camera, an object or a point), keep spinning, and come
-  and go (`hidden`). The camera has a place, a `look_at` point or
-  object, a field of view, a roll, a hand-held `shake`, and may ride an
-  object. Places follow a smooth path through their keys
-  (`motion::Track`: a Hermite curve that rests on a held key),
-  everything else goes straight from key to key, each arriving with an
-  ease: linear, in, out,
-  in-out, `back`, `bounce`, or `cut`, which holds and then jumps (a
-  camera's cut to another set-up). `Scene::render` draws a frame on the
-  CPU, one ray a pixel against the solids, with one light, a shadow,
-  metre tiles on the ground and haze. A ray from the camera tries only
-  the solids listed for its 16 px tile of the picture, and a ray toward
-  the light only those listed for its cell of a grid across the light
-  (`render::Cells`); rays any other way go through a tree of boxes
-  (`render::Solids`). All three are rebuilt each frame. `Detail::Full`
-  also darkens flat surfaces where another is close (five short rays
-  for every fourth pixel that has a solid near, shared with the pixels
-  around it on the same surface; on round solids so few rays show as
-  stripes) and draws edges again from four rays, where `Detail::Draft`
-  is what plays. With no GPU and no model, a 1280×720 frame of a market
-  street of forty-odd objects takes about 40 ms as a draft and 105 ms in
-  full on four cores, and its 8 s clip about 20 s to write.
+  `Part`s named `copy/part`, swaps names for places in the list, works
+  out how each part's keys move it (`motion::Moves`) and the order parts
+  are placed in, gives each joint the box its parts fill, and tabulates
+  the ground each moving thing has covered. An object may also face
+  something about the vertical (`face`: the way it travels, the camera,
+  an object or a point), keep spinning, come and go (`hidden`), shake
+  without repeating (`shake`: metres and degrees either way, and about
+  how long a wobble takes), and say what it stands on (`on`: the ground
+  or an object by name). A camera has a place, a `look_at` point or
+  object, a width (`lens` in millimetres on a frame 36 mm along its
+  longer side, as Blender fits a sensor, or `fov` in degrees), a roll, a
+  hand-held `shake`, and may ride an object. The shot opens on `camera`;
+  `cameras` holds more by name and `cuts` says when the picture goes
+  over to which (`main` is the first), each camera moving on whether or
+  not the picture is its own. `build.rs` turns each into a `motion::Rig`,
+  the names it looks at and rides swapped for places among the parts.
+  A camera, or a key of one, may say what its picture holds in place of
+  where it stands (`frame`: the objects, a shot size from `close_up` to
+  `very_wide`, and `left`, `centre` or `right`). It then keeps the way
+  it looks from its `at` and stands as far off as fits the box of the
+  solids that reach into the share of the subjects' height the size
+  keeps (`motion::framed_from`, the fit Blender's camera-to-selected
+  makes): the top 17% filling three quarters of the picture's height
+  for a close-up, all of it filling a quarter for a very wide. That
+  depends on the picture's shape, so it is worked out as each frame is
+  drawn (`Scene::stood`), with things standing as they do when the
+  camera or the key gets there, and a third is reached by looking a
+  third of half the picture's width to the other side.
+  Everything keys move follows a smooth curve through them
+  (`motion::Track`), place, turn, size, grey, and the camera's field of
+  view, roll and what it looks at: where a value turns back or rests it
+  stops, between stops its pace changes least from key to key (a
+  tridiagonal solve, as Blender's animation curves place their handles),
+  and each pace is held within three times the straight one either
+  side, so the curve never goes past a key. Two keys give a straight
+  move. An ease times one stretch of the curve (linear, in, out, in-out,
+  `back`, `bounce`) and `cut` holds and then jumps, ending one curve and
+  starting the next (a camera's cut to another set-up). A key with a
+  place and no time is passed on the way: `motion::key_times` spreads
+  such keys by the ground between them, between the timed keys either
+  side, so an orbit or a route is a list of places. Angles are taken as
+  written (a wheel turns from 0 to 360); the review says when a turn of
+  270 degrees or more stops short of a whole one. Shake, the camera's
+  and an object's, is fractal noise: smooth noise at three rates, each
+  twice as quick and half as strong as the last, seeded for an object
+  by its name.
+  At a time, `Scene::moment` places every part once, in the order built
+  (`build::placing_order`): each after what it rides, and after what it
+  faces and stands on. Where that goes round in a loop (two people
+  facing each other) the part placed first turns to where the other
+  stands before anything faces, which a first, rough pass gives. A part
+  with `on` is set down: its solids are put where its limbs have them,
+  the lowest point of them is found (`Solid::lowest`) and a ray is cast
+  down from over it onto the solids of what it stands on, the ground
+  where it meets none, so a walker's feet stay on a ramp or a stage and
+  the height written is how far above that it is. `solid.rs` has the
+  solids: where a ray meets each, its lowest point and whether a point
+  is inside it.
+  A part's front can be turned to something (`aim`: an object, the
+  camera, a point; a key retargets it): the least turn that puts its +Z
+  on the target, no more than 85 degrees from how it would else face. A
+  part can be the end of a limb brought somewhere (`reach`: `to`, and
+  optionally `from` and `until`): the part it rides and the part that
+  one rides are the limb (`build::Limb`, hung on the upper of the two),
+  and `Scene::bend` solves it in closed form each frame from the two
+  lengths, bent the way its pose has it bent (a limb posed straight
+  bends forward when it hangs, back when held out), each part turned
+  the least that puts the joint and the end in place; out of reach it
+  goes straight toward the target, and it moves there and back over
+  0.35 s. A foot can step (`step`): `Scene::planted` says where it is
+  from the strides its thing has taken by then (`build::strides`,
+  tabulated a frame: a stride is as long as legs of that length take at
+  the speed, 2.3 leg lengths times the 0.3rd power of speed squared
+  over gravity and leg length, unless `metres` gives it). It is down
+  where the thing passes over it for three quarters of a leg's length
+  of ground, at most 0.6 of the stride, so a run has both feet in the
+  air, and swings to its next landing in between, lifted an eighth of
+  the leg; standing still it is as posed. Its leg is bent to it as a
+  limb is, and a thing with `on` is held no higher than its grounded
+  legs reach (`Scene::lift`), which is the rise and fall of a walk.
+  Because a landing is found from a count of strides, any frame is
+  still drawn without the ones before it.
+  A key with `parent` gives its object to another from that second on,
+  from where it is at that moment (`"none"` lets it go where it is):
+  `build::take_hold` works out, in order of time, where each is within
+  what takes it, the scene built as far as the one before (Blender's
+  Child Of with its inverse set). What is held is placed last each
+  frame, with all that rides it, and a limb that has taken what it
+  reached for leaves for where it took it from, so reaching and holding
+  never wait on each other.
+  `world::World` is the scene at a moment as rays meet it: the solids
+  where they stand, a ray from the camera trying only those listed for
+  its 16 px tile of the picture, a ray toward the sun only those listed
+  for its cell of a grid across the light (`world::Cells`, each solid's
+  cells widened by as far as a ray toward the sun's edge strays), and
+  rays any other way a tree of boxes (`world::Solids`). All three are
+  rebuilt each frame. `Scene::render` (`render.rs`) makes the picture on
+  the CPU: one ray a pixel, lit by the sun, the sky from above, the
+  ground from below and a fill from across the sun that reaches round
+  what turns from it, with metre tiles on the ground and haze. Light is
+  worked out as light and turned into screen greys at the end, pixels
+  between two greys scattered so gradients show no steps. Every picture
+  has lines, from which solid each pixel shows: darker than both sides,
+  a pixel wide on the side away from the camera, strong round a thing
+  and light between its parts, and a solid's own edges a little lighter
+  where they stick out. `Detail::Full` also softens shadows (one ray a
+  pixel toward a spot on the sun's disc, seven more where the pixels
+  around disagree, evened out over 5 px on the same surface), darkens
+  surfaces where the picture shows another close (eight looks along a
+  spiral within 0.7 m at every fourth pixel, shared with the pixels
+  around on the same surface, round solids too), and draws pixels an
+  edge runs through again from four rays, the line taking the share of
+  the pixel the nearer solid leaves and the rest of its width in the
+  pixel outside. `Detail::Draft` is what plays. The values kept a pixel
+  on the way (about 50 bytes in full) stay allocated from one picture to
+  the next (`render::Sheets`). With no GPU and no model, a 1280×720
+  frame of the demo shot takes about 36 ms as a draft and 85 ms in full
+  on four cores.
+  Larger worlds are written short. A box, a cylinder or a capsule takes
+  a `taper` (its top against its base, inside the same size): cylinder,
+  cone and capsule share one ray test for a round side whose radius
+  changes with height. `repeat` (`repeat.rs`) lays one object out as a
+  row or a grid (`step`), a `ring` or a scatter over an `area` (each
+  place the candidate, of twelve, furthest from those before it), every
+  copy the whole object with its keys moved over, called `name 1` and
+  on and riding a joint of the object's name that stands for them all;
+  `vary` turns, scales, shades and puts each out of step by a hash of
+  the name and the copy's number. A solid with `cut` is not drawn but
+  taken out of the object it names: every solid is convex, so a ray is
+  inside one over a single stretch (`Solid::span`, the ordinary test
+  from outside each way), and a ray that meets a cut solid in a hole
+  goes on to where it leaves the hole, the hole's far side turned round
+  being the surface seen. `hills` (`land.rs`) makes the ground roll:
+  smooth noise on a 256 × 256 grid that repeats beyond the haze, walked
+  by rays in strides four times what its steepest slope makes sure is
+  clear and met between the last two places; every height is then above
+  the ground under that thing (`Part::lands`, cameras and points too),
+  so scenes are written as on a level floor. A scene holds 6000 parts.
+  What made more slow was measured: the tree of boxes is rebuilt in
+  under 3 ms at 13 000 parts, so it still is each frame; parts nothing
+  ever moves are placed once (`Part::still`), and the review sets its
+  moments up on several threads.
+  Nothing is simulated, but what is let go falls (`flight.rs`): a key
+  with `"parent": "none"` leaves a thing with the speed it was carried
+  at over the frame before, and a key with `throw` gives it the speed
+  that brings it to an object, the camera or a point, after the seconds
+  it says or those of the throw that takes the least speed, aimed at
+  where a moving target will be. From there its place at any time is
+  its speed and gravity, so a frame still draws on its own. Where it
+  comes to rest is found once at build, frame by frame, as its lowest
+  point comes down on a solid that is not its own or its thrower's, or
+  on the ground; thrown to an object it is caught, a hold by that object
+  timed by the flight. The scene's `gravity`, or an object's own in its
+  place, says how strongly things fall against the Earth's pull: at 0 it goes on in a straight line or stays
+  where it was let go at rest, under 0 it rises. The review says when each lands or is caught,
+  and doubts a throw over 30 m/s or one still in the air at the end.
+  `Scene::render_outside` draws the scene from outside its shot
+  (`Outside`: around, above, how near), toward the middle of a ball that
+  holds the scene over its whole length, with the shot's camera, its
+  move and the way each travelling thing goes, a tick a second, stroked
+  over the picture against its depth. `Scene::render_pass` draws the
+  shot as its depth, its lines or each thing in a colour of its own
+  (`Pass`), and `Scene::thing_at` names what a place in the shot shows.
+  Passes are shown, not sent: whether a video model follows one better
+  than the greys is untested.
   `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
   1280 px on the longer side. `Scene::review` says a scene in words for
   a writer that can't watch it: what the camera sees at the start, the
@@ -1458,13 +1599,24 @@ on the UI thread and run it off it:
   picture, how tall, hidden behind what: found from spots on each thing
   and from a spread of rays through the picture), what looks like a
   mistake a viewer would see (`doubts`: the subject out of the opening
-  picture, a camera inside an object or under the ground, a walker
-  going sideways) and what could be tidied (`notes`: a thing never in
-  the picture, a key after the end). A thing is what a viewer would
-  name: what stands by itself, and each copy, not their parts.
+  picture, a walker going sideways, a turn the long way round) and what
+  could be tidied (`notes`: a thing never in
+  the picture, a key after the end, a camera never cut to). Between the
+  moments it describes it watches the whole scene twelve times a second
+  (`review::Watch`) and adds to the doubts: the camera's subject hidden
+  or out of the picture, from when until when; the camera inside an
+  object or under the ground; one thing going through another (the
+  middle of a solid inside a solid of the other, the two moving past
+  each other); something on stepping feet faster than 12.5 m/s; a
+  walker with its feet off the ground and no `on`; a limb short of what
+  it reaches for. What the camera looks at is named as a shot is called
+  from its height in the picture. A thing is what a viewer would
+  name: what stands by itself, and each copy, not their parts; the
+  copies of a repeat are said as one, with how many of them show.
   `preview_blockout` (the Generate group, a read) gives the agent that
-  text with a collage of eight frames, so it looks at a scene and fixes
-  it before it asks for the video.
+  text with a collage of eight frames and the set from straight above
+  with the camera drawn in, so it looks at a scene and fixes it before
+  it asks for the video.
   A scene is long to write and quick to change, so it is written whole
   only once. `Scene::changed` (`change.rs`) makes a change that says
   only what differs: the scene's JSON with `objects`, and each model's
@@ -1523,7 +1675,11 @@ on the UI thread and run it off it:
   height from its width, so an upright frame overflowed a wide box).
   Clicking the blockout opens its dialog (`blockout::editor`): the scene
   large with play, seek and Undo, and a thread where the user says what
-  should change. Each ask is one backend run without tools
+  should change. Above the picture the player's `Looking` is chosen:
+  the shot, the set from outside (dragged round, the wheel bringing it
+  nearer), or the shot's depth, lines or parts; a button lays the thirds
+  over the shot, and a click on a thing in the shot puts its name into
+  the ask (`Picked`). Each ask is one backend run without tools
   (`reblock::Reblock`: `TurnSpec::mcp` is `None`, so Claude gets an empty
   MCP config and no allowed tools, Codex no MCP server) given the scene,
   its review, the earlier asks and the format's schema; it answers with
