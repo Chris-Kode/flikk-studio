@@ -106,7 +106,7 @@ Say what is there rather than what isn't (\"an empty street\", not \"no cars\"),
 
 /// A blockout as `generate_video` takes it (`flikk_core::blockout::Scene`).
 pub(crate) fn blockout() -> Value {
-    use flikk_core::blockout::{Anchor, Ease, Shape};
+    use flikk_core::blockout::{Anchor, Ease, Shape, ShotSize, Side};
     let point = |d: &str| numbers(3, d);
     let ease = |d: &str| one_of(&Ease::NAMES, d);
     let arrives = "How the move to here is timed. Left out (`linear`), it keeps the pace the keys give: through a key without stopping, slowing to a stop only where it turns back or rests. `in`, `out` and `in_out` start or end slowly, `cut` stays put and is there at once, `back` overshoots and settles, `bounce` lands and bounces";
@@ -156,11 +156,24 @@ pub(crate) fn blockout() -> Value {
             }
         }
     });
+    let frame = |d: &str| {
+        json!({
+            "type": "object",
+            "description": d,
+            "properties": {
+                "of": json!({ "type": ["string", "array"], "description": "The object it holds, by name, or several: a two-shot" }),
+                "size": one_of(&ShotSize::NAMES, "How much of them (default medium): close_up is the head, medium_close_up head and shoulders, medium from the waist up, medium_wide from the knees, full all of them, wide all of them at half the picture's height, very_wide small in their surroundings"),
+                "side": one_of(&Side::NAMES, "Where across the picture they sit (default centre): left and right put them on that third")
+            },
+            "required": ["of"]
+        })
+    };
     let camera = json!({
         "type": "object",
         "properties": {
-            "at": point("Where it is; 1.6 high is eye level"),
-            "look_at": target("A point [x, y, z], or an object's name, which it then follows"),
+            "at": point("Where it is; 1.6 high is eye level. With a `frame`, the way it looks from: how far off it stands is worked out"),
+            "look_at": target("A point [x, y, z], or an object's name, which it then follows. Leave out with a `frame`"),
+            "frame": frame("What the picture holds, as a shot is called: the camera then stands as far off, along the way from `at`, as that takes, and looks at what it holds. Use it in place of working out a distance"),
             "lens": number("Its lens in millimetres, as on a film camera: 18 very wide, 24 wide, 35 (the default) and 50 as an eye sees, 85 a portrait, 135 and up long and flat"),
             "fov": number("Or how wide it sees in degrees across the longer side, in place of `lens`"),
             "roll": number("Degrees it is rolled: a Dutch angle"),
@@ -175,6 +188,7 @@ pub(crate) fn blockout() -> Value {
                         "t": number(when),
                         "at": point("Where it is then"),
                         "look_at": target("What it looks at then"),
+                        "frame": frame("What the picture holds when it gets here, as things are then: a push in is a wide `frame` on the camera and a close one on a key"),
                         "lens": number("Its lens then: a zoom"),
                         "fov": number("Or its field of view then"),
                         "roll": number("Its roll then"),
@@ -183,7 +197,7 @@ pub(crate) fn blockout() -> Value {
                 }
             }
         },
-        "required": ["at", "look_at"]
+        "required": ["at"]
     });
     json!({
         "type": "object",

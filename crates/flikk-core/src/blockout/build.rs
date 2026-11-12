@@ -165,7 +165,11 @@ impl Scene {
                 parts[whole].travelled = travelled(&parts[whole].moves.places, self.duration);
             }
         }
-        let rig = |camera, what: &str| Rig::of(camera, what, self.duration, place);
+        let rig = |camera, what: &str| {
+            Rig::of(camera, what, self.duration, place, |whole| {
+                solids_of(&parts, whole)
+            })
+        };
         let mut rigs = vec![rig(&self.camera, "the camera")?];
         for (name, camera) in &self.cameras {
             rigs.push(rig(camera, &format!("camera `{name}`"))?);

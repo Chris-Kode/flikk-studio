@@ -330,8 +330,15 @@ impl Anchor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Camera {
+    /// Where it is; with a `frame`, the way it looks from.
     pub at: [f64; 3],
-    pub look_at: Target,
+    /// What it looks at. Left out, it looks at what its `frame` holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look_at: Option<Target>,
+    /// What its picture holds: it then stands as far off, along the way
+    /// from `at`, as that takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Frame>,
     /// How wide it sees, as the lens of a film camera in millimetres (on
     /// a frame 36 mm along its longer side): 24 is wide, 35 and 50 as an
     /// eye sees, 85 and up long. Or give `fov`.
@@ -370,6 +377,9 @@ pub struct CameraKey {
     pub at: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look_at: Option<Target>,
+    /// What its picture holds when it gets here, as the things are then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Frame>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +389,117 @@ pub struct CameraKey {
     /// How the move to this key is timed; [`Ease::Cut`] is a cut to it.
     #[serde(default, skip_serializing_if = "Ease::is_linear")]
     pub ease: Ease,
+}
+
+/// What a camera's picture holds, as a shot is called on a set: "a
+/// medium close-up of the runner, on the left".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frame {
+    /// The objects it holds, by name.
+    pub of: Subjects,
+    /// How much of them.
+    #[serde(default, skip_serializing_if = "ShotSize::is_medium")]
+    pub size: ShotSize,
+    /// Where across the picture they sit.
+    #[serde(default, skip_serializing_if = "Side::is_centre")]
+    pub side: Side,
+}
+
+/// One object by name, or several.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Subjects {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Subjects {
+    fn names(&self) -> &[String] {
+        match self {
+            Self::One(name) => std::slice::from_ref(name),
+            Self::Many(names) => names,
+        }
+    }
+}
+
+/// How much of its subjects a picture holds. On a standing person: the
+/// part of them from the top of the head down, and how much of the
+/// picture's height that fills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShotSize {
+    /// The head.
+    #[serde(alias = "closeup")]
+    CloseUp,
+    /// Head and shoulders.
+    MediumCloseUp,
+    /// From the waist up.
+    #[default]
+    Medium,
+    /// From the knees up.
+    #[serde(alias = "cowboy")]
+    MediumWide,
+    /// All of them, filling the picture.
+    Full,
+    /// All of them, half the picture high.
+    #[serde(alias = "long")]
+    Wide,
+    /// All of them, small in their surroundings.
+    #[serde(alias = "extreme_wide")]
+    VeryWide,
+}
+
+impl ShotSize {
+    /// The names a scene's JSON takes.
+    pub const NAMES: [&'static str; 7] = [
+        "close_up",
+        "medium_close_up",
+        "medium",
+        "medium_wide",
+        "full",
+        "wide",
+        "very_wide",
+    ];
+
+    fn is_medium(&self) -> bool {
+        *self == Self::Medium
+    }
+
+    /// The share of its subjects' height it holds, from their top down,
+    /// and the share of the picture's height that fills.
+    fn holds(self) -> (f32, f32) {
+        match self {
+            Self::CloseUp => (0.17, 0.75),
+            Self::MediumCloseUp => (0.3, 0.8),
+            Self::Medium => (0.5, 0.85),
+            Self::MediumWide => (0.72, 0.9),
+            Self::Full => (1.0, 0.85),
+            Self::Wide => (1.0, 0.5),
+            Self::VeryWide => (1.0, 0.25),
+        }
+    }
+}
+
+/// Where across the picture a frame's subjects sit: in the middle, or on
+/// the line a third of the way in from a side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    Left,
+    #[default]
+    #[serde(alias = "center", alias = "middle")]
+    Centre,
+    Right,
+}
+
+impl Side {
+    /// The names a scene's JSON takes.
+    pub const NAMES: [&'static str; 3] = ["left", "centre", "right"];
+
+    fn is_centre(&self) -> bool {
+        *self == Self::Centre
+    }
 }
 
 /// The picture going over to another camera.

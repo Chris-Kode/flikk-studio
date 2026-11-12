@@ -6,8 +6,8 @@ use super::build::{Facing, Part};
 use super::solid::Solid;
 use super::space::{Place, Turn, Vec3, smoothstep};
 use super::{
-    Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, NORMAL_FOV, Object, Scene, Shape, Target, finite,
-    wide,
+    Camera, Cycle, CycleKey, Ease, FPS, Frame, MID_GREY, NORMAL_FOV, Object, Scene, Shape, Side,
+    Target, finite, wide,
 };
 
 /// Seconds before it sets off again that a resting object turns to the
@@ -675,19 +675,22 @@ impl Scene {
         let aimed = rig.aims.iter().take_while(|(at, ..)| *at <= t).last();
         match aimed.map_or(rig.aim, |(_, aim, _)| *aim) {
             Aim::Part(part) => Some(part),
+            Aim::Held(framing) => Some(rig.framings[framing].subject),
             Aim::Point(_) => None,
         }
     }
 
     /// Everything at `t`: where each part stands, and what the camera
     /// sees.
-    pub(super) fn moment(&self, t: f64) -> Moment {
-        let Standing { places, sizes } = self.stand(t);
+    /// `shape` is the picture's, width to height: how far off a camera
+    /// stands to hold what its `frame` says depends on it.
+    pub(super) fn moment(&self, t: f64, shape: (u32, u32)) -> Moment {
+        let standing = self.stand(t);
         let gone = (0..self.parts.len()).map(|i| self.hidden(i, t)).collect();
-        let view = self.view(t, &places);
+        let view = self.view(t, &standing, shape);
         Moment {
-            places,
-            sizes,
+            places: standing.places,
+            sizes: standing.sizes,
             gone,
             view,
         }
@@ -746,6 +749,12 @@ pub(super) struct Rig {
     /// that is, is found each frame: it may be moving.
     aim: Aim,
     aims: Vec<(f64, Aim, Ease)>,
+    /// What its `frame`s hold; where it and its keys stand or frame, in
+    /// order, when any of them frames; and which side of the picture what
+    /// it holds sits on (-1 the left third, 1 the right).
+    framings: Vec<Framing>,
+    stops: Vec<Stop>,
+    sides: Track,
     /// When its keys cut to a new set-up.
     cuts: Vec<f64>,
     /// How much a hand holds it, and what tells its shake from another's.
@@ -755,23 +764,50 @@ pub(super) struct Rig {
     pub mount: Option<usize>,
 }
 
-/// What a camera looks at: a point, in the space of what it rides, or a
-/// part.
+/// What a camera looks at: a point, in the space of what it rides, a
+/// part, or what one of its framings holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Aim {
     Point([f64; 3]),
     Part(usize),
+    Held(usize),
+}
+
+/// What a `frame` holds, names swapped for places among the parts.
+#[derive(Clone, Debug, PartialEq)]
+struct Framing {
+    /// The first object it names, and the solids of all of them.
+    subject: usize,
+    solids: Vec<usize>,
+    /// The share of their height it holds, from the top down, and the
+    /// share of the picture's height that fills.
+    kept: f32,
+    fills: f32,
+    /// Whether they sit off to a side, and so have less room across.
+    aside: bool,
+}
+
+/// Where a camera stands at a time: at a place, or as far off as a
+/// framing takes, the way it looks from the place it would else be at.
+#[derive(Clone, Debug, PartialEq)]
+struct Stop {
+    t: f64,
+    at: Option<[f64; 3]>,
+    framing: Option<usize>,
+    ease: Ease,
 }
 
 impl Rig {
     /// `camera`, called `what`, in a scene of `duration` seconds; `part`
-    /// says where an object is among the parts by its name. Refused when
-    /// it names an object there is none of.
+    /// says where an object is among the parts by its name, and `solids`
+    /// which parts are its solids. Refused when it names an object there
+    /// is none of.
     pub fn of(
         camera: &Camera,
         what: &str,
         duration: f64,
         part: impl Fn(&str) -> Option<usize>,
+        solids: impl Fn(usize) -> Vec<usize>,
     ) -> Result<Self, String> {
         let keys = &camera.keys;
         let given: Vec<_> = keys.iter().map(|key| (key.t, key.at)).collect();
@@ -788,10 +824,84 @@ impl Rig {
             Target::Object(name) => (part(name).map(Aim::Part))
                 .ok_or_else(|| format!("{what} looks at `{name}`, which is no object's name")),
         };
-        let aims = timed()
-            .filter_map(|(t, k)| Some((t, k.look_at.as_ref()?, k.ease)))
-            .map(|(t, target, ease)| Ok((t, aim(target)?, ease)))
+        // The camera's own framing first, then its keys' in order.
+        let mut framings = Vec::new();
+        let mut framed = |frame: &Option<Frame>| -> Result<Option<usize>, String> {
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            let named = |name: &String| {
+                part(name)
+                    .ok_or_else(|| format!("{what} frames `{name}`, which is no object's name"))
+            };
+            let subjects = (frame.of.names().iter())
+                .map(named)
+                .collect::<Result<Vec<_>, _>>()?;
+            let Some(subject) = subjects.first().copied() else {
+                return Err(format!(
+                    "{what}'s `frame` holds nothing: name an object in `of`"
+                ));
+            };
+            let (kept, fills) = frame.size.holds();
+            framings.push(Framing {
+                subject,
+                solids: subjects
+                    .iter()
+                    .flat_map(|subject| solids(*subject))
+                    .collect(),
+                kept,
+                fills,
+                aside: frame.side != Side::Centre,
+            });
+            Ok(Some(framings.len() - 1))
+        };
+        let own = framed(&camera.frame)?;
+        let theirs = (keys.iter())
+            .map(|key| framed(&key.frame))
+            .collect::<Result<Vec<_>, _>>()?;
+        // A key looks at what it says to, else at what it frames.
+        let aim_of = |target: &Option<Target>, framing: Option<usize>| match target {
+            Some(target) => aim(target).map(Some),
+            None => Ok(framing.map(Aim::Held)),
+        };
+        let aims = (timed().zip(&theirs))
+            .map(|((t, k), framing)| Ok((t, aim_of(&k.look_at, *framing)?, k.ease)))
+            .filter_map(|aimed: Result<_, String>| match aimed {
+                Ok((t, aim, ease)) => Some(Ok((t, aim?, ease))),
+                Err(e) => Some(Err(e)),
+            })
             .collect::<Result<_, String>>()?;
+        let Some(first_aim) = aim_of(&camera.look_at, own)? else {
+            return Err(format!(
+                "{what} needs a `look_at`, or a `frame` saying what its picture holds"
+            ));
+        };
+        let stops = match framings.is_empty() {
+            true => Vec::new(),
+            false => {
+                let first = Stop {
+                    t: 0.0,
+                    at: Some(camera.at),
+                    framing: own,
+                    ease: Ease::Linear,
+                };
+                let later = (timed().zip(&theirs))
+                    .filter(|((_, k), framing)| k.at.is_some() || framing.is_some())
+                    .map(|((t, k), framing)| Stop {
+                        t,
+                        at: k.at,
+                        framing: *framing,
+                        ease: k.ease,
+                    });
+                std::iter::once(first).chain(later).collect()
+            }
+        };
+        let side = |frame: &Frame| match frame.side {
+            Side::Left => -1.0,
+            Side::Centre => 0.0,
+            Side::Right => 1.0,
+        };
+        let sides = timed().filter_map(|(t, k)| Some((t, side(k.frame.as_ref()?), k.ease)));
         let mount = match &camera.parent {
             Some(parent) => Some(
                 part(parent)
@@ -803,8 +913,11 @@ impl Rig {
             places: Track::new(camera.at, places),
             fovs: Track::of_number(wide(camera.lens, camera.fov).unwrap_or(NORMAL_FOV), fovs),
             rolls: Track::of_number(camera.roll, rolls),
-            aim: aim(&camera.look_at)?,
+            aim: first_aim,
             aims,
+            sides: Track::of_number(camera.frame.as_ref().map_or(0.0, side), sides),
+            framings,
+            stops,
             cuts: timed()
                 .filter(|(_, k)| k.ease == Ease::Cut)
                 .map(|(t, _)| t)
@@ -833,15 +946,22 @@ pub(super) struct View {
 }
 
 impl Scene {
-    /// What the camera sees at `t`, the parts standing at `places`.
-    fn view(&self, t: f64, places: &[Place]) -> View {
+    /// What the camera sees at `t` in a picture of `shape` (width to
+    /// height), the parts standing as `standing` has them.
+    fn view(&self, t: f64, standing: &Standing, shape: (u32, u32)) -> View {
         let rig = self.rig(t);
+        let places = &standing.places;
         let mount = rig.mount.map_or(Place::ORIGIN, |part| places[part]);
         // Each target is where it is now, so a camera between two objects
         // follows both as they move.
         let point = |aim: &Aim| match aim {
             Aim::Point(point) => mount.point(Vec3::of(*point)),
             Aim::Part(part) => self.middle(*part, places[*part]),
+            Aim::Held(framing) => {
+                let framing = &rig.framings[*framing];
+                let held = self.held(framing, standing, t);
+                held.map_or(places[framing.subject].at, |(low, high)| (low + high) * 0.5)
+            }
         };
         let in_f64 = |v: Vec3| [v.x as f64, v.y as f64, v.z as f64];
         let targets = (rig.aims.iter()).map(|(at, aim, ease)| (*at, in_f64(point(aim)), *ease));
@@ -850,10 +970,15 @@ impl Scene {
         let shake = Handheld::of(rig.shake, t as f32, rig.seed);
         let roll = (rig.rolls.at(t)[0] as f32 + shake.roll).to_radians();
 
-        let eye = mount.point(rig.at(t));
+        let eye = mount.point(self.stood(rig, t, shape));
         let level = mount.turn.y;
         let ahead = (Vec3::of(target) - eye).unit_or(-Vec3::AHEAD);
         // Looking straight up or down, any level direction is to the right.
+        let right = ahead.cross(level).unit_or(mount.turn.x);
+        // What it holds on a third of the picture: it looks a third of
+        // half the picture's width to the other side.
+        let across = half_width(fov, shape).0 * rig.sides.at(t)[0] as f32 / 3.0;
+        let ahead = (ahead - right * across).unit_or(ahead);
         let right = ahead.cross(level).unit_or(mount.turn.x);
         let up = right.cross(ahead);
         // A hand turns it a little and moves it a little.
@@ -869,6 +994,110 @@ impl Scene {
             fov,
         }
     }
+
+    /// Where `rig` is at `t`, in the space of what it rides: where its
+    /// keys have it, or on the curve through where its framings put it,
+    /// each worked out as things stand when it gets there.
+    fn stood(&self, rig: &Rig, t: f64, shape: (u32, u32)) -> Vec3 {
+        if rig.stops.is_empty() {
+            return rig.at(t);
+        }
+        let place = |stop: &Stop| {
+            let written = stop.at.unwrap_or_else(|| rig.places.at(stop.t));
+            let Some(framing) = stop.framing else {
+                return written;
+            };
+            let then = self.stand(stop.t);
+            let mount = rig.mount.map_or(Place::ORIGIN, |part| then.places[part]);
+            let framing = &rig.framings[framing];
+            let Some(held) = self.held(framing, &then, stop.t) else {
+                return written;
+            };
+            // Narrower across where what it holds sits to a side.
+            let (across, up) = half_width(rig.fovs.at(stop.t)[0] as f32, shape);
+            let room = (
+                across * if framing.aside { 0.6 } else { 0.9 },
+                up * framing.fills,
+            );
+            let eye = framed_from(mount.point(Vec3::of(written)), held, room);
+            let within = mount.turn.inward(eye - mount.at);
+            [within.x as f64, within.y as f64, within.z as f64]
+        };
+        let first = place(&rig.stops[0]);
+        let later = rig.stops[1..]
+            .iter()
+            .map(|stop| (stop.t, place(stop), stop.ease));
+        Vec3::of(Track::new(first, later).at(t))
+    }
+
+    /// The box, low corner and high, that holds what `framing` keeps of
+    /// its subjects as they stand at `t`: the solids that reach into the
+    /// share of their height it keeps, from there up. `None` when none of
+    /// them is in the scene.
+    fn held(&self, framing: &Framing, standing: &Standing, t: f64) -> Option<(Vec3, Vec3)> {
+        let boxes: Vec<(Vec3, Vec3)> = (framing.solids.iter())
+            .filter(|of| !self.hidden(**of, t))
+            .map(|of| {
+                let object = &self.parts[*of].object;
+                let shape = object.shape.unwrap_or(Shape::Box);
+                Solid::standing(
+                    shape,
+                    object.anchor,
+                    standing.places[*of],
+                    standing.sizes[*of],
+                )
+                .bounds()
+            })
+            .collect();
+        let together = |boxes: &mut dyn Iterator<Item = (Vec3, Vec3)>| {
+            boxes.reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        };
+        let (low, high) = together(&mut boxes.iter().copied())?;
+        let from = high.y - (high.y - low.y) * framing.kept;
+        let (low, high) = together(&mut boxes.iter().copied().filter(|held| held.1.y > from))?;
+        Some((Vec3::new(low.x, from.max(low.y), low.z), high))
+    }
+}
+
+/// Half of what a camera seeing `fov` degrees across the longer side of a
+/// picture of `shape` sees across it and up it, one unit ahead.
+fn half_width(fov: f32, shape: (u32, u32)) -> (f32, f32) {
+    let longer = (fov.to_radians() * 0.5).tan();
+    let (wide, high) = (shape.0.max(1) as f32, shape.1.max(1) as f32);
+    match wide >= high {
+        true => (longer, longer * high / wide),
+        false => (longer * wide / high, longer),
+    }
+}
+
+/// Where a camera looking from `from` at the middle of the box `held`
+/// stands for the box to just fit `room`: half of what it may take
+/// across and up the picture, one unit ahead (the fit Blender's
+/// camera-to-selected makes, the way it looks kept).
+fn framed_from(from: Vec3, held: (Vec3, Vec3), room: (f32, f32)) -> Vec3 {
+    let (low, high) = held;
+    let middle = (low + high) * 0.5;
+    let ahead = (middle - from).unit_or(-Vec3::AHEAD);
+    let right = ahead.cross(Vec3::UP).unit_or(Vec3::new(1.0, 0.0, 0.0));
+    let up = right.cross(ahead);
+    let corners = (0..8).map(|i| {
+        let pick = |bit: usize, low: f32, high: f32| if i >> bit & 1 == 0 { low } else { high };
+        Vec3::new(
+            pick(0, low.x, high.x),
+            pick(1, low.y, high.y),
+            pick(2, low.z, high.z),
+        ) - middle
+    });
+    // Each corner says how far back keeps it in: the furthest is it.
+    let back = corners
+        .map(|corner| {
+            let nearer = corner.dot(ahead);
+            let across = corner.dot(right).abs() / room.0.max(1e-3);
+            let over = corner.dot(up).abs() / room.1.max(1e-3);
+            across.max(over) - nearer
+        })
+        .fold(0.3, f32::max);
+    middle - ahead * back
 }
 
 /// What a hand does to a camera at a moment.

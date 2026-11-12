@@ -386,7 +386,7 @@ pub(super) struct World {
 
 impl World {
     pub fn of(scene: &Scene, t: f64, width: u32, height: u32) -> Self {
-        let moment = scene.moment(t);
+        let moment = scene.moment(t, (width, height));
         let mut solids = Vec::new();
         for (index, part) in scene.parts.iter().enumerate() {
             let Some(shape) = part.object.shape else {
