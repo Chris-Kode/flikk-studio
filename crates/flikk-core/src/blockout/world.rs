@@ -478,6 +478,28 @@ impl World {
         own.map(|solid| solid.lowest().y).reduce(f32::min)
     }
 
+    /// Each pair of objects of which the first has the middle of one of
+    /// its solids inside a solid of the second: it is in it, or through
+    /// it. None in a scene of more than 400 solids.
+    pub fn through(&self) -> Vec<(u16, u16)> {
+        let solids = &self.solids.solids;
+        // Every solid against every other: not worth it in a crowd.
+        if solids.len() > 400 {
+            return Vec::new();
+        }
+        let mut pairs: Vec<(u16, u16)> = solids
+            .iter()
+            .flat_map(|inner| {
+                (solids.iter())
+                    .filter(move |outer| outer.owner != inner.owner && outer.holds(inner.centre))
+                    .map(move |outer| (inner.owner, outer.owner))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
     /// Where a point of the scene is in the picture, in pixels, and how
     /// far ahead of the camera; `None` behind it.
     pub fn pixel_of(&self, point: Vec3) -> Option<(f32, f32, f32)> {

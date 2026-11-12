@@ -19,6 +19,10 @@ const SPOTS: [(f32, f32); 5] = [
     (-0.4, 0.65),
     (0.4, 0.65),
 ];
+/// How many times a second a scene is watched, and the metres a second
+/// nothing on feet goes faster than.
+const WATCHED: f64 = 12.0;
+const SPRINT: f32 = 12.5;
 /// Metres a walker's lowest point may be off the ground and go unsaid.
 const OFF_GROUND: f32 = 0.06;
 /// What a blockout's camera sees, said for its writer.
@@ -64,6 +68,231 @@ struct Sight {
     glimpsed: bool,
 }
 
+/// What is found watching a scene all through, moment by moment.
+struct Watch {
+    /// Whether each object was ever in the picture, and how tall it got
+    /// there as a share of the picture's height.
+    ever: Vec<bool>,
+    largest: Vec<f32>,
+    /// How far off the ground each walker's lowest point got, and when.
+    off_ground: Vec<Option<(f32, f64)>>,
+    /// The objects the camera was inside, and when it first was; when it
+    /// was first under the ground.
+    inside: Vec<(usize, f64)>,
+    under_ground: Option<f64>,
+    /// The stretches the camera's subject was not to be seen for: which
+    /// object, from when until when, and behind what (nothing when it was
+    /// out of the picture).
+    lost: Vec<(usize, f64, f64, Option<Option<u16>>)>,
+    /// Where each thing was at the last moment, and when that was.
+    was: Vec<Option<Vec3>>,
+    then: Option<f64>,
+    /// The fastest each thing went, and when.
+    fastest: Vec<(f32, f64)>,
+    /// Pairs of things of which one went through the other, and when it
+    /// first did.
+    through: Vec<(usize, usize, f64)>,
+    /// The ends of limbs that were short of what they reach for: what
+    /// that is, by how much at the worst, and when.
+    short: Vec<(usize, usize, f32, f64)>,
+}
+
+impl Watch {
+    fn over(parts: usize) -> Self {
+        Self {
+            ever: vec![false; parts],
+            largest: vec![0.0; parts],
+            off_ground: vec![None; parts],
+            inside: Vec::new(),
+            under_ground: None,
+            lost: Vec::new(),
+            was: vec![None; parts],
+            then: None,
+            fastest: vec![(0.0, 0.0); parts],
+            through: Vec::new(),
+            short: Vec::new(),
+        }
+    }
+
+    /// Take in `scene` at `t`: `world` as it stands then, and how each
+    /// thing shows.
+    fn see(&mut self, scene: &Scene, world: &World, t: f64, sights: &[Sight]) {
+        for sight in sights.iter().filter(|s| s.clear > 0 || s.glimpsed) {
+            self.ever[sight.index] = true;
+            self.largest[sight.index] = self.largest[sight.index].max(sight.share);
+        }
+        for index in scene.walkers() {
+            let off = (world.lowest(index as u16)).filter(|off| off.abs() > OFF_GROUND);
+            let worst = self.off_ground[index].map_or(0.0, |(worst, _)| worst.abs());
+            if let Some(off) = off.filter(|off| off.abs() > worst) {
+                self.off_ground[index] = Some((off, t));
+            }
+        }
+        match world.inside() {
+            Some(inside)
+                if self
+                    .inside
+                    .iter()
+                    .all(|(object, _)| *object != inside as usize) =>
+            {
+                self.inside.push((inside as usize, t));
+            }
+            None if scene.ground && world.eye.y < 0.02 => {
+                self.under_ground.get_or_insert(t);
+            }
+            _ => {}
+        }
+        self.see_subject(scene, world, t, sights);
+        self.see_moving(scene, world, t);
+        for (end, to, short) in scene.short_reaches(t, &world.moment.places) {
+            match self.short.iter_mut().find(|(other, ..)| *other == end) {
+                Some(worst) if worst.2 >= short => {}
+                Some(worst) => *worst = (end, to, short, t),
+                None => self.short.push((end, to, short, t)),
+            }
+        }
+        self.then = Some(t);
+    }
+
+    /// Whether what the camera looks at at `t` is to be seen.
+    fn see_subject(&mut self, scene: &Scene, world: &World, t: f64, sights: &[Sight]) {
+        let Some(subject) = scene.subject(t).map(|part| scene.parts[part].thing) else {
+            return;
+        };
+        if world.moment.gone[subject] {
+            return;
+        }
+        let behind = match sights.iter().find(|sight| sight.index == subject) {
+            Some(sight) if sight.clear > 0 => return,
+            Some(sight) if sight.behind.is_some() => sight.behind,
+            _ => None,
+        };
+        // It goes on from the moment before, or starts now.
+        match self.lost.last_mut() {
+            Some(lost) if lost.0 == subject && Some(lost.2) == self.then && lost.3 == behind => {
+                lost.2 = t;
+            }
+            _ => self.lost.push((subject, t, t, behind)),
+        }
+    }
+
+    /// How fast each thing goes at `t`, and what goes through what.
+    fn see_moving(&mut self, scene: &Scene, world: &World, t: f64) {
+        let moment = &world.moment;
+        let things = (scene.parts.iter().enumerate())
+            .filter(|(index, part)| part.thing == *index && part.parent.is_none());
+        let now: Vec<Option<Vec3>> = (0..scene.parts.len())
+            .map(|index| (!moment.gone[index]).then(|| moment.places[index].at))
+            .collect();
+        let since = self.then.map_or(0.0, |then| (t - then) as f32);
+        // How far a thing went since the last moment, when it was there.
+        let moved = |index: usize| Some(now[index]? - self.was[index]?);
+        if since > 0.0 {
+            for (index, _) in things {
+                let speed = moved(index).map_or(0.0, |moved| moved.length() / since);
+                if speed > self.fastest[index].0 {
+                    self.fastest[index] = (speed, t);
+                }
+            }
+            for (inner, outer) in world.through() {
+                let (inner, outer) = (inner as usize, outer as usize);
+                let apart = |a: usize, b: usize| {
+                    let on = scene.parts[a].rest.as_ref();
+                    !on.is_some_and(|rest| {
+                        rest.surface.iter().any(|of| scene.parts[*of].thing == b)
+                    })
+                };
+                let known = |pair: &(usize, usize, f64)| {
+                    (pair.0, pair.1) == (inner, outer) || (pair.0, pair.1) == (outer, inner)
+                };
+                // One at rest in the other is in it, not going through it.
+                let passing = match (moved(inner), moved(outer)) {
+                    (Some(a), Some(b)) => (a - b).length() / since > 0.5,
+                    _ => false,
+                };
+                let top = |index: usize| scene.parts[index].parent.is_none();
+                if passing
+                    && top(inner)
+                    && top(outer)
+                    && apart(inner, outer)
+                    && apart(outer, inner)
+                    && !self.through.iter().any(known)
+                {
+                    self.through.push((inner, outer, t));
+                }
+            }
+        }
+        self.was = now;
+    }
+
+    /// Add what was found that a viewer would take for a mistake to
+    /// `doubts`.
+    fn say(&self, scene: &Scene, doubts: &mut Vec<String>) {
+        let name = |index: usize| scene.parts[index].object.name.as_str();
+        for (inside, t) in &self.inside {
+            doubts.push(format!(
+                "At {t:.1} s the camera is inside `{}`.",
+                name(*inside)
+            ));
+        }
+        if let Some(t) = self.under_ground {
+            doubts.push(format!("At {t:.1} s the camera is under the ground."));
+        }
+        // A subject lost from the start is said of the opening picture.
+        let lost = (self.lost.iter()).filter(|(_, from, to, _)| *from > 0.0 && to - from >= 0.45);
+        for (subject, from, to, behind) in lost {
+            let how = match behind {
+                Some(front) => format!(
+                    "hidden behind {}",
+                    front.map_or("the ground".to_owned(), |i| format!(
+                        "`{}`",
+                        name(i as usize)
+                    ))
+                ),
+                None => "out of the picture".to_owned(),
+            };
+            doubts.push(format!(
+                "From {from:.1} to {to:.1} s `{}`, which the camera looks at, is {how}.",
+                name(*subject)
+            ));
+        }
+        for (index, off) in self.off_ground.iter().enumerate() {
+            if let Some((off, t)) = off {
+                let (far, side) = (off.abs(), if *off < 0.0 { "under" } else { "over" });
+                doubts.push(format!(
+                    "At {t:.1} s the lowest point of `{}` is {far:.2} m {side} the ground: give \
+                     it `\"on\": \"ground\"` and its feet stay on it.",
+                    name(index)
+                ));
+            }
+        }
+        for (index, (speed, t)) in self.fastest.iter().enumerate() {
+            if *speed > SPRINT && !scene.parts[index].strides.is_empty() {
+                doubts.push(format!(
+                    "`{}` goes at {speed:.0} m/s around {t:.1} s, faster than anyone runs: give \
+                     its keys more time or less ground.",
+                    name(index)
+                ));
+            }
+        }
+        for (inner, outer, t) in &self.through {
+            doubts.push(format!(
+                "At {t:.1} s `{}` goes through `{}`.",
+                name(*inner),
+                name(*outer)
+            ));
+        }
+        for (end, to, short, t) in &self.short {
+            doubts.push(format!(
+                "At {t:.1} s `{}` is {short:.2} m short of `{}`, as far as its limb goes: bring \
+                 them nearer.",
+                name(*end),
+                name(*to)
+            ));
+        }
+    }
+}
+
 /// How many rays across and down the picture look for what shows in it.
 const LOOKS: (usize, usize) = (32, 18);
 
@@ -75,72 +304,32 @@ impl Scene {
         let size = [shape.0, shape.1].map(|side| (side as f32 / longer * 320.0).max(8.0) as u32);
         let mut review = Review::default();
 
-        // The start, the middle and the end, and each shot a cut starts.
+        // Said in words: the start, the middle and the end, and each shot
+        // a cut starts.
         let mut moments = vec![0.0, self.duration * 0.5, self.duration];
         let cuts = self.cuts().filter(|t| *t > 0.0 && *t < self.duration);
         moments.extend(cuts.take(MOMENTS - 3));
         moments.sort_by(f64::total_cmp);
         moments.dedup_by(|a, b| (*a - *b).abs() < 0.05);
-
-        let mut ever = vec![false; self.parts.len()];
-        let mut largest = vec![0f32; self.parts.len()];
-        // How far off the ground each walker's lowest point got, and when.
-        let mut off_ground: Vec<Option<(f32, f64)>> = vec![None; self.parts.len()];
-        let mut tread = |world: &World, t: f64| {
-            for index in self.walkers() {
-                let off = world
-                    .lowest(index as u16)
-                    .filter(|off| off.abs() > OFF_GROUND);
-                let worst = off_ground[index].map_or(0.0, |(worst, _)| worst.abs());
-                if let Some(off) = off.filter(|off| off.abs() > worst) {
-                    off_ground[index] = Some((off, t));
-                }
-            }
-        };
-        let mut note = |sights: &[Sight]| {
-            for sight in sights.iter().filter(|s| s.clear > 0 || s.glimpsed) {
-                ever[sight.index] = true;
-                largest[sight.index] = largest[sight.index].max(sight.share);
-            }
-        };
         for (i, t) in moments.iter().enumerate() {
             let world = World::of(self, *t, size[0], size[1]);
             let sights = self.sights(&world, *t, size);
-            note(&sights);
-            tread(&world, *t);
             review.seen.push(self.line(*t, &sights));
-            if let Some(inside) = world.inside() {
-                let name = &self.parts[inside as usize].object.name;
-                review
-                    .doubts
-                    .push(format!("At {t:.1} s the camera is inside `{name}`."));
-            } else if self.ground && world.eye.y < 0.02 {
-                review
-                    .doubts
-                    .push(format!("At {t:.1} s the camera is under the ground."));
-            }
             if i == 0 {
                 review.doubts.extend(self.start_doubt(&sights));
             }
         }
-        // Between those moments, only whether each is in the picture.
-        for step in 1..8 {
-            let t = self.duration * step as f64 / 8.0;
+        // Watched all through, a few times a second, for what goes wrong
+        // between those.
+        let mut watch = Watch::over(self.parts.len());
+        let looks = ((self.duration * WATCHED).ceil() as usize).clamp(8, 360);
+        for look in 0..=looks {
+            let t = self.duration * look as f64 / looks as f64;
             let world = World::of(self, t, size[0], size[1]);
-            note(&self.sights(&world, t, size));
-            tread(&world, t);
+            watch.see(self, &world, t, &self.sights(&world, t, size));
         }
-        for (index, off) in off_ground.iter().enumerate() {
-            if let Some((off, t)) = off {
-                let name = &self.parts[index].object.name;
-                let (far, side) = (off.abs(), if *off < 0.0 { "under" } else { "over" });
-                review.doubts.push(format!(
-                    "At {t:.1} s the lowest point of `{name}` is {far:.2} m {side} the ground: \
-                     give it `\"on\": \"ground\"` and its feet stay on it."
-                ));
-            }
-        }
-        self.doubts(&ever, &largest, &mut review);
+        watch.say(self, &mut review.doubts);
+        self.doubts(&watch.ever, &watch.largest, &mut review);
         review
     }
 
@@ -257,6 +446,7 @@ impl Scene {
     /// One line saying what `sights` show at `t`.
     fn line(&self, t: f64, sights: &[Sight]) -> String {
         let name = |index: usize| self.parts[index].object.name.as_str();
+        let subject = self.subject(t).map(|part| self.parts[part].thing);
         let said: Vec<String> = (sights.iter().take(NAMED))
             .map(|sight| {
                 let across = match sight.at.0 {
@@ -275,8 +465,13 @@ impl Scene {
                     ),
                 };
                 let share = (sight.share * 100.0).round();
+                // What the camera looks at is said as a shot is called.
+                let shot = match Some(sight.index) == subject {
+                    true => format!(" ({})", shot_called(sight.share)),
+                    false => String::new(),
+                };
                 format!(
-                    "`{}` {across}, {share:.0}% of the height{hidden}",
+                    "`{}` {across}, {share:.0}% of the height{shot}{hidden}",
                     name(sight.index)
                 )
             })
@@ -408,6 +603,20 @@ impl Scene {
                 "Camera `{name}` is never cut to: give it a place in `cuts`."
             ));
         }
+    }
+}
+
+/// What a shot of a standing figure `share` of the picture's height tall
+/// is called.
+fn shot_called(share: f32) -> &'static str {
+    match share {
+        s if s < 0.35 => "a very wide shot",
+        s if s < 0.65 => "a wide shot",
+        s if s < 1.03 => "a full shot",
+        s if s < 1.46 => "a medium wide shot",
+        s if s < 2.13 => "a medium shot",
+        s if s < 3.43 => "a medium close-up",
+        _ => "a close-up",
     }
 }
 

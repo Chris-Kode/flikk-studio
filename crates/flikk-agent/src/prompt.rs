@@ -225,9 +225,9 @@ orbit, a reveal, two people crossing, someone sitting down as a car pulls \
 up), give it a `blockout`: a rough 3D scene that Flikk draws at no cost. \
 Nothing in it is ready-made: you build the characters, creatures, vehicles \
 and set from plain solids with joints, and give them motion of your own \
-(keys for what happens once, cycles for what repeats, by the clock or by \
-the ground covered), with a keyed camera that can ride its subject, shake \
-and cut. Block it as a director would: who is where, what each does and \
+(keys for what happens once, cycles for what repeats, feet that step, \
+hands that reach and take, heads that look), with cameras framed as a shot \
+is called, that move, ride their subject, shake and cut. Block it as a director would: who is where, what each does and \
 when, the set they move through, and one \
 clear camera idea a shot. You can't watch it play, so look at it with \
 `preview_blockout` and fix what is off before you ask for the video. A \

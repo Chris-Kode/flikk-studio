@@ -160,29 +160,53 @@ impl Solid {
             Shape::Cone => hit_cone(o, d, h),
             Shape::Capsule => hit_capsule(o, d, h),
             Shape::Dome => hit_dome(o, d, h),
-            Shape::Wedge => {
-                let slope = (Vec3::new(0.0, h.z, h.y), 0.0);
-                hit_hull(
-                    o,
-                    d,
-                    &[base(h), back(h), side(h, 1.0), side(h, -1.0), slope],
-                )
-            }
-            Shape::Roof => {
-                let faces = [base(h), back(h), front(h), pitch(h, 1.0), pitch(h, -1.0)];
-                hit_hull(o, d, &faces)
-            }
-            Shape::Pyramid => {
-                let ahead = (Vec3::new(0.0, h.z, 2.0 * h.y), h.z * h.y);
-                let behind = (Vec3::new(0.0, h.z, -2.0 * h.y), h.z * h.y);
-                hit_hull(
-                    o,
-                    d,
-                    &[base(h), pitch(h, 1.0), pitch(h, -1.0), ahead, behind],
-                )
-            }
+            Shape::Wedge | Shape::Roof | Shape::Pyramid => hit_hull(o, d, &faces(self.shape, h)),
         }?;
         Some((t, self.turn.outward(normal).unit_or(Vec3::UP)))
+    }
+
+    /// Whether `point` is inside it.
+    pub fn holds(&self, point: Vec3) -> bool {
+        let p = self.turn.inward(point - self.centre);
+        let h = self.half;
+        let round = |x: f32, z: f32| (p.x / x) * (p.x / x) + (p.z / z) * (p.z / z);
+        match self.shape {
+            Shape::Box => p.x.abs() <= h.x && p.y.abs() <= h.y && p.z.abs() <= h.z,
+            Shape::Sphere => round(h.x, h.z) + (p.y / h.y) * (p.y / h.y) <= 1.0,
+            Shape::Cylinder => p.y.abs() <= h.y && round(h.x, h.z) <= 1.0,
+            Shape::Cone => {
+                let narrowed = (h.y - p.y) / (2.0 * h.y);
+                p.y.abs() <= h.y && round(h.x, h.z) <= narrowed * narrowed
+            }
+            Shape::Capsule => {
+                let radius = h.x.min(h.z).min(h.y);
+                let along = p.y.clamp(radius - h.y, h.y - radius);
+                (p - Vec3::new(0.0, along, 0.0)).length() <= radius
+            }
+            Shape::Dome => {
+                let up = (p.y + h.y) / (2.0 * h.y);
+                up >= 0.0 && round(h.x, h.z) + up * up <= 1.0
+            }
+            Shape::Wedge | Shape::Roof | Shape::Pyramid => {
+                (faces(self.shape, h).iter()).all(|(out, offset)| out.dot(p) <= *offset)
+            }
+        }
+    }
+}
+
+/// The five faces of a wedge, a roof or a pyramid of half size `h`.
+fn faces(shape: Shape, h: Vec3) -> [Face; 5] {
+    match shape {
+        Shape::Roof => [base(h), back(h), front(h), pitch(h, 1.0), pitch(h, -1.0)],
+        Shape::Pyramid => {
+            let ahead = (Vec3::new(0.0, h.z, 2.0 * h.y), h.z * h.y);
+            let behind = (Vec3::new(0.0, h.z, -2.0 * h.y), h.z * h.y);
+            [base(h), pitch(h, 1.0), pitch(h, -1.0), ahead, behind]
+        }
+        _ => {
+            let slope = (Vec3::new(0.0, h.z, h.y), 0.0);
+            [base(h), back(h), side(h, 1.0), side(h, -1.0), slope]
+        }
     }
 }
 

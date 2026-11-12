@@ -879,8 +879,32 @@ impl Scene {
         (from + (to - from) * swung + up, grounded)
     }
 
+    /// The limbs whose end is to be on something at `t` and is not, the
+    /// parts standing at `places`: each end, what it reaches for, and how
+    /// far short it is. A limb goes no further than it is long.
+    pub(super) fn short_reaches(&self, t: f64, places: &[Place]) -> Vec<(usize, usize, f32)> {
+        let reaching = self.parts.iter().filter_map(|part| part.limb.as_ref());
+        reaching
+            .filter_map(|limb| {
+                let Goal::Reach {
+                    to: AimAt::Part(to),
+                    from,
+                    until,
+                } = &limb.goal
+                else {
+                    return None;
+                };
+                let there =
+                    from.is_none_or(|from| t >= from) && until.is_none_or(|until| t <= until);
+                let short = (self.middle(*to, places[*to]) - places[limb.end].at).length();
+                (there && self.taken(*to, t).is_none() && short > 0.05)
+                    .then_some((limb.end, *to, short))
+            })
+            .collect()
+    }
+
     /// Whether part `index` is `whole`, or rides it.
-    fn rides(&self, index: usize, whole: usize) -> bool {
+    pub(super) fn rides(&self, index: usize, whole: usize) -> bool {
         let mut above = Some(index);
         while let Some(part) = above {
             if part == whole {
