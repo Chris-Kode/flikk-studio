@@ -1406,8 +1406,8 @@ on the UI thread and run it off it:
   `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
   expensive and each take invents camera, staging and timing again, so
   `generate_video` takes a `blockout`: a rough 3D scene the agent writes
-  as JSON (`blockout::Scene`: objects, models, a camera, an optional sun
-  direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
+  as JSON (`blockout::Scene`: objects, models, a camera or several with
+  the cuts between them, an optional sun direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
   in it is ready-made: there are no built-in people, props or actions,
   so the agent is not held to what Flikk thought of. An object is a
   plain solid (box, sphere, cylinder, cone, capsule, dome, wedge, roof,
@@ -1417,11 +1417,13 @@ on the UI thread and run it off it:
   point they turn about (`anchor`: base, middle, or top for a limb hung
   from its joint). They move by keys, for what happens once, and by a
   `Cycle`, for what repeats: a few keys over one round, added to what
-  the keys make of the object, running by the clock (`seconds`) or by
-  the ground covered (`metres`: the round follows how far the thing the
-  part belongs to has travelled, so feet and wheels keep up with the
-  ground at any speed, and a round that returns to its start eases to
-  rest when the thing stands still). A thing built once goes under
+  the keys make of the object, running by the clock (`seconds`), by the
+  ground covered (`metres`: the round follows how far the thing the part
+  belongs to has travelled, so a wheel keeps up with the road at any
+  speed) or by the strides its thing's feet have taken (`strides`: arms
+  in time with legs); a round that returns to its start eases to rest
+  when the thing stands still, and `from` and `until` have a cycle go on
+  between two times only, in and out over 0.3 s. A thing built once goes under
   `models` and is placed with `model`; a copy can be scaled and shaded,
   and its `parts` give, by part name, the fields that replace the
   model's (another pose, no walk). `build.rs` writes every copy out into
@@ -1433,9 +1435,26 @@ on the UI thread and run it off it:
   an object or a point), keep spinning, come and go (`hidden`), shake
   without repeating (`shake`: metres and degrees either way, and about
   how long a wobble takes), and say what it stands on (`on`: the ground
-  or an object by name). The camera has a place, a `look_at` point or
-  object, a field of view, a roll, a hand-held `shake`, and may ride an
-  object.
+  or an object by name). A camera has a place, a `look_at` point or
+  object, a width (`lens` in millimetres on a frame 36 mm along its
+  longer side, as Blender fits a sensor, or `fov` in degrees), a roll, a
+  hand-held `shake`, and may ride an object. The shot opens on `camera`;
+  `cameras` holds more by name and `cuts` says when the picture goes
+  over to which (`main` is the first), each camera moving on whether or
+  not the picture is its own. `build.rs` turns each into a `motion::Rig`,
+  the names it looks at and rides swapped for places among the parts.
+  A camera, or a key of one, may say what its picture holds in place of
+  where it stands (`frame`: the objects, a shot size from `close_up` to
+  `very_wide`, and `left`, `centre` or `right`). It then keeps the way
+  it looks from its `at` and stands as far off as fits the box of the
+  solids that reach into the share of the subjects' height the size
+  keeps (`motion::framed_from`, the fit Blender's camera-to-selected
+  makes): the top 17% filling three quarters of the picture's height
+  for a close-up, all of it filling a quarter for a very wide. That
+  depends on the picture's shape, so it is worked out as each frame is
+  drawn (`Scene::stood`), with things standing as they do when the
+  camera or the key gets there, and a third is reached by looking a
+  third of half the picture's width to the other side.
   Everything keys move follows a smooth curve through them
   (`motion::Track`), place, turn, size, grey, and the camera's field of
   view, roll and what it looks at: where a value turns back or rests it
@@ -1464,7 +1483,40 @@ on the UI thread and run it off it:
   down from over it onto the solids of what it stands on, the ground
   where it meets none, so a walker's feet stay on a ramp or a stage and
   the height written is how far above that it is. `solid.rs` has the
-  solids: where a ray meets each and its lowest point.
+  solids: where a ray meets each, its lowest point and whether a point
+  is inside it.
+  A part's front can be turned to something (`aim`: an object, the
+  camera, a point; a key retargets it): the least turn that puts its +Z
+  on the target, no more than 85 degrees from how it would else face. A
+  part can be the end of a limb brought somewhere (`reach`: `to`, and
+  optionally `from` and `until`): the part it rides and the part that
+  one rides are the limb (`build::Limb`, hung on the upper of the two),
+  and `Scene::bend` solves it in closed form each frame from the two
+  lengths, bent the way its pose has it bent (a limb posed straight
+  bends forward when it hangs, back when held out), each part turned
+  the least that puts the joint and the end in place; out of reach it
+  goes straight toward the target, and it moves there and back over
+  0.35 s. A foot can step (`step`): `Scene::planted` says where it is
+  from the strides its thing has taken by then (`build::strides`,
+  tabulated a frame: a stride is as long as legs of that length take at
+  the speed, 2.3 leg lengths times the 0.3rd power of speed squared
+  over gravity and leg length, unless `metres` gives it). It is down
+  where the thing passes over it for three quarters of a leg's length
+  of ground, at most 0.6 of the stride, so a run has both feet in the
+  air, and swings to its next landing in between, lifted an eighth of
+  the leg; standing still it is as posed. Its leg is bent to it as a
+  limb is, and a thing with `on` is held no higher than its grounded
+  legs reach (`Scene::lift`), which is the rise and fall of a walk.
+  Because a landing is found from a count of strides, any frame is
+  still drawn without the ones before it.
+  A key with `parent` gives its object to another from that second on,
+  from where it is at that moment (`"none"` lets it go where it is):
+  `build::take_hold` works out, in order of time, where each is within
+  what takes it, the scene built as far as the one before (Blender's
+  Child Of with its inverse set). What is held is placed last each
+  frame, with all that rides it, and a limb that has taken what it
+  reached for leaves for where it took it from, so reaching and holding
+  never wait on each other.
   `world::World` is the scene at a moment as rays meet it: the solids
   where they stand, a ray from the camera trying only those listed for
   its 16 px tile of the picture, a ray toward the sun only those listed
@@ -1500,10 +1552,18 @@ on the UI thread and run it off it:
   picture, how tall, hidden behind what: found from spots on each thing
   and from a spread of rays through the picture), what looks like a
   mistake a viewer would see (`doubts`: the subject out of the opening
-  picture, a camera inside an object or under the ground, a walker
-  going sideways or with its feet off the ground and no `on`, a turn
-  the long way round) and what could be tidied (`notes`: a thing never in
-  the picture, a key after the end). A thing is what a viewer would
+  picture, a walker going sideways, a turn the long way round) and what
+  could be tidied (`notes`: a thing never in
+  the picture, a key after the end, a camera never cut to). Between the
+  moments it describes it watches the whole scene twelve times a second
+  (`review::Watch`) and adds to the doubts: the camera's subject hidden
+  or out of the picture, from when until when; the camera inside an
+  object or under the ground; one thing going through another (the
+  middle of a solid inside a solid of the other, the two moving past
+  each other); something on stepping feet faster than 12.5 m/s; a
+  walker with its feet off the ground and no `on`; a limb short of what
+  it reaches for. What the camera looks at is named as a shot is called
+  from its height in the picture. A thing is what a viewer would
   name: what stands by itself, and each copy, not their parts.
   `preview_blockout` (the Generate group, a read) gives the agent that
   text with a collage of eight frames, so it looks at a scene and fixes

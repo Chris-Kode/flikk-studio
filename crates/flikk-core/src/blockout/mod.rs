@@ -12,8 +12,10 @@
 //! Nothing in a scene is ready-made. Its writer builds every thing from
 //! plain solids, hung from one another at their joints (`parent`,
 //! `anchor`), and moves them with keys and with motion that repeats
-//! ([`Cycle`]): by the clock, or by the ground covered, so that feet and
-//! wheels keep up with it. A thing built once is a model, placed as many
+//! ([`Cycle`]). What a figure does is said rather than posed: feet
+//! [`Step`], a hand is brought somewhere ([`Reach`]), a head looks
+//! (`aim`), a key hands a thing to another. Cameras are framed as shots
+//! are called ([`Frame`]) and cut between. A thing built once is a model, placed as many
 //! times as the shot needs, each copy free to differ. `build` writes the
 //! copies out into the parts that are drawn, `motion` says where each is
 //! at a time, `world` is the scene at that time as rays meet it, and
