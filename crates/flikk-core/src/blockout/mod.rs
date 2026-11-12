@@ -20,7 +20,8 @@
 //!
 //! Space is in metres: X to the right, Y up, the ground at `y = 0`. An
 //! object's `at` is the middle of its base unless it says otherwise, so
-//! `y = 0` stands it on the ground. Angles are degrees.
+//! `y = 0` stands it on the ground; a thing with limbs says what it
+//! stands `on`, and its lowest point is kept there. Angles are degrees.
 
 mod build;
 mod change;
@@ -28,6 +29,7 @@ mod clip;
 mod motion;
 mod render;
 mod review;
+mod solid;
 mod space;
 
 pub use render::Detail;
@@ -73,9 +75,10 @@ pub struct Scene {
     /// rides, and after what it faces.
     #[serde(skip)]
     order: Vec<usize>,
-    /// Whether parts face one another in a loop.
+    /// Whether parts are placed roughly first: some face one another in
+    /// a loop, or stand on something.
     #[serde(skip)]
-    loops: bool,
+    rough: bool,
     /// The part the camera rides, and how its keys move it.
     #[serde(skip)]
     mount: Option<usize>,
@@ -141,6 +144,13 @@ pub struct Object {
     /// own space, and it moves and turns with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// What it stands on: `"ground"`, or an object by name. Its lowest
+    /// point, and that of all that rides it, then rests on that surface
+    /// wherever it is and whatever its limbs do, and the height `at`
+    /// gives is how far above that it is: nothing standing, more in a
+    /// jump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
     /// What it turns to about the vertical, on top of `rotate`: `"path"`
     /// (the way it travels), `"camera"`, an object by name, or a point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +440,8 @@ fn normal_fov() -> f64 {
 /// the camera.
 const PATH: &str = "path";
 const CAMERA: &str = "camera";
+/// What an object can stand on that is no object: the floor at `y = 0`.
+const GROUND: &str = "ground";
 
 impl Scene {
     /// The scene `json` describes, or what is wrong with it, said for
@@ -473,7 +485,7 @@ impl TryFrom<Written> for Scene {
             sun,
             parts: Vec::new(),
             order: Vec::new(),
-            loops: false,
+            rough: false,
             mount: None,
             camera_moves: CameraMoves::default(),
         };

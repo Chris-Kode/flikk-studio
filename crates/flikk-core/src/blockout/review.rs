@@ -19,6 +19,8 @@ const SPOTS: [(f32, f32); 5] = [
     (-0.4, 0.65),
     (0.4, 0.65),
 ];
+/// Metres a walker's lowest point may be off the ground and go unsaid.
+const OFF_GROUND: f32 = 0.06;
 /// What a blockout's camera sees, said for its writer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Review {
@@ -82,6 +84,19 @@ impl Scene {
 
         let mut ever = vec![false; self.parts.len()];
         let mut largest = vec![0f32; self.parts.len()];
+        // How far off the ground each walker's lowest point got, and when.
+        let mut off_ground: Vec<Option<(f32, f64)>> = vec![None; self.parts.len()];
+        let mut tread = |world: &World, t: f64| {
+            for index in self.walkers() {
+                let off = world
+                    .lowest(index as u16)
+                    .filter(|off| off.abs() > OFF_GROUND);
+                let worst = off_ground[index].map_or(0.0, |(worst, _)| worst.abs());
+                if let Some(off) = off.filter(|off| off.abs() > worst) {
+                    off_ground[index] = Some((off, t));
+                }
+            }
+        };
         let mut note = |sights: &[Sight]| {
             for sight in sights.iter().filter(|s| s.clear > 0 || s.glimpsed) {
                 ever[sight.index] = true;
@@ -92,6 +107,7 @@ impl Scene {
             let world = World::of(self, *t, size[0], size[1], Detail::Draft);
             let sights = self.sights(&world, size);
             note(&sights);
+            tread(&world, *t);
             review.seen.push(self.line(*t, &sights));
             if let Some(inside) = world.inside() {
                 let name = &self.parts[inside as usize].object.name;
@@ -112,9 +128,51 @@ impl Scene {
             let t = self.duration * step as f64 / 8.0;
             let world = World::of(self, t, size[0], size[1], Detail::Draft);
             note(&self.sights(&world, size));
+            tread(&world, t);
+        }
+        for (index, off) in off_ground.iter().enumerate() {
+            if let Some((off, t)) = off {
+                let name = &self.parts[index].object.name;
+                let (far, side) = (off.abs(), if *off < 0.0 { "under" } else { "over" });
+                review.doubts.push(format!(
+                    "At {t:.1} s the lowest point of `{name}` is {far:.2} m {side} the ground: \
+                     give it `\"on\": \"ground\"` and its feet stay on it."
+                ));
+            }
         }
         self.doubts(&ever, &largest, &mut review);
         review
+    }
+
+    /// The things that walk on the ground and could be off it: what is
+    /// written at the ground's height, moves limbs by the ground it
+    /// covers, and doesn't say what it stands on.
+    fn walkers(&self) -> impl Iterator<Item = usize> + '_ {
+        let paced = |index: usize| {
+            (self.parts.iter()).any(|part| {
+                part.whole == index
+                    && part
+                        .object
+                        .cycle
+                        .as_ref()
+                        .is_some_and(|c| c.metres.is_some())
+            })
+        };
+        (self.parts.iter().enumerate())
+            .filter(move |(index, part)| {
+                self.ground
+                    && part.thing == *index
+                    && part.parent.is_none()
+                    && part.rest.is_none()
+                    && part.object.at[1].abs() < 0.01
+                    && part
+                        .object
+                        .keys
+                        .iter()
+                        .all(|key| key.at.is_none_or(|at| at[1].abs() < 0.01))
+                    && paced(*index)
+            })
+            .map(|(index, _)| index)
     }
 
     /// How each thing a viewer would name shows at `t`: what stands by

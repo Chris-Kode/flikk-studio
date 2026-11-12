@@ -3,8 +3,9 @@
 //! rides and faces ([`Moment`]), the camera's view with it.
 
 use super::build::{Facing, Part};
+use super::solid::Solid;
 use super::space::{Place, Turn, Vec3, smoothstep};
-use super::{Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Target};
+use super::{Camera, Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Shape, Target};
 
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
@@ -539,17 +540,24 @@ impl Scene {
     pub(super) fn stand(&self, t: f64) -> (Vec<Place>, Vec<Vec3>) {
         // Parts that face one another go round in a loop: there, the one
         // placed first turns to where the other is before anything faces.
-        let rough = match self.loops {
-            true => self.stand_facing(t, None).0,
-            false => Vec::new(),
+        // And what stands on something is set down as its limbs are.
+        let rough = match self.rough {
+            true => Some(self.stand_given(t, None)),
+            false => None,
         };
-        self.stand_facing(t, Some(&rough))
+        self.stand_given(t, Some(rough.as_ref()))
     }
 
     /// Every part's place and size at `t`, each placed after what it
-    /// rides. With `rough`, each also turns to what it faces: where that
-    /// stands already, else where `rough` has it. Without, nothing faces.
-    fn stand_facing(&self, t: f64, rough: Option<&[Place]>) -> (Vec<Place>, Vec<Vec3>) {
+    /// rides. Given `rough` (the places and sizes without it, where a
+    /// scene needs those), each also turns to what it faces and comes to
+    /// rest on what it stands on: where that stands already, else where
+    /// `rough` has it. Given nothing, nothing faces or rests.
+    fn stand_given(
+        &self,
+        t: f64,
+        rough: Option<Option<&(Vec<Place>, Vec<Vec3>)>>,
+    ) -> (Vec<Place>, Vec<Vec3>) {
         let count = self.parts.len();
         let mut places = vec![Place::ORIGIN; count];
         let mut sizes = vec![Vec3::ZERO; count];
@@ -560,10 +568,14 @@ impl Scene {
             let pose = self.pose(index, t);
             let at = Vec3::of(pose.at);
             let mut rotate = pose.rotate;
+            let mut place = rides.then(Place {
+                at,
+                turn: Turn::of(rotate),
+            });
             if let Some(rough) = rough {
-                let stands = |other: usize| match placed[other] {
-                    true => places[other],
-                    false => rough.get(other).copied().unwrap_or(Place::ORIGIN),
+                let stands = |other: usize| match (placed[other], rough) {
+                    (false, Some(rough)) => rough.0[other],
+                    _ => places[other],
                 };
                 // Toward a point of the scene, as a turn in the space it
                 // stands in.
@@ -583,11 +595,34 @@ impl Scene {
                     Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
                 };
                 rotate[1] += faced.unwrap_or(0.0);
+                place = rides.then(Place {
+                    at,
+                    turn: Turn::of(rotate),
+                });
+                if let (Some(rest), Some(rough)) = (&part.rest, rough) {
+                    // Its own solids ride it as they did in the rough.
+                    let solid = |of: usize, place: Place, size: Vec3| {
+                        let object = &self.parts[of].object;
+                        let shape = object.shape.unwrap_or(Shape::Box);
+                        Solid::standing(shape, object.anchor, place, size)
+                    };
+                    let own = (rest.solids.iter())
+                        .filter(|of| !self.hidden(**of, t))
+                        .map(|of| {
+                            let rode = rough.0[index].holds(rough.0[*of]);
+                            solid(*of, place.then(rode), rough.1[*of]).lowest()
+                        });
+                    let lowest = own.reduce(|a, b| if b.y < a.y { b } else { a });
+                    if let Some(lowest) = lowest {
+                        let surface = (rest.surface.iter())
+                            .filter(|of| !self.hidden(**of, t))
+                            .map(|of| solid(*of, stands(*of), rough.1[*of]));
+                        let floor = top_under(surface, lowest);
+                        place.at.y += floor + pose.at[1] as f32 - lowest.y;
+                    }
+                }
             }
-            places[index] = rides.then(Place {
-                at,
-                turn: Turn::of(rotate),
-            });
+            places[index] = place;
             sizes[index] = Vec3::of(pose.size);
             placed[index] = true;
         }
@@ -627,6 +662,18 @@ impl Scene {
             view,
         }
     }
+}
+
+/// How high the top of `surface` is under (or over) `point`; the ground
+/// where none of it is.
+fn top_under(surface: impl Iterator<Item = Solid>, point: Vec3) -> f32 {
+    // From well over it, near enough to measure finely.
+    let from = Vec3::new(point.x, point.y + 200.0, point.z);
+    surface
+        .filter_map(|solid| solid.hit(from, -Vec3::UP))
+        .map(|(down, _)| from.y - down)
+        .reduce(f32::max)
+        .unwrap_or(0.0)
 }
 
 /// A scene at one moment.

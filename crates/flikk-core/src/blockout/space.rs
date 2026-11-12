@@ -189,6 +189,20 @@ impl Place {
             turn: self.turn.then(inner.turn),
         }
     }
+
+    /// `other`, a place of the space it stands in, in its own axes: what
+    /// [`Place::then`] gives `other` back from.
+    pub fn holds(&self, other: Place) -> Place {
+        let inward = |v: Vec3| self.turn.inward(v);
+        Place {
+            at: inward(other.at - self.at),
+            turn: Turn {
+                x: inward(other.turn.x),
+                y: inward(other.turn.y),
+                z: inward(other.turn.z),
+            },
+        }
+    }
 }
 
 /// 0 below `from`, 1 above `to`, a smooth rise between.

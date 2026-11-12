@@ -7,7 +7,7 @@
 
 use super::motion::{CameraMoves, Moves, Track};
 use super::space::Vec3;
-use super::{Anchor, CAMERA, FPS, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
+use super::{Anchor, CAMERA, FPS, GROUND, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
 use std::collections::{HashMap, VecDeque};
 
 /// How deep a model may hold copies of models.
@@ -28,6 +28,8 @@ pub(super) struct Part {
     /// holds that.
     pub thing: usize,
     pub facing: Facing,
+    /// What it stands on, when it says.
+    pub rest: Option<Rest>,
     /// How its keys move it.
     pub moves: Moves,
     /// The box it fills in its own space, low corner and high. For a
@@ -47,6 +49,15 @@ pub(super) enum Facing {
     Camera,
     Part(usize),
     Point([f64; 3]),
+}
+
+/// What a part stands on, and what of it could touch that.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Rest {
+    /// The solids of what it stands on; none for the ground.
+    pub surface: Vec<usize>,
+    /// Its own solids: itself and all that rides it.
+    pub solids: Vec<usize>,
 }
 
 /// An object written out, with the copy of a model it is in and whether
@@ -120,6 +131,7 @@ impl Scene {
                 whole: 0,
                 thing: 0,
                 facing,
+                rest: None,
                 moves: Moves::of(&out.object, self.duration),
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
@@ -160,7 +172,33 @@ impl Scene {
             None => None,
         };
         self.camera_moves = CameraMoves::of(&self.camera, self.duration);
-        (self.order, self.loops) = placing_order(&parts, self.mount);
+        for index in 0..parts.len() {
+            let Some(stood_on) = &parts[index].object.on else {
+                continue;
+            };
+            let name = &parts[index].object.name;
+            let surface = match place(stood_on) {
+                Some(surface) if rides(&parts, surface, index) => {
+                    return Err(format!(
+                        "`{name}` stands on `{stood_on}`, which is part of it"
+                    ));
+                }
+                Some(surface) => solids_of(&parts, surface),
+                None if stood_on == GROUND => Vec::new(),
+                None => {
+                    return Err(format!(
+                        "`{name}` stands on `{stood_on}`, which is no object's name or `{GROUND}`"
+                    ));
+                }
+            };
+            parts[index].rest = Some(Rest {
+                surface,
+                solids: solids_of(&parts, index),
+            });
+        }
+        let (order, loops) = placing_order(&parts, self.mount);
+        self.rough = loops || parts.iter().any(|part| part.rest.is_some());
+        self.order = order;
         self.parts = parts;
         self.bound_joints();
         Ok(())
@@ -195,6 +233,11 @@ impl Scene {
             && is_beside(faced)
         {
             *faced = format!("{prefix}{faced}");
+        }
+        if let Some(stood_on) = &mut out.on
+            && is_beside(stood_on)
+        {
+            *stood_on = format!("{prefix}{stood_on}");
         }
         out.name = name.clone();
         (out.model, out.parts, out.scale) = (None, Default::default(), 1.0);
@@ -350,10 +393,29 @@ fn solid_bounds(object: &Object) -> ([f64; 3], [f64; 3]) {
     ([-w * 0.5, under, -d * 0.5], [w * 0.5, under + h, d * 0.5])
 }
 
+/// Whether part `index` is `whole`, or rides it.
+fn rides(parts: &[Part], index: usize, whole: usize) -> bool {
+    let mut above = Some(index);
+    while let Some(part) = above {
+        if part == whole {
+            return true;
+        }
+        above = parts[part].parent;
+    }
+    false
+}
+
+/// The solids of part `whole`: itself and all that rides it.
+fn solids_of(parts: &[Part], whole: usize) -> Vec<usize> {
+    (0..parts.len())
+        .filter(|index| parts[*index].object.shape.is_some() && rides(parts, *index, whole))
+        .collect()
+}
+
 /// The order parts are placed in at a moment: each after what it rides,
-/// and after what it faces, unless facing goes round in a loop; whether
-/// some did. `mount` is the part the camera rides, which whatever faces
-/// the camera is placed after.
+/// and after what it faces and stands on, unless that goes round in a
+/// loop; whether some did. `mount` is the part the camera rides, which
+/// whatever faces the camera is placed after.
 fn placing_order(parts: &[Part], mount: Option<usize>) -> (Vec<usize>, bool) {
     let faced = |part: &Part| match part.facing {
         Facing::Part(faced) => Some(faced),
@@ -363,7 +425,11 @@ fn placing_order(parts: &[Part], mount: Option<usize>) -> (Vec<usize>, bool) {
     let mut waits = vec![0usize; parts.len()];
     let mut waited_on: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];
     for (index, part) in parts.iter().enumerate() {
-        for other in [part.parent, faced(part)].into_iter().flatten() {
+        let stood_on = part
+            .rest
+            .iter()
+            .flat_map(|rest| rest.surface.iter().copied());
+        for other in (part.parent.into_iter().chain(faced(part))).chain(stood_on) {
             if other != index {
                 waits[index] += 1;
                 waited_on[other].push(index);
