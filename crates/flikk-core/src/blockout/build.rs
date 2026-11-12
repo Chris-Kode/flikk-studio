@@ -52,6 +52,14 @@ pub(super) struct Part {
     /// The strides its feet that step have taken by each frame; empty
     /// when it has none.
     pub strides: Vec<f32>,
+    /// How far into their rounds its cycle and its steps start, on top
+    /// of what they say: each one of a repeat its own.
+    pub stagger: f64,
+    /// The repeat it is one of: the joint that stands for them all.
+    pub one_of: Option<usize>,
+    /// Where it stands and its size, when nothing ever moves it: worked
+    /// out once.
+    pub still: Option<(Place, Vec3)>,
 }
 
 /// What a part turns to about the vertical.
@@ -153,6 +161,8 @@ struct Out {
     object: Object,
     inside: Option<usize>,
     is_copy: bool,
+    stagger: f64,
+    one_of: Option<usize>,
 }
 
 /// What a copy passes on to its parts.
@@ -167,6 +177,8 @@ struct Within<'a> {
     tone: f64,
     copy: Option<usize>,
     depth: usize,
+    /// How far into their rounds its cycles and steps start.
+    stagger: f64,
 }
 
 impl Scene {
@@ -179,6 +191,7 @@ impl Scene {
             tone: 1.0,
             copy: None,
             depth: 0,
+            stagger: 0.0,
         };
         let mut outs = Vec::new();
         for object in &self.objects {
@@ -265,6 +278,9 @@ impl Scene {
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
                 strides: Vec::new(),
+                stagger: out.stagger,
+                one_of: out.one_of,
+                still: None,
             });
         }
         for index in 0..parts.len() {
@@ -272,6 +288,8 @@ impl Scene {
             let whole = match (&outs[index], outs[index].inside) {
                 (out, _) if out.is_copy => index,
                 (_, Some(copy)) => copy,
+                // One of a repeat that rides nothing is a thing itself.
+                (out, None) if out.one_of == Some(top) => index,
                 (_, None) => top,
             };
             // Out of any copy that holds its whole.
@@ -397,7 +415,35 @@ impl Scene {
         self.parts = parts;
         self.bound_joints();
         self.take_hold();
+        self.keep_still();
         Ok(())
+    }
+
+    /// Work out once where each part stands that nothing ever moves:
+    /// most of a set.
+    fn keep_still(&mut self) {
+        let standing = self.stand(0.0);
+        for index in self.order.clone() {
+            let part = &self.parts[index];
+            let object = &part.object;
+            let keyed = (object.keys.iter())
+                .any(|key| key.at.is_some() || key.rotate.is_some() || key.size.is_some());
+            let moved = keyed
+                || object.spin != [0.0; 3]
+                || object.cycle.is_some()
+                || object.shake.is_some()
+                || part.facing != Facing::Nothing
+                || !part.aims.is_empty()
+                || !part.held.is_empty()
+                || part.limb.is_some()
+                || part.rest.is_some();
+            let carried = part
+                .parent
+                .is_some_and(|parent| self.parts[parent].still.is_none());
+            if !moved && !carried {
+                self.parts[index].still = Some((standing.places[index], standing.sizes[index]));
+            }
+        }
     }
 
     /// Give each leg whose foot steps its limb: how long a stride is and
@@ -442,7 +488,8 @@ impl Scene {
                 goal: Goal::Step(Stepping {
                     root,
                     strides: taken,
-                    shift: step.shift.unwrap_or(turn as f64 / beside.len() as f64),
+                    shift: step.shift.unwrap_or(turn as f64 / beside.len() as f64)
+                        + parts[end].stagger,
                     leg: leg as f32,
                     lift: step.lift.map_or(leg as f32 * 0.12, |lift| lift as f32),
                     rest: (foot.x, foot.z),
@@ -463,6 +510,9 @@ impl Scene {
         within: Within,
         outs: &mut Vec<Out>,
     ) -> Result<(), String> {
+        if let Some(copies) = object.repeated() {
+            return self.write_repeat(object, copies, within, outs);
+        }
         let Within {
             prefix,
             beside,
@@ -470,6 +520,7 @@ impl Scene {
             tone,
             copy,
             depth,
+            stagger,
         } = within;
         let name = format!("{prefix}{}", object.name);
         let is_beside = |other: &str| beside.iter().any(|part| part.name == other);
@@ -537,6 +588,8 @@ impl Scene {
             object: out,
             inside: copy,
             is_copy: object.model.is_some(),
+            stagger,
+            one_of: None,
         });
         let Some(model) = &object.model else {
             return Ok(());
@@ -565,6 +618,7 @@ impl Scene {
             tone: tone * object.shade.map_or(1.0, |shade| shade / MID_GREY),
             copy: Some(index),
             depth: depth + 1,
+            stagger,
         };
         for part in parts {
             let part = match object.parts.get(&part.name) {
@@ -572,6 +626,30 @@ impl Scene {
                 None => part.clone(),
             };
             self.write_out(&part, within, outs)?;
+        }
+        Ok(())
+    }
+
+    /// Add the `copies` that `object` repeats as, each riding a joint of
+    /// its name that stands for them all.
+    fn write_repeat(
+        &self,
+        object: &Object,
+        copies: Vec<(Object, f64)>,
+        within: Within,
+        outs: &mut Vec<Out>,
+    ) -> Result<(), String> {
+        let all = outs.len();
+        let joint = Object::joint(object.name.clone(), object.parent.clone());
+        self.write_out(&joint, within, outs)?;
+        for (copy, stagger) in copies {
+            let index = outs.len();
+            let within = Within {
+                stagger: within.stagger + stagger,
+                ..within
+            };
+            self.write_out(&copy, within, outs)?;
+            outs[index].one_of = Some(all);
         }
         Ok(())
     }

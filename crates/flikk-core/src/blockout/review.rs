@@ -5,6 +5,7 @@
 use super::Scene;
 use super::space::Vec3;
 use super::world::World;
+use std::collections::HashMap;
 
 /// The most moments described, and the most objects named at each.
 const MOMENTS: usize = 6;
@@ -66,6 +67,9 @@ struct Sight {
     behind: Option<Option<u16>>,
     /// Whether some of it shows somewhere in the picture.
     glimpsed: bool,
+    /// For a repeat, said as one: how many of it show. The rest is then
+    /// of the one that shows largest.
+    showing: usize,
 }
 
 /// What is found watching a scene all through, moment by moment.
@@ -180,7 +184,7 @@ impl Watch {
     fn see_moving(&mut self, scene: &Scene, world: &World, t: f64) {
         let moment = &world.moment;
         let things = (scene.parts.iter().enumerate())
-            .filter(|(index, part)| part.thing == *index && part.parent.is_none());
+            .filter(|(index, part)| part.thing == *index && scene.stands_alone(*index));
         let now: Vec<Option<Vec3>> = (0..scene.parts.len())
             .map(|index| (!moment.gone[index]).then(|| moment.places[index].at))
             .collect();
@@ -202,16 +206,20 @@ impl Watch {
                         rest.surface.iter().any(|of| scene.parts[*of].thing == b)
                     })
                 };
+                // The ones of a repeat are said as one.
+                let said = (scene.said_as(inner), scene.said_as(outer));
                 let known = |pair: &(usize, usize, f64)| {
-                    (pair.0, pair.1) == (inner, outer) || (pair.0, pair.1) == (outer, inner)
+                    let pair = (scene.said_as(pair.0), scene.said_as(pair.1));
+                    pair == said || pair == (said.1, said.0)
                 };
                 // One at rest in the other is in it, not going through it.
                 let passing = match (moved(inner), moved(outer)) {
                     (Some(a), Some(b)) => (a - b).length() / since > 0.5,
                     _ => false,
                 };
-                let top = |index: usize| scene.parts[index].parent.is_none();
+                let top = |index: usize| scene.stands_alone(index);
                 if passing
+                    && said.0 != said.1
                     && top(inner)
                     && top(outer)
                     && apart(inner, outer)
@@ -228,7 +236,7 @@ impl Watch {
     /// Add what was found that a viewer would take for a mistake to
     /// `doubts`.
     fn say(&self, scene: &Scene, doubts: &mut Vec<String>) {
-        let name = |index: usize| scene.parts[index].object.name.as_str();
+        let name = |index: usize| scene.parts[scene.said_as(index)].object.name.as_str();
         for (inside, t) in &self.inside {
             doubts.push(format!(
                 "At {t:.1} s the camera is inside `{}`.",
@@ -323,10 +331,31 @@ impl Scene {
         // between those.
         let mut watch = Watch::over(self.parts.len());
         let looks = ((self.duration * WATCHED).ceil() as usize).clamp(8, 360);
-        for look in 0..=looks {
-            let t = self.duration * look as f64 / looks as f64;
-            let world = World::of(self, t, size[0], size[1]);
-            watch.see(self, &world, t, &self.sights(&world, t, size));
+        let moments: Vec<f64> = (0..=looks)
+            .map(|look| self.duration * look as f64 / looks as f64)
+            .collect();
+        // Each moment is set up on a thread of its own, a few at a time,
+        // and taken in as they come in order.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+        for together in moments.chunks(threads) {
+            let seen: Vec<_> = std::thread::scope(|scope| {
+                let looking: Vec<_> = (together.iter())
+                    .map(|t| {
+                        scope.spawn(move || {
+                            let world = World::of(self, *t, size[0], size[1]);
+                            let sights = self.sights(&world, *t, size);
+                            (world, sights)
+                        })
+                    })
+                    .collect();
+                (looking.into_iter()).map(|look| look.join().ok()).collect()
+            });
+            // A moment that could not be set up is not watched.
+            for (t, (world, sights)) in
+                (together.iter().zip(&seen)).filter_map(|(t, seen)| Some((t, seen.as_ref()?)))
+            {
+                watch.see(self, world, *t, sights);
+            }
         }
         watch.say(self, &mut review.doubts);
         self.doubts(&watch.ever, &watch.largest, &mut review);
@@ -365,8 +394,25 @@ impl Scene {
         !self.parts[index].strides.is_empty() || self.parts.iter().any(by_ground)
     }
 
+    /// The part `index` is said as: the repeat it is one of, else itself.
+    fn said_as(&self, index: usize) -> usize {
+        self.parts[index].one_of.unwrap_or(index)
+    }
+
+    /// Whether part `index` rides nothing: it has no parent, or is one of
+    /// a repeat that has none.
+    fn stands_alone(&self, index: usize) -> bool {
+        let part = &self.parts[index];
+        match (part.parent, part.one_of) {
+            (None, _) => true,
+            (Some(parent), Some(all)) => parent == all && self.parts[all].parent.is_none(),
+            (Some(_), None) => false,
+        }
+    }
+
     /// How each thing a viewer would name shows at `t`: what stands by
-    /// itself, and each copy of a model, not their parts.
+    /// itself, and each copy of a model, not their parts. The ones of a
+    /// repeat are said as one.
     fn sights(&self, world: &World, t: f64, size: [u32; 2]) -> Vec<Sight> {
         let (wide, high) = (size[0] as f32, size[1] as f32);
         // What a spread of rays through the picture meets: a thing too
@@ -380,9 +426,14 @@ impl Scene {
                 glimpsed[thing as usize] = true;
             }
         }
-        let mut sights = Vec::new();
+        let mut repeats = vec![false; self.parts.len()];
+        for all in self.parts.iter().filter_map(|part| part.one_of) {
+            repeats[all] = true;
+        }
+        let mut sights: Vec<Sight> = Vec::new();
+        let mut said: HashMap<usize, usize> = HashMap::new();
         for (index, part) in self.parts.iter().enumerate() {
-            if part.thing != index || world.moment.gone[index] {
+            if part.thing != index || world.moment.gone[index] || repeats[index] {
                 continue;
             }
             let place = world.moment.places[index];
@@ -414,6 +465,7 @@ impl Scene {
                 clear: 0,
                 behind: None,
                 glimpsed: glimpsed[index],
+                showing: 1,
             };
             for (across, up) in SPOTS {
                 let point = spot(across, up);
@@ -426,8 +478,29 @@ impl Scene {
                     front => sight.behind = front,
                 }
             }
-            if sight.clear > 0 || sight.behind.is_some() || sight.glimpsed {
+            if sight.clear == 0 && sight.behind.is_none() && !sight.glimpsed {
+                continue;
+            }
+            let Some(all) = part.one_of else {
                 sights.push(sight);
+                continue;
+            };
+            sight.index = all;
+            sight.showing = usize::from(sight.clear > 0 || sight.glimpsed);
+            match said.get(&all) {
+                Some(at) => {
+                    let one = &mut sights[*at];
+                    let showing = one.showing + sight.showing;
+                    let shows = |sight: &Sight| (sight.showing > 0, sight.share);
+                    if shows(&sight) > shows(one) {
+                        *one = sight;
+                    }
+                    one.showing = showing;
+                }
+                None => {
+                    said.insert(all, sights.len());
+                    sights.push(sight);
+                }
             }
         }
         // What the camera looks at first, then what was built of parts
@@ -445,7 +518,12 @@ impl Scene {
 
     /// One line saying what `sights` show at `t`.
     fn line(&self, t: f64, sights: &[Sight]) -> String {
-        let name = |index: usize| self.parts[index].object.name.as_str();
+        let name = |index: usize| self.parts[self.said_as(index)].object.name.as_str();
+        let of = |all: usize| {
+            (self.parts.iter())
+                .filter(|part| part.one_of == Some(all))
+                .count()
+        };
         let subject = self.subject(t).map(|part| self.parts[part].thing);
         let said: Vec<String> = (sights.iter().take(NAMED))
             .map(|sight| {
@@ -470,10 +548,21 @@ impl Scene {
                     true => format!(" ({})", shot_called(sight.share)),
                     false => String::new(),
                 };
-                format!(
-                    "`{}` {across}, {share:.0}% of the height{shot}{hidden}",
-                    name(sight.index)
-                )
+                match of(sight.index) {
+                    0 => format!(
+                        "`{}` {across}, {share:.0}% of the height{shot}{hidden}",
+                        name(sight.index)
+                    ),
+                    all if sight.showing == 0 => {
+                        format!("`{}` (none of its {all} to be seen)", name(sight.index))
+                    }
+                    all => format!(
+                        "`{}` ({} of its {all} in the picture) {across}, up to {share:.0}% of \
+                         the height{shot}",
+                        name(sight.index),
+                        sight.showing
+                    ),
+                }
             })
             .collect();
         let more = match sights.len().saturating_sub(NAMED) {
@@ -499,7 +588,7 @@ impl Scene {
                 ..
             }) => {
                 let front = front.map_or("the ground", |i| {
-                    self.parts[i as usize].object.name.as_str()
+                    self.parts[self.said_as(i as usize)].object.name.as_str()
                 });
                 Some(format!(
                     "At the start `{name}`, which the camera looks at, is hidden behind {front}."

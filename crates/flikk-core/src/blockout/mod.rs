@@ -31,12 +31,14 @@ mod change;
 mod clip;
 mod motion;
 mod render;
+mod repeat;
 mod review;
 mod solid;
 mod space;
 mod world;
 
 pub use render::Detail;
+pub use repeat::{Count, Repeat, Vary};
 pub use review::Review;
 
 use build::Part;
@@ -51,7 +53,7 @@ pub const MAX_SECONDS: f64 = 30.0;
 /// The most objects a scene is written with, and the most parts it has
 /// once every copy of a model is written out.
 pub const MAX_OBJECTS: usize = 256;
-pub const MAX_PARTS: usize = 1200;
+pub const MAX_PARTS: usize = 6000;
 
 /// A rough 3D scene over a few seconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,6 +195,9 @@ pub struct Object {
     /// to keep it there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<Step>,
+    /// Many of it, laid out: each is this object over again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<Repeat>,
     /// Degrees a second it keeps turning about X, Y and Z.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spin: [f64; 3],
@@ -735,7 +740,8 @@ impl TryFrom<Written> for Scene {
         scene.duration = scene.duration.min(MAX_SECONDS);
         if scene.objects.len() > MAX_OBJECTS {
             return Err(format!(
-                "at most {MAX_OBJECTS} objects; this has {}. Build what repeats as a model",
+                "at most {MAX_OBJECTS} objects; this has {}. Build what repeats as a model, and \
+                 lay many of one thing out with `repeat`",
                 scene.objects.len()
             ));
         }
@@ -813,6 +819,17 @@ fn in_range(size: &mut [f64; 3]) {
 }
 
 impl Object {
+    /// A joint called `name` riding `parent`: nothing is drawn of it.
+    fn joint(name: String, parent: Option<String>) -> Self {
+        Self {
+            name,
+            parent,
+            scale: 1.0,
+            taper: 1.0,
+            ..Self::default()
+        }
+    }
+
     fn settle(&mut self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("every object needs a `name`".into());
@@ -877,6 +894,9 @@ impl Object {
             if let Target::Point(point) = &reach.to {
                 finite(&what, point)?;
             }
+        }
+        if let Some(repeat) = self.repeat.as_mut() {
+            repeat.settle(&what)?;
         }
         if let Some(shake) = self.shake.as_mut() {
             finite(&what, &shake.at)?;

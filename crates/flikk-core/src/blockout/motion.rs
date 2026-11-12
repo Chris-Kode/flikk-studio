@@ -517,7 +517,7 @@ impl Scene {
             }
             (None, None, None) => return pose,
         };
-        let added = cycle.added(rounds);
+        let added = cycle.added(rounds + part.stagger);
         for c in 0..3 {
             pose.at[c] += added.at[c] * swing;
             pose.rotate[c] += added.rotate[c] * swing;
@@ -598,6 +598,10 @@ impl Scene {
                     last[index] = true;
                 }
                 if last[index] != lasts {
+                    continue;
+                }
+                if let Some((place, size)) = part.still {
+                    (places[index], sizes[index], placed[index]) = (place, size, true);
                     continue;
                 }
                 let pose = self.pose(index, t);
@@ -1548,7 +1552,7 @@ fn noise(x: f64, seed: u32) -> f64 {
 }
 
 /// `n` with its bits well mixed.
-fn mixed(mut n: u32) -> u32 {
+pub(super) fn mixed(mut n: u32) -> u32 {
     n ^= n >> 16;
     n = n.wrapping_mul(0x7feb_352d);
     n ^= n >> 15;

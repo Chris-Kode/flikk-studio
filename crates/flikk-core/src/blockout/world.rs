@@ -151,6 +151,35 @@ impl Solids {
         first
     }
 
+    /// Give `found` each solid that `point` is inside.
+    fn holding(&self, point: Vec3, mut found: impl FnMut(&Solid)) {
+        let mut stack = [0u32; 48];
+        let mut depth = usize::from(!self.nodes.is_empty());
+        while depth > 0 {
+            depth -= 1;
+            let index = stack[depth];
+            let node = &self.nodes[index as usize];
+            let outside = (node.low - point).max(point - node.high);
+            if outside.x > 0.0 || outside.y > 0.0 || outside.z > 0.0 {
+                continue;
+            }
+            if node.count == 0 {
+                if depth + 2 <= stack.len() {
+                    (stack[depth], stack[depth + 1]) = (node.second, index + 1);
+                    depth += 2;
+                }
+                continue;
+            }
+            let (from, count) = (node.first as usize, node.count as usize);
+            for solid in self.solids[from..from + count]
+                .iter()
+                .filter(|solid| solid.holds(point))
+            {
+                found(solid);
+            }
+        }
+    }
+
     /// Whether any solid's box is within `reach` of `point`.
     fn near(&self, point: Vec3, reach: f32) -> bool {
         let within = |node: &Node| {
@@ -481,21 +510,16 @@ impl World {
 
     /// Each pair of objects of which the first has the middle of one of
     /// its solids inside a solid of the second: it is in it, or through
-    /// it. None in a scene of more than 400 solids.
+    /// it.
     pub fn through(&self) -> Vec<(u16, u16)> {
-        let solids = &self.solids.solids;
-        // Every solid against every other: not worth it in a crowd.
-        if solids.len() > 400 {
-            return Vec::new();
+        let mut pairs = Vec::new();
+        for inner in &self.solids.solids {
+            self.solids.holding(inner.centre, |outer| {
+                if outer.owner != inner.owner {
+                    pairs.push((inner.owner, outer.owner));
+                }
+            });
         }
-        let mut pairs: Vec<(u16, u16)> = solids
-            .iter()
-            .flat_map(|inner| {
-                (solids.iter())
-                    .filter(move |outer| outer.owner != inner.owner && outer.holds(inner.centre))
-                    .map(move |outer| (inner.owner, outer.owner))
-            })
-            .collect();
         pairs.sort_unstable();
         pairs.dedup();
         pairs

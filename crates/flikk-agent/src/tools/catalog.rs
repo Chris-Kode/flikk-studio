@@ -76,6 +76,7 @@ Moving: `keys` say what an object is at given seconds, for what happens once (it
 Walking: build a leg as thigh, shin and foot, each hung from the one above, and give each foot `\"step\": {}` and the thing `\"on\": \"ground\"` (or the object it walks on). The feet then land, stay put while the body passes over them and swing on, the knees bend, the body rises and sinks, and a run leaves the ground, all from where the thing's keys take it and how fast: no cycle on the legs, no hip height to work out, up a ramp or a stair too.\n\
 Touching and looking: don't work out a limb's angles to touch something. Give its end `reach` and the limb bends to put it there; give a head `aim` and it looks there.\n\
 Reuse: build a thing once under `models` and place copies of it with `model`. A copy can be scaled and shaded, and its `parts` say what it does its own way, by part name: a raised arm, another pose, `\"cycle\": null` for legs that don't walk.\n\
+Many: `repeat` lays one object out many times, in a row or a grid (`step`), a `ring`, or scattered over an `area`, and its `vary` makes each a little its own: a street of stalls, the windows of a front, a wood, an audience. Each is the whole object, its keys too, so a walker repeated over an area is a crowd that walks. Don't write the same thing out many times.\n\
 An example of the grammar, not a design to copy: {\"duration\":5,\"models\":{\"walker\":[{\"name\":\"hips\",\"at\":[0,0.9,0]},{\"name\":\"body\",\"shape\":\"capsule\",\"size\":[0.4,0.7,0.3],\"parent\":\"hips\"},{\"name\":\"head\",\"shape\":\"sphere\",\"size\":[0.24,0.26,0.24],\"parent\":\"body\",\"at\":[0,0.72,0]},{\"name\":\"arm l\",\"shape\":\"capsule\",\"size\":[0.1,0.6,0.1],\"anchor\":\"top\",\"parent\":\"body\",\"at\":[0.25,0.6,0],\"cycle\":{\"strides\":1,\"keys\":[{\"t\":0,\"rotate\":[25,0,0]},{\"t\":0.5,\"rotate\":[-25,0,0]}]}},{\"name\":\"thigh l\",\"shape\":\"capsule\",\"size\":[0.15,0.46,0.15],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[0.1,0,0]},{\"name\":\"shin l\",\"shape\":\"capsule\",\"size\":[0.12,0.46,0.12],\"anchor\":\"top\",\"parent\":\"thigh l\",\"at\":[0,-0.44,0]},{\"name\":\"foot l\",\"shape\":\"box\",\"size\":[0.1,0.07,0.26],\"parent\":\"shin l\",\"at\":[0,-0.47,0.07],\"step\":{}},{\"name\":\"thigh r\",\"shape\":\"capsule\",\"size\":[0.15,0.46,0.15],\"anchor\":\"top\",\"parent\":\"hips\",\"at\":[-0.1,0,0]},{\"name\":\"shin r\",\"shape\":\"capsule\",\"size\":[0.12,0.46,0.12],\"anchor\":\"top\",\"parent\":\"thigh r\",\"at\":[0,-0.44,0]},{\"name\":\"foot r\",\"shape\":\"box\",\"size\":[0.1,0.07,0.26],\"parent\":\"shin r\",\"at\":[0,-0.47,0.07],\"step\":{}}]},\"objects\":[{\"name\":\"guard\",\"model\":\"walker\",\"at\":[-4,0,0],\"on\":\"ground\",\"face\":\"path\",\"keys\":[{\"t\":5,\"at\":[3,0,0]}]},{\"name\":\"visitor\",\"model\":\"walker\",\"at\":[4,0,-1],\"on\":\"ground\",\"scale\":0.8,\"face\":\"guard\",\"parts\":{\"arm l\":{\"cycle\":null,\"rotate\":[0,0,150]},\"head\":{\"aim\":\"guard\"}}}],\"camera\":{\"at\":[0,1.5,7],\"frame\":{\"of\":\"guard\",\"size\":\"full\"}}}. Design each thing for its shot: more parts where it is seen close (knees, elbows, hands, a face that shows which way it looks), fewer far off, and motion that says what it is doing.";
 
 /// How a change to a blockout is written (`Scene::changed`): what its
@@ -234,6 +235,28 @@ pub(crate) fn blockout() -> Value {
             "seconds": number("About how long one wobble takes (default 1): 0.1 rumbles, 3 sways")
         }
     });
+    let repeat = json!({
+        "type": "object",
+        "description": "Many of it, laid out: each is this object over again, its keys too, moved over. They are called `name 1`, `name 2` and on, and the name alone stands for them all: a camera can `frame` it, and others can ride it. Give `count` and one of `step`, `ring` or `area`. A solid or a copy of a model: build a thing of several parts as a model first. In a model too: the legs of a table, the wheels of a train",
+        "properties": {
+            "count": { "type": ["number", "array"], "description": "How many; or [along X, up Y, along Z] for a grid" },
+            "step": point("Metres from each to the next, the first at `at`: a row along it. With a count along X, Y and Z, the metres between them along each: [3, 0, 4] spaces a grid on the ground, [2.5, 3, 0] the windows of a front"),
+            "ring": number("Or the radius of a ring around `at` they stand in, each turned to face its middle; `rotate` [0, 180, 0] on the object faces them out"),
+            "area": numbers(2, "Or the width (X) and depth (Z) of ground around `at` they are scattered over, keeping apart from one another"),
+            "vary": {
+                "type": "object",
+                "description": "How each differs from the others, the same every time it is drawn",
+                "properties": {
+                    "turn": number("The most each is turned about the vertical, degrees either way: 180 for trees, 15 for parked cars"),
+                    "scale": number("The most each is larger or smaller: 0.1 for people, 0.3 for trees"),
+                    "shade": number("The most each is lighter or darker: 0.1"),
+                    "shift": number("How far into their rounds each one's cycles and steps start, at most: 1 puts a crowd out of step")
+                }
+            },
+            "seed": number("Another whole number scatters and varies them another way")
+        },
+        "required": ["count"]
+    });
     json!({
         "type": "object",
         "description": description,
@@ -248,7 +271,7 @@ pub(crate) fn blockout() -> Value {
             },
             "objects": {
                 "type": "array",
-                "description": "What is in the scene: solids, joints, and copies of models. At most 256, and 1200 parts once the copies are written out",
+                "description": "What is in the scene: solids, joints, and copies of models. At most 256, and 6000 parts once copies and repeats are written out",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -273,6 +296,7 @@ pub(crate) fn blockout() -> Value {
                         "aim": target("What its front turns to, up and down as well as round, as far as a neck goes: a head to who it looks at, a lamp to what it lights. An object's name, \"camera\", a point, or \"ahead\" for not turned. `face` turns a whole thing about the vertical; this tips a part of it"),
                         "reach": reach,
                         "step": step,
+                        "repeat": repeat,
                         "spin": point("Degrees a second it keeps turning about X, Y and Z"),
                         "hidden": boolean("Not there at the start; a key with `hidden` false brings it in. What rides it goes with it"),
                         "cycle": cycle,
