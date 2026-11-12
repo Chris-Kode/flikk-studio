@@ -3,7 +3,7 @@
 //! camera's move read at a glance. Greys only: the look is the video
 //! model's to make.
 
-use super::motion::View;
+use super::motion::{Moment, View};
 use super::space::{Turn, Vec3};
 use super::{Anchor, Scene, Shape};
 use crate::services::Frame;
@@ -745,20 +745,23 @@ pub(super) struct World {
     /// The picture's middle, in pixels.
     middle: (f32, f32),
     detail: Detail,
+    /// Where everything stands.
+    pub moment: Moment,
 }
 
 impl World {
     pub fn of(scene: &Scene, t: f64, width: u32, height: u32, detail: Detail) -> Self {
+        let moment = scene.moment(t);
         let mut solids = Vec::new();
         for (index, part) in scene.parts.iter().enumerate() {
             let Some(shape) = part.object.shape else {
                 continue;
             };
-            if scene.hidden(index, t) {
+            if moment.gone[index] {
                 continue;
             }
-            let (place, size) = scene.placed(index, t, 0);
-            let half = size * 0.5;
+            let place = moment.places[index];
+            let half = moment.sizes[index] * 0.5;
             let above = match part.object.anchor {
                 Anchor::Base => half.y,
                 Anchor::Middle => 0.0,
@@ -770,7 +773,7 @@ impl World {
                 turn: place.turn,
                 half,
                 reach: half.length(),
-                shade: part.object.shade_now(t) as f32,
+                shade: part.moves.shade(t) as f32,
                 owner: part.thing as u16,
             });
         }
@@ -780,7 +783,7 @@ impl World {
             right,
             up,
             fov,
-        } = scene.view(t);
+        } = moment.view;
         let pixel = 2.0 * (fov.to_radians() * 0.5).tan() / width.max(height) as f32;
         let [around, above] = scene.sun.unwrap_or(SUN).map(|d| d.to_radians() as f32);
         let light = Vec3::new(
@@ -805,6 +808,7 @@ impl World {
             down: up * -pixel,
             middle: (width as f32 * 0.5, height as f32 * 0.5),
             detail,
+            moment,
         };
         let reaches: Vec<_> = (world.solids.solids.iter())
             .map(|solid| world.tiles_of(solid))

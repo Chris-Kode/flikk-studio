@@ -1,13 +1,14 @@
 //! Writing a scene out into the parts that are drawn. Every copy of a
 //! model becomes its parts, named `copy/part`, scaled with the copy and
 //! with what the copy does its own way put in; names are swapped for
-//! places in the list; and what the motion needs every frame (the box
-//! each thing fills, the ground each has covered) is worked out once.
+//! places in the list; and what the motion needs every frame (how each
+//! part's keys move it, the order parts are placed in, the box each thing
+//! fills, the ground each has covered) is worked out once.
 
-use super::motion::Track;
+use super::motion::{Moves, Track};
 use super::space::Vec3;
 use super::{Anchor, CAMERA, FPS, MAX_PARTS, MID_GREY, Object, PATH, Scene, Target};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// How deep a model may hold copies of models.
 const MAX_NESTING: usize = 4;
@@ -27,6 +28,8 @@ pub(super) struct Part {
     /// holds that.
     pub thing: usize,
     pub facing: Facing,
+    /// How its keys move it.
+    pub moves: Moves,
     /// The box it fills in its own space, low corner and high. For a
     /// joint or a copy: what rides it, as the scene starts.
     pub bounds: ([f64; 3], [f64; 3]),
@@ -117,6 +120,7 @@ impl Scene {
                 whole: 0,
                 thing: 0,
                 facing,
+                moves: Moves::of(&out.object),
                 bounds: solid_bounds(&out.object),
                 travelled: Vec::new(),
             });
@@ -146,9 +150,16 @@ impl Scene {
             .collect();
         for whole in paced {
             if parts[whole].travelled.is_empty() {
-                parts[whole].travelled = travelled(&parts[whole].object, self.duration);
+                parts[whole].travelled = travelled(&parts[whole].moves.places, self.duration);
             }
         }
+        self.mount = match &self.camera.parent {
+            Some(parent) => Some(place(parent).ok_or_else(|| {
+                format!("the camera rides `{parent}`, which is no object's name")
+            })?),
+            None => None,
+        };
+        (self.order, self.loops) = placing_order(&parts, self.mount);
         self.parts = parts;
         self.bound_joints();
         Ok(())
@@ -254,7 +265,7 @@ impl Scene {
     /// Give each joint and copy the box that holds what rides it as the
     /// scene starts, in its own space.
     fn bound_joints(&mut self) {
-        let places: Vec<_> = (0..self.parts.len()).map(|i| self.place(i, 0.0)).collect();
+        let places = self.stand(0.0).0;
         let mut boxes: Vec<Option<(Vec3, Vec3)>> = vec![None; self.parts.len()];
         for (index, part) in self.parts.iter().enumerate() {
             if part.object.shape.is_none() {
@@ -335,10 +346,56 @@ fn solid_bounds(object: &Object) -> ([f64; 3], [f64; 3]) {
     ([-w * 0.5, under, -d * 0.5], [w * 0.5, under + h, d * 0.5])
 }
 
-/// Metres `object`'s keys have moved it over the ground by each frame of
-/// `duration` seconds.
-fn travelled(object: &Object, duration: f64) -> Vec<f32> {
-    let places = Track::places(object);
+/// The order parts are placed in at a moment: each after what it rides,
+/// and after what it faces, unless facing goes round in a loop; whether
+/// some did. `mount` is the part the camera rides, which whatever faces
+/// the camera is placed after.
+fn placing_order(parts: &[Part], mount: Option<usize>) -> (Vec<usize>, bool) {
+    let faced = |part: &Part| match part.facing {
+        Facing::Part(faced) => Some(faced),
+        Facing::Camera => mount,
+        Facing::Nothing | Facing::Path | Facing::Point(_) => None,
+    };
+    let mut waits = vec![0usize; parts.len()];
+    let mut waited_on: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];
+    for (index, part) in parts.iter().enumerate() {
+        for other in [part.parent, faced(part)].into_iter().flatten() {
+            if other != index {
+                waits[index] += 1;
+                waited_on[other].push(index);
+            }
+        }
+    }
+    let mut ready: VecDeque<usize> = (0..parts.len()).filter(|i| waits[*i] == 0).collect();
+    let mut placed = vec![false; parts.len()];
+    let mut order = Vec::with_capacity(parts.len());
+    let mut loops = false;
+    while order.len() < parts.len() {
+        let Some(index) = ready.pop_front().or_else(|| {
+            // All that is left waits on a loop of facing: break it at a
+            // part whose parent is placed, which then faces as best it can.
+            loops = true;
+            (0..parts.len()).find(|i| !placed[*i] && parts[*i].parent.is_none_or(|p| placed[p]))
+        }) else {
+            break;
+        };
+        if std::mem::replace(&mut placed[index], true) {
+            continue;
+        }
+        order.push(index);
+        for &waiting in &waited_on[index] {
+            waits[waiting] -= 1;
+            if waits[waiting] == 0 && !placed[waiting] {
+                ready.push_back(waiting);
+            }
+        }
+    }
+    (order, loops)
+}
+
+/// Metres the keys of `places` have moved a thing over the ground by each
+/// frame of `duration` seconds.
+fn travelled(places: &Track, duration: f64) -> Vec<f32> {
     let frames = (duration * FPS as f64).ceil() as usize + 1;
     let mut gone = 0.0;
     let mut was = places.path(0.0);

@@ -1,16 +1,14 @@
 //! Where things are at a time: the values keys move ([`Track`]), what a
-//! cycle adds to them, each part's place with what it rides and faces,
-//! and the camera's view.
+//! cycle adds to them, and everything's place at one moment with what it
+//! rides and faces ([`Moment`]), the camera's view with it.
 
-use super::build::Facing;
+use super::build::{Facing, Part};
 use super::space::{Place, Turn, Vec3, smoothstep};
 use super::{Cycle, CycleKey, Ease, FPS, MID_GREY, Object, Scene, Target};
 
 /// Seconds before it sets off again that a resting object turns to the
 /// way it will go.
 const TURN: f64 = 0.6;
-/// How deep facing is followed: one object facing another that faces it.
-const FACING_DEPTH: u8 = 2;
 /// Metres a second below which motion paced by the ground is at rest,
 /// and above which it is in full swing.
 const STILL: f32 = 0.05;
@@ -48,6 +46,7 @@ type Knot = (f64, [f64; 3], Ease);
 
 /// A value its keys move: what it starts as, then its keys in order. A
 /// key at the start replaces the start.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Track {
     knots: Vec<Knot>,
 }
@@ -63,12 +62,6 @@ impl Track {
             }
         }
         Self { knots }
-    }
-
-    /// The path `object`'s keys move it along, in the space it stands in.
-    pub fn places(object: &Object) -> Self {
-        let keys = (object.keys.iter()).filter_map(|k| Some((k.t, k.at?, k.ease)));
-        Self::new(object.at, keys)
     }
 
     /// One number its keys move.
@@ -198,45 +191,81 @@ impl Cycle {
     }
 }
 
-impl Object {
-    /// How its own keys have it at `t`, before any cycle.
-    fn keyed(&self, t: f64) -> Pose {
-        let turned = (self.keys.iter()).filter_map(|k| Some((k.t, k.rotate?, k.ease)));
-        let turned = Track::new(self.rotate, turned).straight(t);
-        let sized = (self.keys.iter()).filter_map(|k| Some((k.t, k.size?, k.ease)));
-        Pose {
-            at: Track::places(self).path(t),
-            rotate: std::array::from_fn(|c| turned[c] + self.spin[c] * t),
-            size: Track::new(self.size.unwrap_or([0.0; 3]), sized).straight(t),
+/// How an object's keys move it, worked out once when the scene is built.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Moves {
+    /// The path its keys move it along, in the space it stands in.
+    pub places: Track,
+    turns: Track,
+    sizes: Track,
+    shades: Track,
+    /// Degrees a second it keeps turning.
+    spin: [f64; 3],
+    /// Whether it starts out of the scene, and when it goes and comes.
+    starts_hidden: bool,
+    hidden: Vec<(f64, bool)>,
+}
+
+impl Moves {
+    pub fn of(object: &Object) -> Self {
+        let keys = &object.keys;
+        let places = keys.iter().filter_map(|k| Some((k.t, k.at?, k.ease)));
+        let turns = keys.iter().filter_map(|k| Some((k.t, k.rotate?, k.ease)));
+        let sizes = keys.iter().filter_map(|k| Some((k.t, k.size?, k.ease)));
+        let shades = keys.iter().filter_map(|k| Some((k.t, k.shade?, k.ease)));
+        Self {
+            places: Track::new(object.at, places),
+            turns: Track::new(object.rotate, turns),
+            sizes: Track::new(object.size.unwrap_or([0.0; 3]), sizes),
+            shades: Track::of_number(object.shade.unwrap_or(MID_GREY), shades),
+            spin: object.spin,
+            starts_hidden: object.hidden,
+            hidden: (keys.iter())
+                .filter_map(|k| Some((k.t, k.hidden?)))
+                .collect(),
         }
     }
 
-    pub(super) fn shade_now(&self, t: f64) -> f64 {
-        let keys = (self.keys.iter()).filter_map(|k| Some((k.t, k.shade?, k.ease)));
-        Track::of_number(self.shade.unwrap_or(MID_GREY), keys).straight(t)[0]
+    /// How the keys have it at `t`, before any cycle.
+    fn keyed(&self, t: f64) -> Pose {
+        let turned = self.turns.straight(t);
+        Pose {
+            at: self.places.path(t),
+            rotate: std::array::from_fn(|c| turned[c] + self.spin[c] * t),
+            size: self.sizes.straight(t),
+        }
+    }
+
+    /// Its grey at `t`.
+    pub fn shade(&self, t: f64) -> f64 {
+        self.shades.straight(t)[0]
     }
 
     /// Whether it says it is out of the scene at `t`.
-    fn hidden_now(&self, t: f64) -> bool {
-        let said = (self.keys.iter()).filter_map(|k| Some((k.t, k.hidden?)));
-        said.take_while(|(at, _)| *at <= t)
+    fn hidden(&self, t: f64) -> bool {
+        (self.hidden.iter())
+            .take_while(|(at, _)| *at <= t)
             .last()
-            .map_or(self.hidden, |(_, hidden)| hidden)
+            .map_or(self.starts_hidden, |(_, hidden)| *hidden)
     }
+}
 
+impl Part {
     /// The most its travel is off the way `rotate` turns it, in degrees
     /// (90 is sideways, 180 backwards), while it goes at more than a
     /// stroll. `None` when it faces something, or never goes that fast.
     pub(super) fn off_course(&self, duration: f64) -> Option<f64> {
-        if self.face.is_some() {
+        if self.facing != Facing::Nothing {
             return None;
         }
-        let places = Track::places(self);
+        let places = &self.moves.places;
         let steps = (duration * 6.0).ceil() as u32;
         (0..=steps)
             .map(|i| i as f64 / 6.0)
-            .filter(|t| speed(&places, *t, 0.12) > 0.4)
-            .filter_map(|t| Some(shortest(heading(&places, t)? - self.keyed(t).rotate[1]).abs()))
+            .filter(|t| speed(places, *t, 0.12) > 0.4)
+            .filter_map(|t| {
+                Some(shortest(heading(places, t)? - self.moves.keyed(t).rotate[1]).abs())
+            })
             .reduce(f64::max)
     }
 }
@@ -289,9 +318,9 @@ fn heading(places: &Track, t: f64) -> Option<f64> {
 impl Scene {
     /// How part `index` is at `t`: as its keys have it, with what its
     /// cycle adds.
-    pub(super) fn pose(&self, index: usize, t: f64) -> Pose {
+    fn pose(&self, index: usize, t: f64) -> Pose {
         let part = &self.parts[index];
-        let mut pose = part.object.keyed(t);
+        let mut pose = part.moves.keyed(t);
         let Some(cycle) = &part.object.cycle else {
             return pose;
         };
@@ -337,7 +366,7 @@ impl Scene {
     pub(super) fn hidden(&self, index: usize, t: f64) -> bool {
         let mut part = Some(index);
         while let Some(index) = part {
-            if self.parts[index].object.hidden_now(t) {
+            if self.parts[index].moves.hidden(t) {
                 return true;
             }
             part = self.parts[index].parent;
@@ -345,69 +374,103 @@ impl Scene {
         false
     }
 
-    /// Where part `index` stands in the scene at `t`.
-    pub(super) fn place(&self, index: usize, t: f64) -> Place {
-        self.placed(index, t, 0).0
+    /// Where every part stands at `t`, and its size then.
+    pub(super) fn stand(&self, t: f64) -> (Vec<Place>, Vec<Vec3>) {
+        // Parts that face one another go round in a loop: there, the one
+        // placed first turns to where the other is before anything faces.
+        let rough = match self.loops {
+            true => self.stand_facing(t, None).0,
+            false => Vec::new(),
+        };
+        self.stand_facing(t, Some(&rough))
     }
 
-    /// The middle of part `index` at `t`: what a camera looking at it
-    /// looks at.
-    pub(super) fn middle(&self, index: usize, t: f64) -> Vec3 {
-        self.middle_facing(index, t, 0)
+    /// Every part's place and size at `t`, each placed after what it
+    /// rides. With `rough`, each also turns to what it faces: where that
+    /// stands already, else where `rough` has it. Without, nothing faces.
+    fn stand_facing(&self, t: f64, rough: Option<&[Place]>) -> (Vec<Place>, Vec<Vec3>) {
+        let count = self.parts.len();
+        let mut places = vec![Place::ORIGIN; count];
+        let mut sizes = vec![Vec3::ZERO; count];
+        let mut placed = vec![false; count];
+        for &index in &self.order {
+            let part = &self.parts[index];
+            let rides = part.parent.map_or(Place::ORIGIN, |parent| places[parent]);
+            let pose = self.pose(index, t);
+            let at = Vec3::of(pose.at);
+            let mut rotate = pose.rotate;
+            if let Some(rough) = rough {
+                let stands = |other: usize| match placed[other] {
+                    true => places[other],
+                    false => rough.get(other).copied().unwrap_or(Place::ORIGIN),
+                };
+                // Toward a point of the scene, as a turn in the space it
+                // stands in.
+                let toward = |point: Vec3| {
+                    let way = rides.turn.inward(point - rides.point(at));
+                    (way.x.hypot(way.z) > 1e-5).then(|| (way.x.atan2(way.z) as f64).to_degrees())
+                };
+                let faced = match part.facing {
+                    Facing::Nothing => None,
+                    Facing::Point(point) => toward(Vec3::of(point)),
+                    Facing::Path => heading(&part.moves.places, t),
+                    Facing::Camera => {
+                        let mount = self.mount.map_or(Place::ORIGIN, stands);
+                        toward(mount.point(self.camera_at(t)))
+                    }
+                    Facing::Part(faced) if faced == index => None,
+                    Facing::Part(faced) => toward(self.middle(faced, stands(faced))),
+                };
+                rotate[1] += faced.unwrap_or(0.0);
+            }
+            places[index] = rides.then(Place {
+                at,
+                turn: Turn::of(rotate),
+            });
+            sizes[index] = Vec3::of(pose.size);
+            placed[index] = true;
+        }
+        (places, sizes)
     }
 
-    fn middle_facing(&self, index: usize, t: f64, depth: u8) -> Vec3 {
+    /// The middle of part `index` standing at `place`: what a camera
+    /// looking at it looks at.
+    fn middle(&self, index: usize, place: Place) -> Vec3 {
         let (low, high) = self.parts[index].bounds;
-        let middle = Vec3::of(std::array::from_fn(|c| (low[c] + high[c]) * 0.5));
-        self.placed(index, t, depth).0.point(middle)
+        place.point(Vec3::of(std::array::from_fn(|c| (low[c] + high[c]) * 0.5)))
     }
 
-    /// Where part `index` stands at `t` and its size then, `depth` parts
-    /// into following what faces what.
-    pub(super) fn placed(&self, index: usize, t: f64, depth: u8) -> (Place, Vec3) {
-        let part = &self.parts[index];
-        let rides = part
-            .parent
-            .map_or(Place::ORIGIN, |parent| self.placed(parent, t, depth).0);
-        let pose = self.pose(index, t);
-        let at = Vec3::of(pose.at);
-        // Toward a point of the scene, as a turn in the space it stands in.
-        let toward = |point: Vec3| {
-            let way = rides.turn.inward(point - rides.point(at));
-            (way.x.hypot(way.z) > 1e-5).then(|| (way.x.atan2(way.z) as f64).to_degrees())
-        };
-        let faced = match part.facing {
-            _ if depth > FACING_DEPTH => None,
-            Facing::Nothing => None,
-            Facing::Point(point) => toward(Vec3::of(point)),
-            Facing::Path => heading(&Track::places(&part.object), t),
-            Facing::Camera => toward(self.eye(t, depth + 1)),
-            Facing::Part(faced) if faced == index => None,
-            Facing::Part(faced) => toward(self.middle_facing(faced, t, depth + 1)),
-        };
-        let mut rotate = pose.rotate;
-        rotate[1] += faced.unwrap_or(0.0);
-        let place = rides.then(Place {
-            at,
-            turn: Turn::of(rotate),
-        });
-        (place, Vec3::of(pose.size))
-    }
-
-    /// Where the camera is in the scene at `t`.
-    fn eye(&self, t: f64, depth: u8) -> Vec3 {
+    /// Where the camera's keys have it at `t`, in the space of what it
+    /// rides.
+    fn camera_at(&self, t: f64) -> Vec3 {
         let camera = &self.camera;
         let at = (camera.keys.iter()).filter_map(|k| Some((k.t, k.at?, k.ease)));
-        self.mount(t, depth)
-            .point(Vec3::of(Track::new(camera.at, at).path(t)))
+        Vec3::of(Track::new(camera.at, at).path(t))
     }
 
-    /// What the camera rides at `t`.
-    fn mount(&self, t: f64, depth: u8) -> Place {
-        (self.camera.parent.as_deref())
-            .and_then(|name| self.find(name))
-            .map_or(Place::ORIGIN, |parent| self.placed(parent, t, depth).0)
+    /// Everything at `t`: where each part stands, and what the camera
+    /// sees.
+    pub(super) fn moment(&self, t: f64) -> Moment {
+        let (places, sizes) = self.stand(t);
+        let gone = (0..self.parts.len()).map(|i| self.hidden(i, t)).collect();
+        let view = self.view(t, &places);
+        Moment {
+            places,
+            sizes,
+            gone,
+            view,
+        }
     }
+}
+
+/// A scene at one moment.
+pub(super) struct Moment {
+    /// Where each part stands, and its size.
+    pub places: Vec<Place>,
+    pub sizes: Vec<Vec3>,
+    /// Whether each part, or what it rides, is out of the scene.
+    pub gone: Vec<bool>,
+    pub view: View,
 }
 
 /// Where the camera is and what it sees at a time.
@@ -422,14 +485,17 @@ pub(super) struct View {
 }
 
 impl Scene {
-    pub(super) fn view(&self, t: f64) -> View {
+    /// What the camera sees at `t`, the parts standing at `places`.
+    fn view(&self, t: f64, places: &[Place]) -> View {
         let camera = &self.camera;
-        let mount = self.mount(t, 0);
+        let mount = self.mount.map_or(Place::ORIGIN, |part| places[part]);
         // Each target is where it is now, so a camera between two objects
         // follows both as they move.
         let point = |target: &Target| match target {
             Target::Point(p) => mount.point(Vec3::of(*p)),
-            Target::Object(name) => (self.find(name)).map_or(Vec3::ZERO, |i| self.middle(i, t)),
+            Target::Object(name) => {
+                (self.find(name)).map_or(Vec3::ZERO, |i| self.middle(i, places[i]))
+            }
         };
         let in_f64 = |v: Vec3| [v.x as f64, v.y as f64, v.z as f64];
         let targets = (camera.keys.iter())
@@ -443,7 +509,7 @@ impl Scene {
         let shake = Shake::of(camera.shake as f32, t as f32);
         let roll = (number(camera.roll, |k| k.roll) + shake.roll).to_radians();
 
-        let eye = self.eye(t, 0);
+        let eye = mount.point(self.camera_at(t));
         let level = mount.turn.y;
         let ahead = (Vec3::of(target) - eye).unit_or(-Vec3::AHEAD);
         // Looking straight up or down, any level direction is to the right.

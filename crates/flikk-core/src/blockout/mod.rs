@@ -68,6 +68,16 @@ pub struct Scene {
     /// What is drawn: the objects, with every copy of a model written out.
     #[serde(skip)]
     parts: Vec<Part>,
+    /// The order parts are placed in at a moment: each after what it
+    /// rides, and after what it faces.
+    #[serde(skip)]
+    order: Vec<usize>,
+    /// Whether parts face one another in a loop.
+    #[serde(skip)]
+    loops: bool,
+    /// The part the camera rides.
+    #[serde(skip)]
+    mount: Option<usize>,
 }
 
 /// A scene as its JSON has it, before it is checked and built.
@@ -430,6 +440,9 @@ impl TryFrom<Written> for Scene {
             ground,
             sun,
             parts: Vec::new(),
+            order: Vec::new(),
+            loops: false,
+            mount: None,
         };
         if !scene.duration.is_finite() || scene.duration <= 0.0 {
             return Err("`duration` is in seconds, more than 0".into());
@@ -451,13 +464,6 @@ impl TryFrom<Written> for Scene {
         }
         scene.camera.settle()?;
         scene.build()?;
-        if let Some(parent) = &scene.camera.parent
-            && scene.find(parent).is_none()
-        {
-            return Err(format!(
-                "the camera rides `{parent}`, which is no object's name"
-            ));
-        }
         let targets = std::iter::once(&scene.camera.look_at)
             .chain(scene.camera.keys.iter().filter_map(|k| k.look_at.as_ref()));
         for target in targets {

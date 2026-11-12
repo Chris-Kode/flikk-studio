@@ -91,7 +91,7 @@ impl Scene {
         };
         for (i, t) in moments.iter().enumerate() {
             let world = World::of(self, *t, size[0], size[1], Detail::Draft);
-            let sights = self.sights(&world, *t, size);
+            let sights = self.sights(&world, size);
             note(&sights);
             review.seen.push(self.line(*t, &sights));
             if let Some(inside) = world.inside() {
@@ -112,7 +112,7 @@ impl Scene {
         for step in 1..8 {
             let t = self.duration * step as f64 / 8.0;
             let world = World::of(self, t, size[0], size[1], Detail::Draft);
-            note(&self.sights(&world, t, size));
+            note(&self.sights(&world, size));
         }
         self.doubts(&ever, &largest, &mut review);
         review
@@ -120,7 +120,7 @@ impl Scene {
 
     /// How each thing a viewer would name shows at `t`: what stands by
     /// itself, and each copy of a model, not their parts.
-    fn sights(&self, world: &World, t: f64, size: [u32; 2]) -> Vec<Sight> {
+    fn sights(&self, world: &World, size: [u32; 2]) -> Vec<Sight> {
         let (wide, high) = (size[0] as f32, size[1] as f32);
         // What a spread of rays through the picture meets: a thing too
         // large or too far to one side for its spots still shows.
@@ -135,10 +135,10 @@ impl Scene {
         }
         let mut sights = Vec::new();
         for (index, part) in self.parts.iter().enumerate() {
-            if part.thing != index || self.hidden(index, t) {
+            if part.thing != index || world.moment.gone[index] {
                 continue;
             }
-            let place = self.place(index, t);
+            let place = world.moment.places[index];
             let (low, high_corner) = (Vec3::of(part.bounds.0), Vec3::of(part.bounds.1));
             let reach = high_corner - low;
             // A spot on it: across its width from the middle, and up it.
@@ -314,11 +314,7 @@ impl Scene {
             let paced = (self.parts.iter()).any(|p| {
                 p.whole == index && p.object.cycle.as_ref().is_some_and(|c| c.metres.is_some())
             });
-            if paced
-                && object
-                    .off_course(self.duration)
-                    .is_some_and(|off| off > 50.0)
-            {
+            if paced && part.off_course(self.duration).is_some_and(|off| off > 50.0) {
                 doubts.push(format!(
                     "`{name}` travels sideways or backwards: give it `\"face\": \"path\"` unless \
                      that is meant."
