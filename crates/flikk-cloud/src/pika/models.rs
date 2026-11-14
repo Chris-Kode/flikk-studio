@@ -768,6 +768,21 @@ pub const IMAGE: &[PikaImage] = &[
         background: true,
     },
     PikaImage {
+        id: "bytedance/seedream-5.5",
+        spec: ImageModel {
+            name: "Seedream 5.5",
+            aspects: SEEDREAM_ASPECTS,
+            // Left out, it picks from the prompt.
+            auto_aspect: true,
+            resolutions: &["2K", "1.5K", "1K"],
+            references: 10,
+            transparent: true,
+        },
+        shape: ImageShape::AspectRatio(None),
+        resolution: "size",
+        background: true,
+    },
+    PikaImage {
         id: "bytedance/seedream-5.0-pro",
         spec: ImageModel {
             name: "Seedream 5.0 Pro",

@@ -707,6 +707,16 @@ pub const IMAGE: &[FalImage] = &[
         background: false,
     },
     FalImage {
+        id: "bytedance/seedream/v5.5",
+        spec: sized("Seedream 5.5", true, 10, true),
+        text: "bytedance/seedream/v5.5/text-to-image",
+        edit: Some("bytedance/seedream/v5.5/edit"),
+        shape: Shape::ImageSize(Some("auto_2K")),
+        lower_resolution: false,
+        pictures: Pictures::List,
+        background: true,
+    },
+    FalImage {
         id: "bytedance/seedream/v5/pro",
         spec: sized("Seedream 5.0 Pro", true, 10, false),
         text: "bytedance/seedream/v5/pro/text-to-image",

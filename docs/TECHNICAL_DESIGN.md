@@ -1690,10 +1690,10 @@ on the UI thread and run it off it:
 * **Generating pictures:** `Capability::Image` is a row in Settings →
   Integrations like video, with fal and Pika as providers. On fal: Nano
   Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and
-  Sunburst, FLUX 3 and FLUX 3 Klein, Seedream 5.0 Pro, Ideogram 4.5, Grok
-  Imagine Image 2.0, Qwen Image 3, Krea 3 and Recraft V4.1 Pro. On Pika:
-  Nano Banana 2.1 (the default) and Pro, GPT Image 2, 2.6 Flare and 2.6
-  Sunburst, Seedream 5.0 Pro and Lite, Ideogram 4.5, Grok Imagine Image
+  Sunburst, FLUX 3 and FLUX 3 Klein, Seedream 5.5 and 5.0 Pro, Ideogram
+  4.5, Grok Imagine Image 2.0, Qwen Image 3, Krea 3 and Recraft V4.1 Pro.
+  On Pika: Nano Banana 2.1 (the default) and Pro, GPT Image 2, 2.6 Flare
+  and 2.6 Sunburst, Seedream 5.5, 5.0 Pro and Lite, Ideogram 4.5, Grok Imagine Image
   2.0, Muse Image and Recraft 4.1. A `GenerateRequest::Image` carries a
   prompt, an optional shape and resolution, a transparent background, and
   the pictures it edits or follows (`ImageMode::Edit` when there are any:
