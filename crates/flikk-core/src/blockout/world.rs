@@ -2,6 +2,7 @@
 //! sorted so a ray tries few of them, the camera's rays through the
 //! picture, and the way to the light.
 
+use super::gpu::Words;
 use super::land::Land;
 use super::motion::{Moment, View};
 use super::outside::Outside;
@@ -26,6 +27,11 @@ const TILE: usize = 16;
 const LIGHT_CELLS: usize = 96;
 /// The most solids a leaf of the tree holds.
 const LEAF: usize = 2;
+/// The nodes a walk through the tree keeps to go back to: more than the
+/// tree of the most solids a scene holds is deep.
+const STACK: usize = 48;
+/// Metres over which the ground's tiles fade to one grey.
+const TILE_FADE: f32 = 30.0;
 
 /// What a ray met.
 pub(super) struct Hit {
@@ -112,7 +118,7 @@ impl Solids {
     fn first(&self, origin: Vec3, dir: Vec3, mut reach: f32) -> Option<Hit> {
         let mut first: Option<Hit> = None;
         let inverse = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
-        let mut stack = [0u32; 48];
+        let mut stack = [0u32; STACK];
         let mut depth = usize::from(!self.nodes.is_empty());
         while depth > 0 {
             depth -= 1;
@@ -156,7 +162,7 @@ impl Solids {
 
     /// Give `found` each solid that `point` is inside.
     fn holding(&self, point: Vec3, mut found: impl FnMut(&Solid)) {
-        let mut stack = [0u32; 48];
+        let mut stack = [0u32; STACK];
         let mut depth = usize::from(!self.nodes.is_empty());
         while depth > 0 {
             depth -= 1;
@@ -183,13 +189,38 @@ impl Solids {
         }
     }
 
+    /// Write them for the GPU as `world.wgsl` reads them: the tree's nodes
+    /// into `nodes`, and into `solids` its solids in its order, then their
+    /// holes.
+    fn pack(&self, nodes: &mut Words, solids: &mut Words) {
+        for node in &self.nodes {
+            // A leaf's first solid, or an inner node's second half.
+            let link = if node.count > 0 {
+                node.first
+            } else {
+                node.second
+            };
+            nodes.vec(node.low, f32::from_bits(link));
+            let shape = node.count | (node.axis as u32) << 16;
+            nodes.vec(node.high, f32::from_bits(shape));
+        }
+        let mut holes_at = self.solids.len() as u32;
+        for solid in &self.solids {
+            solid.pack(holes_at, solids);
+            holes_at += solid.holes().len() as u32;
+        }
+        for hole in self.solids.iter().flat_map(Solid::holes) {
+            hole.pack(0, solids);
+        }
+    }
+
     /// Whether any solid's box is within `reach` of `point`.
     fn near(&self, point: Vec3, reach: f32) -> bool {
         let within = |node: &Node| {
             let outside = (node.low - point).max(point - node.high).max(Vec3::ZERO);
             outside.dot(outside) <= reach * reach
         };
-        let mut stack = [0u32; 48];
+        let mut stack = [0u32; STACK];
         let mut depth = usize::from(!self.nodes.is_empty());
         while depth > 0 {
             depth -= 1;
@@ -623,7 +654,7 @@ impl World {
                 // reads against the ground, fading out before they shimmer.
                 let odd = (at.x.floor() as i64 + at.z.floor() as i64) & 1;
                 let even_tone = (self.floor[0] + self.floor[1]) * 0.5;
-                let fade = (-distance / 30.0).exp();
+                let fade = (-distance / TILE_FADE).exp();
                 Some(Hit {
                     distance,
                     normal,
@@ -703,4 +734,45 @@ impl World {
     pub fn across(&self) -> (Vec3, Vec3) {
         (self.right.unit_or(Vec3::UP), (-self.down).unit_or(Vec3::UP))
     }
+
+    /// Write it for the GPU: into `view` as `world.wgsl` reads a `World`,
+    /// into `nodes` and `solids` its solids, and its ground's heights at
+    /// the end of `tables`.
+    pub fn pack(
+        &self,
+        view: &mut Words,
+        nodes: &mut Words,
+        solids: &mut Words,
+        tables: &mut Words,
+    ) {
+        view.vec(self.eye, self.pixel());
+        view.vec(self.ahead, self.middle.0);
+        view.vec(self.right, self.middle.1);
+        view.vec(self.down, 0.0);
+        view.vec(self.light, 0.0);
+        view.vec(self.shade.across, 0.0);
+        view.vec(self.shade.up, 0.0);
+        view.floats([self.floor[0], self.floor[1], 0.0, 0.0]);
+        match &self.land {
+            Some(land) => {
+                land.pack(view);
+                land.pack_heights(tables);
+            }
+            None => view.floats([1.0, 0.0, 0.0, 0.0]),
+        }
+        let (count, ground, land) = (self.solids.nodes.len(), self.ground, self.land.is_some());
+        view.uints([count as u32, ground as u32, land as u32, 0]);
+        self.solids.pack(nodes, solids);
+    }
+}
+
+/// The GPU's side of this module: the solids' tree and the view as
+/// [`World::pack`] writes them, and rays through them as [`World::seen`],
+/// [`World::sunlit_from`] and [`World::crowded`].
+pub(super) fn shader() -> String {
+    format!(
+        "const SUN_WIDTH: f32 = {SUN_WIDTH:?};\nconst STACK: u32 = {STACK}u;\n\
+         const TILE_FADE: f32 = {TILE_FADE:?};\n{}",
+        include_str!("world.wgsl")
+    )
 }

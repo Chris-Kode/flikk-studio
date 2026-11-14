@@ -9,7 +9,7 @@ pub mod editor;
 
 use crate::ui::kit::theme as t;
 use crate::ui::viewer::latest::Latest;
-use flikk_core::blockout::{Detail, FPS, Outside, Pass, Scene};
+use flikk_core::blockout::{Detail, FPS, Look, Outside, Pass, Renderer, Scene};
 use gpui_kit::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -48,6 +48,7 @@ impl EventEmitter<Picked> for BlockoutPlayer {}
 /// box it is given.
 pub struct BlockoutPlayer {
     scene: Arc<Scene>,
+    renderer: Renderer,
     /// Counts the scenes shown, so a frame of an earlier one is dropped.
     version: u64,
     /// The picture's shape: width to height.
@@ -76,11 +77,12 @@ pub struct BlockoutPlayer {
 
 impl BlockoutPlayer {
     /// `scene`, playing, in a picture `shape` (width to height) at most
-    /// `full_width` pixels wide.
+    /// `full_width` pixels wide, drawn by `renderer`.
     pub fn new(
         scene: Scene,
         shape: (u32, u32),
         full_width: u32,
+        renderer: Renderer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -92,6 +94,7 @@ impl BlockoutPlayer {
         .detach();
         let mut this = Self {
             scene: Arc::new(scene),
+            renderer,
             version: 0,
             shape: (shape.0.max(1), shape.1.max(1)),
             full_width: full_width.max(NARROWEST),
@@ -261,6 +264,7 @@ impl BlockoutPlayer {
     fn start_drawing(&mut self, at: f64, detail: Detail, cx: &mut Context<Self>) {
         self.drawing.start();
         let (scene, version, looking) = (self.scene.clone(), self.version, self.looking);
+        let renderer = self.renderer.clone();
         let width = match detail {
             Detail::Draft => self.width,
             Detail::Full => self.full_width,
@@ -268,11 +272,12 @@ impl BlockoutPlayer {
         let height = (width as u64 * self.shape.1 as u64 / self.shape.0 as u64).max(1) as u32;
         let drawn = cx.background_executor().spawn(async move {
             let began = Instant::now();
-            let frame = match looking {
-                Looking::Shot => scene.render(at, width, height, detail),
-                Looking::Set(from) => scene.render_outside(at, (width, height), &from, detail),
-                Looking::Pass(pass) => scene.render_pass(at, width, height, pass),
+            let look = match looking {
+                Looking::Shot => Look::Shot(detail),
+                Looking::Set(from) => Look::Outside(from, detail),
+                Looking::Pass(pass) => Look::Pass(pass),
             };
+            let frame = renderer.render_watched(&scene, at, (width, height), look);
             // The GPU takes blue first; greys read the same either way.
             let mut bgra = frame.rgba.to_vec();
             if matches!(looking, Looking::Pass(_)) {

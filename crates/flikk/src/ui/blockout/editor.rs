@@ -75,7 +75,9 @@ impl BlockoutEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let player = cx.new(|cx| BlockoutPlayer::new(scene.clone(), shape, WIDTH, window, cx));
+        let renderer = state.read(cx).services.blockout.clone();
+        let player =
+            cx.new(|cx| BlockoutPlayer::new(scene.clone(), shape, WIDTH, renderer, window, cx));
         let ask = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Lower the camera, have her wave, cut closer at 3 s…")

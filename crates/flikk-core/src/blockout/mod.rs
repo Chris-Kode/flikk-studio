@@ -4,7 +4,8 @@
 //! and its clip is what the model then follows.
 //!
 //! A [`Scene`] is plain data the agent writes as JSON ([`Scene::parse`])
-//! and the user changes by asking. [`Scene::render`] draws it at a time,
+//! and the user changes by asking. A [`Renderer`] draws it at a time, on
+//! the GPU when it can, matching [`Scene::render`] on the CPU;
 //! [`Scene::write_clip`] writes it as a video file, [`Scene::review`]
 //! says in words what its camera sees, for a writer that can't look, and
 //! [`Scene::changed`] makes a change that says only what differs.
@@ -23,7 +24,10 @@
 //! copies out into the parts that are drawn, `motion` says where each is
 //! at a time, `world` is the scene at that time as rays meet it, and
 //! `render` makes the picture: the shot, a [`Pass`] of it, or the set
-//! from [`Outside`] the shot for whoever stages it.
+//! from [`Outside`] the shot for whoever stages it. `gpu` writes the scene
+//! at a time into buffers for the same picture to be traced on the GPU,
+//! from the `.wgsl` beside each module, and `renderer` picks where each
+//! frame is drawn.
 //!
 //! Space is in metres: X to the right, Y up, the ground at `y = 0`. An
 //! object's `at` is the middle of its base unless it says otherwise, so
@@ -34,10 +38,12 @@ mod build;
 mod change;
 mod clip;
 mod flight;
+mod gpu;
 mod land;
 mod motion;
 mod outside;
 mod render;
+mod renderer;
 mod repeat;
 mod review;
 mod solid;
@@ -46,7 +52,8 @@ mod world;
 
 pub use land::Hills;
 pub use outside::Outside;
-pub use render::{Detail, Pass};
+pub use render::{Detail, Look, Pass};
+pub use renderer::Renderer;
 pub use repeat::{Count, Repeat, Vary};
 pub use review::Review;
 

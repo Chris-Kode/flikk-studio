@@ -1,6 +1,7 @@
 //! The solids things are built from, placed in the scene: where a ray
 //! meets one, the box that holds it, and its lowest point.
 
+use super::gpu::Words;
 use super::space::{Place, Turn, Vec3};
 use super::{Anchor, Shape};
 
@@ -248,6 +249,24 @@ impl Solid {
         Some((t, self.turn.outward(normal).unit_or(Vec3::UP)))
     }
 
+    /// The solids cut out of it.
+    pub fn holes(&self) -> &[Solid] {
+        self.holes.as_deref().unwrap_or_default()
+    }
+
+    /// Write it for the GPU as `solid.wgsl` reads a `Solid`, its holes
+    /// [`Solid::holes`] at `holes_at` among the solids written.
+    pub fn pack(&self, holes_at: u32, words: &mut Words) {
+        let turn = self.turn;
+        words.vec(self.centre, self.reach);
+        words.vec(turn.x, self.half.x);
+        words.vec(turn.y, self.half.y);
+        words.vec(turn.z, self.half.z);
+        words.floats([self.ends.0, self.ends.1, self.tone, 0.0]);
+        let holes = self.holes().len() as u32;
+        words.uints([shape_code(self.shape), self.owner as u32, holes_at, holes]);
+    }
+
     /// Whether `point` is inside it.
     pub fn holds(&self, point: Vec3) -> bool {
         let in_hole = || (self.holes.iter().flatten()).any(|hole| hole.holds_whole(point));
@@ -290,6 +309,35 @@ impl Solid {
             }
         }
     }
+}
+
+/// Each shape as `solid.wgsl` names it, and the number it is written as.
+const SHAPE_CODES: [(Shape, &str); 9] = [
+    (Shape::Box, "BOX"),
+    (Shape::Sphere, "SPHERE"),
+    (Shape::Cylinder, "CYLINDER"),
+    (Shape::Cone, "CONE"),
+    (Shape::Capsule, "CAPSULE"),
+    (Shape::Dome, "DOME"),
+    (Shape::Wedge, "WEDGE"),
+    (Shape::Roof, "ROOF"),
+    (Shape::Pyramid, "PYRAMID"),
+];
+
+fn shape_code(shape: Shape) -> u32 {
+    (SHAPE_CODES.iter())
+        .position(|(of, _)| *of == shape)
+        .unwrap_or(0) as u32
+}
+
+/// The GPU's side of this module: a solid as [`Solid::pack`] writes it,
+/// and where a ray meets one, as [`Solid::hit`].
+pub(super) fn shader() -> String {
+    let mut source = format!("const NEAR: f32 = {NEAR:?};\nconst EDGE: f32 = {EDGE:?};\n");
+    for (code, (_, name)) in SHAPE_CODES.iter().enumerate() {
+        source += &format!("const {name}: u32 = {code}u;\n");
+    }
+    source + include_str!("solid.wgsl")
 }
 
 /// The five faces of a wedge, a roof or a pyramid of half size `h`.

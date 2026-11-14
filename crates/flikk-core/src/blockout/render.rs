@@ -9,6 +9,7 @@
 //! greys a screen shows at the end.
 
 use super::Scene;
+use super::gpu::Words;
 use super::outside::{Guide, Outside};
 use super::space::Vec3;
 use super::world::World;
@@ -55,6 +56,13 @@ const LINE_SIDE: f32 = 640.0;
 /// darkened.
 const RIDGE: f32 = 0.2;
 const VALLEY: f32 = 0.25;
+/// Interleaved gradient noise's numbers: see [`scatter`].
+const SCATTER: [f32; 3] = [52.982_918, 0.067_110_56, 0.005_837_15];
+/// Nine tenths of the way to facing the same, as the parts of two ways
+/// a surface faces, in 32767ths, multiply out: see [`Seen::same_surface`].
+const ALIKE: i32 = 966_300_000;
+/// The greys a screen shows, from no light to full: see [`screen_greys`].
+const GREYS: usize = 1025;
 /// Where in a pixel an edge is drawn again from.
 const SPOTS: [(f32, f32); 4] = [
     (0.375, 0.125),
@@ -87,43 +95,63 @@ pub enum Pass {
     Things,
 }
 
+/// What a picture of a scene shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Look {
+    /// The shot, as its camera sees it.
+    Shot(Detail),
+    /// The set from outside the shot, with the shot's camera and the way
+    /// each thing goes drawn into it.
+    Outside(Outside, Detail),
+    /// The shot as one of its passes.
+    Pass(Pass),
+}
+
 impl Scene {
-    /// The scene at `t` seconds, `width` × `height` pixels, opaque.
+    /// The scene at `t` seconds, `width` × `height` pixels, opaque. Drawn
+    /// on the CPU: the reference [`super::Renderer`] matches.
     pub fn render(&self, t: f64, width: u32, height: u32, detail: Detail) -> Frame {
-        let (width, height) = (width.max(1), height.max(1));
-        let world = World::of(self, t.clamp(0.0, self.duration), width, height);
-        Picture::of(&world, width as usize, height as usize)
-            .frame(|picture, sheets, pixels| picture.draw(detail, sheets, pixels))
+        self.plan(t, (width, height), Look::Shot(detail)).draw()
     }
 
-    /// The scene at `t` seconds as `pass` shows it.
+    /// The scene at `t` seconds as `pass` shows it, on the CPU.
     pub fn render_pass(&self, t: f64, width: u32, height: u32, pass: Pass) -> Frame {
-        let (width, height) = (width.max(1), height.max(1));
-        let world = World::of(self, t.clamp(0.0, self.duration), width, height);
-        let near = self.reach() * 0.5;
-        Picture::of(&world, width as usize, height as usize)
-            .frame(|picture, sheets, pixels| picture.pass(pass, near, sheets, pixels))
+        self.plan(t, (width, height), Look::Pass(pass)).draw()
     }
 
     /// The scene at `t` seconds seen from `from`, outside its shot, with
-    /// the shot's camera and the way each thing goes drawn into it.
+    /// the shot's camera and the way each thing goes drawn into it, on
+    /// the CPU.
     pub fn render_outside(
         &self,
         t: f64,
-        (width, height): (u32, u32),
+        size: (u32, u32),
         from: &Outside,
         detail: Detail,
     ) -> Frame {
+        self.plan(t, size, Look::Outside(*from, detail)).draw()
+    }
+
+    /// The picture of the scene at `t` seconds that `look` asks for, `size`
+    /// pixels, worked out as far as its rays.
+    pub(super) fn plan(&self, t: f64, (width, height): (u32, u32), look: Look) -> Plan {
         let (width, height) = (width.max(1), height.max(1));
         let t = t.clamp(0.0, self.duration);
-        let world = World::outside(self, t, width, height, from);
-        let guides = self.guides(t, &world.moment.view, (width, height));
-        Picture::of(&world, width as usize, height as usize).frame(|picture, sheets, pixels| {
-            picture.draw(detail, sheets, pixels);
-            for guide in &guides {
-                picture.stroke(&sheets.seens, pixels, guide);
+        let (world, guides) = match &look {
+            Look::Outside(from, _) => {
+                let world = World::outside(self, t, width, height, from);
+                let guides = self.guides(t, &world.moment.view, (width, height));
+                (world, guides)
             }
-        })
+            Look::Shot(_) | Look::Pass(_) => (World::of(self, t, width, height), Vec::new()),
+        };
+        Plan {
+            world,
+            size: (width as usize, height as usize),
+            look,
+            guides,
+            near: self.reach() * 0.5,
+        }
     }
 
     /// The name of the thing that shows in the shot's picture at `t`, `at`
@@ -138,6 +166,119 @@ impl Scene {
     }
 }
 
+/// A picture of a scene worked out as far as its rays, for either
+/// renderer to draw: the scene where everything stands, seen as it is
+/// looked at, and the lines drawn over it.
+pub(super) struct Plan {
+    pub world: World,
+    /// Its width and height, in pixels.
+    pub size: (usize, usize),
+    pub look: Look,
+    /// Drawn over the picture, for a look from outside.
+    pub guides: Vec<Guide>,
+    /// The distance at which a pass's depth is half way from light to
+    /// dark.
+    pub near: f32,
+}
+
+impl Plan {
+    /// The picture, drawn on the CPU.
+    pub fn draw(&self) -> Frame {
+        let picture = self.picture();
+        picture.frame(|picture, sheets, pixels| match self.look {
+            Look::Shot(detail) | Look::Outside(_, detail) => {
+                picture.draw(detail, sheets, pixels);
+                let seens = &sheets.seens;
+                picture.stroke_all(&self.guides, |at| seens[at].depth, pixels);
+            }
+            Look::Pass(pass) => picture.pass(pass, self.near, sheets, pixels),
+        })
+    }
+
+    /// It as a picture being drawn, at its size.
+    pub fn picture(&self) -> Picture<'_> {
+        Picture::of(&self.world, self.size.0, self.size.1)
+    }
+}
+
+/// What the GPU is asked to draw, as `render.wgsl` names it, and the
+/// number it is written as.
+#[derive(Clone, Copy)]
+pub(super) enum Mode {
+    Draft = 0,
+    Full = 1,
+    Depth = 2,
+    Lines = 3,
+    Things = 4,
+}
+
+impl Mode {
+    pub const NAMES: [(Mode, &'static str); 5] = [
+        (Mode::Draft, "DRAFT"),
+        (Mode::Full, "FULL"),
+        (Mode::Depth, "DEPTH"),
+        (Mode::Lines, "LINES"),
+        (Mode::Things, "THINGS"),
+    ];
+
+    pub fn of(look: Look) -> Self {
+        match look {
+            Look::Shot(Detail::Draft) | Look::Outside(_, Detail::Draft) => Mode::Draft,
+            Look::Shot(Detail::Full) | Look::Outside(_, Detail::Full) => Mode::Full,
+            Look::Pass(Pass::Depth) => Mode::Depth,
+            Look::Pass(Pass::Lines) => Mode::Lines,
+            Look::Pass(Pass::Things) => Mode::Things,
+        }
+    }
+}
+
+/// How many of the tables [`pack_tables`] writes come before what other
+/// modules add after them.
+pub(super) const TABLES: usize = GREYS + 2 * LOOKS;
+
+/// Write the tables `render.wgsl` reads: the screen's greys, then the
+/// spiral.
+pub(super) fn pack_tables(words: &mut Words) {
+    screen_greys().iter().for_each(|grey| words.float(*grey));
+    spiral().iter().for_each(|(x, y)| words.floats([*x, *y]));
+}
+
+/// The GPU's side of this module: what each stage of a picture works out,
+/// as [`Picture`] does.
+pub(super) fn shader() -> String {
+    let floats = [
+        ("SUN_LIGHT", SUN_LIGHT),
+        ("SKY_LIGHT", SKY_LIGHT),
+        ("GROUND_LIGHT", GROUND_LIGHT),
+        ("FILL_LIGHT", FILL_LIGHT),
+        ("HAZE", HAZE),
+        ("CLOSE", CLOSE),
+        ("CLOSE_PIXELS", CLOSE_PIXELS),
+        ("CLOSE_DARK", CLOSE_DARK),
+        ("OUTLINE", OUTLINE),
+        ("INLINE", INLINE),
+        ("RIDGE", RIDGE),
+        ("VALLEY", VALLEY),
+    ];
+    let mut source: String = (floats.iter())
+        .map(|(name, value)| format!("const {name}: f32 = {value:?};\n"))
+        .collect();
+    for (mode, name) in Mode::NAMES {
+        source += &format!("const {name}: u32 = {}u;\n", mode as u32);
+    }
+    let [a, b, c] = SCATTER;
+    let spots = SPOTS
+        .map(|(x, y)| format!("vec2<f32>({x:?}, {y:?})"))
+        .join(", ");
+    source += &format!(
+        "const LOOKS: u32 = {LOOKS}u;\nconst SUNS: u32 = {SUNS}u;\nconst ALIKE: i32 = {ALIKE};\n\
+         const GREYS: u32 = {GREYS}u;\nconst GREYS_AT: u32 = 0u;\nconst SPIRAL_AT: u32 = {GREYS}u;\n\
+         const SCATTER = vec3<f32>({a:?}, {b:?}, {c:?});\n\
+         const SPOTS = array<vec2<f32>, 4>({spots});\n"
+    );
+    source + include_str!("render.wgsl")
+}
+
 /// The light a surface of grey `grey` (0 to 1 on a screen) gives back.
 pub(super) fn to_light(grey: f32) -> f32 {
     match grey.clamp(0.0, 1.0) {
@@ -146,11 +287,11 @@ pub(super) fn to_light(grey: f32) -> f32 {
     }
 }
 
-/// The grey a screen shows for each of 1025 lights from none to full.
-fn screen_greys() -> &'static [f32; 1025] {
-    static GREYS: OnceLock<[f32; 1025]> = OnceLock::new();
-    GREYS.get_or_init(|| {
-        std::array::from_fn(|i| match i as f32 / 1024.0 {
+/// The grey a screen shows for each of [`GREYS`] lights from none to full.
+fn screen_greys() -> &'static [f32; GREYS] {
+    static SHOWN: OnceLock<[f32; GREYS]> = OnceLock::new();
+    SHOWN.get_or_init(|| {
+        std::array::from_fn(|i| match i as f32 / (GREYS - 1) as f32 {
             dark if dark <= 0.003_130_8 => dark * 12.92,
             light => 1.055 * light.powf(1.0 / 2.4) - 0.055,
         })
@@ -160,7 +301,8 @@ fn screen_greys() -> &'static [f32; 1025] {
 /// A number from 0 to 1 for a pixel, unlike its neighbours' and evenly
 /// spread among them (Jimenez's interleaved gradient noise).
 fn scatter(x: usize, y: usize) -> f32 {
-    (52.982_918 * (0.067_110_56 * x as f32 + 0.005_837_15 * y as f32).fract()).fract()
+    let [a, b, c] = SCATTER;
+    (a * (b * x as f32 + c * y as f32).fract()).fract()
 }
 
 /// What a thing or a solid is when it is none: the sky, or the ground.
@@ -209,8 +351,6 @@ impl Seen {
 
     /// Whether `other` is of the same solid, facing much the same way.
     fn same_surface(&self, other: &Seen) -> bool {
-        // Nine tenths of the way to facing the same, in 32767ths squared.
-        const ALIKE: i32 = 966_300_000;
         let alike = || {
             let along = |part: usize| self.faces[part] as i32 * other.faces[part] as i32;
             along(0) + along(1) + along(2) > ALIKE
@@ -297,7 +437,7 @@ fn sized<T: Clone + Default>(sheet: &mut Vec<T>, len: usize) -> &mut [T] {
 }
 
 /// A picture of a scene at one moment being drawn, `row` × `rows` pixels.
-struct Picture<'a> {
+pub(super) struct Picture<'a> {
     world: &'a World,
     row: usize,
     rows: usize,
@@ -316,7 +456,7 @@ struct Picture<'a> {
 }
 
 impl<'a> Picture<'a> {
-    fn of(world: &'a World, row: usize, rows: usize) -> Self {
+    pub fn of(world: &'a World, row: usize, rows: usize) -> Self {
         let across = Vec3::new(-world.light.x, 0.0, -world.light.z).unit_or(Vec3::AHEAD);
         let (right, up) = world.across();
         Self {
@@ -378,9 +518,37 @@ impl<'a> Picture<'a> {
         });
     }
 
-    /// Draw `guide` over `pixels`, the picture drawn of `seens`: faint
-    /// where it runs behind something.
-    fn stroke(&self, seens: &[Seen], pixels: &mut [[u8; 4]], guide: &Guide) {
+    /// Write how it is drawn for the GPU as `render.wgsl` reads a `Look`,
+    /// to show `look`; `near` as [`Plan::near`].
+    pub fn pack(&self, look: Look, near: f32, words: &mut Words) {
+        words.vec(self.fill, self.faint);
+        words.vec(self.right, self.horizon);
+        words.vec(self.up, self.zenith);
+        words.floats([near, 0.0, 0.0, 0.0]);
+        let (row, rows, half) = (
+            self.row as u32,
+            self.rows as u32,
+            self.row.div_ceil(2) as u32,
+        );
+        words.uints([row, rows, half, Mode::of(look) as u32]);
+    }
+
+    /// Draw `guides` over `pixels`, the picture drawn with `depth` at
+    /// each: faint where they run behind something.
+    pub fn stroke_all(
+        &self,
+        guides: &[Guide],
+        depth: impl Fn(usize) -> f32,
+        pixels: &mut [[u8; 4]],
+    ) {
+        for guide in guides {
+            self.stroke(&depth, pixels, guide);
+        }
+    }
+
+    /// Draw `guide` over `pixels`, the picture drawn with `depth` at each:
+    /// faint where it runs behind something.
+    fn stroke(&self, depth_at: &impl Fn(usize) -> f32, pixels: &mut [[u8; 4]], guide: &Guide) {
         let world = self.world;
         // Only what is ahead of the camera can be drawn.
         const AHEAD: f32 = 0.1;
@@ -418,14 +586,13 @@ impl<'a> Picture<'a> {
                     true => (x as isize + more, y as isize),
                     false => (x as isize, y as isize + more),
                 };
-                let Some(under) = self.at(seens, x, y) else {
+                let inside =
+                    x >= 0 && y >= 0 && (x as usize) < self.row && (y as usize) < self.rows;
+                if !inside {
                     continue;
-                };
-                let shows = if depth > under.depth + 0.05 {
-                    0.22
-                } else {
-                    0.9
-                };
+                }
+                let under = depth_at(y as usize * self.row + x as usize);
+                let shows = if depth > under + 0.05 { 0.22 } else { 0.9 };
                 let pixel = &mut pixels[y as usize * self.row + x as usize];
                 let mixed = pixel[0] as f32 + (value - pixel[0] as f32) * shows;
                 *pixel = [mixed as u8, mixed as u8, mixed as u8, 255];

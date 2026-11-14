@@ -187,8 +187,11 @@ impl ShotCard {
             && let Some(blockout) = &self.shot.blockout
         {
             let (scene, shape) = (blockout.scene.clone(), self.shape);
+            let renderer = self.state.read(cx).services.blockout.clone();
             self.player =
-                Some(cx.new(|cx| BlockoutPlayer::new(scene, shape, STAGE_WIDTH, window, cx)));
+                Some(cx.new(|cx| {
+                    BlockoutPlayer::new(scene, shape, STAGE_WIDTH, renderer, window, cx)
+                }));
         }
         if std::mem::take(&mut self.prompt_stale) {
             let text = self.shot.prompt().to_owned();
@@ -567,7 +570,8 @@ impl ShotCard {
         if let Some(picture) = self.picture_in(slot) {
             references.push(picture.clone());
         } else if let (Slot::First, Some(blockout)) = (slot, &self.shot.blockout) {
-            match blockout.still(0.0) {
+            let renderer = &self.state.read(cx).services.blockout;
+            match blockout.still(renderer, 0.0) {
                 Ok(still) => references.push(still),
                 Err(e) => return self.set_busy(slot, Busy::Failed(e), cx),
             }
