@@ -9,6 +9,7 @@ pub mod code_editor;
 pub mod deliver;
 pub mod editor_settings;
 pub mod format;
+pub mod gpu_jobs;
 pub mod inspector;
 pub mod kit;
 pub mod lettering;

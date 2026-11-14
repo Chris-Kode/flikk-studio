@@ -17,9 +17,11 @@ use flikk_core::speed::Waiting;
 use flikk_core::stabilize;
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{ClipId, Time, TimeRange};
+use flikk_os::gpu;
 use flikk_os::process::{ChildGuard, command, ffmpeg};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -225,7 +227,8 @@ impl Pictures for Originals {
     }
 }
 
-/// Composes the frames of `spec`'s range in order.
+/// Composes the frames of `spec`'s range in order, each in a GPU turn of
+/// its own when the effects engine draws them.
 pub(crate) struct Frames<'a> {
     project: &'a Project,
     /// Lettering only when [`GraphSpec::lettered`].
@@ -235,10 +238,18 @@ pub(crate) struct Frames<'a> {
     crew: Option<Arc<dyn HtmlCrew>>,
     /// The first frame the crew has not heard of.
     told: i64,
+    /// Listed as the export of `output` while frames are composed.
+    gpu: Option<gpu::Job>,
 }
 
 impl<'a> Frames<'a> {
-    pub(crate) fn new(project: &'a Project, services: &'a Services, spec: &'a GraphSpec) -> Self {
+    /// The frames of an export to `output`.
+    pub(crate) fn new(
+        project: &'a Project,
+        services: &'a Services,
+        spec: &'a GraphSpec,
+        output: &Path,
+    ) -> Self {
         let pictures = Originals(Streams::new(services.media.clone(), spec.width, spec.rate));
         let lettering = spec.lettered.then(|| {
             Arc::new(Letterer::new(spec.caption_styles.clone())) as Arc<dyn LetteringService>
@@ -262,6 +273,13 @@ impl<'a> Frames<'a> {
             pictures,
             crew,
             told: 0,
+            gpu: services.fx.as_ref().map(|_| {
+                let name = output.file_name().unwrap_or(output.as_os_str());
+                gpu::Job::new(
+                    format!("Export: {}", name.to_string_lossy()),
+                    gpu::Level::Asked,
+                )
+            }),
         }
     }
 
@@ -286,11 +304,17 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Output frame `f` (from the range start). Fails when a clip in it
-    /// could not be drawn, rather than render without it.
-    pub(crate) fn frame(&mut self, f: i64) -> Result<Frame> {
+    /// Output frame `f` (from the range start), composed once it is this
+    /// export's GPU turn. Fails when a clip in it could not be drawn,
+    /// rather than render without it, and with "canceled" once `cancel` is
+    /// set while it waits.
+    fn frame(&mut self, f: i64, cancel: &AtomicBool) -> Result<Frame> {
         self.tell(f);
         let t = self.time(f);
+        let _turn = match &self.gpu {
+            Some(job) => Some(job.turn(cancel).ok_or_else(|| anyhow!("canceled"))?),
+            None => None,
+        };
         compose::render_program(
             self.project,
             t,
@@ -354,7 +378,7 @@ pub(crate) fn run(
         if cancel.load(Ordering::Relaxed) {
             bail!("canceled");
         }
-        let frame = frames.frame(f)?;
+        let frame = frames.frame(f, cancel)?;
         if child
             .stdin
             .as_mut()
@@ -363,7 +387,11 @@ pub(crate) fn run(
             write_failed = true;
             break;
         }
-        progress((f + 1) as f32 / total as f32);
+        let done = (f + 1) as f32 / total as f32;
+        progress(done);
+        if let Some(job) = &frames.gpu {
+            job.progress(done);
+        }
     }
     drop(child.stdin.take());
     let status = child.wait()?;

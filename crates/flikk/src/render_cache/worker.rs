@@ -9,7 +9,9 @@
 //! frame is kept that live composing would draw differently later.
 //! Dropping the worker stops it after the frame in hand; frames are keyed
 //! by what they show, so one finished after an edit is simply never asked
-//! for.
+//! for. Each frame composed is a background GPU turn
+//! ([`flikk_os::gpu`]), under a job listed from the first frame that
+//! needs composing.
 //!
 //! The first frames of each span are timed, one at a time: a span that
 //! composes well within a frame's time is [`cheap`], drawn live as fast as
@@ -22,6 +24,7 @@ use flikk_core::compose::{self, MaskView, Pending, Streams};
 use flikk_core::model::Project;
 use flikk_core::services::{Frame, PixelOrder, Services};
 use flikk_core::speed::Waiting;
+use flikk_os::gpu;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -268,8 +271,22 @@ fn compose_all(
     let mut flight: Option<(Key, Pending<'_>)> = None;
     let land = |(key, pending): (Key, Pending<'_>)| keep(key, pending.wait());
     let budget = Duration::from_secs_f64(rate.frame_duration().as_secs_f64() * CHEAP_SHARE);
-    for (i, frames) in order(plan, from) {
+    let order = order(plan, from);
+    let total = order
+        .iter()
+        .map(|(_, f)| f.end - f.start)
+        .sum::<i64>()
+        .max(1);
+    // Frames of the spans before this one, composed or not.
+    let mut passed = 0;
+    // Opened once a frame needs composing, so a pass over frames all on
+    // disk doesn't flash in the list.
+    let mut job: Option<gpu::Job> = None;
+    for (i, frames) in order {
         let span = &plan.spans[i];
+        // Where this span's frames start among all of them.
+        let offset = passed - frames.start;
+        passed += frames.end - frames.start;
         if cheap(span) {
             continue;
         }
@@ -287,6 +304,12 @@ fn compose_all(
             if store().contains(&key) {
                 continue;
             }
+            let job =
+                job.get_or_insert_with(|| gpu::Job::new("Render cache", gpu::Level::Background));
+            let Some(_turn) = job.turn(stop) else {
+                return;
+            };
+            job.progress((offset + frame) as f32 / total as f32);
             let submit = |streams: &mut Streams| {
                 compose::submit_program(
                     project,
@@ -322,7 +345,7 @@ fn compose_all(
         }
     }
     if let Some(last) = flight
-        && !stop.load(Ordering::Relaxed)
+        && let Some(_turn) = job.as_ref().and_then(|job| job.turn(stop))
     {
         land(last);
     }
