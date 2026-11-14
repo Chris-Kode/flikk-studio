@@ -244,6 +244,7 @@ on 2026-11-07 from the catalog's `input_schema`.
 | Nano Banana 2.1 (`google/gemini-nano-banana-2.1`, default) | `aspect_ratio`, `auto` | `resolution` 1K, 2K, 4K | 16 | — |
 | Nano Banana Pro (`google/gemini-3-pro-image`) | as above | as above | 16 | — |
 | GPT Image 2, 2.6 Flare, 2.6 Sunburst (`openai/gpt-image-2`, `-2.6-flare`, `-2.6-sunburst`) | `aspect_ratio`, no `auto` (1:1 left out) | `resolution` 1K, 2K, 4K | 16 | `background` |
+| Seedream 5.5 (`bytedance/seedream-5.5`) | `aspect_ratio` (left out: picked from the prompt) | `size` 2K, 1.5K, 1K | 10 | `background` |
 | Seedream 5.0 Pro (`bytedance/seedream-5.0-pro`) | `aspect_ratio` (left out: picked from the prompt) | `size` 2K, 1.5K, 1K | 10 | — |
 | Seedream 5.0 Lite (`bytedance/seedream-5.0-lite`) | as above | `size` 2K, 3K, 4K | 14 | — |
 | Ideogram 4.5 (`ideogram/ideogram-4.5`) | `size` in pixels: the larger size its text-to-image enum has for each ratio (editing takes any `WxH` in multiples of 32 up to 4,194,304 pixels, which these are) | — | 5 | — |
@@ -252,8 +253,8 @@ on 2026-11-07 from the catalog's `input_schema`.
 | Recraft 4.1 (`recraft/recraft-4.1`) | none: its `size` answers 422 "not enabled on this environment yet" | — | text only | — |
 
 `num_images`, `seed`, `quality`, `output_format` and the like keep their
-defaults; one picture is made per request. Not used: Seedream 4.0, 4.5 and
-the 5.0 Pro layer decomposition, Gemini 3.1 Flash Image and Flash Lite,
+defaults; one picture is made per request. Not used: Seedream 4.0, 4.5,
+5.0 Flash and the 5.5, 5.0 Pro and 5.0 Flash layer decompositions, Gemini 3.1 Flash Image and Flash Lite,
 Ideogram 4.0 (and Transparent) and P-Image, GPT Image 2.5, Grok Imagine
 Image and Image Quality, and Topaz Image Upscale.
 

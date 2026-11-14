@@ -142,6 +142,10 @@ pub static PROVIDER: Provider = Provider {
                     name: "GPT Image 2.6 Sunburst",
                 },
                 CloudModel {
+                    id: "bytedance/seedream-5.5",
+                    name: "Seedream 5.5",
+                },
+                CloudModel {
                     id: "bytedance/seedream-5.0-pro",
                     name: "Seedream 5.0 Pro",
                 },

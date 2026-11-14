@@ -120,6 +120,10 @@ pub static PROVIDER: Provider = Provider {
                     name: "FLUX 3 Klein",
                 },
                 CloudModel {
+                    id: "bytedance/seedream/v5.5",
+                    name: "Seedream 5.5",
+                },
+                CloudModel {
                     id: "bytedance/seedream/v5/pro",
                     name: "Seedream 5.0 Pro",
                 },
