@@ -118,11 +118,14 @@ pub trait DepthService: Send + Sync {
     /// How far the maps of `item` over source `range` are made.
     fn status(&self, item: &MediaItem, range: TimeRange) -> DepthStatus;
     /// Make every map `range` of `item` shows, waiting for it (renders).
-    /// `progress` gets 0..1.
+    /// Where the model runs on the GPU this is a listed job there, taking
+    /// turns at `level` (`flikk_os::gpu`): asked when someone waits on it,
+    /// background otherwise. `progress` gets 0..1.
     fn complete(
         &self,
         item: &MediaItem,
         range: TimeRange,
+        level: flikk_os::gpu::Level,
         progress: &dyn Fn(f32),
         cancel: &AtomicBool,
     ) -> ServiceResult<()>;

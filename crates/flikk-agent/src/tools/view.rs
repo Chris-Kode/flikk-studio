@@ -7,7 +7,7 @@
 
 use super::audio::{script, unheard_note};
 use super::preview::{collage, columns, draw_text};
-use super::{Done, Job, JobDone, Step, ToolCtx};
+use super::{Done, Job, JobDone, Step, ToolCtx, on_gpu};
 use crate::args::{Args, ToolError, range_json, short};
 use crate::bridge::{Content, ToolResult};
 use base64::Engine;
@@ -20,6 +20,7 @@ use flikk_core::{Time, TimeRange, paths};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Longest span `view_range` with `detail` accepts.
 pub(super) const DETAIL_MAX: f64 = 20.0;
@@ -242,11 +243,14 @@ pub fn view_range(ctx: &mut ToolCtx, args: &Args, detail: bool) -> Result<Step, 
         range,
         detail,
         Clock::Timeline,
+        ctx.stop.flag(),
     )
 }
 
 /// What `view_range` shows of `range` of `project`: the sound script, and
-/// a collage of frames that the step's job decodes.
+/// a collage of frames that the step's job decodes, or composes until
+/// `stop` is set.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn range_step(
     project: &Project,
     services: &Services,
@@ -255,6 +259,7 @@ pub(super) fn range_step(
     range: TimeRange,
     detail: bool,
     clock: Clock,
+    stop: Arc<AtomicBool>,
 ) -> Result<Step, ToolError> {
     let n = vision.frames_per_collage.clamp(1, 30) as usize;
     let tile_width = vision.tile_width.clamp(64, 640);
@@ -292,6 +297,7 @@ pub(super) fn range_step(
         let job: Job = Box::new(move || {
             program_collage(
                 &project, &services, &times, tile_width, name, range, header, transcript, clock,
+                &stop,
             )
         });
         return Ok(Step::Job(job));
@@ -380,7 +386,8 @@ fn program_times(project: &Project, range: TimeRange, n: usize) -> Vec<Time> {
     out
 }
 
-/// The composited program at `times`, as one stamped collage.
+/// The composited program at `times`, as one stamped collage; stopped
+/// once `stop` is set.
 #[allow(clippy::too_many_arguments)]
 fn program_collage(
     project: &Project,
@@ -392,16 +399,19 @@ fn program_collage(
     header: String,
     transcript: String,
     clock: Clock,
+    stop: &AtomicBool,
 ) -> JobDone {
     let size = compose::size_for_width(project, tile_width);
     let mut stills = Stills::new(services.media.clone(), tile_width);
-    let tiles: Vec<(Frame, String)> = times
-        .iter()
-        .map(|t| {
-            let frame = compose::program(project, *t, size, services, &mut stills);
-            (frame, format!("{:.2}s", t.as_secs_f64()))
-        })
-        .collect();
+    let mut tiles: Vec<(Frame, String)> = Vec::with_capacity(times.len());
+    for t in times {
+        let Some(frame) = on_gpu(services, stop, || {
+            compose::program(project, *t, size, services, &mut stills)
+        }) else {
+            return JobDone::Stopped;
+        };
+        tiles.push((frame, format!("{:.2}s", t.as_secs_f64())));
+    }
     let path = match save_png(&collage(&tiles, size)) {
         Ok(p) => p,
         Err(ToolError(e)) => return JobDone::Done(Done::error(e)),
@@ -448,6 +458,7 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     if annotate || masks || zoom.is_some() || wants_program(project, span, ctx.services) {
         let project = Arc::new(project.clone());
         let services = ctx.services.clone();
+        let stop = ctx.stop.flag();
         let job: Job = Box::new(move || {
             let frame_w = project.timeline.settings.width.max(2);
             let width = zoom.map_or(FRAME_WIDTH, |r| zoom_width(frame_w, r));
@@ -458,13 +469,20 @@ pub fn view_frame(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             } else {
                 compose::MaskView::Cut
             };
-            let mut frame = compose::program_with(&project, t, size, &services, &mut stills, view);
+            let composed = on_gpu(&services, &stop, || {
+                let frame = compose::program_with(&project, t, size, &services, &mut stills, view);
+                let shapes =
+                    annotate.then(|| compose::layout(&project, t, size, &services, &mut stills));
+                (frame, shapes)
+            });
+            let Some((mut frame, shapes)) = composed else {
+                return JobDone::Stopped;
+            };
             let mut text = format!("Program frame at {t} ({}).", program_note(&services));
             if masks {
                 text.push_str(&masks_note(&project, t, &services));
             }
-            if annotate {
-                let shapes = compose::layout(&project, t, size, &services, &mut stills);
+            if let Some(shapes) = shapes {
                 frame = annotated(&frame, &shapes);
                 let legend = super::layout::legend(&project, &shapes);
                 if legend.is_empty() {

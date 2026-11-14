@@ -172,7 +172,7 @@ pub(crate) fn find_depth(
     for (i, (clip, (item, r))) in wanted.iter().enumerate() {
         let part = |p: f32| progress((i as f32 + p) / n);
         service
-            .complete(item, *r, &part, cancel)
+            .complete(item, *r, gpu::Level::Asked, &part, cancel)
             .map_err(|e| anyhow!("depth of clip {}: {e}", short(clip)))?;
     }
     Ok(!wanted.is_empty())

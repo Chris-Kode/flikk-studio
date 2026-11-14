@@ -16,18 +16,23 @@
 //!   [`BACKGROUND_EVERY`] while asked work runs, so it is never starved.
 //!
 //! A [`Job`] is the long-lived work that takes many turns. It is listed
-//! ([`jobs`]) from [`Job::new`] until it is dropped, so a new kind of GPU
-//! work joins the turns and the list just by opening a job. Work too
-//! short-lived to deserve a row takes turns with [`turn`] instead.
+//! ([`jobs`]) from its first turn asked for until it is dropped, so a new
+//! kind of GPU work joins the turns and the list just by opening a job,
+//! and work that ends up on the CPU takes no turn and is never listed.
+//! Work too short-lived to deserve a row takes turns with [`turn`]
+//! instead. An engine that alone knows whether its work runs on the GPU
+//! (a model that may have moved to the CPU) is handed a [`Unit`], which
+//! says how its caller's work takes turns, and takes it only there.
 //!
 //! Turns share the GPU out; nothing breaks when two units overlap, so no
 //! mistake in taking them can stop work for good. Every turn and job lets
 //! go when dropped (a panic, a cancel or an early return never holds the
 //! GPU or leaves a row behind); a turn asked for inside another on the
 //! same thread is that same turn (a frame whose composing runs a model
-//! that takes turns too); and a turn held longer than [`LONGEST_TURN`]
-//! (a long unit, or a holder waiting on other GPU work from another
-//! thread) no longer keeps the next waiter out.
+//! that takes turns too); a holder that waits on another thread's work
+//! gives its turn back meanwhile ([`aside`]), so the work it waits on can
+//! have it; and a turn held longer than [`LONGEST_TURN`] (a long unit)
+//! no longer keeps the next waiter out.
 
 use crate::sync::{lock, wait_timeout};
 use std::cell::Cell;
@@ -85,8 +90,8 @@ pub struct Listed {
     pub progress: Option<f32>,
 }
 
-/// Long-lived GPU work, listed until dropped. Not `Clone`: share it by
-/// reference.
+/// Long-lived GPU work, listed from its first turn asked for until
+/// dropped. Not `Clone`: share it by reference.
 #[must_use = "a job is listed only while it is kept"]
 pub struct Job {
     id: u64,
@@ -94,8 +99,9 @@ pub struct Job {
 }
 
 impl Job {
-    /// Open a job named `label` for the user, listed as waiting until its
-    /// first turn.
+    /// Open a job named `label` for the user. It is listed once it first
+    /// asks for a turn, as waiting until it has one; a job that never asks
+    /// (its work all ran on the CPU, or was there already) is never listed.
     pub fn new(label: impl Into<String>, level: Level) -> Self {
         let mut board = lock(&BOARD.state);
         let id = board.next_id();
@@ -116,7 +122,8 @@ impl Job {
         take(self.level, Some(self.id), cancel)
     }
 
-    /// Say how much is done, 0–1 (clamped).
+    /// Say how much is done, 0–1 (clamped); kept for the row until the
+    /// job is listed.
     pub fn progress(&self, fraction: f32) {
         let mut board = lock(&BOARD.state);
         if let Some(row) = board.row(self.id) {
@@ -154,26 +161,47 @@ pub fn turn(level: Level, cancel: &AtomicBool) -> Option<Turn<'static>> {
 /// same one.
 #[must_use = "the turn ends as soon as it is dropped"]
 pub struct Turn<'a> {
-    /// `None` for a turn taken inside another of its thread.
-    ticket: Option<u64>,
     job: Option<u64>,
     _job: PhantomData<&'a Job>,
     /// Not `Send`: its thread counts the turns it holds.
     _thread: PhantomData<*const ()>,
 }
 
+/// The turn a thread holds, however many [`Turn`]s of it there are.
+#[derive(Clone, Copy)]
+struct Holding {
+    /// Turns of it not dropped yet, one inside another.
+    turns: u32,
+    /// The ticket the turn was given as; `None` while it is given back
+    /// ([`aside`]), or after a panic there.
+    ticket: Option<u64>,
+    /// What it was taken at, to take it again after [`aside`].
+    level: Level,
+    job: Option<u64>,
+}
+
 thread_local! {
-    /// The turns this thread holds, one inside another.
-    static HELD: Cell<u32> = const { Cell::new(0) };
+    static HELD: Cell<Option<Holding>> = const { Cell::new(None) };
 }
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        HELD.with(|held| held.set(held.get().saturating_sub(1)));
+        let Some(mut holding) = HELD.get() else {
+            return;
+        };
+        holding.turns = holding.turns.saturating_sub(1);
+        // The last of the thread's turns gives the GPU back.
+        let ticket = if holding.turns == 0 {
+            HELD.set(None);
+            holding.ticket
+        } else {
+            HELD.set(Some(holding));
+            None
+        };
         let mut board = lock(&BOARD.state);
         // Taken over after `LONGEST_TURN`, the turn is no longer this one's
         // to give back.
-        if matches!(board.slot, Slot::Held { ticket, .. } if Some(ticket) == self.ticket) {
+        if ticket.is_some() && board.holds(ticket) {
             board.slot = Slot::Free;
         }
         if let Some(row) = self.job.and_then(|id| board.row(id)) {
@@ -182,6 +210,124 @@ impl Drop for Turn<'_> {
         drop(board);
         BOARD.changed.notify_all();
     }
+}
+
+/// One unit of some caller's GPU work, by who waits on it: what that
+/// caller hands an engine that knows, itself, whether the work runs on the
+/// GPU (a model that may have moved to the CPU), so the engine takes it
+/// ([`Unit::take`]) around each piece of work it runs there, and work on
+/// the CPU neither waits nor shows in the list.
+#[derive(Clone, Copy)]
+pub enum Unit<'a> {
+    /// For the picture on screen now: it never waits, and keeps
+    /// background work off meanwhile ([`watching`]).
+    Watched,
+    /// One unit of `job` ([`Job::turn`]), given up once `cancel` is set.
+    Job {
+        job: &'a Job,
+        cancel: &'a AtomicBool,
+    },
+    /// Unlisted work at `level` ([`turn`]), given up once `cancel` is set.
+    Unlisted {
+        level: Level,
+        cancel: &'a AtomicBool,
+    },
+}
+
+impl<'a> Unit<'a> {
+    /// Wait for this unit's turn, or for watched work only mark the GPU
+    /// watched; `None` once its cancel is set.
+    pub fn take(self) -> Option<Held<'a>> {
+        let (watching, turn) = match self {
+            Unit::Watched => (Some(watching()), None),
+            Unit::Job { job, cancel } => (None, Some(job.turn(cancel)?)),
+            Unit::Unlisted { level, cancel } => (None, Some(turn(level, cancel)?)),
+        };
+        Some(Held {
+            _watching: watching,
+            _turn: turn,
+        })
+    }
+
+    /// Whether its cancel is set: work that failed for it was cancelled,
+    /// not failed. Watched work is never cancelled.
+    pub fn cancelled(self) -> bool {
+        match self {
+            Unit::Watched => false,
+            Unit::Job { cancel, .. } | Unit::Unlisted { cancel, .. } => {
+                cancel.load(Ordering::Relaxed)
+            }
+        }
+    }
+}
+
+/// A [`Unit`]'s hold on the GPU, let go when dropped.
+#[must_use = "the GPU is held only while this is kept"]
+pub struct Held<'a> {
+    _watching: Option<Watching>,
+    _turn: Option<Turn<'a>>,
+}
+
+/// Run `wait`, which waits on another thread's work (a frame that thread
+/// is making, which this one needs), with this thread's turn given back
+/// meanwhile, and take the turn again after: the work waited on may need
+/// the GPU itself, and must not queue behind its own waiter. On a thread
+/// that holds no turn, `wait` just runs.
+///
+/// Taking the turn back goes ahead of every waiter, whatever its level and
+/// whether the GPU is watched: it is the turn the thread had, so it waits
+/// for the unit running then only (at most [`LONGEST_TURN`]) and needs no
+/// cancel. `wait` should only wait: a turn it asks for on this thread is
+/// the turn given back, and holds nothing. Should `wait` panic, the turn
+/// stays given back.
+pub fn aside<T>(wait: impl FnOnce() -> T) -> T {
+    let Some(holding) = HELD.get().filter(|h| h.ticket.is_some()) else {
+        return wait();
+    };
+    HELD.set(Some(Holding {
+        ticket: None,
+        ..holding
+    }));
+    let mut board = lock(&BOARD.state);
+    if board.holds(holding.ticket) {
+        board.slot = Slot::Free;
+    }
+    let now = Instant::now();
+    if let Some(row) = holding.job.and_then(|id| board.row(id)) {
+        row.phase = Phase::Waiting {
+            since: now,
+            ran: true,
+        };
+    }
+    drop(board);
+    BOARD.changed.notify_all();
+
+    let out = wait();
+
+    let mut board = lock(&BOARD.state);
+    let ticket = board.next_id();
+    board.queue.push_front(Waiter {
+        ticket,
+        level: holding.level,
+        back: true,
+    });
+    loop {
+        let now = Instant::now();
+        if board.next_up(now) == Some(ticket) {
+            board.give(ticket, holding.job, now);
+            break;
+        }
+        board = wait_timeout(&BOARD.changed, board, RECHECK);
+    }
+    drop(board);
+    // The turns of it taken or dropped meanwhile still count.
+    if let Some(now) = HELD.get() {
+        HELD.set(Some(Holding {
+            ticket: Some(ticket),
+            ..now
+        }));
+    }
+    out
 }
 
 /// Mark the GPU as watched for as long as the guard is kept, and [`GRACE`]
@@ -207,15 +353,17 @@ impl Drop for Watching {
     }
 }
 
-/// The jobs open now: running first, then waiting, each in the order
-/// opened. Cheap (a lock and a few rows); compare two lists to see a
-/// change, as states move with time as well as with turns.
+/// The jobs listed now (open, and asked for a turn once): running first,
+/// then waiting, each in the order opened. Cheap (a lock and a few rows);
+/// compare two lists to see a change, as states move with time as well as
+/// with turns.
 pub fn jobs() -> Vec<Listed> {
     let board = lock(&BOARD.state);
     let now = Instant::now();
     let mut listed: Vec<Listed> = board
         .rows
         .iter()
+        .filter(|row| !matches!(row.phase, Phase::Opened))
         .map(|row| Listed {
             id: row.id,
             label: row.label.clone(),
@@ -275,7 +423,7 @@ struct Row {
 /// Where a job is between opening and dropping.
 #[derive(Clone, Copy)]
 enum Phase {
-    /// No turn asked for yet.
+    /// No turn asked for yet: not listed.
     Opened,
     /// Asked for a turn at `since`; `ran` when it had one before.
     Waiting {
@@ -309,6 +457,8 @@ impl Phase {
 struct Waiter {
     ticket: u64,
     level: Level,
+    /// Taking back a turn given back ([`aside`]): it goes first.
+    back: bool,
 }
 
 /// The one GPU turn.
@@ -332,6 +482,11 @@ impl Turns {
         self.rows.iter_mut().find(|row| row.id == id)
     }
 
+    /// Whether the turn is held as `ticket`.
+    fn holds(&self, ticket: Option<u64>) -> bool {
+        matches!(self.slot, Slot::Held { ticket: held, .. } if Some(held) == ticket)
+    }
+
     fn watched(&self, now: Instant) -> bool {
         let framing = self
             .watchers
@@ -347,18 +502,21 @@ impl Turns {
         }
         self.queue
             .iter()
-            .find(|w| w.level == level)
+            .find(|w| w.level == level && !w.back)
             .map(|w| w.ticket)
     }
 
     /// Who gets the turn once it is free, or held longer than
-    /// [`LONGEST_TURN`]: asked work first, but background work after
-    /// [`BACKGROUND_EVERY`] − 1 asked turns in a row.
+    /// [`LONGEST_TURN`]: a turn taken back first, then asked work, but
+    /// background work after [`BACKGROUND_EVERY`] − 1 asked turns in a row.
     fn next_up(&self, now: Instant) -> Option<u64> {
         if let Slot::Held { since, .. } = self.slot
             && now - since < LONGEST_TURN
         {
             return None;
+        }
+        if let Some(back) = self.queue.iter().find(|w| w.back) {
+            return Some(back.ticket);
         }
         let asked = self.first(Level::Asked, now);
         let background = self.first(Level::Background, now);
@@ -397,27 +555,31 @@ impl Turns {
 /// Queue for a turn at `level` for `job` (or unlisted work) and wait for
 /// it, giving up once `cancel` is set.
 fn take(level: Level, job: Option<u64>, cancel: &AtomicBool) -> Option<Turn<'static>> {
-    let turn = |ticket: Option<u64>| {
-        HELD.with(|held| held.set(held.get() + 1));
-        Turn {
-            ticket,
-            job,
-            _job: PhantomData,
-            _thread: PhantomData,
-        }
+    let turn = Turn {
+        job,
+        _job: PhantomData,
+        _thread: PhantomData,
     };
     let mut board = lock(&BOARD.state);
-    if HELD.with(Cell::get) > 0 {
+    if let Some(holding) = HELD.get() {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
         if let Some(row) = job.and_then(|id| board.row(id)) {
             row.phase = Phase::Holding;
         }
-        return Some(turn(None));
+        HELD.set(Some(Holding {
+            turns: holding.turns + 1,
+            ..holding
+        }));
+        return Some(turn);
     }
     let ticket = board.next_id();
-    board.queue.push_back(Waiter { ticket, level });
+    board.queue.push_back(Waiter {
+        ticket,
+        level,
+        back: false,
+    });
     let now = Instant::now();
     if let Some(row) = job.and_then(|id| board.row(id)) {
         let ran = !matches!(row.phase, Phase::Opened);
@@ -437,7 +599,13 @@ fn take(level: Level, job: Option<u64>, cancel: &AtomicBool) -> Option<Turn<'sta
         let now = Instant::now();
         if board.next_up(now) == Some(ticket) {
             board.give(ticket, job, now);
-            return Some(turn(Some(ticket)));
+            HELD.set(Some(Holding {
+                turns: 1,
+                ticket: Some(ticket),
+                level,
+                job,
+            }));
+            return Some(turn);
         }
         // Timed: a cancel and a watched mark lapsing ring no bell.
         board = wait_timeout(&BOARD.changed, board, RECHECK);

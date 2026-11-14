@@ -21,6 +21,11 @@
 //! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), once the model is
 //! downloaded anew, or when a render waits on it.
 //!
+//! Where the model runs on the GPU (MLX on a Mac), its work takes turns
+//! there (`flikk_os::gpu`), a frame each. Picking and previews are for the
+//! picture on screen, so they never wait (watched); following a subject is
+//! a job the user waits on, listed as "Track subject: " and the file.
+//!
 //! Person masks are its other half ([`crate::people`]): they share its
 //! media engine and its version, so views draw again as either makes
 //! mattes.
@@ -43,6 +48,7 @@ use flikk_core::subject::{Fnv, Matte, SubjectPrompt};
 use flikk_core::time::{Rate, Time};
 use flikk_models::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use flikk_models::{Model, Task as ModelTask};
+use flikk_os::gpu::{self, Level, Unit};
 use flikk_os::sync::lock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -447,7 +453,8 @@ impl Shared {
     }
 
     /// `item`'s frame `frame` segmented by `prompt` on `model`, encoding it
-    /// unless it was one of the last few.
+    /// unless it was one of the last few. For the picture on screen, it
+    /// never waits for other GPU work.
     fn segment(
         &self,
         model: &'static Model,
@@ -479,7 +486,11 @@ impl Shared {
             None => {
                 let t = Time::from_frame(frame, rate(item));
                 let picture = self.media.frame(item, t, DECODE_WIDTH)?;
-                let encoded = Arc::new(runner.encode(&picture).map_err(model_error)?);
+                let encoded = Arc::new(
+                    runner
+                        .encode(&picture, Unit::Watched)
+                        .map_err(model_error)?,
+                );
                 picker.encoded.push_back((key, encoded.clone()));
                 while picker.encoded.len() > ENCODED_KEPT {
                     picker.encoded.pop_front();
@@ -488,7 +499,7 @@ impl Shared {
             }
         };
         runner
-            .segment(&encoded, prompt)
+            .segment(&encoded, prompt, Unit::Watched)
             .map(matte)
             .map_err(model_error)
     }
@@ -677,26 +688,38 @@ fn track(
         chunk: None,
         last: None,
     };
+    let job = gpu::Job::new(
+        format!("Track subject: {}", crate::file_name(&item.path)),
+        Level::Asked,
+    );
+    let unit = Unit::Job { job: &job, cancel };
     let (mut made, mut last) = (0usize, Instant::now());
-    let result = tracker.track(count, &at, &mut |i| reader.get(i), &mut |i, segment| {
-        if cancel.load(Ordering::SeqCst) {
-            anyhow::bail!("cancelled");
-        }
-        let packed = Packed::pack(&matte(segment));
-        let mut tracks = lock(&s.tracks);
-        let frames = tracks.entry(key.clone()).or_default();
-        frames.frames.insert(lo + i as i64, packed);
-        made += 1;
-        if made.is_multiple_of(SAVE_EVERY) {
-            let _ = store::store(&store::track_path(&key.0, key.1), frames);
-        }
-        drop(tracks);
-        *lock(&s.seconds_per_frame) = Some((model.id, last.elapsed().as_secs_f32()));
-        last = Instant::now();
-        progress.set(made as f32 / count as f32);
-        s.bump();
-        Ok(())
-    });
+    let result = tracker.track(
+        count,
+        &at,
+        unit,
+        &mut |i| reader.get(i),
+        &mut |i, segment| {
+            if cancel.load(Ordering::SeqCst) {
+                anyhow::bail!("cancelled");
+            }
+            let packed = Packed::pack(&matte(segment));
+            let mut tracks = lock(&s.tracks);
+            let frames = tracks.entry(key.clone()).or_default();
+            frames.frames.insert(lo + i as i64, packed);
+            made += 1;
+            if made.is_multiple_of(SAVE_EVERY) {
+                let _ = store::store(&store::track_path(&key.0, key.1), frames);
+            }
+            drop(tracks);
+            *lock(&s.seconds_per_frame) = Some((model.id, last.elapsed().as_secs_f32()));
+            last = Instant::now();
+            progress.set(made as f32 / count as f32);
+            job.progress(made as f32 / count as f32);
+            s.bump();
+            Ok(())
+        },
+    );
     match result {
         Ok(()) => {
             let mut tracks = lock(&s.tracks);
@@ -910,7 +933,8 @@ impl SubjectService for LocalSubjects {
             if cancel.load(Ordering::SeqCst) {
                 return Err(ServiceError("cancelled".into()));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            // The tracking waited for may need the GPU this thread holds.
+            gpu::aside(|| std::thread::sleep(Duration::from_millis(200)));
         }
     }
 

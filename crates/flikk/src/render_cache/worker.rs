@@ -208,7 +208,11 @@ fn complete_depth(project: &Project, services: &Services, span: &Span, stop: &At
         if status.error.is_some() || status.complete() {
             continue;
         }
-        if stop.load(Ordering::Relaxed) || service.complete(&item, r, &|_| {}, stop).is_err() {
+        if stop.load(Ordering::Relaxed)
+            || service
+                .complete(&item, r, gpu::Level::Background, &|_| {}, stop)
+                .is_err()
+        {
             return;
         }
     }

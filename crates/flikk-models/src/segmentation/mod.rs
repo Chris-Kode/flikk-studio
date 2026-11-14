@@ -9,6 +9,7 @@ pub mod sam2_mlx;
 use crate::Model;
 use anyhow::Result;
 use flikk_core::services::Frame;
+use flikk_os::gpu;
 
 /// The one model this build runs it on, picked for the machine: MLX on
 /// Metal (the Mac's GPU), else ONNX Runtime. There is no choice to make.
@@ -65,14 +66,17 @@ impl Encoded {
     }
 }
 
-/// Finds and follows objects in pictures.
+/// Finds and follows objects in pictures. A runner on the GPU does each
+/// frame's work in a turn of `unit` (`flikk_os::gpu`), and fails with
+/// "canceled" once that is cancelled while it waits; one on the CPU takes
+/// none.
 pub trait Segmenter: Send + Sync {
     /// `picture` (any size; stretched to the model's square) ready to
     /// segment.
-    fn encode(&self, picture: &Frame) -> Result<Encoded>;
+    fn encode(&self, picture: &Frame, unit: gpu::Unit<'_>) -> Result<Encoded>;
 
     /// The object `prompt` picks in an encoded frame, by itself.
-    fn segment(&self, frame: &Encoded, prompt: &Prompt) -> Result<Segment>;
+    fn segment(&self, frame: &Encoded, prompt: &Prompt, unit: gpu::Unit<'_>) -> Result<Segment>;
 
     /// Follow the object through frames `0..count`: each of `prompts`
     /// (frame, prompt) picks it on its frame by itself; the frames after
@@ -85,6 +89,7 @@ pub trait Segmenter: Send + Sync {
         &self,
         count: usize,
         prompts: &[(usize, Prompt)],
+        unit: gpu::Unit<'_>,
         frame: &mut dyn FnMut(usize) -> Result<Frame>,
         done: &mut dyn FnMut(usize, Segment) -> Result<()>,
     ) -> Result<()>;

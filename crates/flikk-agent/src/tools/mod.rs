@@ -3,7 +3,8 @@
 //! Reads go through `bus.view_for(author)` so the agent sees its own pending
 //! proposals. Edits go through `bus.execute` as `Author::Agent`, which puts
 //! them in the turn's change set. Anything slow (collages, frames, loudness)
-//! runs as a [`Job`] off-thread on a project snapshot.
+//! runs as a [`Job`] off-thread on a project snapshot; what a job draws on
+//! the GPU takes asked turns there ([`on_gpu`]), stopped with its turn.
 
 mod analysis;
 mod approval;
@@ -209,9 +210,39 @@ pub(crate) enum JobDone {
         /// The pool bin it goes to.
         bin: &'static str,
     },
+    /// Stopped with its turn ([`Stop`]) before it was done: not a failure.
+    Stopped,
+}
+
+impl JobDone {
+    /// The job failed with `message`, unless `stop` is set: then what
+    /// failed was stopped, as [`JobDone::Stopped`].
+    pub(crate) fn failed(stop: &AtomicBool, message: impl Into<String>) -> Self {
+        if stop.load(Ordering::Relaxed) {
+            JobDone::Stopped
+        } else {
+            JobDone::Done(Done::error(message))
+        }
+    }
 }
 
 pub(crate) type Job = Box<dyn FnOnce() -> JobDone + Send>;
+
+/// `draw` in an asked GPU turn (`flikk_os::gpu`) when the effects engine is
+/// there to draw on, so a job's frames take turns with exports, the render
+/// cache and the models; `None`, without drawing, once `stop` is set while
+/// it waits. One turn per frame: call it for each.
+pub(crate) fn on_gpu<T>(
+    services: &Services,
+    stop: &AtomicBool,
+    draw: impl FnOnce() -> T,
+) -> Option<T> {
+    let _turn = match services.fx {
+        Some(_) => Some(flikk_os::gpu::turn(flikk_os::gpu::Level::Asked, stop)?),
+        None => None,
+    };
+    Some(draw())
+}
 
 pub(crate) enum Step {
     Done(Box<Done>),

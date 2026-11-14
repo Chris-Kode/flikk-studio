@@ -13,6 +13,7 @@ use flikk_core::depth;
 use flikk_core::fx::{self, FxInstance, FxRef};
 use flikk_core::model::{Clip, Project};
 use flikk_core::{EffectId, Time, TimeRange};
+use flikk_os::gpu::Level;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -180,7 +181,7 @@ fn focus(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let cancel = ctx.stop.flag();
     let job: Job = Box::new(move || {
         let frame = TimeRange::new(source, source + Time(1));
-        if let Err(e) = service.complete(&item, frame, &|_| {}, &cancel) {
+        if let Err(e) = service.complete(&item, frame, Level::Asked, &|_| {}, &cancel) {
             return JobDone::Done(Done::error(format!("Could not make the depth map: {e}")));
         }
         let Some(map) = service.depth(&item, source) else {

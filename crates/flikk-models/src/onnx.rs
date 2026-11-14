@@ -3,11 +3,14 @@
 //! environment, so every model shares it.
 
 use anyhow::{Result, anyhow};
+use flikk_os::gpu;
+use flikk_os::sync::lock;
 use ort::environment::Environment;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Sessions kept for one model on the GPU.
 const KEPT: usize = 2;
@@ -40,11 +43,23 @@ pub fn session(model: &Path, what: &str) -> Result<Session> {
 /// of free dimensions, the last [`KEPT`] used; on the CPU in other builds,
 /// and from the first time the GPU fails to load or run it. Check that what
 /// it gives is sound: Core ML can answer NaN without an error.
+///
+/// One run at a time. A run on the GPU takes its turn there
+/// (`flikk_os::gpu`) before it waits for the one running, so a run that
+/// waits for its turn never keeps another from running; a run on the CPU
+/// takes none.
 #[derive(Default)]
 pub struct GpuSessions {
     /// Keep what Core ML compiles, for a model that takes long to compile
     /// and is worth the disk space. The other backends keep nothing.
     keep_compiled: bool,
+    /// Moved to the CPU, read without waiting for the run under way.
+    on_cpu: AtomicBool,
+    sessions: Mutex<Sessions>,
+}
+
+#[derive(Default)]
+struct Sessions {
     /// Newest last.
     gpu: Vec<(Vec<(&'static str, i64)>, Session)>,
     cpu: Option<Session>,
@@ -58,53 +73,80 @@ impl GpuSessions {
         }
     }
 
-    /// Let go of every session, as when its model was deleted.
-    pub fn forget(&mut self) {
-        self.gpu.clear();
-        self.cpu = None;
+    /// Whether its runs go to the GPU: a build with a backend, until the
+    /// GPU first fails it.
+    pub fn on_gpu(&self) -> bool {
+        GPU && !self.on_cpu.load(Ordering::Relaxed)
     }
 
-    /// `run` in a session for `sizes`, once more on the CPU if the GPU fails.
+    /// Let go of every session, as when its model was deleted.
+    pub fn forget(&self) {
+        let mut sessions = lock(&self.sessions);
+        sessions.gpu.clear();
+        sessions.cpu = None;
+        self.on_cpu.store(false, Ordering::Relaxed);
+    }
+
+    /// `run` in a session for `sizes`, once more on the CPU if the GPU
+    /// fails. On the GPU it runs in `unit`'s turn, and fails with
+    /// "canceled" once that is cancelled while it waits.
     pub fn run<T>(
-        &mut self,
+        &self,
         model: &Path,
         what: &str,
         sizes: &[(&'static str, i64)],
+        unit: gpu::Unit<'_>,
         mut run: impl FnMut(&mut Session) -> Result<T>,
     ) -> Result<T> {
-        if GPU && self.cpu.is_none() {
-            match self.on_gpu(model, sizes).and_then(&mut run) {
+        let _turn = if self.on_gpu() {
+            Some(unit.take().ok_or_else(|| anyhow!("canceled"))?)
+        } else {
+            None
+        };
+        let mut sessions = lock(&self.sessions);
+        if GPU && sessions.cpu.is_none() {
+            match self
+                .session_for(&mut sessions, model, sizes)
+                .and_then(&mut run)
+            {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     eprintln!("flikk-models: {what} moves to the CPU: {e:#}");
-                    self.gpu.clear();
+                    sessions.gpu.clear();
                     // What was compiled may be why.
                     let _ = std::fs::remove_dir_all(compiled(model, sizes));
                 }
             }
         }
-        if self.cpu.is_none() {
-            self.cpu = Some(session(model, what)?);
+        if sessions.cpu.is_none() {
+            sessions.cpu = Some(session(model, what)?);
+            self.on_cpu.store(true, Ordering::Relaxed);
         }
-        run(self.cpu.as_mut().expect("set above"))
+        run(sessions.cpu.as_mut().expect("set above"))
     }
 
-    fn on_gpu(&mut self, model: &Path, sizes: &[(&'static str, i64)]) -> Result<&mut Session> {
-        match self.gpu.iter().position(|(s, _)| s == sizes) {
+    fn session_for<'s>(
+        &self,
+        sessions: &'s mut Sessions,
+        model: &Path,
+        sizes: &[(&'static str, i64)],
+    ) -> Result<&'s mut Session> {
+        let gpu = &mut sessions.gpu;
+        match gpu.iter().position(|(s, _)| s == sizes) {
             Some(i) => {
-                let session = self.gpu.remove(i);
-                self.gpu.push(session);
+                let session = gpu.remove(i);
+                gpu.push(session);
             }
             None => {
                 let cache = self.keep_compiled.then(|| compiled(model, sizes));
                 let session = gpu_session(model, sizes, cache.as_deref())?;
-                if self.gpu.len() == KEPT {
-                    self.gpu.remove(0);
+                if gpu.len() == KEPT {
+                    gpu.remove(0);
                 }
-                self.gpu.push((sizes.to_vec(), session));
+                gpu.push((sizes.to_vec(), session));
             }
         }
-        Ok(&mut self.gpu.last_mut().expect("added above").1)
+        Ok(&mut gpu.last_mut().expect("added above").1)
     }
 }
 

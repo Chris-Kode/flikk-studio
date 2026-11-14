@@ -7,19 +7,18 @@ use crate::depth::{DepthEstimator, Disparity};
 use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
-use flikk_os::sync::lock;
+use flikk_os::gpu;
 use ort::value::TensorRef;
-use std::sync::Mutex;
 
 /// The graph, loaded on first use for each size. One picture at a time.
 pub struct DepthAnything {
-    sessions: Mutex<GpuSessions>,
+    sessions: GpuSessions,
 }
 
 impl Default for DepthAnything {
     fn default() -> Self {
         Self {
-            sessions: Mutex::new(GpuSessions::keeping_compiled()),
+            sessions: GpuSessions::keeping_compiled(),
         }
     }
 }
@@ -60,40 +59,45 @@ fn pixels(picture: &Frame, w: usize, h: usize) -> Result<Vec<f32>> {
 }
 
 impl DepthEstimator for DepthAnything {
-    fn estimate(&self, picture: &Frame) -> Result<Disparity> {
+    fn estimate(&self, picture: &Frame, unit: gpu::Unit<'_>) -> Result<Disparity> {
         let (w, h) = input_size(picture.width, picture.height);
         let input = pixels(picture, w, h)?;
         let sizes = [("batch_size", 1), ("height", h as i64), ("width", w as i64)];
-        let mut sessions = lock(&self.sessions);
         // Its file was deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
-            sessions.forget();
+            self.sessions.forget();
         }
-        sessions.run(&MODEL_FILE.locate()?, MODEL_FILE.what, &sizes, |session| {
-            let input = TensorRef::from_array_view(([1, 3, h, w], &input[..]))
-                .map_err(|e| anyhow!("{e}"))?;
-            let outputs = session
-                .run(ort::inputs!["pixel_values" => input])
-                .map_err(|e| anyhow!("depth model failed: {e}"))?;
-            let (shape, values) = outputs["predicted_depth"]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| anyhow!("{e}"))?;
-            let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-            let (oh, ow) = match dims.as_slice() {
-                [_, oh, ow] | [_, _, oh, ow] => (*oh, *ow),
-                _ => bail!("depth model gave a map of unexpected shape {dims:?}"),
-            };
-            if values.len() != ow * oh {
-                bail!("depth model gave a map of unexpected size");
-            }
-            if values.iter().any(|v| !v.is_finite()) {
-                bail!("depth model gave a map that is not numbers");
-            }
-            Ok(Disparity {
-                width: ow,
-                height: oh,
-                values: values.to_vec(),
+        let model = MODEL_FILE.locate()?;
+        self.sessions
+            .run(&model, MODEL_FILE.what, &sizes, unit, |session| {
+                let input = TensorRef::from_array_view(([1, 3, h, w], &input[..]))
+                    .map_err(|e| anyhow!("{e}"))?;
+                let outputs = session
+                    .run(ort::inputs!["pixel_values" => input])
+                    .map_err(|e| anyhow!("depth model failed: {e}"))?;
+                let (shape, values) = outputs["predicted_depth"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| anyhow!("{e}"))?;
+                let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+                let (oh, ow) = match dims.as_slice() {
+                    [_, oh, ow] | [_, _, oh, ow] => (*oh, *ow),
+                    _ => bail!("depth model gave a map of unexpected shape {dims:?}"),
+                };
+                if values.len() != ow * oh {
+                    bail!("depth model gave a map of unexpected size");
+                }
+                if values.iter().any(|v| !v.is_finite()) {
+                    bail!("depth model gave a map that is not numbers");
+                }
+                Ok(Disparity {
+                    width: ow,
+                    height: oh,
+                    values: values.to_vec(),
+                })
             })
-        })
+    }
+
+    fn on_gpu(&self) -> bool {
+        self.sessions.on_gpu()
     }
 }

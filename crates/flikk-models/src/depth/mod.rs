@@ -7,6 +7,7 @@ pub mod depth_anything;
 use crate::Model;
 use anyhow::Result;
 use flikk_core::services::Frame;
+use flikk_os::gpu;
 
 /// The models that can do it, the default first.
 pub const MODELS: &[&Model] = &[&depth_anything::MODEL];
@@ -24,7 +25,12 @@ pub struct Disparity {
 pub trait DepthEstimator: Send + Sync {
     /// The relative depth of `picture` (any size; the model sees it at its
     /// own, smaller one, keeping its shape).
-    fn estimate(&self, picture: &Frame) -> Result<Disparity>;
+    /// On the GPU it runs in `unit`'s turn (`flikk_os::gpu`), and fails
+    /// with "canceled" once that is cancelled while it waits.
+    fn estimate(&self, picture: &Frame, unit: gpu::Unit<'_>) -> Result<Disparity>;
+
+    /// Whether [`Self::estimate`] runs on the GPU now, and takes turns.
+    fn on_gpu(&self) -> bool;
 }
 
 /// The runner of `model`, one of [`MODELS`].

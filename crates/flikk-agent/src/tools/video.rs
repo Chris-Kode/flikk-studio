@@ -74,7 +74,9 @@ impl FrameGrab {
 }
 
 /// Write the program at `at` as a PNG at `path`: the sequence's picture,
-/// at most [`FRAME_WIDTH`] wide, as the viewer shows it.
+/// at most [`FRAME_WIDTH`] wide, as the viewer shows it. Composed in an
+/// asked GPU turn, waited for whatever: a grab is a frame or two that a
+/// generation about to start needs.
 pub(crate) fn grab_frame(
     project: &Project,
     services: &Services,
@@ -85,7 +87,11 @@ pub(crate) fn grab_frame(
     let width = settings.width.clamp(2, FRAME_WIDTH);
     let size = compose::size_for_width(project, width);
     let mut stills = Stills::new(services.media.clone(), width);
-    let frame = compose::program(project, at, size, services, &mut stills);
+    let never = AtomicBool::new(false);
+    let frame = super::on_gpu(services, &never, || {
+        compose::program(project, at, size, services, &mut stills)
+    })
+    .expect("never stopped");
     let fail = |e: String| format!("could not grab the frame at {:.2} s: {e}", at.as_secs_f64());
     super::view::write_png(path, &frame).map_err(|e| fail(e.to_string()))
 }

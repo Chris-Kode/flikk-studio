@@ -11,7 +11,7 @@
 
 use super::fx::{fx_asset, kind_name, preview_values};
 use super::view::{image_content, save_png};
-use super::{Done, Job, JobDone, Rebase, Step, ToolCtx};
+use super::{Done, Job, JobDone, Rebase, Step, ToolCtx, on_gpu};
 use crate::args::*;
 use crate::bridge::{Content, ToolResult};
 use flikk_core::command::Command;
@@ -25,6 +25,11 @@ use flikk_core::services::{Frame, FxCall, Services};
 use flikk_core::{ClipId, Time};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+/// Why a picture was not made when `stop` was set while it waited for
+/// the GPU; the job then reports itself stopped ([`JobDone::failed`]).
+const STOPPED: &str = "stopped";
 
 const TILE_WIDTH: u32 = 384;
 const SCOPE_WIDTH: u32 = 960;
@@ -91,11 +96,14 @@ fn layer_source(project: &Project, clip: &Clip, t: Time, effects: Option<usize>)
     })
 }
 
+/// `source` at `size`, what is drawn on the GPU in an asked turn there;
+/// fails with [`STOPPED`] once `stop` is set while it waits.
 fn render_source(
     services: &Services,
     source: &Source,
     canvas: (u32, u32),
     size: (u32, u32),
+    stop: &AtomicBool,
 ) -> Result<Frame, String> {
     let frame = match source {
         Source::Media { item, at } => services
@@ -118,7 +126,7 @@ fn render_source(
                 duration: *duration,
                 canvas,
             };
-            generate(services, &call, size)?
+            on_gpu(services, stop, || generate(services, &call, size)).ok_or(STOPPED)??
         }
         Source::Layer {
             project,
@@ -128,8 +136,11 @@ fn render_source(
         } => {
             let (_, c) = project.timeline.clip(*clip).ok_or("the clip is gone")?;
             let mut stills = Stills::new(services.media.clone(), size.0);
-            compose::clip_picture(project, c, *at, size, services, &mut stills, *effects)
-                .ok_or("the clip has no picture (missing media or engine)")?
+            on_gpu(services, stop, || {
+                compose::clip_picture(project, c, *at, size, services, &mut stills, *effects)
+            })
+            .ok_or(STOPPED)?
+            .ok_or("the clip has no picture (missing media or engine)")?
         }
         Source::Card(which) => test_card(*which, size),
     };
@@ -282,33 +293,38 @@ pub fn preview_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         (TILE_WIDTH as u64 * canvas.1 as u64 / canvas.0 as u64).max(8) as u32,
     );
     let services = ctx.services.clone();
-    let job: Job = Box::new(
-        move || match render_preview(&services, &plan, n, canvas, size) {
-            Ok(done) => JobDone::Done(done),
-            Err(e) => JobDone::Done(Done::error(format!("Preview failed: {e}"))),
-        },
-    );
+    let stop = ctx.stop.flag();
+    let job: Job =
+        Box::new(
+            move || match render_preview(&services, &plan, n, canvas, size, &stop) {
+                Ok(done) => JobDone::Done(done),
+                Err(e) => JobDone::failed(&stop, format!("Preview failed: {e}")),
+            },
+        );
     Ok(Step::Job(job))
 }
 
+/// The preview of `plan`, `n` frames each in an asked GPU turn; fails with
+/// [`STOPPED`] once `stop` is set while one waits.
 fn render_preview(
     services: &Services,
     plan: &Plan,
     n: usize,
     canvas: (u32, u32),
     size: (u32, u32),
+    stop: &AtomicBool,
 ) -> Result<Done, String> {
     let from = plan
         .inputs
         .0
         .as_ref()
-        .map(|s| render_source(services, s, canvas, size))
+        .map(|s| render_source(services, s, canvas, size, stop))
         .transpose()?;
     let to = plan
         .inputs
         .1
         .as_ref()
-        .map(|s| render_source(services, s, canvas, size))
+        .map(|s| render_source(services, s, canvas, size, stop))
         .transpose()?;
     let asset = &plan.asset;
     let mut tiles = Vec::with_capacity(n);
@@ -329,14 +345,14 @@ fn render_preview(
             duration: plan.duration,
             canvas,
         };
-        let frame = match asset.kind {
-            FxKind::Generator => generate(services, &call, size)?,
+        let draw = || match asset.kind {
+            FxKind::Generator => generate(services, &call, size),
             FxKind::Effect => services
                 .fx
                 .as_ref()
                 .ok_or_else(|| unavailable(FxLanguage::Glsl))?
                 .apply(from.as_ref().ok_or("no input")?, &[call])
-                .map_err(|e| e.0)?,
+                .map_err(|e| e.0),
             FxKind::Transition => services
                 .fx
                 .as_ref()
@@ -346,8 +362,9 @@ fn render_preview(
                     to.as_ref().ok_or("no input")?,
                     &call,
                 )
-                .map_err(|e| e.0)?,
+                .map_err(|e| e.0),
         };
+        let frame = on_gpu(services, stop, draw).ok_or(STOPPED)??;
         let label = match asset.kind {
             FxKind::Transition => format!("p={:.2}", u),
             _ => format!("{time:.2}s"),
@@ -451,8 +468,9 @@ pub fn get_scopes(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         SCOPE_WIDTH,
         (SCOPE_WIDTH as u64 * canvas.1 as u64 / canvas.0.max(1) as u64) as u32,
     );
+    let stop = ctx.stop.flag();
     let job: Job = Box::new(
-        move || match render_source(&services, &source, canvas, size) {
+        move || match render_source(&services, &source, canvas, size, &stop) {
             Ok(frame) => {
                 let mut v = readings_json(&scopes::measure(&frame));
                 v["clip"] = json!(id.to_string());
@@ -462,7 +480,7 @@ pub fn get_scopes(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 ));
                 JobDone::Done(Done::json(format!("scopes {id} at {t}"), &v))
             }
-            Err(e) => JobDone::Done(Done::error(format!("Could not read the frame: {e}"))),
+            Err(e) => JobDone::failed(&stop, format!("Could not read the frame: {e}")),
         },
     );
     Ok(Step::Job(job))
@@ -501,14 +519,16 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let canvas = (p.timeline.settings.width, p.timeline.settings.height);
     let size = (480, (480 * canvas.1 as u64 / canvas.0.max(1) as u64) as u32);
     let since = ctx.version();
+    let stop = ctx.stop.flag();
     let job: Job = Box::new(move || {
-        let render = |s: &Source| render_source(&services, s, canvas, size);
+        let render = |s: &Source| render_source(&services, s, canvas, size, &stop);
         let reference = match render(&reference_src) {
             Ok(r) => r,
             Err(e) => {
-                return JobDone::Done(Done::error(format!(
-                    "Could not read the reference {reference_id}: {e}"
-                )));
+                return JobDone::failed(
+                    &stop,
+                    format!("Could not read the reference {reference_id}: {e}"),
+                );
             }
         };
         let median = |f: &Frame, g: &Grade| scopes::measure(&grade::graded(f, &[g])).luma.median;
@@ -528,6 +548,9 @@ pub fn match_grade(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                         clips: vec![*id],
                         grade,
                     });
+                }
+                Err(_) if stop.load(std::sync::atomic::Ordering::Relaxed) => {
+                    return JobDone::Stopped;
                 }
                 Err(e) => excerpts.push(format!("{id}: {e}")),
             }

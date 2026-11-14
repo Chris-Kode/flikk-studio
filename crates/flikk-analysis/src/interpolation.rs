@@ -17,6 +17,11 @@
 //! that fails is not asked for again for
 //! [`RETRY_AFTER`](flikk_os::backoff::RETRY_AFTER), or until the model
 //! is downloaded when it was missing; renders try it again all the same.
+//!
+//! On the GPU, each frame takes its turn there (`flikk_os::gpu`): the
+//! viewer's are for the picture on screen, so they never wait (watched);
+//! a render's is made in the turn of the frame it composes, and asked for
+//! on its own.
 
 use crate::engine::{Claims, ModelFailures};
 use flikk_core::disk_cache::{DiskCache, GB, Key};
@@ -25,6 +30,7 @@ use flikk_core::services::{Between, Frame, InterpolationService};
 use flikk_core::subject::Fnv;
 use flikk_models::Task as ModelTask;
 use flikk_models::interpolation::Interpolator;
+use flikk_os::gpu::{Level, Unit};
 use flikk_os::sync::{lock, panic_message, wait};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -244,10 +250,18 @@ impl Shared {
         lock(&self.failed).record(key, why, downloaded);
     }
 
-    fn make(&self, job: &Job) -> Option<Frame> {
+    /// The frame of `job`, made by `runner` in `unit`'s turn on the GPU.
+    fn make(
+        &self,
+        job: &Job,
+        runner: Result<Arc<dyn Interpolator>, String>,
+        unit: Unit<'_>,
+    ) -> Option<Frame> {
         let made = catch_unwind(AssertUnwindSafe(|| {
-            self.runner()
-                .and_then(|r| r.between(&job.a, &job.b, job.at).map_err(|e| e.to_string()))
+            runner.and_then(|r| {
+                r.between(&job.a, &job.b, job.at, unit)
+                    .map_err(|e| e.to_string())
+            })
         }))
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
@@ -274,10 +288,19 @@ impl Shared {
         self.making.held(&key)
     }
 
-    /// The frame of `job`, made here unless it is made already. While
-    /// another thread makes it, waits for that with `wait` and takes its
-    /// frame (making it here when that failed), and leaves it otherwise.
-    fn claim(&self, job: &Job, wait: bool) -> Option<Frame> {
+    /// The frame of `job`, made here (in `unit`'s turn on the GPU) unless
+    /// it is made already. While another thread makes it, waits for that
+    /// with `wait` and takes its frame (making it here when that failed),
+    /// and leaves it otherwise.
+    fn claim(&self, job: &Job, wait: bool, unit: Unit<'_>) -> Option<Frame> {
+        let runner = self.runner();
+        // The turn before the claim: a thread that claimed a frame never
+        // waits for its turn, so the viewer's frames never wait behind a
+        // render's. The model's own turn is this one.
+        let _turn = match &runner {
+            Ok(runner) if runner.on_gpu() => Some(unit.take()?),
+            _ => None,
+        };
         let claimed = self
             .making
             .claim(&job.key, || None, || (!wait).then_some(()), None);
@@ -288,7 +311,7 @@ impl Shared {
         if let Some(frame) = self.find(job.key) {
             return Some(frame);
         }
-        self.make(job)
+        self.make(job, runner, unit)
     }
 
     /// Start the worker unless it is running; whether it is.
@@ -325,7 +348,7 @@ impl Shared {
             };
             // `make` catches the model's panics; this, the disk's. A
             // render making this frame now keeps it for the viewer.
-            let done = catch_unwind(AssertUnwindSafe(|| self.claim(&job, false)));
+            let done = catch_unwind(AssertUnwindSafe(|| self.claim(&job, false, Unit::Watched)));
             if let Err(payload) = done {
                 self.fail(job.key, &panic_message("optical flow", payload.as_ref()));
             }
@@ -359,9 +382,14 @@ impl InterpolationService for LocalInterpolation {
             b: request.b.1.clone(),
             at: request.at,
         };
-        // Renders try again whatever failed before.
+        // Renders try again whatever failed before. A render composes the
+        // frame in a turn of its own, which this is then.
         if wait {
-            return self.shared.claim(&job, true);
+            let unit = Unit::Unlisted {
+                level: Level::Asked,
+                cancel: &NEVER,
+            };
+            return self.shared.claim(&job, true, unit);
         }
         if self.shared.failed(key) || self.shared.being_made(key) {
             return None;
@@ -387,6 +415,9 @@ impl InterpolationService for LocalInterpolation {
         self.shared.version.load(Ordering::SeqCst)
     }
 }
+
+/// The cancel of a render's frames, which wait for their turn whatever.
+static NEVER: AtomicBool = AtomicBool::new(false);
 
 /// Marks the worker stopped when it ends (it only does by a panic).
 struct Working<'a>(&'a Shared);

@@ -14,6 +14,7 @@ use crate::segmentation::plan::{self, MEMORY_FRAMES, POINTERS};
 use crate::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::gpu;
 use flikk_os::sync::lock;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -107,13 +108,14 @@ impl Sam2 {
     }
 }
 
+// On the CPU: its work takes no GPU turns.
 impl Segmenter for Sam2 {
-    fn encode(&self, picture: &Frame) -> Result<Encoded> {
+    fn encode(&self, picture: &Frame, _unit: gpu::Unit<'_>) -> Result<Encoded> {
         let mut graphs = self.graphs(false)?;
         encode(graphs.as_mut().expect("loaded"), picture)
     }
 
-    fn segment(&self, frame: &Encoded, prompt: &Prompt) -> Result<Segment> {
+    fn segment(&self, frame: &Encoded, prompt: &Prompt, _unit: gpu::Unit<'_>) -> Result<Segment> {
         let mut graphs = self.graphs(false)?;
         let g = graphs.as_mut().expect("loaded");
         let cond = &frame.of(super::ID)?[FEATS2_NO_MEMORY];
@@ -124,6 +126,7 @@ impl Segmenter for Sam2 {
         &self,
         count: usize,
         prompts: &[(usize, Prompt)],
+        _unit: gpu::Unit<'_>,
         frame: &mut dyn FnMut(usize) -> Result<Frame>,
         done: &mut dyn FnMut(usize, Segment) -> Result<()>,
     ) -> Result<()> {
