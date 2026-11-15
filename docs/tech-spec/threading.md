@@ -1,18 +1,24 @@
 # Threading
 
-GPUI owns the main thread. `EditorState` (the bus, selection, chat) lives
-there. Anything slow (probing, decoding, proxies, collages, analysis,
-rendering, the agent subprocess) runs on background threads or
-`cx.background_executor()` and reports back through `Entity::update`. The
-bus is not `Sync`, by design: agent tool calls arrive over a channel and are
-served in `AgentLink::pump`, which `EditorState` calls every 33 ms. Slow
-tools (views, previews, FFmpeg work) return a job that runs off-thread on a
-`Project` snapshot; its proposals are applied back on the UI thread.
+GPUI owns the main thread. `EditorState` (the bus, selection, chat) is on
+that thread. Slow work runs on background threads or on
+`cx.background_executor()`. Examples are probes, decodes, proxies,
+collages, analysis, renders and the agent subprocess. This work sends its
+results back through `Entity::update`.
 
-Heavy background work that must not pile up goes through
-`flikk_core::jobs::JobQueue`: FIFO, at most `limit` jobs at once on threads of
-its own, a key already queued or running returns that job, and a job that
-panics fails without stopping the queue.
+The bus is not `Sync`, by design. Agent tool calls come through a channel.
+`AgentLink::pump` answers them, and `EditorState` calls it every 33 ms.
+Slow tools (views, previews, FFmpeg work) return a job. The job runs on a
+different thread, on a `Project` snapshot. The UI thread then applies its
+proposals.
 
-Work on the GPU takes turns besides, a frame or an inference each, whatever
-thread it runs on: see [GPU turns and the Jobs list](gpu-turns.md).
+Heavy background work must not accumulate. This work goes through
+`flikk_core::jobs::JobQueue`:
+
+- The queue is FIFO.
+- A maximum of `limit` jobs run at the same time, on threads of the queue.
+- If a key is already in the queue or runs, the queue returns that job.
+- If a job panics, the job fails, but the queue does not stop.
+
+Work on the GPU also takes turns, one frame or one inference each. This is
+true on all threads. Refer to [GPU turns and the Jobs list](gpu-turns.md).

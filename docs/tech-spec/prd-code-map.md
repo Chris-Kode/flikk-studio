@@ -6,7 +6,7 @@
 | M2 inspector, M4 proxies | `flikk-media`, `ui/media_pool*` |
 | M3 analysis | `flikk-analysis`, `flikk-models` |
 | E1, E2 timeline and tools | `ui/timeline*`, `flikk-core/src/edit/` |
-| E3 transcript editing | `ui/transcript*`, `flikk-core/src/query.rs`, `cuts.rs`; fixing words: `flikk-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
+| E3 transcript editing | `ui/transcript*`, `flikk-core/src/query.rs`, `cuts.rs`. Word fixes: `flikk-core/src/respeak*`, `state/respeak.rs`, `tools/respeak.rs` |
 | E4 silences | `AnalysisService::silences`, `ui/timeline/silence.rs` |
 | E5 transform, keyframes | `model::Transform`, `mask.rs`, `ui/inspector*`, `ui/viewer/gizmo.rs`, `ui/viewer/masks.rs` |
 | Subject masks | `flikk-core/src/subject.rs`, `mask.rs`, `compose.rs`, `flikk-models/src/segmentation/`, `flikk-analysis/src/subjects*`, `ui/viewer/masks.rs`, `ui/inspector/masks.rs`, `tools/masks.rs` |
@@ -19,7 +19,7 @@
 | K1 grade | `flikk-core/src/grade.rs`, `scopes.rs`, `ui/inspector/color*`, `ui/scopes.rs` |
 | A1–A3 mixer, loudness, ducking | `ui/mixer*`, `ui/inspector/audio.rs`, `audiofx.rs`, `AnalysisService::loudness`, render graph |
 | Fit music to length | `flikk-core/src/music_fit*`, `Command::FitMusic`, `state/music_fit.rs`, `ui/timeline/menu.rs`, `tools/music.rs` |
-| D1 render | `flikk-deliver`, `ui/deliver.rs`; hardware encoders `flikk-deliver/src/hw.rs` |
+| D1 render | `flikk-deliver`, `ui/deliver.rs`. Hardware encoders: `flikk-deliver/src/hw.rs` |
 | Render cache | `flikk/src/render_cache*`, `ui/viewer/player.rs`, `ui/timeline/paint.rs` (render bar), `ui/editor_settings/storage.rs`, `flikk-store/src/render_cache.rs` |
 | AG1–AG10 | `flikk-agent`, `agent_link*`, `ui/chat*`, `ui/settings.rs` |
 | Online providers | `flikk-cloud`, `flikk-core/src/cloud/`, `pool.rs`, `state/cloud.rs`, `ui/editor_settings/integrations.rs`, `ui/media_pool/generate.rs`, `tools/generate.rs` |

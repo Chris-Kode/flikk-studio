@@ -1,57 +1,84 @@
 # Deliver
 
-* **Render graph** (`flikk-deliver/src/graph.rs`): one FFmpeg `filter_complex`
-  per job, sources opened inside it. Cuts, transforms, keyframes as FFmpeg
-  expressions matching the viewer's curves, the grade as a `lut3d`, captions
-  and titles burned in with ASS (libass; the viewer letters them with the
-  same timing code in `captions/motion.rs`, and so does the render when
-  FFmpeg has no `ass` filter, by piping the frames through the compositor
-  with `Letterer`), gain, fades, equal-power
-  crossfades, `atempo` retiming, ducking with `sidechaincompress`, audio
-  effects, and two-pass `loudnorm`. Under a speed ramp the audio runs
-  through `atempo` stages (enough that each stays at 0.5 or more) whose
-  tempo an `asendcmd` script in the work folder moves every 50 ms of
-  timeline; the viewer's stretch reads its grains where the ramp has the
-  source (`Stretch::mapped`). Muted ramps leave the clip out.
-* **HDR** sources go through the same tone mapping as in the viewer ([Media and playback](media-and-playback.md)),
-  after the segment's trim and before its grade; composited ranges get it
-  from the media engine. Video outputs are tagged BT.709.
-* **Composited ranges** (`composed.rs`): ranges that need the compositor
-  (effects, generators, transitions, blend modes, crop, flip, stretch/skew/
-  anchor, corner pins, masks, retimed or ramped media;
-  `compose::needs_compositor`) are drawn by `compose::program` from the
-  original media and piped into the graph as raw RGBA, which keeps
-  captions and audio. Optical flow frames are made as each frame is
-  composed (`speed::Waiting`), never blended in their place. Subject masks in
-  the range are found (and tracked) first, and person masks' frames in it
-  matted, `SubjectService::complete` and `complete_person` taking half the
-  progress; a subject that cannot be found (or people without their model)
-  fails the render. A render of a person mask matched the viewer's frame
-  to a mean difference of 1.8/255 (H.264 included). Then every depth map
-  the range's depth effects and masks read (the frames their clips show
-  there, transitions included, and the frames smoothing reads) is made (`DepthService::complete`, half of what
-  progress is left), so frames compose as the viewer shows them; a map
-  that cannot be made fails the render.
-* **Queue** (`queue.rs`): jobs run one after another with progress from
-  `-progress pipe:1`, can be cancelled and never overwrite a file.
-* **Hardware encoding** (`hw.rs`): H.264 and HEVC go to VideoToolbox
-  (macOS), NVENC, Quick Sync, VA-API (Linux) or AMF (Windows) when the
-  installed FFmpeg lists the encoder (`ffmpeg -encoders`) and a five-frame
-  trial encode with the render's own arguments succeeds. The probe runs
-  once per session, the trials in parallel (about 0.1 s here), off the UI
-  thread. The preset's CRF maps to each encoder's rate control: NVENC
-  `-rc vbr -cq`, Quick Sync `-global_quality`, VA-API and AMF constant QP,
-  one step below the CRF; VideoToolbox an average bitrate from the CRF,
-  size and rate (its constant quality is Apple silicon only). Frames are
-  converted to 4:2:0 by swscale as for libx264, so the matrix and colour
-  tags match; VA-API then `hwupload`s at the end of the graph. Composited
-  ranges pipe RGBA into the same graph, so they encode on hardware too.
-  The Deliver workspace's Encoder choice (Auto, Hardware, Software) is
-  saved per user (`Store::render_encoder`); Auto falls back to libx264 /
-  libx265 when the hardware encode fails, Hardware fails instead. The
-  agent's `queue_render` takes an optional `encoder`, else the user's
-  choice.
-* **Presets:** 1080p60, 1080p30 and 4K30 H.264, 4K30 HEVC (x265 CRF 22),
-  ProRes 422 HQ, WAV and Custom, sized by the short side so they keep the sequence's shape
-  ("1080p" is 1080 × 1920 for 9:16).
-* **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
+- **Render graph** (`flikk-deliver/src/graph.rs`): Each job has one FFmpeg
+  `filter_complex`, and the sources open inside it. The graph contains
+  these items:
+  - Cuts and transforms.
+  - Keyframes as FFmpeg expressions that match the curves of the viewer.
+  - The grade as a `lut3d`.
+  - Captions and titles, burned in with ASS (libass). The viewer letters
+    them with the same timing code in `captions/motion.rs`. The render
+    also uses this code when FFmpeg has no `ass` filter. It then sends the
+    frames through the compositor with `Letterer`.
+  - Gain, fades, equal-power crossfades and `atempo` retiming.
+  - Ducking with `sidechaincompress`, audio effects and two-pass
+    `loudnorm`.
+
+  Under a speed ramp, the audio goes through `atempo` stages. There are
+  sufficient stages to keep each stage at 0.5 or more. An `asendcmd`
+  script in the work folder changes their tempo every 50 ms of timeline.
+  The stretch of the viewer reads its grains where the ramp has the source
+  (`Stretch::mapped`). If a ramp is muted, the graph does not include the
+  clip.
+- **HDR** sources get the same tone mapping as in the viewer
+  ([Media and playback](media-and-playback.md)). It occurs after the trim
+  of the segment and before its grade. Composited ranges get it from the
+  media engine. The code tags video outputs as BT.709.
+- **Composited ranges** (`composed.rs`) are ranges that need the
+  compositor (`compose::needs_compositor`).
+  - These ranges have effects, generators, transitions, blend modes, crop,
+    flip, stretch/skew/anchor, corner pins, masks, or retimed or ramped
+    media.
+  - `compose::program` draws them from the original media. They go into
+    the graph through a pipe as raw RGBA, so the captions and audio stay.
+  - The code makes optical flow frames when it composes each frame
+    (`speed::Waiting`). It never uses blended frames in their place.
+  - First, the code finds (and tracks) the subject masks in the range. It
+    also mattes the frames of the person masks in the range.
+    `SubjectService::complete` and `complete_person` use half of the
+    progress.
+  - If the code cannot find a subject, the render fails. This is also true
+    for people without their model.
+  - A render of a person mask had a mean difference of 1.8/255 from the
+    frame of the viewer (H.264 included).
+  - Then the code makes each depth map that the depth effects and masks of
+    the range read (`DepthService::complete`). These are the frames that
+    their clips show there, with transitions, and the frames that
+    smoothing reads. This step uses half of the remaining progress. Thus
+    the frames compose as the viewer shows them. If the code cannot make a
+    map, the render fails.
+- **Queue** (`queue.rs`): Jobs run one after the other. Their progress
+  comes from `-progress pipe:1`. The user can cancel a job. Jobs never
+  overwrite a file.
+- **Hardware encoding** (`hw.rs`): H.264 and HEVC go to a hardware
+  encoder. The encoders are VideoToolbox (macOS), NVENC, Quick Sync,
+  VA-API (Linux) and AMF (Windows).
+  - The code uses an encoder when two conditions are true. The installed
+    FFmpeg lists the encoder (`ffmpeg -encoders`). A trial encode of five
+    frames with the arguments of the render is successful.
+  - The probe runs one time in each session, off the UI thread. The trials
+    run in parallel (approximately 0.1 s here).
+  - The CRF of the preset maps to the rate control of each encoder:
+
+    | Encoder | Rate control |
+    | --- | --- |
+    | NVENC | `-rc vbr -cq` |
+    | Quick Sync | `-global_quality` |
+    | VA-API and AMF | Constant QP, one step below the CRF |
+    | VideoToolbox | An average bitrate from the CRF, size and rate. Its constant quality is only for Apple silicon. |
+
+  - swscale changes the frames to 4:2:0 as for libx264. Thus the matrix
+    and colour tags match. VA-API then does `hwupload` at the end of the
+    graph.
+  - Composited ranges send RGBA through a pipe into the same graph. Thus
+    they also encode on hardware.
+  - The Deliver workspace has an Encoder choice (Auto, Hardware,
+    Software). The store keeps it for each user (`Store::render_encoder`).
+  - If the hardware encode fails, Auto uses libx264 / libx265. Hardware
+    fails instead.
+  - For the agent, `queue_render` takes an optional `encoder`. If there
+    is no `encoder`, it uses the choice of the user.
+- **Presets:** 1080p60, 1080p30 and 4K30 H.264, 4K30 HEVC (x265 CRF 22),
+  ProRes 422 HQ, WAV and Custom. The short side sets their size, so they
+  keep the shape of the sequence ("1080p" is 1080 × 1920 for 9:16).
+- **Exports:** SRT, ASS, OTIO, FCPXML and PNG frames.
