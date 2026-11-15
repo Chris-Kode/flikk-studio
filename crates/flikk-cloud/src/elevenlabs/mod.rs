@@ -1,7 +1,7 @@
 //! ElevenLabs (api.elevenlabs.io): transcription with Scribe, music, sound
 //! effects, voiceovers, and the voices that read them: listed, searched in
 //! the shared library, designed, cloned. Every call sends the key as
-//! `xi-api-key`.
+//! `xi-api-key`. See `docs/providers/elevenlabs.md`.
 
 mod design;
 mod music;

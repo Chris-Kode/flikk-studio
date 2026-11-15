@@ -10,7 +10,7 @@
 //! effects: Pika SFX, Sonilo, ElevenLabs. Every call sends the key as
 //! `X-API-Key`. All are made as media jobs ([`jobs`]); what goes in is
 //! [`video`]'s, [`image`]'s, [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to Pika first
-//! ([`files`]). See `docs/tech-spec/pika.md`.
+//! ([`files`]). See `docs/providers/pika.md`.
 
 mod audio;
 mod files;

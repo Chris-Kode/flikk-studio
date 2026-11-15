@@ -86,7 +86,7 @@ Anything else a reviewer needs: details, trade-offs, follow-ups.
 ### 6. Documentation follows ASD-STE100
 
 Write all documentation in ASD-STE100 Simplified Technical English: the
-files in [docs/tech-spec](docs/tech-spec/README.md), README files and other
+files in [docs/providers](docs/providers/README.md), README files and other
 Markdown documents. This rule does not apply to interface copy
 ([DESIGN.md](DESIGN.md)) or to commit messages (rule 5).
 
@@ -110,8 +110,8 @@ Markdown documents. This rule does not apply to interface copy
   Use a table to compare items.
 - **Contractions:** Do not use contractions.
 
-Each new file in `docs/tech-spec` must also obey the rules in its
-[README](docs/tech-spec/README.md).
+Each new file in `docs/providers` must also obey the rules in its
+[README](docs/providers/README.md).
 
 ## Commands
 
