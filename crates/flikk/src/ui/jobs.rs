@@ -1,4 +1,4 @@
-//! The title bar's GPU button and the jobs it drops down: what holds or
+//! The title bar's Jobs button and the jobs it drops down: what holds or
 //! waits for a GPU turn ([`flikk_os::gpu`]), running first, each with its
 //! progress when known. The app reads the list again every
 //! [`POLL`] and passes it in.
@@ -16,7 +16,7 @@ use std::time::Duration;
 /// row is never more than a beat behind its job.
 pub const POLL: Duration = Duration::from_millis(250);
 
-/// The GPU button, with a dot while a job runs.
+/// The Jobs button, with a dot while a job runs.
 pub fn button(
     jobs: &[Listed],
     open: bool,
@@ -24,15 +24,15 @@ pub fn button(
 ) -> Popover {
     let running = jobs.iter().any(|job| job.state == State::Running);
     let jobs = jobs.to_vec();
-    Popover::new("gpu-jobs")
+    Popover::new("jobs")
         .anchor(Anchor::TopRight)
         .open(open)
         .on_open_change(on_open_change)
         .trigger(
-            Button::new("gpu-jobs-button")
+            Button::new("jobs-button")
                 .ghost()
-                .icon(IconName::Cpu)
-                .tooltip("GPU jobs")
+                .icon(IconName::Activity)
+                .tooltip("Jobs")
                 .relative()
                 .when(running, |b| b.child(Indicator::Dot(Tone::Neutral))),
         )
@@ -52,7 +52,7 @@ fn list(jobs: Vec<Listed>) -> Div {
                 .border_color(t::LN)
                 .text_size(px(11.))
                 .font_weight(FontWeight::MEDIUM)
-                .child("GPU jobs")
+                .child("Jobs")
                 .when(count > 0, |el| {
                     el.child(
                         div()
@@ -63,7 +63,7 @@ fn list(jobs: Vec<Listed>) -> Div {
                 }),
         )
         .when(count == 0, |el| {
-            el.child(EmptyState::new(IconName::Cpu, "No GPU jobs").compact())
+            el.child(EmptyState::new(IconName::Activity, "No jobs").compact())
         })
         .when(count > 0, |el| {
             el.child(v_flex().py(px(4.)).children(jobs.into_iter().map(row)))
@@ -87,7 +87,7 @@ fn row(job: Listed) -> Stateful<Div> {
             }
         });
     h_flex()
-        .id(("gpu-job", job.id))
+        .id(("job", job.id))
         .gap(px(8.))
         .h(px(26.))
         .px(px(12.))
