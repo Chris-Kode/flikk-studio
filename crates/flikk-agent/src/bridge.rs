@@ -1,5 +1,5 @@
 //! Local IPC between `flikk-mcp` and the editor: newline-delimited JSON over
-//! `127.0.0.1`, opened with a per-session token (`docs/tech-spec/key-decisions.md`).
+//! `127.0.0.1`, opened with a per-session token.
 //!
 //! `flikk-mcp` sends [`BridgeRequest`]s; the editor answers each with a
 //! [`BridgeResponse`] carrying the same `id`. Answers may come out of order:

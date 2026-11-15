@@ -7,7 +7,7 @@
 //! agent authors, parks them in a pending [`changeset::ChangeSet`].
 //!
 //! Other crates depend on this one and on nothing else in the workspace, so the
-//! types here are the contract between them. See `docs/tech-spec/`.
+//! types here are the contract between them.
 
 pub mod agent;
 pub mod analysis;

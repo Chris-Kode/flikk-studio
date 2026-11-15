@@ -10,7 +10,7 @@
 //! sends the key as `Authorization: Key <key>`. All are made on fal's
 //! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s,
 //! [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to fal's storage
-//! first ([`files`]).
+//! first ([`files`]). See `docs/providers/falai.md`.
 
 mod audio;
 mod files;

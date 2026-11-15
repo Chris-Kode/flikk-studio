@@ -5,8 +5,7 @@ use flikk_core::time::{FLICKS_PER_SECOND, Time};
 
 /// The model as ONNX, with its Whisper-style features built in (16 kHz
 /// samples and token ids in, a class per token out), weights quantized to
-/// 4 bits. Qwen publishes no ONNX export; how this one is made and hosted
-/// is in `docs/tech-spec/analysis-and-models.md`.
+/// 4 bits. Qwen publishes no ONNX export, so this one is our own.
 pub const FILE: ModelFile = ModelFile {
     name: "qwen3-forced-aligner-0.6b-q4.onnx",
     url: "https://huggingface.co/Chris-Kode/qwen3-forced-aligner-0.6b-onnx/resolve/c1386c6a094f575f2067cf82632c30238c1b1f9d/qwen3-forced-aligner-0.6b-q4.onnx",
