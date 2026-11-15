@@ -1,10 +1,12 @@
-//! Voiceover: a script read by one of the provider's voices, landing in the
-//! Voiceover Generated bin. Delivery is written into the script: bracketed
-//! tags and pauses from the menus go in at the cursor, ellipses and capitals
-//! by hand. Regenerating a voiceover opens this form with its script. The
-//! user's own voices come first; "More voices" opens the Voices dialog to
-//! find, design or clone another, which this form then reads with. A voice
-//! in the library starts on the stability and similarity it last read with.
+//! Voiceover: a script read by one of the model's voices, landing in the
+//! Voiceover Generated bin. Delivery is written into the script as the
+//! picked model reads it ([`DeliveryMarks`]): tags and pauses from the menus
+//! go in at the cursor, ellipses and capitals by hand. Regenerating a
+//! voiceover opens this form with its script. The user's own voices come
+//! first; "More voices", where the provider can do more with voices, opens
+//! the Voices dialog to find, design or clone another, which this form then
+//! reads with. A voice in the library starts on the stability and
+//! similarity it last read with, on models that take them.
 
 use super::{MediaPoolPanel, form};
 use crate::state::EditorState;
@@ -17,8 +19,10 @@ use crate::ui::kit::{
 };
 use crate::ui::listen::listen_button;
 use flikk_core::cloud::{
-    self, Capability, CloudResult, GenerateRequest, Reading, SCRIPT_CHARS, Voice,
+    self, Capability, CloudResult, DeliveryMarks, GenerateRequest, INTERJECTIONS, Reading, Voice,
+    VoiceoverModel,
 };
+use flikk_core::library::SavedVoice;
 use flikk_core::model::MediaItem;
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::base::slider::{SliderEvent, SliderState};
@@ -50,6 +54,7 @@ const REACTIONS: [&str; 8] = [
     "[woo]",
 ];
 const PAUSES: [&str; 3] = ["...", "[short pause]", "[long pause]"];
+const SECONDS: [&str; 4] = ["...", "<#0.5#>", "<#1#>", "<#2#>"];
 
 /// A voice in the picker; typing searches its name and traits.
 #[derive(Clone)]
@@ -92,6 +97,8 @@ pub struct Take {
 
 pub struct VoiceoverForm {
     state: Entity<EditorState>,
+    /// The model picked when it opened; Settings can't open over it.
+    model: VoiceoverModel,
     voices: Vec<Voice>,
     picker: Entity<SelectState<VoiceRow>>,
     /// The voice to pick once they are in.
@@ -128,10 +135,18 @@ impl VoiceoverForm {
             .as_ref()
             .map(|r| r.voice.clone())
             .or_else(|| state.read(cx).last_voice());
+        let model = state.read(cx).voiceover_model().unwrap_or_default();
+        let placeholder = match model.marks {
+            DeliveryMarks::AudioTags => "[warm] ",
+            DeliveryMarks::Interjections => "(sighs) ",
+            DeliveryMarks::Plain => "",
+        };
         let script = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 12)
-                .placeholder("[warm] The studio opened in 1974, two rooms and one tape machine.")
+                .placeholder(format!(
+                    "{placeholder}The studio opened in 1974, two rooms and one tape machine."
+                ))
                 .default_value(script_text)
         });
         let picker = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx).searchable(true));
@@ -167,10 +182,16 @@ impl VoiceoverForm {
                     this.apply_saved_reading(&id.clone(), window, cx);
                 },
             ),
-            cx.subscribe_in(&script, window, |_, script, _: &InputEvent, window, cx| {
-                form::mark_tags(script, form::Tags::Bracketed, window, cx);
-                cx.notify();
-            }),
+            cx.subscribe_in(
+                &script,
+                window,
+                move |_, script, _: &InputEvent, window, cx| {
+                    if let Some(tags) = form::Tags::of(model.marks) {
+                        form::mark_tags(script, tags, window, cx);
+                    }
+                    cx.notify();
+                },
+            ),
             cx.subscribe(&stability, |_, _, _: &SliderEvent, cx| cx.notify()),
             cx.subscribe(&similarity, |_, _, _: &SliderEvent, cx| cx.notify()),
         ];
@@ -188,6 +209,7 @@ impl VoiceoverForm {
         .detach();
         Self {
             state,
+            model,
             voices: Vec::new(),
             picker,
             wanted,
@@ -263,13 +285,15 @@ impl VoiceoverForm {
         cx.notify();
     }
 
+    /// Library voice `voice`, when it is one.
+    fn saved<'a>(&self, voice: &str, cx: &'a App) -> Option<&'a SavedVoice> {
+        let state = self.state.read(cx);
+        state.library.voice_of(&state.voice_provider()?, voice)
+    }
+
     /// Start on how library voice `voice` last read, when it is one.
     fn apply_saved_reading(&mut self, voice: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let Some(provider) = state.voice_provider() else {
-            return;
-        };
-        let Some(saved) = state.library.voice_of(&provider, voice) else {
+        let Some(saved) = self.saved(voice, cx) else {
             return;
         };
         let (stability, similarity) = (saved.stability, saved.similarity);
@@ -312,7 +336,7 @@ impl VoiceoverForm {
     fn request(&self, cx: &App) -> Option<GenerateRequest> {
         let voice = self.voice(cx)?;
         let text = self.text(cx);
-        if text.is_empty() || cloud::check_script(&text).is_err() {
+        if text.is_empty() || self.model.check(&text).is_err() {
             return None;
         }
         Some(GenerateRequest::Voiceover {
@@ -393,10 +417,11 @@ impl VoiceoverForm {
         cx.notify();
     }
 
-    /// Put `tag` in at the cursor; a `[tag]` is set off from the word
-    /// before it.
+    /// Put `tag` in at the cursor; a `[tag]`, `(tag)` or `<#pause#>` is set
+    /// off from the word before it.
     fn insert_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
-        form::insert_tag(&self.script, tag, tag.starts_with('['), window, cx);
+        let set_off = tag.starts_with(['[', '(', '<']);
+        form::insert_tag(&self.script, tag, set_off, window, cx);
         cx.notify();
     }
 
@@ -415,6 +440,13 @@ impl VoiceoverForm {
         }
         if let Some(item) = id.and_then(|id| self.samples.get(id)) {
             return listen_button("voice-sample", &self.state, item, cx).into_any_element();
+        }
+        // A clone kept with its recording, where the provider has no sample.
+        let kept = id
+            .and_then(|id| self.saved(id, cx))
+            .and_then(SavedVoice::sample_item);
+        if let Some(item) = kept {
+            return listen_button("voice-sample", &self.state, &item, cx).into_any_element();
         }
         let heard = voice.as_ref().is_some_and(|v| v.sample.is_some());
         play_button("voice-sample", false)
@@ -452,6 +484,37 @@ impl VoiceoverForm {
             })
     }
 
+    /// The menus of what can go in a script the model reads.
+    fn tag_menus(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menus = match self.model.marks {
+            DeliveryMarks::AudioTags => vec![
+                self.tag_menu("Emotion", &EMOTIONS, cx).into_any_element(),
+                self.tag_menu("Reaction", &REACTIONS, cx).into_any_element(),
+                self.tag_menu("Pause", &PAUSES, cx).into_any_element(),
+            ],
+            DeliveryMarks::Interjections => vec![
+                self.tag_menu("Reaction", &INTERJECTIONS, cx)
+                    .into_any_element(),
+                self.tag_menu("Pause", &SECONDS, cx).into_any_element(),
+            ],
+            DeliveryMarks::Plain => return None,
+        };
+        // Pulled left so the labels line up with the script.
+        Some(
+            h_flex()
+                .gap(px(2.))
+                .ml(px(-8.))
+                .children(menus)
+                .into_any_element(),
+        )
+    }
+
+    /// Whether "More voices" has anything to offer on this model.
+    fn more_to_do(&self) -> bool {
+        let ops = self.model.voices;
+        ops.library || ops.design || ops.clone
+    }
+
     fn slider_row(name: &'static str, slider: &Entity<SliderState>, cx: &App) -> impl IntoElement {
         let percent = format!("{:.0} %", Self::slider_value(slider, cx) * 100.);
         form::row(name, form::slider(slider, percent))
@@ -462,8 +525,10 @@ impl Render for VoiceoverForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let text = self.text(cx);
         let chars = text.chars().count();
-        let fixed = cloud::without_breaks(&text);
+        let fixed = self.model.without_breaks(&text);
         let sample = self.sample_button(cx);
+        let menus = self.tag_menus(cx);
+        let (tuned, more) = (self.model.tuned, self.more_to_do());
         v_flex()
             .gap(px(10.))
             .child(form::row(
@@ -482,15 +547,17 @@ impl Render for VoiceoverForm {
                         ),
                     )
                     .child(sample)
-                    .child(
-                        Button::new("more-voices")
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .tooltip("More voices")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.more_voices(window, cx)),
-                            ),
-                    ),
+                    .when(more, |el| {
+                        el.child(
+                            Button::new("more-voices")
+                                .ghost()
+                                .icon(IconName::Plus)
+                                .tooltip("More voices")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.more_voices(window, cx)),
+                                ),
+                        )
+                    }),
             ))
             .when_some(self.load_error.clone(), |el, error| {
                 el.child(form::problem(error))
@@ -503,18 +570,10 @@ impl Render for VoiceoverForm {
                     .gap(px(4.))
                     .child(
                         Textarea::new(&self.script)
-                            .counter(chars, SCRIPT_CHARS)
+                            .counter(chars, self.model.script_chars)
                             .token(form::tag_token),
                     )
-                    .child(
-                        // Pulled left so the labels line up with the script.
-                        h_flex()
-                            .gap(px(2.))
-                            .ml(px(-8.))
-                            .child(self.tag_menu("Emotion", &EMOTIONS, cx))
-                            .child(self.tag_menu("Reaction", &REACTIONS, cx))
-                            .child(self.tag_menu("Pause", &PAUSES, cx)),
-                    ),
+                    .children(menus),
             )
             .when_some(fixed, |el, fixed| {
                 let script = self.script.clone();
@@ -534,8 +593,10 @@ impl Render for VoiceoverForm {
                         ),
                 )
             })
-            .child(Self::slider_row("Stability", &self.stability, cx))
-            .child(Self::slider_row("Similarity", &self.similarity, cx))
+            .when(tuned, |el| {
+                el.child(Self::slider_row("Stability", &self.stability, cx))
+                    .child(Self::slider_row("Similarity", &self.similarity, cx))
+            })
     }
 }
 

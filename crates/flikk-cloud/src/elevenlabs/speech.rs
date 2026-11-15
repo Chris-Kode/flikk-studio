@@ -7,7 +7,7 @@
 //! so its delivery fits; a model that refuses them reads without.
 
 use super::{FORMATS, cost, write_audio};
-use flikk_core::cloud::{self, CloudError, CloudResult, GenerateRequest, GenerationTask};
+use flikk_core::cloud::{CloudError, CloudResult, GenerateRequest, GenerationTask};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,6 @@ pub fn run(
     else {
         unreachable!("voiceover request");
     };
-    cloud::check_script(text)?;
     // It goes in the path, and the agent may have written it.
     let voice = &reading.voice;
     if voice.is_empty() || !voice.chars().all(|c| c.is_ascii_alphanumeric()) {

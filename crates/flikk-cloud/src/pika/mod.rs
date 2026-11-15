@@ -1,30 +1,35 @@
 //! Pika (dev.pika.art): video and pictures, from the models in
-//! [`models`], larger videos, from the operations in [`upscale`], and
-//! music and sound effects, from those in [`audio`].
+//! [`models`], larger videos, from the operations in [`upscale`],
+//! music and sound effects, from those in [`audio`], and voiceovers, from
+//! those in [`speech`], with the voices in [`voices`].
 //! Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes) and the
 //! other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy
 //! Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from a
 //! description or from pictures: Nano Banana, GPT Image, Seedream,
 //! Ideogram, Grok Imagine, Muse, Recraft. Larger videos: Topaz, and Pika H3
 //! Flex's own upscale. Music: Pika Music, Sonilo, MiniMax, Lyria. Sound
-//! effects: Pika SFX, Sonilo, ElevenLabs. Every call sends the key as
-//! `X-API-Key`. All are made as media jobs ([`jobs`]); what goes in is
-//! [`video`]'s, [`image`]'s, [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to Pika first
-//! ([`files`]). See `docs/providers/pika.md`.
+//! effects: Pika SFX, Sonilo, ElevenLabs. Voiceovers: ElevenLabs (with
+//! the account's clones), MiniMax, Pika Speech. Every call sends the key
+//! as `X-API-Key`. All are made as media jobs ([`jobs`]); what goes in is
+//! [`video`]'s, [`image`]'s, [`upscale`]'s, [`audio`]'s or [`speech`]'s,
+//! and the files they follow are uploaded to Pika first ([`files`]). See
+//! `docs/providers/pika.md`.
 
 mod audio;
 mod files;
 mod image;
 mod jobs;
 mod models;
+mod speech;
 mod upscale;
 mod video;
+mod voices;
 
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
-    UpscaleModel, VideoModel,
+    UpscaleModel, VideoModel, Voice, VoiceClone, VoiceoverModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -237,6 +242,24 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Voiceover,
+            // The ids and order of `speech::SPEECH`, the default first.
+            models: &[
+                CloudModel {
+                    id: "elevenlabs/eleven-v4/text-to-speech",
+                    name: "ElevenLabs v4",
+                },
+                CloudModel {
+                    id: "minimax/minimax-speech-2.8-hd/text-to-speech",
+                    name: "MiniMax Speech 2.8 HD",
+                },
+                CloudModel {
+                    id: "pika/pika-audio/pika-speech",
+                    name: "Pika Speech",
+                },
+            ],
+        },
     ],
     api: &Pika,
 };
@@ -295,12 +318,14 @@ impl Api for Pika {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
             }
-            Capability::Transcription | Capability::Voiceover => {
-                Err(CloudError::Unavailable(format!(
-                    "{NAME} doesn't make {}",
-                    request.capability().label().to_lowercase()
-                )))
+            Capability::Voiceover => {
+                let model = speech::find(model).ok_or_else(missing)?;
+                speech::run(key, model, request, stem, task)
             }
+            Capability::Transcription => Err(CloudError::Unavailable(format!(
+                "{NAME} doesn't make {}",
+                request.capability().label().to_lowercase()
+            ))),
         }
     }
 
@@ -318,6 +343,29 @@ impl Api for Pika {
 
     fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {
         audio::find(model).map(|m| &m.spec)
+    }
+
+    fn voiceover_model(&self, model: &str) -> Option<&'static VoiceoverModel> {
+        speech::find(model).map(|m| &m.spec)
+    }
+
+    fn voices(&self, key: &str, model: &str) -> CloudResult<Vec<Voice>> {
+        voices::list(key, model)
+    }
+
+    fn clone_voice(&self, key: &str, clone: &VoiceClone) -> CloudResult<Voice> {
+        voices::clone(key, clone)
+    }
+
+    /// Pika can't; the name is kept in the library only.
+    fn rename_voice(&self, _key: &str, _voice: &str, _name: &str) -> CloudResult<()> {
+        Err(CloudError::Unavailable(format!(
+            "{NAME} can't rename a voice"
+        )))
+    }
+
+    fn delete_voice(&self, key: &str, voice: &str) -> CloudResult<()> {
+        voices::delete(key, voice)
     }
 }
 

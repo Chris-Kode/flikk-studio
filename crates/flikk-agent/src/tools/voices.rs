@@ -1,11 +1,12 @@
 //! Voices for voiceovers (the Generate group). `find_voices` lists the
-//! account's voices, the user's own first, or searches the provider's shared
-//! Voice Library; both are free. `add_voice` adds a shared one to the
+//! voices the picked model reads with, the user's own first, or searches
+//! the provider's shared Voice Library where it has one; both are free. `add_voice` adds a shared one to the
 //! account and `design_voice` makes one from a description; each takes a
 //! voice slot or credits, so it waits for the user's approval. Either way
 //! the voice is kept in the user's library,
 //! where every project finds it. Cloning a voice is the user's alone: it
-//! needs the consent of whoever it belongs to.
+//! needs the consent of whoever it belongs to. What the provider can do
+//! with voices is the picked model's [`VoiceOps`].
 //!
 //! Where each voice listed can be heard is remembered, so an approval card
 //! plays it before the user decides.
@@ -13,7 +14,7 @@
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolResultOf, fail};
 use flikk_core::cloud::{
-    self, Capability, GenerationService, Voice, VoiceDesign, VoiceOrigin, VoiceQuery,
+    self, Capability, GenerationService, Voice, VoiceDesign, VoiceOps, VoiceOrigin, VoiceQuery,
 };
 use flikk_core::library::{self, Library, SavedVoice};
 use flikk_core::model::MediaItem;
@@ -69,6 +70,13 @@ pub(crate) fn find_voices(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> 
         use_case: label("use_case", &cloud::VOICE_USES)?,
     };
     let limit = args.opt_f64("limit")?.map_or(20, |n| n.max(1.0) as usize);
+    if shared {
+        check_ops(
+            ctx,
+            |ops| ops.library,
+            "has no shared voice library; list its own voices without `library`",
+        )?;
+    }
     let generation = voices_service(ctx)?;
     let job: Job = Box::new(move || {
         if shared {
@@ -326,9 +334,32 @@ pub fn design(
     ))
 }
 
-/// Whether voices can be added and designed now; why not, when not.
-pub(crate) fn check_available(ctx: &ToolCtx) -> ToolResultOf<()> {
-    voices_service(ctx).map(|_| ())
+/// Whether shared voices can be added now; why not, when not.
+pub(crate) fn check_adding(ctx: &ToolCtx) -> ToolResultOf<()> {
+    check_ops(
+        ctx,
+        |ops| ops.library,
+        "has no shared voice library to add from",
+    )
+}
+
+/// Whether voices can be designed now; why not, when not.
+pub(crate) fn check_designing(ctx: &ToolCtx) -> ToolResultOf<()> {
+    check_ops(ctx, |ops| ops.design, "can't design voices")
+}
+
+/// Whether a provider does voiceovers and `can` do what is asked with
+/// voices on the picked model; else that the model `cannot`.
+fn check_ops(ctx: &ToolCtx, can: fn(VoiceOps) -> bool, cannot: &str) -> ToolResultOf<()> {
+    let generation = voices_service(ctx)?;
+    let model = generation.voiceover_model().unwrap_or_default();
+    if !can(model.voices) {
+        return fail(format!(
+            "{} {cannot}. Tell the user, or read with one of its voices from find_voices.",
+            model.name
+        ));
+    }
+    Ok(())
 }
 
 fn sample_of(

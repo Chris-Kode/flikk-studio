@@ -7,7 +7,7 @@
 
 use crate::args::{Args, ToolError, ToolResultOf, fail, secs, short, track_id};
 use flikk_core::bus::{Author, CommandBus};
-use flikk_core::cloud::{self, Capability, CloudError, GenerateRequest, MusicSection, Reading};
+use flikk_core::cloud::{Capability, CloudError, GenerateRequest, MusicSection, Reading};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::model::{MediaKind, Project, TrackKind};
 use flikk_core::{MediaId, Time, TimeRange, TrackId};
@@ -86,7 +86,8 @@ pub(crate) fn parse(
             looping: args.opt_bool("loop")?.unwrap_or(false),
         },
         "voiceover" => {
-            cloud::check_script(&prompt).map_err(|e| ToolError(error_text(&e)))?;
+            // The script is checked against the picked model before
+            // approval, which knows the pauses it reads.
             let voice = args.str("voice")?.trim().to_owned();
             let unit = |key: &str, default: f32| -> ToolResultOf<f32> {
                 match args.opt_f64(key)? {

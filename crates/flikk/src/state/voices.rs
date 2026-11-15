@@ -9,6 +9,7 @@ use super::{ApprovalOutcome, EditorState};
 use flikk_agent::tools::ApprovalRequest;
 use flikk_core::cloud::{
     self, CloudError, GenerateRequest, GenerationService, Reading, Voice, VoiceOrigin,
+    VoiceoverModel,
 };
 use flikk_core::library::{self, SavedVoice};
 use flikk_core::model::{MediaItem, Project};
@@ -54,9 +55,10 @@ pub enum VoiceList {
     Loading {
         read: u64,
     },
-    /// Read for `provider`.
+    /// Read for `source`, the provider and model doing voiceovers then
+    /// (`cloud::voice_source`): each model reads its own voices.
     Loaded {
-        provider: Option<String>,
+        source: Option<String>,
     },
     /// Read again when asked after [`VOICES_RETRY`].
     Failed {
@@ -267,13 +269,38 @@ impl EditorState {
         self.services.generation.as_ref()?.voice_provider()
     }
 
+    /// The provider and model doing voiceovers, as `cloud::voice_source`
+    /// keys them: what the voices listed are read with.
+    pub fn voice_source(&self) -> Option<String> {
+        self.services.generation.as_ref()?.voice_source()
+    }
+
+    /// What the model doing voiceovers reads, and what its voices can do.
+    pub fn voiceover_model(&self) -> Option<VoiceoverModel> {
+        self.services.generation.as_ref()?.voiceover_model()
+    }
+
+    /// Why library voice `saved` can't be changed on the account now: it
+    /// belongs to another provider than the one doing voiceovers.
+    fn elsewhere(&self, saved: &SavedVoice) -> Option<String> {
+        if self.voice_provider().as_deref() == Some(saved.provider.as_str()) {
+            return None;
+        }
+        let name =
+            flikk_cloud::provider(&saved.provider).map_or(saved.provider.as_str(), |p| p.name);
+        Some(format!(
+            "{} is a {name} voice; pick {name} for voiceovers in Settings → Integrations first",
+            saved.name
+        ))
+    }
+
     /// Read the account's voices again, off the UI thread. A read on its
     /// way is overtaken: only the latest one's answer is taken.
     pub fn refresh_voices(&mut self, cx: &mut Context<Self>) {
         let Some(generation) = self.generation() else {
             return;
         };
-        let provider = self.voice_provider();
+        let source = self.voice_source();
         let list = &mut self.account_voices;
         list.read += 1;
         let read = list.read;
@@ -299,7 +326,7 @@ impl EditorState {
                         }
                         list.deleted.clear();
                         list.voices = Some(voices);
-                        list.state = VoiceList::Loaded { provider };
+                        list.state = VoiceList::Loaded { source };
                     }
                     Err(e) => {
                         list.state = VoiceList::Failed {
@@ -315,21 +342,20 @@ impl EditorState {
         cx.notify();
     }
 
-    /// Read the account's voices if they haven't been for the provider
-    /// doing voiceovers now, or the last read failed a while ago.
+    /// Read the account's voices if they haven't been for the provider and
+    /// model doing voiceovers now, or the last read failed a while ago.
     pub fn want_voices(&mut self, cx: &mut Context<Self>) {
-        let provider = self.voice_provider();
+        let source = self.voice_source();
         match &self.account_voices.state {
             VoiceList::Idle => self.refresh_voices(cx),
-            VoiceList::Loaded { provider: listed } if *listed != provider => {
-                self.invalidate_voices(cx)
-            }
+            VoiceList::Loaded { source: listed } if *listed != source => self.invalidate_voices(cx),
             VoiceList::Failed { at, .. } if at.elapsed() >= VOICES_RETRY => self.refresh_voices(cx),
             _ => {}
         }
     }
 
-    /// The account the voices are of changed (another provider, or key):
+    /// The account or model the voices are of changed (another provider,
+    /// model or key):
     /// drop the list, and read it again if it was read or being read.
     pub(super) fn invalidate_voices(&mut self, cx: &mut Context<Self>) {
         let wanted = !matches!(self.account_voices.state, VoiceList::Idle);
@@ -377,8 +403,11 @@ impl EditorState {
     }
 
     /// Keep `reading`'s stability and similarity with its voice, when the
-    /// voice is in the library.
+    /// voice is in the library and the model reads them.
     pub fn keep_reading(&mut self, reading: &Reading, cx: &mut Context<Self>) {
+        if !self.voiceover_model().unwrap_or_default().tuned {
+            return;
+        }
         let Some(provider) = self.voice_provider() else {
             return;
         };
@@ -410,11 +439,12 @@ impl EditorState {
             }
         }
         // Voices of the provider's own, or shared ones, keep their name
-        // there.
+        // there; another provider's can't be reached.
         if !matches!(
             saved.origin,
             VoiceOrigin::Designed { .. } | VoiceOrigin::Cloned { .. }
-        ) {
+        ) || self.elsewhere(&saved).is_some()
+        {
             return;
         }
         let Some(generation) = self.generation() else {
@@ -440,6 +470,12 @@ impl EditorState {
         let Some(saved) = self.library.voice(id).cloned() else {
             return;
         };
+        // Its id means nothing to another provider, which may take it as
+        // already gone.
+        if let Some(why) = self.elsewhere(&saved) {
+            self.say(why, cx);
+            return;
+        }
         let Some(generation) = self.generation() else {
             return;
         };

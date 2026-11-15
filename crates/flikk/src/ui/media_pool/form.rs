@@ -6,6 +6,7 @@
 use std::ops::Range;
 
 use crate::ui::kit::{Icon, IconName, Slider, h_flex, theme as t};
+use flikk_core::cloud::{DeliveryMarks, INTERJECTIONS};
 use gpui_kit::base::input::{InlineToken, InlineTokenContext, TextareaState};
 use gpui_kit::base::slider::SliderState;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -83,18 +84,63 @@ pub(crate) fn problem(text: impl Into<SharedString>) -> Div {
 pub(crate) enum Tags {
     /// Audio tags in a script: `[whispers]`, `[short pause]`.
     Bracketed,
+    /// Interjections and pauses in a script: `(sighs)`, `<#0.5#>`.
+    Interjections,
     /// References in a prompt: `@Image1`, `@Video2`.
     References,
 }
 
 impl Tags {
+    /// The tags a script is marked with on a model reading `marks`; `None`
+    /// when it reads none, and brackets are words.
+    pub(crate) fn of(marks: DeliveryMarks) -> Option<Self> {
+        match marks {
+            DeliveryMarks::AudioTags => Some(Self::Bracketed),
+            DeliveryMarks::Interjections => Some(Self::Interjections),
+            DeliveryMarks::Plain => None,
+        }
+    }
+
     /// Where the tags sit in `text`, in order.
     fn find(self, text: &str) -> Vec<Range<usize>> {
         match self {
             Tags::Bracketed => bracketed(text),
+            Tags::Interjections => interjections(text),
             Tags::References => references(text),
         }
     }
+}
+
+/// The [`INTERJECTIONS`], and `<#` seconds `#>` pauses of at most 5
+/// characters.
+fn interjections(text: &str) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find(['(', '<']).map(|i| from + i) {
+        let rest = &text[open..];
+        let len = if let Some(pause) = rest.strip_prefix("<#") {
+            pause
+                .find("#>")
+                .filter(|&n| {
+                    let secs = &pause[..n];
+                    (1..=5).contains(&n) && secs.chars().all(|c| c.is_ascii_digit() || c == '.')
+                })
+                .map(|n| n + 4)
+        } else {
+            INTERJECTIONS
+                .iter()
+                .find(|i| rest.starts_with(*i))
+                .map(|i| i.len())
+        };
+        match len {
+            Some(len) => {
+                found.push(open..open + len);
+                from = open + len;
+            }
+            None => from = open + 1,
+        }
+    }
+    found
 }
 
 /// `[` words `]`, at most 40 bytes, with no space just inside the brackets.

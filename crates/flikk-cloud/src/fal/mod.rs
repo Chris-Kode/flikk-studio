@@ -1,22 +1,26 @@
 //! fal (fal.ai): video and pictures, from the models in [`models`],
-//! larger videos, from those in [`upscale`], and music and sound effects,
-//! from those in [`audio`]. Video: Seedance, Kling,
+//! larger videos, from those in [`upscale`], music and sound effects,
+//! from those in [`audio`], and voiceovers, from those in [`speech`].
+//! Video: Seedance, Kling,
 //! MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX. Pictures, from
 //! a description or from pictures: Nano Banana, GPT Image, FLUX 3,
 //! Seedream, Ideogram, Grok Imagine, Qwen Image, Krea, Recraft. Larger
 //! videos: Topaz, SeedVR2, Crystal, FLUX, Gemini Omni Flash. Music:
 //! ElevenLabs, Sonilo, Lyria, Stable Audio. Sound effects: ElevenLabs,
-//! Sonilo, Mirelo, Stable Audio. Every call
+//! Sonilo, Mirelo, Stable Audio. Voiceovers: ElevenLabs, MiniMax, Gemini,
+//! each with its own voices. Every call
 //! sends the key as `Authorization: Key <key>`. All are made on fal's
 //! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s,
-//! [`upscale`]'s or [`audio`]'s, and the files they follow are uploaded to fal's storage
-//! first ([`files`]). See `docs/providers/falai.md`.
+//! [`upscale`]'s, [`audio`]'s or [`speech`]'s, and the files they follow
+//! are uploaded to fal's storage first ([`files`]). See
+//! `docs/providers/falai.md`.
 
 mod audio;
 mod files;
 mod image;
 mod models;
 mod queue;
+mod speech;
 mod upscale;
 mod video;
 
@@ -24,7 +28,7 @@ use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
-    UpscaleModel, VideoModel,
+    UpscaleModel, VideoModel, Voice, VoiceoverModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -227,6 +231,24 @@ pub static PROVIDER: Provider = Provider {
                 },
             ],
         },
+        Offer {
+            capability: Capability::Voiceover,
+            // The ids and order of `speech::SPEECH`, the default first.
+            models: &[
+                CloudModel {
+                    id: "elevenlabs/tts/eleven-v4",
+                    name: "ElevenLabs v4",
+                },
+                CloudModel {
+                    id: "fal-ai/minimax/speech-2.8-hd",
+                    name: "MiniMax Speech 2.8 HD",
+                },
+                CloudModel {
+                    id: "fal-ai/gemini-3.1-flash-tts",
+                    name: "Gemini 3.1 Flash TTS",
+                },
+            ],
+        },
     ],
     api: &Fal,
 };
@@ -287,12 +309,14 @@ impl Api for Fal {
                 let model = models::find(model).ok_or_else(missing)?;
                 video::run(key, model, request, stem, task)
             }
-            Capability::Transcription | Capability::Voiceover => {
-                Err(CloudError::Unavailable(format!(
-                    "{NAME} doesn't make {}",
-                    request.capability().label().to_lowercase()
-                )))
+            Capability::Voiceover => {
+                let model = speech::find(model).ok_or_else(missing)?;
+                speech::run(key, model, request, stem, task)
             }
+            Capability::Transcription => Err(CloudError::Unavailable(format!(
+                "{NAME} doesn't make {}",
+                request.capability().label().to_lowercase()
+            ))),
         }
     }
 
@@ -310,6 +334,17 @@ impl Api for Fal {
 
     fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {
         audio::find(model).map(|m| &m.spec)
+    }
+
+    fn voiceover_model(&self, model: &str) -> Option<&'static VoiceoverModel> {
+        speech::find(model).map(|m| &m.spec)
+    }
+
+    /// The voices the model's schema names: fal lists none.
+    fn voices(&self, _key: &str, model: &str) -> CloudResult<Vec<Voice>> {
+        let model = speech::find(model)
+            .ok_or_else(|| CloudError::Unavailable(format!("{NAME} has no model {model}")))?;
+        Ok(crate::speech::presets(model))
     }
 }
 

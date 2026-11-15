@@ -319,12 +319,12 @@ impl EditorState {
         if settings.choice(capability) == choice {
             return;
         }
-        let voices = self.voice_provider();
+        let voices = self.voice_source();
         settings.set(capability, choice);
         persistence::with_store(|s| s.save_cloud_settings(&settings));
         self.cloud.set_settings(settings);
-        // The voices listed are another provider's.
-        if self.voice_provider() != voices {
+        // The voices listed are another provider's, or another model's.
+        if self.voice_source() != voices {
             self.invalidate_voices(cx);
         }
         self.configure_analysis();
@@ -537,16 +537,19 @@ impl EditorState {
         }
     }
 
-    /// The voice that last read a voiceover.
+    /// The voice that last read a voiceover on the model doing them now.
     pub fn last_voice(&self) -> Option<String> {
-        self.cloud.settings().voice
+        let source = self.voice_source()?;
+        self.cloud.settings().last_voice(&source).map(str::to_owned)
     }
 
-    /// Start the next voiceover on `voice`.
+    /// Start the next voiceover on the model doing them now on `voice`.
     pub fn remember_voice(&mut self, voice: &str) {
+        let Some(source) = self.voice_source() else {
+            return;
+        };
         let mut settings = self.cloud.settings();
-        if settings.voice.as_deref() != Some(voice) {
-            settings.voice = Some(voice.to_owned());
+        if settings.remember_voice(&source, voice) {
             persistence::with_store(|s| s.save_cloud_settings(&settings));
             self.cloud.set_settings(settings);
         }

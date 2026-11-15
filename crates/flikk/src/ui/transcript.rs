@@ -545,22 +545,34 @@ impl TranscriptPanel {
                 let Some(name) = speaker else {
                     return menu;
                 };
+                let ops = (panel.read(cx).state.read(cx))
+                    .voiceover_model()
+                    .unwrap_or_default()
+                    .voices;
+                if !ops.library && !ops.clone {
+                    return menu;
+                }
                 let (p1, p2) = (panel.clone(), panel.clone());
-                menu.item(PopupMenuItem::separator())
-                    .item(
+                let mut menu = menu.item(PopupMenuItem::separator());
+                if ops.library {
+                    menu = menu.item(
                         PopupMenuItem::new(format!("Find Voices Like {name}…")).on_click(
                             move |_, window, cx| {
                                 p1.update(cx, |this, cx| this.speaker_voice(false, window, cx))
                             },
                         ),
-                    )
-                    .item(
+                    );
+                }
+                if ops.clone {
+                    menu = menu.item(
                         PopupMenuItem::new(format!("Clone {name}’s voice…")).on_click(
                             move |_, window, cx| {
                                 p2.update(cx, |this, cx| this.speaker_voice(true, window, cx))
                             },
                         ),
-                    )
+                    );
+                }
+                menu
             })
             .into_any_element()
     }

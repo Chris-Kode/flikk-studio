@@ -209,6 +209,8 @@ pub struct VoiceClone {
     pub files: Vec<PathBuf>,
     /// Have the provider take out background noise first.
     pub denoise: bool,
+    /// The user said they have the speaker's consent to clone the voice.
+    pub consent: bool,
 }
 
 /// How a voice in the user's library came to be.

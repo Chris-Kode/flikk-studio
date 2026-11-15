@@ -117,7 +117,7 @@ pub(super) fn item_menu(
         Some(take) => {
             let p = panel.clone();
             let state = panel.read(cx).state.clone();
-            let saved = voice_saved(&state, &take, cx);
+            let saved = voice_saved(&state, id, &take, cx);
             let menu = menu.item(PopupMenuItem::new("Regenerate…").on_click(
                 move |_, window, cx| {
                     let take = Some(take.clone());
@@ -509,14 +509,20 @@ fn voiceover_take(
     })
 }
 
-/// Whether the voice that read `take` is in the library.
-fn voice_saved(state: &Entity<EditorState>, take: &voiceover::Take, cx: &App) -> bool {
+/// Whether the voice that read voiceover `id`'s `take` is in the library,
+/// or can't go there: another provider than the one doing voiceovers read
+/// it.
+fn voice_saved(state: &Entity<EditorState>, id: MediaId, take: &voiceover::Take, cx: &App) -> bool {
     let state = state.read(cx);
     let provider = state.voice_provider().unwrap_or_default();
-    state
-        .library
-        .voice_of(&provider, &take.reading.voice)
-        .is_some()
+    let read_by = (state.bus.project().media(id))
+        .and_then(|m| m.generated.as_deref())
+        .map(|g| g.provider.as_str());
+    read_by != Some(provider.as_str())
+        || state
+            .library
+            .voice_of(&provider, &take.reading.voice)
+            .is_some()
 }
 
 /// Keep the voice that read voiceover `id` in the library, with the

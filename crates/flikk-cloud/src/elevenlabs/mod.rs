@@ -15,9 +15,9 @@ pub(crate) use music::plan as composition_plan;
 use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
-    AudioLengths, AudioModel, Capability, CloudError, CloudResult, Designed, GenerateRequest,
-    GenerationTask, Heard, SpeechRequest, Voice, VoiceClone, VoiceDesign, VoicePage, VoicePreview,
-    VoiceQuery,
+    AudioLengths, AudioModel, Capability, CloudError, CloudResult, DeliveryMarks, Designed,
+    GenerateRequest, GenerationTask, Heard, SCRIPT_CHARS, SpeechRequest, Voice, VoiceClone,
+    VoiceDesign, VoiceOps, VoicePage, VoicePreview, VoiceQuery, VoiceoverModel,
 };
 use flikk_os::sync::lock;
 use serde_json::Value;
@@ -124,6 +124,21 @@ static AUDIO: [(&str, AudioModel); 5] = [
     ("eleven_text_to_sound_v3", sound_model("Sound Effects v3")),
 ];
 
+/// Eleven v4: the longest script, audio tags, tuning, and every voice
+/// operation.
+static SPEECH: VoiceoverModel = VoiceoverModel {
+    name: "Eleven v4",
+    script_chars: SCRIPT_CHARS,
+    marks: DeliveryMarks::AudioTags,
+    tuned: true,
+    voices: VoiceOps {
+        library: true,
+        design: true,
+        clone: true,
+        denoise: true,
+    },
+};
+
 impl Api for ElevenLabs {
     fn account(&self, key: &str) -> CloudResult<Account> {
         let reply = http::get(
@@ -188,7 +203,12 @@ impl Api for ElevenLabs {
             .map(|(_, spec)| spec)
     }
 
-    fn voices(&self, key: &str) -> CloudResult<Vec<Voice>> {
+    fn voiceover_model(&self, model: &str) -> Option<&'static VoiceoverModel> {
+        (model == "eleven_v4").then_some(&SPEECH)
+    }
+
+    /// Every model reads the account's voices.
+    fn voices(&self, key: &str, _model: &str) -> CloudResult<Vec<Voice>> {
         voices::list(key)
     }
 

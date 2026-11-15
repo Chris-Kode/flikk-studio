@@ -183,9 +183,11 @@ the whole file in one request.
 - Eleven v4 takes only stability and similarity. Style and speed of the
   API do not apply to it. To change the speed, the user changes the
   timing of the clip.
-- Before the editor sends a script, `check_script` refuses these
-  scripts:
-  - a script of more than 10,000 characters;
+- The model's `VoiceoverModel` (in `mod.rs`) says what it reads: 10,000
+  characters, audio tags, stability and similarity, and every voice
+  operation below. Before any provider gets a script, `Cloud::generate`
+  checks it against the picked model, and refuses these scripts:
+  - a script longer than the model takes;
   - a script with `<break>` tags. The refusal has a suggestion with
     pauses in place of the tags.
 - The voice id goes in the path. Thus the editor accepts only an id of

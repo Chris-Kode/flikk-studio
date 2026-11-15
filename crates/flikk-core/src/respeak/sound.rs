@@ -66,9 +66,9 @@ pub fn make(
         reading,
         &take,
         media.as_ref(),
-        |path, script| {
+        |path, script, marks| {
             analysis
-                .time_script(path, script)
+                .time_script(path, script, marks)
                 .map(|w| w.into_iter().map(|w| w.range).collect())
                 .map_err(|e| e.0)
         },
@@ -88,11 +88,12 @@ fn splice(
     reading: &Reading,
     take: &Generated,
     media: &dyn MediaService,
-    time: impl Fn(&Path, &str) -> Result<Vec<TimeRange>, String>,
+    time: impl Fn(&Path, &str, cloud::DeliveryMarks) -> Result<Vec<TimeRange>, String>,
 ) -> Result<MediaItem, String> {
     let script = fix.script();
-    let words = time(&take.path, &script)?;
-    let new = fix.new_words();
+    let marks = take.info.marks();
+    let words = time(&take.path, &script, marks)?;
+    let new = fix.new_words(marks);
     if new.is_empty() || words.len() < new.end {
         return Err("The provider's take could not be followed.".into());
     }

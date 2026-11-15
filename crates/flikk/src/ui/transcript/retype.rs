@@ -94,7 +94,21 @@ impl TranscriptPanel {
             return;
         }
 
-        // No voice of theirs yet: clone it from what they say here.
+        // No voice of theirs yet: clone it from what they say here, where
+        // the model can.
+        let model = self.state.read(cx).voiceover_model().unwrap_or_default();
+        if !model.voices.clone {
+            self.state.update(cx, |s, cx| {
+                s.say(
+                    format!(
+                        "{} can't clone a voice; pick a model that can in Settings → Integrations",
+                        model.name
+                    ),
+                    cx,
+                );
+            });
+            return;
+        }
         let project = self.state.read(cx).bus.project().clone();
         let theirs: Vec<&TimelineWord> = self
             .words
