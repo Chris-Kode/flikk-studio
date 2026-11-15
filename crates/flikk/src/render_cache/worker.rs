@@ -348,9 +348,15 @@ fn compose_all(
             }
         }
     }
-    if let Some(last) = flight
-        && let Some(_turn) = job.as_ref().and_then(|job| job.turn(stop))
-    {
+    if let Some(last) = flight {
+        let Some(_turn) = job.as_ref().and_then(|job| job.turn(stop)) else {
+            return;
+        };
         land(last);
+    }
+    if let Some(job) = job
+        && !stop.load(Ordering::Relaxed)
+    {
+        job.done();
     }
 }

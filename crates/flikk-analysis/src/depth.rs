@@ -719,6 +719,7 @@ impl DepthService for LocalDepth {
             job.progress(done);
             progress(done);
         }
+        job.done();
         Ok(())
     }
 

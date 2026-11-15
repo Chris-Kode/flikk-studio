@@ -728,6 +728,8 @@ fn track(
             if let Err(e) = store::store(&store::track_path(&key.0, key.1), frames) {
                 eprintln!("flikk-analysis: {e:#}");
             }
+            drop(tracks);
+            job.done();
             Ok(())
         }
         Err(_) if cancel.load(Ordering::SeqCst) => Ok(()),

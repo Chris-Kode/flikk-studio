@@ -1,6 +1,7 @@
 //! The title bar's Jobs button and the jobs it drops down: what holds or
 //! waits for a GPU turn ([`flikk_os::gpu`]), running first, each with its
-//! progress when known. The app reads the list again every
+//! progress when known. A finished job turns its bar green for a moment,
+//! then leaves the list. The app reads the list again every
 //! [`POLL`] and passes it in.
 
 use crate::ui::kit::theme as t;
@@ -71,21 +72,26 @@ fn list(jobs: Vec<Listed>) -> Div {
 }
 
 fn row(job: Listed) -> Stateful<Div> {
-    let running = job.state == State::Running;
-    // One 14 px column for the spinner and the hourglass, so labels align.
+    let waiting = job.state == State::Waiting;
+    // One 14 px column for the spinner, the hourglass and the check, so
+    // labels align.
     let mark = div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
         .size(px(14.))
-        .map(|el| {
-            if running {
-                el.child(Spinner::new().color(t::T2))
-            } else {
-                el.child(Icon::new(IconName::Hourglass).color(t::T3))
-            }
+        .child(match job.state {
+            State::Running => Spinner::new().color(t::T2).into_any_element(),
+            State::Waiting => Icon::new(IconName::Hourglass)
+                .color(t::T3)
+                .into_any_element(),
+            State::Done => Icon::new(IconName::Check).color(t::OK).into_any_element(),
         });
+    let bar = match job.state {
+        State::Done => Some(Progress::new().done()),
+        State::Running | State::Waiting => job.progress.map(|f| Progress::new().value(f)),
+    };
     h_flex()
         .id(("job", job.id))
         .gap(px(8.))
@@ -98,14 +104,15 @@ fn row(job: Listed) -> Stateful<Div> {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(if running { t::T1 } else { t::T2 })
+                .text_color(if waiting { t::T2 } else { t::T1 })
                 .child(job.label),
         )
-        .children(job.progress.map(|fraction| {
+        .children(bar.map(|bar| {
+            let fraction = job.progress.unwrap_or(1.);
             h_flex()
                 .flex_none()
                 .gap(px(6.))
-                .child(Progress::new().value(fraction).w(px(48.)).h(px(3.)))
+                .child(bar.w(px(48.)).h(px(3.)))
                 .child(
                     div()
                         .w(px(32.))

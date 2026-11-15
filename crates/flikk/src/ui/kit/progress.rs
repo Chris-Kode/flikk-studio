@@ -1,5 +1,6 @@
-//! The 4 px progress bar: a signal-blue fill for a known fraction, or a
-//! fading segment that sweeps the track while the length is unknown.
+//! The 4 px progress bar: a signal-blue fill for a known fraction (green
+//! once [`Progress::done`]), or a fading segment that sweeps the track
+//! while the length is unknown.
 
 use super::theme as t;
 use gpui_kit::*;
@@ -11,6 +12,7 @@ const SEGMENT: f32 = 0.34;
 #[derive(IntoElement)]
 pub struct Progress {
     value: Option<f32>,
+    fill: Rgba,
     style: StyleRefinement,
 }
 
@@ -18,6 +20,7 @@ impl Progress {
     pub fn new() -> Self {
         Self {
             value: Some(0.),
+            fill: t::AC,
             style: StyleRefinement::default(),
         }
     }
@@ -25,6 +28,13 @@ impl Progress {
     /// The fraction done, 0–1.
     pub fn value(mut self, fraction: f32) -> Self {
         self.value = Some(fraction.clamp(0., 1.));
+        self
+    }
+
+    /// Finished: full, in the success green.
+    pub fn done(mut self) -> Self {
+        self.value = Some(1.);
+        self.fill = t::OK;
         self
     }
 
@@ -59,7 +69,7 @@ impl RenderOnce for Progress {
         track.style().refine(&self.style);
         let fill = div().absolute().top_0().bottom_0().rounded_full();
         match self.value {
-            Some(fraction) => track.child(fill.left_0().w(relative(fraction)).bg(t::AC)),
+            Some(fraction) => track.child(fill.left_0().w(relative(fraction)).bg(self.fill)),
             None => {
                 let clear = t::alpha(t::AC, 0.);
                 let half = |from: Rgba, to: Rgba| {
