@@ -1,17 +1,23 @@
 # Pika
 
-Pika's developer API (the "Pika API Club", <https://dev.pika.art/>) is now a
-paid, prepaid aggregator: one key reaches Pika's own models and about 170
-operations from other vendors (Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs
-and more). The editor uses it as a video provider for Pika's own models and
-the other vendors' video models that fit its video request (see "What the
-editor uses"), as an image provider for the other vendors' image models
-(see "Image operations"), and for music and sound effects, Pika's own and
-other vendors' (see "Audio operations").
+The developer API of Pika (the "Pika API Club", <https://dev.pika.art/>)
+is now a paid, prepaid aggregator. One key gives access to Pika's own
+models and to approximately 170 operations from other vendors. These
+vendors include Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs and more.
 
-Read on 2026-11-02 from `llms.txt`, the per-operation specifications, the
-public catalog and `openapi.json` (links at the end). The catalog's
-`input_schema` is Pika's stated source of truth when prose and schema differ.
+The editor uses the API in three roles:
+
+- A video provider for Pika's own models, and for the video models of
+  other vendors that fit its video request (see "What the editor uses").
+- An image provider for the image models of other vendors (see "Image
+  operations").
+- A source of music and sound effects, from Pika and from other vendors
+  (see "Audio operations").
+
+We read these sources on 2026-11-02: `llms.txt`, the specification of
+each operation, the public catalog and `openapi.json` (links at the end).
+If the prose and the schema are different, Pika states that the
+`input_schema` of the catalog is the source of truth.
 
 ## Access
 
@@ -19,85 +25,111 @@ public catalog and `openapi.json` (links at the end). The catalog's
 | --- | --- |
 | Base URL | `https://api.dev.pika.art` |
 | Auth | `X-API-Key: <key>` (or `Authorization: Bearer <key>` on `/v1/media`) |
-| Keys | made, rotated and revoked at <https://dev.pika.art/keys> |
-| Env var | `PIKA_API_KEY` (the name Pika's docs suggest) |
-| Billing | prepaid in micro-USD (1,000,000 = $1); a $10/month membership comes back as $10 of credits; no free tier, no sandbox; only successful generations are charged |
+| Keys | you make, rotate and revoke them at <https://dev.pika.art/keys> |
+| Env var | `PIKA_API_KEY` (the name that the docs of Pika suggest) |
+| Billing | prepaid in micro-USD (1,000,000 = $1). A $10/month membership gives back $10 of credits. There is no free tier and no sandbox. Pika charges only for successful generations |
 | Free calls | `GET /catalog/apis`, `GET /catalog/apis/{api_id}?expand=inputs` (no key), `POST /catalog/apis/{api_id}/quote`, `GET /billing/balance` |
 
 ## Job flow
 
 1. **Upload** (local files): `POST /v1/media/uploads` with
    `{"content_type": "image/png", "size_bytes": 12345}` → `upload_url`
-   (valid 5 minutes), `headers`, `url`, `expires_in`, `max_bytes`. `PUT` the
-   raw bytes to `upload_url` with `headers` sent verbatim (`Content-Type`
-   and `Content-Length` are signed; storage answers a bare 403 otherwise).
-   The request then names `url`. Caps: 20 MB image or audio, 50 MB video;
-   `413` too big, `415` unsupported type. A public URL can be passed as is.
-   `DELETE /v1/media/uploads?url=…` erases one.
+   (valid 5 minutes), `headers`, `url`, `expires_in`, `max_bytes`.
+   - `PUT` the raw bytes to `upload_url`. Send `headers` verbatim.
+     `Content-Type` and `Content-Length` are signed. If you do not send
+     them verbatim, the storage answers a bare 403.
+   - The request then names `url`.
+   - The limits are 20 MB for an image or audio and 50 MB for a video.
+     `413` means too big. `415` means an unsupported type.
+   - You can send a public URL as it is.
+   - `DELETE /v1/media/uploads?url=…` erases an upload.
 2. **Submit**: `POST /v1/media/{vendor}/{model}/{function}` with the JSON
-   body → the job, `{"id": "media_…", "status": "queued"}`. An optional
-   `Idempotency-Key` header, and an optional `webhook_url`.
-3. **Poll**: `GET /v1/media/jobs/{id}`. `status` goes `queued` → `running` →
-   `completed` or `failed` (it may skip `running`). A completed job has
-   `output.video.url` (and `content_type`); a failed one `error.code` and
-   `error.message`. A terminal job carries `usage` and `billing`
-   (`state`: `settled` with `charge_micro_usd`, `pending`, `unavailable`).
-   `GET /v1/media/jobs/{id}/content` gives the same URL as `{"url"}`, `409`
-   before it is done.
-4. **Cancel**: there is none. `DELETE /v1/media/jobs/{id}` erases a finished
-   job's media and request; on a running job it answers `409`.
+   body → the job, `{"id": "media_…", "status": "queued"}`. The request
+   can have an optional `Idempotency-Key` header and an optional
+   `webhook_url`.
+3. **Poll**: `GET /v1/media/jobs/{id}`.
+   - `status` goes `queued` → `running` → `completed` or `failed`. It can
+     skip `running`.
+   - A completed job has `output.video.url` (and `content_type`). A
+     failed job has `error.code` and `error.message`.
+   - A terminal job has `usage` and `billing` (`state`: `settled` with
+     `charge_micro_usd`, `pending`, `unavailable`).
+   - `GET /v1/media/jobs/{id}/content` gives the same URL as `{"url"}`.
+     Before the job is complete, it answers `409`.
+4. **Cancel**: there is no cancel operation. `DELETE /v1/media/jobs/{id}`
+   erases the media and the request of a finished job. On a running job,
+   it answers `409`.
 
 ## Errors
 
-Two body shapes: request errors before a job exists are
-`{"message": "..."}`; a submit refused after the job row exists comes back as
-the failed job, `{"id", "status": "failed", "error": {"code", "message"}}`.
+There are two body shapes:
+
+- A request error before a job exists is `{"message": "..."}`.
+- Pika can refuse a submit after the job row exists. The answer is then
+  the failed job:
+  `{"id", "status": "failed", "error": {"code", "message"}}`.
 
 | HTTP | Meaning |
 | --- | --- |
 | 401 | Key missing or invalid (`{"message":"Invalid API key"}`; `"missing API key"` without one) |
-| 403 | Inactive key (`{"message"}`), or the balance / postpaid cycle can't cover it (failed job, `insufficient_balance` / `cycle_limit_exceeded`) |
+| 403 | Inactive key (`{"message"}`), or the balance / postpaid cycle cannot pay for it (failed job, `insufficient_balance` / `cycle_limit_exceeded`) |
 | 404 | Unknown job, or unknown vendor/model/function |
-| 409 | Result asked for too early, or an idempotency key reused with another body |
-| 413 / 415 | Upload too big, or of a type it won't take |
-| 422 | Validation: `{"message": "duration: Input should be less than or equal to 15"}`; an unpriceable combination is a failed job with `invalid_input` |
-| 429 | Per-minute or per-day limit, or the org's queue is full (failed job, `rate_limited`; honour `Retry-After`) |
+| 409 | A request for the result before it is ready, or an idempotency key used again with a different body |
+| 413 / 415 | Upload too big, or of a type that it does not accept |
+| 422 | Validation: `{"message": "duration: Input should be less than or equal to 15"}`. An unpriceable combination is a failed job with `invalid_input` |
+| 429 | Per-minute or per-day limit, or the queue of the org is full (failed job, `rate_limited`; honour `Retry-After`) |
 | 503 | A Pika dependency is down (failed job, `provider_unavailable`) |
 
 `error.code` is one of `invalid_input`, `content_moderation`,
-`provider_error`, `provider_timeout`, `provider_unavailable`, `rate_limited`,
-`insufficient_balance`, `membership_required`, `cycle_limit_exceeded`,
-`admission_suspended`, `usage_limit_exceeded`, `timed_out`, `internal`.
+`provider_error`, `provider_timeout`, `provider_unavailable`,
+`rate_limited`, `insufficient_balance`, `membership_required`,
+`cycle_limit_exceeded`, `admission_suspended`, `usage_limit_exceeded`,
+`timed_out`, `internal`.
 
-The editor maps them (`pika/mod.rs`, `failure`): `insufficient_balance` and
-`cycle_limit_exceeded` → out of credits; `membership_required` and
-`usage_limit_exceeded` → not allowed; `invalid_input` and
-`content_moderation` → refused prompt; `rate_limited` and
-`provider_unavailable` → busy; other codes → failed with Pika's message.
-Without a code: 401 → bad key, 403 → not allowed, 422 → refused prompt,
-429 / 503 → busy.
+The editor maps the codes (`pika/mod.rs`, `failure`):
+
+| `error.code` | Result in the editor |
+| --- | --- |
+| `insufficient_balance`, `cycle_limit_exceeded` | out of credits |
+| `membership_required`, `usage_limit_exceeded` | not allowed |
+| `invalid_input`, `content_moderation` | refused prompt |
+| `rate_limited`, `provider_unavailable` | busy |
+| Other codes | failed, with the message of Pika |
+
+If there is no code, the editor maps the HTTP status:
+
+| HTTP | Result in the editor |
+| --- | --- |
+| 401 | bad key |
+| 403 | not allowed |
+| 422 | refused prompt |
+| 429 / 503 | busy |
 
 ## Balance
 
-`GET /billing/balance` (same key, free): `unit` (`micro_usd`), `currency`,
-`org_id`, `balance_micro_usd` (prepaid plus comp credits),
-`prepaid_micro_usd`, `credit_micro_usd`, and `postpaid` (`null` for a
-prepaid org; when `active`, `cycle.remaining_micro_usd` is what can still be
-spent). Settings → Integrations shows it as dollars left.
+`GET /billing/balance` uses the same key and is free. It gives these
+fields: `unit` (`micro_usd`), `currency`, `org_id`, `balance_micro_usd`
+(prepaid plus comp credits), `prepaid_micro_usd`, `credit_micro_usd` and
+`postpaid`.
+
+`postpaid` is `null` for a prepaid org. When it is `active`,
+`cycle.remaining_micro_usd` is the amount that the org can still spend.
+Settings → Integrations shows the balance as the dollars that remain.
 
 ## Pika's video operations
 
-All async, all `POST /v1/media/pika/…`.
+All operations are async. All use `POST /v1/media/pika/…`.
 
 ### Pika H3 Flex — `pika-h3-flex/{text,image,reference}-to-video`
 
-Video with native, synchronized sound (no switch to turn it off).
+This model makes video with native, synchronized sound. No switch
+disables the sound.
 
 | Field | Type | Values / default |
 | --- | --- | --- |
 | `prompt` | string, required | 1–8000 chars |
 | `duration` | integer | 5–15, default 5 |
-| `aspect_ratio` | enum or null | `auto`, `21:9`, `16:9`, `3:2`, `4:3`, `5:4`, `1:1`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`; left out, `auto` while `rewrite` is on, else the first keyframe's, else 16:9. A fixed ratio wins over the frames (they are cropped) |
+| `aspect_ratio` | enum or null | `auto`, `21:9`, `16:9`, `3:2`, `4:3`, `5:4`, `1:1`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`. If left out: `auto` while `rewrite` is on, else the ratio of the first keyframe, else 16:9. A fixed ratio has priority over the frames (the frames are cropped) |
 | `resolution` | enum | `480p`, `768p` (default) native; `1080p`, `2k`, `4k` are 768p upscaled |
 | `seed` | integer | default 0 |
 | `rewrite` | boolean | default true: Pika rewrites the prompt |
@@ -107,17 +139,17 @@ Video with native, synchronized sound (no switch to turn it off).
 | `last_frame_image` | URL | image-to-video: last frame; `image`, this, or both |
 | `references` | `[{type: image\|video\|audio, url}]`, required | reference-to-video: 1–12, at most 9 images, 3 videos, 3 audio; at least one image or video; each 24 MiB, 64 MiB base64 together; clips and sounds 2–15 s, 15 s together per kind |
 
-References are cited in the prompt as `@Image1`, `@Video1`, `@Audio1`,
-counted per kind in order. (The prose specification also mentions flat
-`image_urls` / `video_urls` / `audio_urls` lists; the schema, which wins,
-takes `references`.)
+The prompt cites references as `@Image1`, `@Video1`, `@Audio1`. The
+count is per kind, in sequence. The prose specification also mentions
+flat `image_urls` / `video_urls` / `audio_urls` lists. The schema has
+priority, and it takes `references`.
 
-Price per output second: $0.01 at 480p to $0.08–0.10 at 4K
-(reference-to-video costs more and adds reference video seconds).
+The price for each output second is $0.01 at 480p to $0.08–0.10 at 4K.
+Reference-to-video costs more. It also adds the reference video seconds.
 
 ### Pika 2.5 — `pika-2.5/{text,image}-to-video`
 
-No sound.
+This model makes no sound.
 
 | Field | Type | Values / default |
 | --- | --- | --- |
@@ -125,17 +157,17 @@ No sound.
 | `negative_prompt` | string | optional |
 | `duration_s` | integer | `5` (default) or `10` |
 | `resolution` | enum | `480p`, `720p`, `1080p` (default) |
-| `aspect_ratio` | enum or null | text only: `5:2`, `16:9`, `4:3`, `1:1`, `4:5`, `9:16`; left out, the model picks |
+| `aspect_ratio` | enum or null | text only: `5:2`, `16:9`, `4:3`, `1:1`, `4:5`, `9:16`; if left out, the model selects |
 | `seed` | integer or null | random by default |
-| `image` | URL, required | image-to-video: the picture to animate (its shape is the video's) |
+| `image` | URL, required | image-to-video: the picture to animate (the video has its shape) |
 
-$0.02–0.09 per second by resolution.
+The price is $0.02–0.09 per second, by resolution.
 
 ### Pikaframes (Pika 2.5 Keyframe) — `pikaframes/image-to-video`
 
 | Field | Type | Values / default |
 | --- | --- | --- |
-| `images` | URL[], required | 1–5 ordered keyframes; one needs `loop` |
+| `images` | URL[], required | 1–5 ordered keyframes; one image needs `loop` |
 | `prompt` | string | default motion prompt |
 | `transition_duration_s` | integer | 1–10, default 5; 5 at most each when there are several transitions |
 | `transition_durations_s` | integer[] | per transition, overrides the above |
@@ -148,20 +180,22 @@ $0.02–0.09 per second by resolution.
 
 - `pika-h3-flex/prompt-rewriter`, `pika-h3-flex/audio-stems`
   (`draft-to-video` is used to upscale; see "Upscaling");
-- Pikadditions and Pikaswaps (`video-to-video`: add or swap something in a
-  clip), Pikaffects (`image-to-video`, `video-to-video`: named effects);
-- Pika Dynamic Captions, Video Compose, Video Merge, Pika Speech and Pika
-  Soundtrack (sound for a whole video);
+- Pikadditions and Pikaswaps (`video-to-video`: add or swap something in
+  a clip), Pikaffects (`image-to-video`, `video-to-video`: named
+  effects);
+- Pika Dynamic Captions, Video Compose, Video Merge, Pika Speech and
+  Pika Soundtrack (sound for a full video);
 - webhooks, idempotency keys, quotes, spend reports.
 
-These edit media the editor's video request has no field for, or duplicate
-what ElevenLabs already does here (speech).
+Some of these operations edit media in a way that the video request of
+the editor has no field for. Others do the same work as ElevenLabs does
+here (speech).
 
 ## Other vendors' video models
 
-Each is at `POST /v1/media/{vendor}/{model}/{function}`, with its own fields
-(the catalog's `input_schema` is the reference; `pika/models.rs` records
-how each takes a request).
+Each model is at `POST /v1/media/{vendor}/{model}/{function}` and has its
+own fields. The `input_schema` of the catalog is the reference.
+`pika/models.rs` records how each model takes a request.
 
 | Model | Text / first frame / references | Length | Aspect field | Resolutions | First / last frame fields | References | Sound |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -179,21 +213,23 @@ how each takes a request).
 | FLUX 3 (`black-forest-labs/flux-3-video`) | text, image | 5–20 or `"auto"` | `aspect_ratio`: `auto`, 21:9, 2:1, 16:9, 4:3, 1:1, 3:4, 9:16 | 720p, 1080p | `keyframes: [{image_url, at_s?}]` (1–10) | — | `generate_audio` |
 | Grok Imagine Video (`x-ai/grok-imagine-video`) | text, image, reference-to-video | 1–15 | `aspect_ratio`: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3 | 480p, 720p | `image_url` | `reference_image_urls` 1–3 | — |
 
-Not offered, because the editor's video request needs both text and image to
-video and always sends a length:
+The editor does not offer the models below. Its video request needs both
+text and image to video, and always sends a length.
 
 - Veo 3.1 and Veo 3.1 Fast: text-to-video only (with up to 3 reference
   images at 8 s), plus video extension;
-- Veo 3.1 Lite, Hailuo 2.3 Fast, Grok Imagine Video 1.5: image-to-video only;
+- Veo 3.1 Lite, Hailuo 2.3 Fast, Grok Imagine Video 1.5: image-to-video
+  only;
 - Gemini Omni 1.1 Flash: no length field;
 - the other video operations: video-to-video, video extension, motion
-  control, avatars and lip sync. Upscaling is offered on its own (see
-  "Upscaling").
+  control, avatars and lip sync. The editor offers upscaling separately
+  (see "Upscaling").
 
-Kling's omni-video references are left out: Pika states no limits for them.
-Most models' references are cited `@Image1`, `@Video1`, `@Audio1`, as Pika's
-specifications say for every reference model; MiniMax H3's fields say
-`Image 1`, so the editor's tags are rewritten for it.
+The editor does not use the omni-video references of Kling, because
+Pika states no limits for them. For most models, the prompt cites
+references as `@Image1`, `@Video1`, `@Audio1`. The specifications of
+Pika say this for every reference model. The fields of MiniMax H3 say
+`Image 1`. Thus the editor rewrites its tags for MiniMax H3.
 
 ## What the editor uses
 
@@ -214,28 +250,45 @@ specifications say for every reference model; MiniMax H3's fields say
 | FLUX 3 | ✓ | ✓ | ✓ (two keyframes) | — | 5–20 s | without `auto` | 720p, 1080p | switch |
 | Grok Imagine Video | ✓ | ✓ | — | pictures | 1–15 s | as above | 720p, 480p | — |
 
-- The prompt is sent as written (for MiniMax H3, with its reference tags
-  rewritten); `rewrite`, `seed`, `draft`, `watermark` and the like keep
-  their defaults. No shape asked for leaves the field out; no length leaves
-  it out too, or sends `"auto"` where the model takes it (Seedance requires
-  one). The resolution is always sent, in the case the model spells it.
-- Before anything is uploaded or spent, `VideoModel::check` and
-  `pika/video.rs` refuse what Pika would: references that are only sounds,
-  clips or sounds under 2 s (H3 Flex, Seedance), 480p between two frames on
-  Pika 2.5, over 6 s at 1080p on Hailuo 2.3.
-- Files are uploaded with `POST /v1/media/uploads` and a signed `PUT`.
-- The job is polled every 3 s, as queued or running; it can't be stopped, so
-  the media pool shows no stop button for it. It is followed for at most
-  two hours. The video is downloaded from `output.video.url` without the
-  key; the job's charge is not recorded.
+- The request:
+  - The editor sends the prompt as the user wrote it. For MiniMax H3, the
+    editor rewrites the reference tags.
+  - `rewrite`, `seed`, `draft`, `watermark` and similar fields keep their
+    defaults.
+  - If the user asks for no shape, the request leaves the field out.
+  - If the user asks for no length, the request also leaves the field
+    out. Or it sends `"auto"` where the model takes it. Seedance requires
+    a length.
+  - The editor always sends the resolution, in the letter case that the
+    model uses.
+- Before the editor uploads a file or spends credit, `VideoModel::check`
+  and `pika/video.rs` refuse the requests that Pika would refuse:
+  - references that are only sounds;
+  - clips or sounds under 2 s (H3 Flex, Seedance);
+  - 480p between two frames on Pika 2.5;
+  - over 6 s at 1080p on Hailuo 2.3.
+- The editor uploads files with `POST /v1/media/uploads` and a signed
+  `PUT`.
+- The job:
+  - The editor polls the job every 3 s while it is queued or running.
+  - The job cannot stop. Thus the media pool shows no stop button for it.
+  - The editor follows the job for two hours at most.
+  - The editor downloads the video from `output.video.url` without the
+    key.
+  - The editor does not record the charge of the job.
 
 ## Image operations
 
-Each image model is two operations at `POST /v1/media/{vendor}/{model}/…`:
-`text-to-image`, and `image-to-image` (editing, or following, 1 to its
-limit of pictures as `image_urls`). Jobs, uploads and errors are as for
-video; a completed job has `output.images[].url` (and `content_type`). Read
-on 2026-11-07 from the catalog's `input_schema`.
+Each image model has two operations at
+`POST /v1/media/{vendor}/{model}/…`:
+
+- `text-to-image`;
+- `image-to-image`: it edits or follows from 1 picture up to its limit of
+  pictures, as `image_urls`.
+
+Jobs, uploads and errors are the same as for video. A completed job has
+`output.images[].url` (and `content_type`). We read this data on
+2026-11-07 from the `input_schema` of the catalog.
 
 `crates/flikk-cloud/src/pika/` (`models::IMAGE`, `image.rs`):
 
@@ -247,86 +300,121 @@ on 2026-11-07 from the catalog's `input_schema`.
 | Seedream 5.5 (`bytedance/seedream-5.5`) | `aspect_ratio` (left out: picked from the prompt) | `size` 2K, 1.5K, 1K | 10 | `background` |
 | Seedream 5.0 Pro (`bytedance/seedream-5.0-pro`) | `aspect_ratio` (left out: picked from the prompt) | `size` 2K, 1.5K, 1K | 10 | — |
 | Seedream 5.0 Lite (`bytedance/seedream-5.0-lite`) | as above | `size` 2K, 3K, 4K | 14 | — |
-| Ideogram 4.5 (`ideogram/ideogram-4.5`) | `size` in pixels: the larger size its text-to-image enum has for each ratio (editing takes any `WxH` in multiples of 32 up to 4,194,304 pixels, which these are) | — | 5 | — |
+| Ideogram 4.5 (`ideogram/ideogram-4.5`) | `size` in pixels: for each ratio, the larger size in its text-to-image enum. Editing accepts any `WxH` in multiples of 32 up to 4,194,304 pixels, and these sizes obey that rule | — | 5 | — |
 | Grok Imagine Image 2.0 (`x-ai/grok-imagine-image-2.0`) | `aspect_ratio`, `auto` | `resolution` 1K, 2K | 5 | — |
 | Muse Image (`meta/muse-image-1.0`) | none (`size` left at `auto`) | — | 10 | — |
 | Recraft 4.1 (`recraft/recraft-4.1`) | none: its `size` answers 422 "not enabled on this environment yet" | — | text only | — |
 
-`num_images`, `seed`, `quality`, `output_format` and the like keep their
-defaults; one picture is made per request. Not used: Seedream 4.0, 4.5,
-5.0 Flash and the 5.5, 5.0 Pro and 5.0 Flash layer decompositions, Gemini 3.1 Flash Image and Flash Lite,
-Ideogram 4.0 (and Transparent) and P-Image, GPT Image 2.5, Grok Imagine
-Image and Image Quality, and Topaz Image Upscale.
+`num_images`, `seed`, `quality`, `output_format` and similar fields keep
+their defaults. Each request makes one picture.
 
-Pika validates an image request's body before its key too: with a made-up
-key, every model's text-to-image body (no shape, each shape, each
-resolution, transparent where offered) and image-to-image body (one
-picture, its most pictures, pictures with a shape) as `image.rs` writes it
-answers 401, which is how Recraft 4.1's refused `size` was found.
+The editor does not use these models:
+
+- Seedream 4.0, 4.5 and 5.0 Flash;
+- the 5.5, 5.0 Pro and 5.0 Flash layer decompositions;
+- Gemini 3.1 Flash Image and Flash Lite;
+- Ideogram 4.0 (and Transparent) and P-Image;
+- GPT Image 2.5;
+- Grok Imagine Image and Image Quality;
+- Topaz Image Upscale.
+
+Pika also validates the body of an image request before its key. We sent
+these bodies, as `image.rs` writes them, with a made-up key:
+
+- the text-to-image body of each model: no shape, each shape, each
+  resolution, and transparent where available;
+- the image-to-image body of each model: one picture, its maximum number
+  of pictures, and pictures with a shape.
+
+Each body got the answer 401. This test found that Recraft 4.1 refuses
+`size`.
 
 ## Audio operations
 
-The editor makes music and sound effects with these (`pika/audio.rs`; the
-fields each request is written in are in `audio.rs`). All are media jobs;
-a completed job has `output.audio.url` and `content_type`.
+The editor makes music and sound effects with these operations
+(`pika/audio.rs`). `audio.rs` also has the fields of each request. All
+are media jobs. A completed job has `output.audio.url` and
+`content_type`.
 
 | Operation | Prompt | Length | Other fields the editor sends |
 | --- | --- | --- | --- |
-| Pika Music (`pika/pika-audio/pika-music`, default) | `prompt`, 4,000 | `duration` 10–360 (default 30) | `lyrics` (`[Name]` blocks) when sung lines are given |
+| Pika Music (`pika/pika-audio/pika-music`, default) | `prompt`, 4,000 | `duration` 10–360 (default 30) | `lyrics` (`[Name]` blocks) when the user gives sung lines |
 | Sonilo 1.1 (`sonilo/sonilo-v1.1-music/text-to-music`) | `prompt`, 2,000 | `duration` 5–360, whole seconds, required | `segments: [{start, prompt (200), label?}]`, up to 30; `label` one of intro, verse, pre-chorus, chorus, bridge, break, silence, outro |
-| MiniMax Music 3.0 (`minimax/minimax-music-3.0/text-to-audio`) | `prompt`, 2,000 | none (up to 5 min) | `is_instrumental`; `lyrics` (3,500), or `lyrics_optimizer` to have it write them |
+| MiniMax Music 3.0 (`minimax/minimax-music-3.0/text-to-audio`) | `prompt`, 2,000 | none (up to 5 min) | `is_instrumental`; `lyrics` (3,500), or `lyrics_optimizer` to make the model write them |
 | Lyria 3.5, Lyria 3 Pro (`google/lyria-3.5/text-to-audio`, `google/lyria-3-pro/text-to-audio`) | `prompt`, 4,096 | none (3 Pro: up to 184 s) | none: structure, tempo and lyrics go in the prompt |
 | Pika SFX (`pika/pika-audio/pika-sfx`, default) | `prompt`, 4,000 | `duration` 1–20 (default 10) | |
 | Sonilo 1.1 SFX (`sonilo/sonilo-v1.1-sfx/sound-effects`) | `prompt`, 2,000 | `duration` 1–180, whole seconds, required | `audio_format: wav` |
 | ElevenLabs Sound Effects v2 (`elevenlabs/eleven-text-to-sound-v2/sound-effects`) | `text`, 450 | `duration_seconds` 0.5–30, required | `loop` |
 
-Not used: Lyria 2, Lyria 3 (30 s), Seed Audio, Kling Audio, the video-to-audio
-operations (Sonilo, Kling, Pika Soundtrack) and stems.
+The editor does not use these operations:
+
+- Lyria 2, Lyria 3 (30 s), Seed Audio, Kling Audio;
+- the video-to-audio operations (Sonilo, Kling, Pika Soundtrack);
+- stems.
 
 ## Upscaling
 
-Two operations make a video larger; both are jobs as above, take the video
-as an uploaded URL (50 MB at most) and answer `output.video.url`. Read on
-2026-11-10 from the catalog's `input_schema`.
+Two operations make a video larger. Both are jobs, as above. Both take
+the video as an uploaded URL (50 MB at most) and answer
+`output.video.url`. We read this data on 2026-11-10 from the
+`input_schema` of the catalog.
 
 | Operation | Fields | Limits | Price |
 | --- | --- | --- | --- |
 | Topaz Video Upscale (`topaz/topaz-video-upscale/video-upscale`) | `video_url`; `upscale_factor` `x2` (default), `x3`, `x4` (`x1` only interpolates frames); `model` `proteus` (default), `starlight-mini`, `starlight-hq`, `starlight-sharp`, `starlight-fast-2`, `starlight-precise-2.6`; `h264_output` (default H.265); Proteus tuning (`compression`, `noise`, `halo`, `grain`, `recover_detail`), `target_fps`, `slowdown_factor` | output at most 4096 × 2160 pixels in all; Starlight takes sources up to 30 fps and, except Precise 2.6, never makes less than 720p | Proteus $0.19 per 1,000 output megapixels; Starlight $1.92 (Fast 2) or $3.84 per 1,000 1080p frames, $4.20 or $8.39 per 1,000 4K frames |
-| Pika H3 Flex Draft to Video (`pika/pika-h3-flex/draft-to-video`) | `video` (or `draft_job_id`, a 480p/768p H3 Flex job of the account's); `resolution` `1080p`, `2k` (default), `4k` | short side at most 768 px; 512 MiB, 1,441 frames; keeps the frames, frame rate and sound | the final resolution's price per second less the native 480p/768p price |
+| Pika H3 Flex Draft to Video (`pika/pika-h3-flex/draft-to-video`) | `video` (or `draft_job_id`, a 480p/768p H3 Flex job of the account); `resolution` `1080p`, `2k` (default), `4k` | short side at most 768 px; 512 MiB, 1,441 frames; keeps the frames, frame rate and sound | the price per second of the final resolution, less the native 480p/768p price |
 
-`crates/flikk-cloud/src/pika/upscale.rs` offers Topaz Proteus (the
-default), Starlight Precise 2.6 and Starlight Fast 2, each with
-`h264_output` on and the smallest factor reaching the resolution asked
-for, and H3 Flex's `draft-to-video` with the resolution itself. Proteus
-tuning, frame interpolation and Starlight Mini, HQ and Sharp are not used.
-Topaz Image Upscale (`topaz/topaz-image-upscale/image-upscale`) is not
-used: pictures are not upscaled yet.
+`crates/flikk-cloud/src/pika/upscale.rs` offers these operations:
+
+- Topaz Proteus (the default), Starlight Precise 2.6 and Starlight
+  Fast 2. Each one has `h264_output` on. Each one uses the smallest factor
+  that reaches the requested resolution.
+- The `draft-to-video` operation of H3 Flex, with the requested resolution
+  itself.
+
+The editor does not use Proteus tuning, frame interpolation, or
+Starlight Mini, HQ and Sharp. It does not use Topaz Image Upscale
+(`topaz/topaz-image-upscale/image-upscale`), because it does not upscale
+pictures yet.
 
 ## Verified
 
-- Every field, enum and limit above against the live catalog
-  (`/catalog/apis/…?expand=inputs`) and `openapi.json`, with a script: each
-  model's lengths, shapes, resolutions (and their case and default),
-  reference limits and the fields its frames, references and sound go in.
-- Pika validates a submit's body before its key, so a made-up key checks a
-  request's fields for free: every model's text-to-video request, at each
-  resolution with its shortest and longest length, with each shape and with
-  none, is accepted (401). That is how Hailuo 2.3's 6 s limit at 1080p was
-  found; it is in no schema.
-- With a made-up key: `401 {"message":"Invalid API key"}` on
-  `/billing/balance`, submit, uploads and job reads (`"missing API key"` with
-  none); a submit with `duration: 30` answers `422 {"message":"duration:
-  Input should be less than or equal to 15"}` before the key is checked.
+- A script verified every field, enum and limit above against the live
+  catalog (`/catalog/apis/…?expand=inputs`) and `openapi.json`. For each
+  model, it checked these items:
+  - the lengths;
+  - the shapes;
+  - the resolutions, with their letter case and default;
+  - the reference limits;
+  - the fields for its frames, references and sound.
+- Pika validates the body of a submit before its key. Thus a made-up key
+  checks the fields of a request at no cost.
+  - We sent the text-to-video request of each model. We used each
+    resolution with its shortest and longest length, each shape, and no
+    shape. Pika accepted each request (401).
+  - This test found the 6 s limit of Hailuo 2.3 at 1080p. No schema
+    shows this limit.
+- With a made-up key, `/billing/balance`, submit, uploads and job reads
+  answer `401 {"message":"Invalid API key"}`. Without a key, they answer
+  `"missing API key"`. A submit with `duration: 30` answers
+  `422 {"message":"duration: Input should be less than or equal to 15"}`
+  before Pika checks the key.
 
-- Every audio request the editor writes (each model above, with and
-  without a length, sections, lyrics and looping) is accepted (401), and
-  a length out of range, a fractional length to Sonilo SFX and a length
-  to Lyria are refused (422), with a made-up key on 2026-11-11.
+- On 2026-11-11, we sent with a made-up key each audio request that the
+  editor writes. These requests used each model above, with and without
+  a length, sections, lyrics and loop. Pika accepted them (401). Pika
+  refused these requests (422):
+  - a length out of range;
+  - a fractional length to Sonilo SFX;
+  - a length to Lyria.
 
-Not verified without a paid key: a real job end to end, the exact
-`headers` an upload hands out, whether `output.video.url` downloads without
-the key, and the failed-job bodies for balance, rate limits and moderation
-(taken from the specification).
+We did not verify these items, because we have no paid key:
+
+- a real job end to end;
+- the exact `headers` that an upload gives;
+- if `output.video.url` downloads without the key;
+- the failed-job bodies for balance, rate limits and moderation (they
+  come from the specification).
 
 ## Sources
 
