@@ -100,10 +100,11 @@ impl Fix {
         .join(" ")
     }
 
-    /// Where the new words are among the script's spoken words.
-    pub fn new_words(&self) -> std::ops::Range<usize> {
-        let first = cloud::spoken_words(&self.before).len();
-        first..first + cloud::spoken_words(&self.text).len()
+    /// Where the new words are among the script's spoken words, read by a
+    /// model taking `marks`.
+    pub fn new_words(&self, marks: cloud::DeliveryMarks) -> std::ops::Range<usize> {
+        let first = cloud::spoken_words(&self.before, marks).len();
+        first..first + cloud::spoken_words(&self.text, marks).len()
     }
 
     /// One line for cards and logs.

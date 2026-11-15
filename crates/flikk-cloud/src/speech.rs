@@ -34,6 +34,27 @@ pub struct HostedSpeech {
     pub clone_id: Option<fn(&str) -> bool>,
 }
 
+/// The voices MiniMax Speech reads with on every host, the default first.
+pub const MINIMAX_VOICES: &[&str] = &[
+    "Wise_Woman",
+    "Friendly_Person",
+    "Inspirational_girl",
+    "Deep_Voice_Man",
+    "Calm_Woman",
+    "Casual_Guy",
+    "Lively_Girl",
+    "Patient_Man",
+    "Young_Knight",
+    "Determined_Man",
+    "Lovely_Girl",
+    "Decent_Boy",
+    "Imposing_Manner",
+    "Elegant_Man",
+    "Abbess",
+    "Sweet_Girl_2",
+    "Exuberant_Girl",
+];
+
 impl HostedSpeech {
     /// Whether it reads with `voice`.
     fn reads(&self, voice: &str) -> bool {

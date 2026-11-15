@@ -19,6 +19,18 @@ pub fn list(key: &str, model: &str) -> CloudResult<Vec<Voice>> {
     if model != CLONES {
         return Ok(voices);
     }
+    // The stock voices read without the clones: only a key Pika refuses
+    // stops the list.
+    match clones(key) {
+        Ok(clones) => voices.extend(clones),
+        Err(e @ CloudError::InvalidKey { .. }) => return Err(e),
+        Err(_) => {}
+    }
+    Ok(voices)
+}
+
+/// The clones the account made, newest first.
+fn clones(key: &str) -> CloudResult<Vec<Voice>> {
     let reply = http::get(
         &format!("{BASE}/v1/voices"),
         &[("authorization", &bearer(key)), ("x-api-key", key)],
@@ -27,14 +39,12 @@ pub fn list(key: &str, model: &str) -> CloudResult<Vec<Voice>> {
         return Err(error(&reply));
     }
     let json = reply.json()?;
-    let clones = json["results"].as_array().into_iter().flatten();
-    // Stock voices come first in the list; the model's own are above.
-    voices.extend(
-        clones
-            .filter(|v| v["kind"] == "cloned")
-            .filter_map(clone_of),
-    );
-    Ok(voices)
+    let listed = json["results"].as_array().into_iter().flatten();
+    // Stock voices come first in the list; the model's own are the presets.
+    Ok(listed
+        .filter(|v| v["kind"] == "cloned")
+        .filter_map(clone_of)
+        .collect())
 }
 
 /// Clone a voice from `clone`'s recordings. Can take over a minute; not
@@ -72,11 +82,12 @@ pub fn clone(key: &str, clone: &VoiceClone) -> CloudResult<Voice> {
         None,
     )?;
     if !reply.ok() {
-        return Err(match reply.status {
-            409 => CloudError::NotAllowed(format!(
-                "{NAME} keeps 100 cloned voices at most; delete one first"
-            )),
-            _ => error(&reply),
+        return Err(match (reply.status, error(&reply)) {
+            // What Pika says of it; the usual conflict is its limit.
+            (409, e) => {
+                CloudError::NotAllowed(format!("{e}. {NAME} keeps 100 cloned voices at most"))
+            }
+            (_, e) => e,
         });
     }
     clone_of(&reply.json()?).ok_or_else(|| CloudError::Failed("the reply named no voice".into()))
@@ -85,8 +96,8 @@ pub fn clone(key: &str, clone: &VoiceClone) -> CloudResult<Voice> {
 /// Remove clone `voice` from the account; what it read stays.
 pub fn delete(key: &str, voice: &str) -> CloudResult<()> {
     if !is_clone(voice) {
-        return Err(CloudError::Failed(format!(
-            "No voice with the id “{voice}”"
+        return Err(CloudError::NotAllowed(format!(
+            "“{voice}” is one of {NAME}'s own voices, which stay on the account; remove it from the library instead"
         )));
     }
     let reply = http::delete(

@@ -2,6 +2,7 @@
 //! ([`VoiceoverModel`]), and the words it says.
 
 use super::{CloudError, CloudResult, SCRIPT_CHARS};
+use serde::{Deserialize, Serialize};
 
 /// What one voiceover model reads and which voices it can use, so a script
 /// is checked before it costs anything and the form, the Voices dialog and
@@ -20,9 +21,11 @@ pub struct VoiceoverModel {
 }
 
 /// How a model reads delivery written into a script.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryMarks {
     /// Bracketed tags: `[whispers]`, `[laughs]`, `[short pause]`.
+    #[default]
     AudioTags,
     /// The [`INTERJECTIONS`] in parentheses, and `<#0.5#>` pauses in
     /// seconds.
@@ -142,17 +145,22 @@ impl DeliveryMarks {
     }
 }
 
-/// The words a voiceover's `script` says, punctuation on the word before
-/// it. Delivery marks are not said, and a dash, an ellipsis or a full stop
-/// in Chinese or Japanese ends a word without a space; so does each
-/// character that is a word or close to one there.
-pub fn spoken_words(script: &str) -> Vec<String> {
+/// The words a voiceover's `script` says when a model reading `marks` reads
+/// it, punctuation on the word before it. Its delivery marks are not said;
+/// another model's are, as it reads them aloud. A dash, an ellipsis or a
+/// full stop in Chinese or Japanese ends a word without a space; so does
+/// each character that is a word or close to one there.
+pub fn spoken_words(script: &str, marks: DeliveryMarks) -> Vec<String> {
     let ends_word = |c: char| {
         matches!(c, '—' | '–' | '…' | '、' | '。' | '，' | '！' | '？')
             || matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
     };
     let mut words: Vec<String> = Vec::new();
-    let text = without_marks(script);
+    let text = match marks {
+        DeliveryMarks::AudioTags => without_tags(script),
+        DeliveryMarks::Interjections => without_interjections(script),
+        DeliveryMarks::Plain => script.to_owned(),
+    };
     for part in text
         .split_whitespace()
         .flat_map(|token| token.split_inclusive(ends_word))
@@ -167,17 +175,28 @@ pub fn spoken_words(script: &str) -> Vec<String> {
     words
 }
 
-/// `script` with a space for each delivery mark of any model: an
-/// `[audio tag]`, a `<#0.5#>` pause or one of the [`INTERJECTIONS`].
-fn without_marks(script: &str) -> String {
+/// `script` with a space for each `[audio tag]`.
+fn without_tags(script: &str) -> String {
     let mut out = String::new();
     let mut rest = script;
-    while let Some(start) = rest.find(['[', '<', '(']) {
+    while let Some((said, tag)) = rest.split_once('[') {
+        out.push_str(said);
+        out.push(' ');
+        rest = tag.split_once(']').map_or(tag, |(_, after)| after);
+    }
+    out + rest
+}
+
+/// `script` with a space for each `<#0.5#>` pause and each of the
+/// [`INTERJECTIONS`]; any other bracket is said.
+fn without_interjections(script: &str) -> String {
+    let mut out = String::new();
+    let mut rest = script;
+    while let Some(start) = rest.find(['<', '(']) {
         let (said, mark) = rest.split_at(start);
-        let end = match mark.as_bytes()[0] {
-            b'[' => mark.find(']').map(|i| i + 1),
-            b'<' if mark.starts_with("<#") => mark[2..].find("#>").map(|i| i + 4),
-            _ => INTERJECTIONS
+        let end = match mark.strip_prefix("<#") {
+            Some(pause) => pause.find("#>").map(|i| i + 4),
+            None => INTERJECTIONS
                 .iter()
                 .find(|i| mark.starts_with(*i))
                 .map(|i| i.len()),
@@ -187,11 +206,6 @@ fn without_marks(script: &str) -> String {
             Some(end) => {
                 out.push(' ');
                 rest = &mark[end..];
-            }
-            // An unclosed `[` is dropped; any other bracket is said.
-            None if mark.starts_with('[') => {
-                out.push(' ');
-                rest = &mark[1..];
             }
             None => {
                 out.push_str(&mark[..1]);

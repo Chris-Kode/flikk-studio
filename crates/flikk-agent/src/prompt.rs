@@ -169,6 +169,12 @@ or missing word said again in the speaker's own voice and cut in where the \
 old words were; it costs credits like a voiceover. Use it only when the user \
 asked for the words to change; to take words out, cut them.";
 
+/// In place of the voiceover guidance while no model is picked for them.
+const NO_VOICEOVERS: &str = "\
+Writing voiceovers: no provider is picked for them. When the user asks for \
+one, tell them to pick a provider for Voiceover in Settings → Integrations. \
+Never imitate a real person.";
+
 /// After the voiceover guidance.
 const EDITOR_VIDEO: &str = "\
 Making video: `generate_video` (generate group) has the provider the user \
@@ -322,7 +328,10 @@ pub fn system_prompt(
     out.push_str("\n\n");
     out.push_str(EDITOR);
     out.push_str("\n\n");
-    out.push_str(&voiceovers(&voiceover.unwrap_or_default()));
+    match &voiceover {
+        Some(model) => out.push_str(&voiceovers(model)),
+        None => out.push_str(NO_VOICEOVERS),
+    }
     out.push_str("\n\n");
     out.push_str(EDITOR_VIDEO);
     out.push_str("\n\n");

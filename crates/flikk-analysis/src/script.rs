@@ -11,7 +11,12 @@ use flikk_core::time::{Time, TimeRange};
 use std::path::Path;
 
 /// `script`'s words with where each is said in the file at `path`.
-pub(crate) fn time(shared: &Shared, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
+pub(crate) fn time(
+    shared: &Shared,
+    path: &Path,
+    script: &str,
+    marks: cloud::DeliveryMarks,
+) -> ServiceResult<Vec<Word>> {
     let audio = ffmpeg::extract_audio(path, 0, None, &|_| {}, &|| false)
         .map_err(|e| ServiceError(format!("{e:#}")))?;
     if audio.is_empty() {
@@ -21,7 +26,7 @@ pub(crate) fn time(shared: &Shared, path: &Path, script: &str) -> ServiceResult<
     // A take is clean speech: the energy VAD hears it well.
     let speech = vad::speech_ranges(&audio);
     let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
-    let mut words: Vec<Word> = cloud::spoken_words(script)
+    let mut words: Vec<Word> = cloud::spoken_words(script, marks)
         .into_iter()
         .map(|text| Word {
             range: TimeRange::new(Time::ZERO, Time::ZERO),

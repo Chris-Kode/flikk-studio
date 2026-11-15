@@ -442,8 +442,13 @@ impl AnalysisService for LocalAnalysis {
         }
     }
 
-    fn time_script(&self, path: &Path, script: &str) -> ServiceResult<Vec<Word>> {
-        script::time(&self.shared, path, script)
+    fn time_script(
+        &self,
+        path: &Path,
+        script: &str,
+        marks: cloud::DeliveryMarks,
+    ) -> ServiceResult<Vec<Word>> {
+        script::time(&self.shared, path, script, marks)
     }
 
     fn silences(&self, item: &MediaItem, min: Time) -> ServiceResult<Vec<TimeRange>> {
@@ -770,6 +775,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     let generated = item.generated.as_deref();
     let script = generated.and_then(GenerationInfo::script);
     let script = script.filter(|_| !task.options.sound_only);
+    let marks = generated.map(GenerationInfo::marks).unwrap_or_default();
     let plan = Plan::new(
         &lock(&shared.config),
         task.options.sound_only,
@@ -925,7 +931,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                 }
                 if let Some(script) = script {
                     let end = Time::from_secs_f64(audio.len() as f64 / ffmpeg::SAMPLE_RATE as f64);
-                    let mut t = written(task, stream, script);
+                    let mut t = written(task, stream, script, marks);
                     align::spread(&mut t.words, &analysis.speech, Time::ZERO, end);
                     let words = progress.step(Step::Words);
                     match follow_script(
@@ -1182,13 +1188,15 @@ fn transcript(
 
 /// The transcript of a voiceover, as `script` is written: no times yet, and
 /// no language, which nothing here hears.
-fn written(task: &Task, stream: u32, script: &str) -> Transcript {
-    let words = cloud::spoken_words(script).into_iter().map(|text| Word {
-        range: TimeRange::new(Time::ZERO, Time::ZERO),
-        text,
-        confidence: 1.0,
-        speaker: None,
-    });
+fn written(task: &Task, stream: u32, script: &str, marks: cloud::DeliveryMarks) -> Transcript {
+    let words = cloud::spoken_words(script, marks)
+        .into_iter()
+        .map(|text| Word {
+            range: TimeRange::new(Time::ZERO, Time::ZERO),
+            text,
+            confidence: 1.0,
+            speaker: None,
+        });
     Transcript {
         fingerprint: task.fingerprint.clone(),
         audio_stream: stream,

@@ -141,10 +141,8 @@ pub fn request(
                     .map_err(|e| ToolError(super::image::error_text(&e)))?;
             }
             let speech = (ctx.services.generation.as_ref()).and_then(|g| g.voiceover_model());
-            if let (Some(speech), flikk_core::cloud::GenerateRequest::Voiceover { text, .. }) =
-                (speech, &request)
-            {
-                speech.check(text).map_err(|e| {
+            if let flikk_core::cloud::GenerateRequest::Voiceover { text, .. } = &request {
+                speech.unwrap_or_default().check(text).map_err(|e| {
                     ToolError(match &e {
                         // A rewrite to read instead.
                         flikk_core::cloud::CloudError::BadPrompt {

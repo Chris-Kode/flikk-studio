@@ -405,6 +405,9 @@ impl GenerationService for Cloud {
             model: model.id.to_owned(),
             prompt: request.prompt().to_owned(),
             reading: request.reading().cloned(),
+            marks: (capability == Capability::Voiceover)
+                .then(|| provider.api.voiceover_model(model.id).map(|m| m.marks))
+                .flatten(),
         };
         write_sidecar(&path, request, &info, cost);
         Ok(Generated { path, info, cost })

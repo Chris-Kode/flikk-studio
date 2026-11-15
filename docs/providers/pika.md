@@ -396,6 +396,13 @@ has `output.audio.url`. We read the specifications on 2026-11-15.
 - An organization keeps 100 clones at most (`409`). The first 5 are
   free, deleted ones included; each one after costs $1.
 - A clone reads only on its provider's models: ElevenLabs v4 here.
+- If the list call fails, the editor shows the stock voices without the
+  clones. Only a key that Pika refuses stops the list.
+- The editor does not delete a stock voice. It tells the user to remove
+  the voice from the library.
+- A voiceover keeps the delivery marks of its model (`marks` in
+  `GenerationInfo`). The editor uses them to find the words the take
+  says.
 - Pika can't rename a voice (the name is kept in the library only),
   take noise out of recordings, search a shared library or design a
   voice.

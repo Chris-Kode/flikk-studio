@@ -952,7 +952,14 @@ fn voice_menu(
     let p = panel.clone();
     let (s4, s5) = (state.clone(), state.clone());
     let name = saved.name.clone();
-    menu.item(PopupMenuItem::separator())
+    // One of the model's own voices, where the account holds no others,
+    // is not the user's to delete.
+    let ops = s.voiceover_model().unwrap_or_default().voices;
+    let stock = matches!(saved.origin, VoiceOrigin::Account)
+        && s.voice_provider().as_deref() == Some(saved.provider.as_str())
+        && !(ops.library || ops.design || ops.clone);
+    let menu = menu
+        .item(PopupMenuItem::separator())
         .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
             p.update(cx, |this, cx| this.start_rename(id, window, cx))
         }))
@@ -960,25 +967,26 @@ fn voice_menu(
         .item(
             PopupMenuItem::new("Remove from Library")
                 .on_click(move |_, _, cx| s4.update(cx, |s, cx| s.forget_voice(id, cx))),
-        )
-        .item(
-            PopupMenuItem::new(format!("Delete from {provider}…")).on_click(
-                move |_, window, cx| {
-                    let (state, name) = (s5.clone(), name.clone());
-                    window.open_confirm(cx, move |dialog, _, _| {
-                        let state = state.clone();
-                        dialog
-                            .title(format!("Delete “{name}” from {provider}?"))
-                            .description("Voiceovers it read stay.")
-                            .destructive()
-                            .confirm("Delete", move |_, cx| {
-                                state.update(cx, |s, cx| s.delete_saved_voice(id, cx));
-                                true
-                            })
-                    });
-                },
-            ),
-        )
+        );
+    if stock {
+        return menu;
+    }
+    menu.item(
+        PopupMenuItem::new(format!("Delete from {provider}…")).on_click(move |_, window, cx| {
+            let (state, name) = (s5.clone(), name.clone());
+            window.open_confirm(cx, move |dialog, _, _| {
+                let state = state.clone();
+                dialog
+                    .title(format!("Delete “{name}” from {provider}?"))
+                    .description("Voiceovers it read stay.")
+                    .destructive()
+                    .confirm("Delete", move |_, cx| {
+                        state.update(cx, |s, cx| s.delete_saved_voice(id, cx));
+                        true
+                    })
+            });
+        }),
+    )
 }
 
 /// What a library item offers besides using it.

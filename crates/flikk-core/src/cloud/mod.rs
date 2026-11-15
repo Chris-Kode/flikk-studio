@@ -252,9 +252,18 @@ pub struct GenerationInfo {
     /// Who read it, for a voiceover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<Reading>,
+    /// How the model that read a voiceover takes delivery in its script;
+    /// `None` on one made before models differed, which read audio tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marks: Option<DeliveryMarks>,
 }
 
 impl GenerationInfo {
+    /// The delivery marks a voiceover's script is written in.
+    pub fn marks(&self) -> DeliveryMarks {
+        self.marks.unwrap_or_default()
+    }
+
     /// What a voiceover reads, with its delivery written in.
     pub fn script(&self) -> Option<&str> {
         (self.capability == Capability::Voiceover).then_some(self.prompt.as_str())
