@@ -2,159 +2,166 @@
 
 ## Status
 
-Shipped in pull request #61 (November 2026). Code:
-[`crates/flikk-os/src/gpu.rs`](../../crates/flikk-os/src/gpu.rs), list in
-[`crates/flikk/src/ui/jobs.rs`](../../crates/flikk/src/ui/jobs.rs).
+Pull request #61 added this design in November 2026.
+
+- Scheduler: [`crates/flikk-os/src/gpu.rs`](../../crates/flikk-os/src/gpu.rs)
+- List: [`crates/flikk/src/ui/jobs.rs`](../../crates/flikk/src/ui/jobs.rs)
 
 ## Problem
 
-Nothing coordinated GPU work. Playback, export, the background render
-cache, depth maps, slow motion, transcription, subject masks and the
-agent's previews could all reach the GPU at once. The only rule was that
-the render cache stopped while the user played or exported. The user also
-had no way to see what was running or waiting.
+No module controlled the work on the GPU. Playback, export, the render
+cache and the models used the GPU at the same time. There was only one
+rule: the render cache stopped during playback and export. The user did
+not see the jobs.
 
-Two requirements came with the fix:
+The solution had two requirements:
 
-- every job gets its moment: nothing saturates the GPU and nothing is
-  starved;
-- it scales: a new kind of GPU work joins without changes to the
-  scheduler or to the list.
+- Each job gets time on the GPU. No job uses all of the GPU, and no job
+  waits without end.
+- The design accepts new types of GPU work. A new type does not change
+  the scheduler or the list.
 
 ## Decision
 
-GPU work takes **turns**, coordinated on the CPU side before each unit of
-work, in one small module that every crate can reach (`flikk_os::gpu`).
-The scheduler and the list of jobs are the same module: a job is listed
-because it takes turns.
+GPU work uses **turns**. Before each unit of work, the code asks the
+module `flikk_os::gpu` for a turn. Each crate can use this module. The
+scheduler and the list of jobs are the same module. Thus a job that uses
+turns is in the list automatically.
 
-The GPU users sit on separate APIs (wgpu, ONNX Runtime with Core ML,
-DirectML or WebGPU, whisper.cpp, MLX), each with its own device or
-context. There is no shared GPU-side queue to use, so the only place they
-can be coordinated is before each one starts a unit.
+The GPU users have different APIs: wgpu, ONNX Runtime, whisper.cpp and
+MLX. Each API has its own device or context. No queue on the GPU side
+connects them. Thus the control is on the CPU side, before a unit starts.
 
-Turns are **advisory**. They share the GPU out; nothing is incorrect when
-two units overlap, which is what happened all the time before. So every
-failure of turn-taking degrades to overlap, never to a stall.
+Turns are **advisory**. They divide the GPU time between the jobs. If two
+units run at the same time, the result is still correct. Thus an error in
+the use of turns causes an overlap. It does not stop the work.
 
 ## How it works
 
 ### Levels
 
-| Level | For | Behaviour |
+| Level | Work | Behaviour |
 | --- | --- | --- |
-| Watched | What the user looks at now: playback, a scrubbed frame, the blockout view, the viewer's depth and slow-motion frames, picking a subject | Never waits. `gpu::watching()` only marks the GPU as watched; the mark lapses 250 ms after the last watched frame |
-| Asked | Work the user asked for and waits on: export, a blockout clip, depth for a render, subject tracking, the agent's frames | One unit at a time, in arrival order, so two asked jobs alternate |
-| Background | Work nobody waits on: render cache, render-ahead, pre-analysis | One unit at a time. None while the GPU is watched. One turn in four beside asked work, so it is never starved |
+| Watched | The picture that the user sees now: playback, a scrubbed frame, the blockout view, a subject pick | It does not wait. `gpu::watching()` puts a mark on the GPU. The mark stops 250 ms after the last watched frame. |
+| Asked | Work that the user started and waits for: an export, a blockout clip, subject tracking, the agent frames | One unit at a time, in the sequence of arrival. Two asked jobs alternate. |
+| Background | Work that no person waits for: the render cache, render-ahead, analysis before use | One unit at a time. It waits while the GPU has the watched mark. It gets one turn in four when asked work runs. |
 
 ### Units, jobs and the list
 
-- A **turn** is one unit: one frame, one inference. Decode, disk and
-  network stay outside it where the unit can be that narrow.
-- A **job** (`gpu::Job`) is the long-lived work that takes many turns. It
-  carries a label the user reads ("Export: Interview.mp4") and optional
-  progress.
-- A job is listed from its first turn asked for until it is dropped. Work
-  that ends up on the CPU takes no turn and is never listed.
-- Short-lived work that would only flicker in the list (render-ahead, a
-  single agent frame) takes turns with `gpu::turn` and has no row.
-- An engine that alone knows whether its work runs on the GPU (a model
-  that may have moved to the CPU) is handed a `gpu::Unit` by its caller
-  and takes it only there.
+- A **turn** is one unit: one frame or one inference. Decode, disk and
+  network operations stay out of the turn when that is possible.
+- A **job** (`gpu::Job`) is long work that uses many turns. It has a
+  label for the user ("Export: Interview.mp4") and optional progress.
+- The list shows a job from its first turn request until the code drops
+  it. Work that runs on the CPU does not ask for a turn. The list does
+  not show it.
+- Short work uses `gpu::turn` and has no row. Examples are render-ahead
+  and one agent frame.
+- Some engines know if their work runs on the GPU. The caller gives such
+  an engine a `gpu::Unit`. The engine uses it only for GPU work.
 
-### Joining
+### How to add GPU work
 
 ```rust
 let job = gpu::Job::new("Export: My film.mp4", gpu::Level::Asked);
 for frame in frames {
-    let Some(_turn) = job.turn(&cancel) else { break }; // None once cancelled
+    let Some(_turn) = job.turn(&cancel) else { break }; // None after a cancel
     job.progress(fraction);
     render(frame);
 }
 
-let _watching = gpu::watching(); // watched work: never blocks
+let _watching = gpu::watching(); // watched work: it does not wait
 ```
 
-That is all a new kind of GPU work has to do. The title bar's Jobs list
-reads `gpu::jobs()` every 250 ms and repaints when it changes.
+1. Open a job with a label and a level.
+2. Ask for a turn before each unit.
+3. Report the progress, if you know it.
 
-### Guarantees
+No other step is necessary. The Jobs list reads `gpu::jobs()` each
+250 ms. It draws again when the list changes.
 
-| Hazard | What happens |
+### Protection
+
+| Condition | Result |
 | --- | --- |
-| Panic, cancel or early return while holding a turn | The turn and the job's row are released on drop |
-| Waiting for a turn | Takes a cancel and checks it every 50 ms; a cancelled job is not a failed job |
-| A turn asked for inside another on the same thread (a frame whose composing runs a model) | It is the same turn |
-| A holder waits on another thread's work that needs the GPU | The holder gives its turn back meanwhile (`gpu::aside`) and takes it again first afterwards |
-| A unit longer than 5 s, or a holder stuck | The next waiter takes the turn over; the two overlap |
-| A watched guard kept by mistake | It stops counting after 2 s |
+| A panic, a cancel or an early return occurs during a turn | The drop of the turn releases the GPU. The drop of the job removes its row. |
+| The code waits for a turn | The code examines the cancel flag each 50 ms. A cancelled job is not a failed job. |
+| A thread asks for a turn while it has a turn | The thread gets the same turn. |
+| A thread with a turn waits for a different thread that needs the GPU | `gpu::aside` gives the turn back during the wait. The thread gets the turn again first. |
+| A unit continues for more than 5 s | The subsequent job takes the turn. The two units overlap. |
+| The code keeps a watched mark in error | The mark stops after 2 s. |
 
-### Who takes turns
+### Work that uses turns
 
 | Work | Level | Unit | Row |
 | --- | --- | --- | --- |
-| Program playback, scrub | Watched | frame | none |
-| Export | Asked | composed frame | "Export: file" |
-| Render cache | Background | composed frame | "Render cache" |
-| Viewer render-ahead | Background | frame | none |
-| Blockout view | Watched | frame | none |
-| Blockout clip | Asked | frame | "Blockout clip" |
-| Depth for a render | Asked or background, as the caller says | inference | "Depth: file" |
-| Depth and slow motion for the viewer | Watched | inference | none |
-| Slow motion for a render | Inside the frame's own turn | inference | none |
-| Transcription (Whisper built for a GPU) | As the analysis job's lane | one stretch of speech | "Transcription: file" |
-| Subject tracking (MLX, macOS) | Asked | frame | "Track subject: file" |
-| Subject picking and hover | Watched | frame | none |
-| Agent frames and previews | Asked, stopped with the agent's turn | frame | none |
+| Program playback and scrub | Watched | Frame | None |
+| Export | Asked | Composed frame | "Export: file" |
+| Render cache | Background | Composed frame | "Render cache" |
+| Viewer render-ahead | Background | Frame | None |
+| Blockout view | Watched | Frame | None |
+| Blockout clip | Asked | Frame | "Blockout clip" |
+| Depth for a render | Asked or background, as the caller specifies | Inference | "Depth: file" |
+| Depth and slow motion for the viewer | Watched | Inference | None |
+| Slow motion for a render | The turn of the frame | Inference | None |
+| Transcription (Whisper with GPU support) | The lane of the analysis job | One speech segment | "Transcription: file" |
+| Subject tracking (MLX, macOS) | Asked | Frame | "Track subject: file" |
+| Subject pick and hover | Watched | Frame | None |
+| Agent frames and previews | Asked. A stop of the agent turn stops them. | Frame | None |
 
-The agent's jobs also run at most four at a time on a `JobQueue`, where
-each used to get a thread of its own.
+The agent jobs run on a `JobQueue`, a maximum of four at a time. Before
+this change, each agent job had its own thread.
 
-## Turned down
+## Alternatives that we rejected
 
-- **A queue inside each engine** (wgpu batch, ONNX session, Whisper).
-  Narrower units, but the engines do not know who waits on their work,
-  pipelined frames would hold two turns at once, and each new engine
-  would need its own integration.
-- **Strict exclusion (a lock).** Any mistake in taking turns would then
-  stop work. Advisory turns with a takeover keep the worst case at
-  overlap.
-- **Watched work in the queue.** A background inference can run for
-  seconds; playback must never wait behind one.
-- **One list for every kind of job.** Analysis jobs (`JobStatus`), the
-  render queue and the turn registry stay separate systems for now. See
-  Open.
-- **FFmpeg hardware decode and encode.** They run in other processes on
-  the GPU's video blocks and already fall back to software.
+- **A queue in each engine.** The units are smaller. But an engine does
+  not know who waits for its work. Pipelined frames need two turns at the
+  same time. Each new engine needs its own integration.
+- **A lock.** With a lock, an error in the use of turns stops the work.
+  With advisory turns, the worst result is an overlap.
+- **Watched work in the queue.** A background inference can continue for
+  seconds. Playback must not wait for it.
+- **One list for all job types.** The analysis jobs (`JobStatus`), the
+  render queue and the turns stay as three systems. Refer to Open items.
+- **FFmpeg hardware decode and encode.** They run in other processes.
+  They use the video blocks of the GPU. A software fallback is available.
 
-## Verified
+## Verification
 
-- Format, lint and build clean on Linux; the project has no tests.
-- Throwaway programs outside the repository against `flikk_os::gpu`:
-  asked jobs alternate, background gets one turn in four and waits while
-  watched, a cancelled waiter leaves cleanly, a panicking holder
-  releases, nested turns, the 5 s takeover, `aside` (0.1 s against a 5 s
-  stall without it) and a panic inside it.
-- The Jobs list's empty state in the running app; a blockout clip and a
-  depth pass listed with progress on software Vulkan and WebGPU.
+We did these checks:
 
-Not verified:
+- Format, lint and build are clean on Linux. The project has no tests.
+- Temporary programs called `flikk_os::gpu` from outside the repository.
+  They showed these results:
+  - Asked jobs alternate.
+  - Background work gets one turn in four.
+  - Background work waits during watched work.
+  - A cancelled wait stops cleanly.
+  - A holder that panics releases the turn.
+  - A second request on the same thread gets the same turn.
+  - A different job takes the turn after 5 s.
+  - With `gpu::aside`, a wait takes 0.1 s. Without it, the wait takes 5 s.
+- The app showed the Jobs list with no jobs.
+- On software Vulkan and WebGPU, the list showed a blockout clip and a
+  depth job with progress.
 
-- the MLX subject-mask changes, which are macOS only and were never
-  compiled;
-- slow motion, Whisper on a GPU and the agent's jobs at runtime;
-- rows with real jobs in the app on real hardware.
+We did not do these checks:
 
-## Open
+- The MLX subject mask changes. They are for macOS only, and no compiler
+  built them.
+- Slow motion, Whisper on a GPU and the agent jobs in operation.
+- Rows with real jobs in the app on real hardware.
 
-- The list is called Jobs but holds only work that takes GPU turns.
-  CPU-only work (person masks, stabilizing, speaker and sound analysis)
-  is not in it.
-- A stretch of speech is one Whisper unit and can run past 5 s, after
-  which other work overlaps it. Whisper built for a GPU takes turns even
-  on a machine where it fell back to the CPU.
-- While the viewer's depth or slow-motion queue fills around a paused
-  playhead, background work stays off the GPU.
-- The agent's cap of four includes network-bound jobs.
-- A blockout clip written after approving a shot, and frame grabs for a
-  generation, cannot be cancelled: their callers have no cancel to pass.
+## Open items
+
+- The name of the list is Jobs, but the list shows only GPU work. It does
+  not show CPU work, such as person masks and stabilization.
+- One speech segment is one Whisper unit. A segment can continue for more
+  than 5 s. Then other work overlaps it.
+- Whisper with GPU support always uses turns. This also occurs when
+  Whisper runs on the CPU.
+- The viewer makes depth and slow motion frames around a stopped
+  playhead. During this time, background work does not use the GPU.
+- The limit of four agent jobs includes jobs that wait for the network.
+- Two operations do not accept a cancel: a blockout clip after the
+  approval of a shot, and a frame grab for a generation.
