@@ -2,7 +2,7 @@
 //! offers ([`UPSCALE`]), and how each is asked. The source is uploaded to
 //! Pika, the operation runs as a job, and the video it made is fetched next
 //! to the others; the provider's catalog lists the same ids, in the same
-//! order, the default first. See `docs/pika.md`.
+//! order, the default first. See `docs/tech-spec/pika.md`.
 
 use super::{NAME, files, jobs, video};
 use crate::http;
