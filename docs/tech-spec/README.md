@@ -65,7 +65,5 @@ must tell the reader which checks we did not do.
 
 ## Language of the files
 
-The files in the group "Decisions" and this file obey ASD-STE100. The
-files in the groups "The system" and "Providers" are older. They do not
-obey it yet. When you change one of them, write the new text in
-ASD-STE100.
+All files in this folder obey ASD-STE100. When you change a file, write
+the new text in ASD-STE100.
