@@ -134,6 +134,13 @@ jobs:
           # Where mlx-sys writes mlx.metallib, for package.sh to bundle.
           echo "MLX_RS_METAL_PATH=$RUNNER_TEMP/mlx-metal" >>"$GITHUB_ENV"
 
+      # whisper.cpp otherwise builds for the runner's own CPU: with AVX-512
+      # there, it crashes on every PC without it the first time a model
+      # runs. Off, it builds for AVX2. whisper-rs-sys hands GGML_* to CMake.
+      - name: Build whisper.cpp for any x86-64 CPU
+        if: runner.os != 'macOS'
+        run: echo "GGML_NATIVE=OFF" >>"$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release --locked -p flikk -p flikk-agent
 
