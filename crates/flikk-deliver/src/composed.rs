@@ -399,5 +399,8 @@ pub(crate) fn run(
     if !status.success() || write_failed {
         return Err(anyhow!(ffmpeg::last_error_lines(&stderr)));
     }
+    if let Some(job) = frames.gpu.take() {
+        job.done();
+    }
     Ok(())
 }

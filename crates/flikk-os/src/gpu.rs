@@ -19,6 +19,8 @@
 //! ([`jobs`]) from its first turn asked for until it is dropped, so a new
 //! kind of GPU work joins the turns and the list just by opening a job,
 //! and work that ends up on the CPU takes no turn and is never listed.
+//! A job that ends with [`Job::done`] stays listed as done for [`SHOWN_DONE`]
+//! more; one dropped without it (cancelled, failed) leaves at once.
 //! Work too short-lived to deserve a row takes turns with [`turn`]
 //! instead. An engine that alone knows whether its work runs on the GPU
 //! (a model that may have moved to the CPU) is handed a [`Unit`], which
@@ -58,6 +60,8 @@ const RECHECK: Duration = Duration::from_millis(50);
 /// A job that had turns still shows as running for this long while it
 /// waits for the next one, so jobs taking turns don't flicker.
 const STILL_RUNNING: Duration = Duration::from_secs(1);
+/// How long a job that ended with [`Job::done`] stays listed as done.
+pub const SHOWN_DONE: Duration = Duration::from_millis(1500);
 
 /// Whether someone waits on a job's work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +79,8 @@ pub enum State {
     Running,
     /// It has not had a turn yet, or has waited a while for the next.
     Waiting,
+    /// It ended with [`Job::done`] lately; it leaves the list soon.
+    Done,
 }
 
 /// A job as [`jobs`] lists it.
@@ -130,15 +136,31 @@ impl Job {
             row.progress = Some(fraction.clamp(0.0, 1.0));
         }
     }
+
+    /// End the job as finished: a job that was listed stays listed as done
+    /// for [`SHOWN_DONE`], at full progress. Dropping it instead (cancelled,
+    /// failed) takes its row off at once.
+    pub fn done(self) {
+        let mut board = lock(&BOARD.state);
+        if let Some(row) = board.row(self.id)
+            && !matches!(row.phase, Phase::Opened)
+        {
+            row.phase = Phase::Done { at: Instant::now() };
+            row.progress = Some(1.0);
+        }
+    }
 }
 
 impl Drop for Job {
-    /// Takes the row off the list. A turn of this job cannot outlive it,
-    /// short of being leaked; even then the turn is given back here, so
-    /// jobs waiting behind it carry on.
+    /// Takes the row off the list, unless [`Job::done`] keeps it a little
+    /// longer. A turn of this job cannot outlive it, short of being
+    /// leaked; even then the turn is given back here, so jobs waiting
+    /// behind it carry on.
     fn drop(&mut self) {
         let mut board = lock(&BOARD.state);
-        board.rows.retain(|row| row.id != self.id);
+        board
+            .rows
+            .retain(|row| row.id != self.id || matches!(row.phase, Phase::Done { .. }));
         if matches!(board.slot, Slot::Held { job: Some(job), .. } if job == self.id) {
             board.slot = Slot::Free;
         }
@@ -353,13 +375,16 @@ impl Drop for Watching {
     }
 }
 
-/// The jobs listed now (open, and asked for a turn once): running first,
-/// then waiting, each in the order opened. Cheap (a lock and a few rows);
-/// compare two lists to see a change, as states move with time as well as
-/// with turns.
+/// The jobs listed now (open and asked for a turn once, or done lately):
+/// running and done first, then waiting, each in the order opened. Cheap
+/// (a lock and a few rows); compare two lists to see a change, as states
+/// move with time as well as with turns.
 pub fn jobs() -> Vec<Listed> {
-    let board = lock(&BOARD.state);
+    let mut board = lock(&BOARD.state);
     let now = Instant::now();
+    board
+        .rows
+        .retain(|row| !matches!(row.phase, Phase::Done { at } if now - at >= SHOWN_DONE));
     let mut listed: Vec<Listed> = board
         .rows
         .iter()
@@ -433,6 +458,10 @@ enum Phase {
     Holding,
     /// Had a turn and has not asked for the next yet.
     Between,
+    /// Ended with [`Job::done`] at `at`; the job itself is gone.
+    Done {
+        at: Instant,
+    },
 }
 
 impl Phase {
@@ -441,6 +470,7 @@ impl Phase {
             Phase::Holding | Phase::Between => State::Running,
             Phase::Waiting { since, ran: true } if now - since < STILL_RUNNING => State::Running,
             Phase::Opened | Phase::Waiting { .. } => State::Waiting,
+            Phase::Done { .. } => State::Done,
         }
     }
 
