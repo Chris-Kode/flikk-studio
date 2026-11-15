@@ -140,6 +140,21 @@ pub fn request(
                     .check(&request)
                     .map_err(|e| ToolError(super::image::error_text(&e)))?;
             }
+            let speech = (ctx.services.generation.as_ref()).and_then(|g| g.voiceover_model());
+            if let (Some(speech), flikk_core::cloud::GenerateRequest::Voiceover { text, .. }) =
+                (speech, &request)
+            {
+                speech.check(text).map_err(|e| {
+                    ToolError(match &e {
+                        // A rewrite to read instead.
+                        flikk_core::cloud::CloudError::BadPrompt {
+                            suggestion: Some(_),
+                            ..
+                        } => super::generate::error_text(&e),
+                        _ => super::image::error_text(&e),
+                    })
+                })?;
+            }
             let mut json = super::generate::request_json(&request, placement.as_ref());
             if let flikk_core::cloud::GenerateRequest::Voiceover { reading, .. } = &request {
                 json = super::voices::with_sample(json, &reading.voice);
@@ -189,7 +204,7 @@ pub fn request(
             )
         }
         "add_voice" => {
-            super::voices::check_available(ctx)?;
+            super::voices::check_adding(ctx)?;
             let adding = super::voices::parse_add(args)?;
             (
                 super::voices::add_summary(&adding),
@@ -197,7 +212,7 @@ pub fn request(
             )
         }
         "design_voice" => {
-            super::voices::check_available(ctx)?;
+            super::voices::check_designing(ctx)?;
             let (design, name) = super::voices::parse_design(args)?;
             (
                 super::voices::design_summary(&design, &name),

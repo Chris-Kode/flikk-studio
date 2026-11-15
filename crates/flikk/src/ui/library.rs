@@ -932,7 +932,8 @@ fn voice_menu(
                 .on_click(move |_, _, cx| s2.update(cx, |s, cx| s.toggle_source(&sample, cx))),
         );
     }
-    if let (true, VoiceOrigin::Designed { description, .. }) = (gone, &saved.origin) {
+    let design = s.voiceover_model().is_some_and(|m| m.voices.design);
+    if let (true, true, VoiceOrigin::Designed { description, .. }) = (gone, design, &saved.origin) {
         let description = description.clone();
         menu = menu.item(
             PopupMenuItem::new("Design Again…").on_click(move |_, window, cx| {

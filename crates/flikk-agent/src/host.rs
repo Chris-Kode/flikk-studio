@@ -496,7 +496,8 @@ impl AgentHost {
             message = format!("<approvals>\n{outcomes}\n</approvals>\n\n{message}");
         }
         let images = tools::image::offered(&q.settings, services);
-        let system_prompt = prompt::system_prompt(&q.settings, images);
+        let voiceover = (services.generation.as_ref()).and_then(|g| g.voiceover_model());
+        let system_prompt = prompt::system_prompt(&q.settings, images, voiceover);
         let backend = q.settings.backend;
         let resume = session::load(project.id, &self.chat, backend);
         // A new session doesn't have the chat's earlier messages.

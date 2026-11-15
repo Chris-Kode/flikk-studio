@@ -86,7 +86,10 @@ pub(crate) fn parse(
             looping: args.opt_bool("loop")?.unwrap_or(false),
         },
         "voiceover" => {
-            cloud::check_script(&prompt).map_err(|e| ToolError(error_text(&e)))?;
+            // The picked model's own limit is checked before approval.
+            cloud::VoiceoverModel::default()
+                .check(&prompt)
+                .map_err(|e| ToolError(error_text(&e)))?;
             let voice = args.str("voice")?.trim().to_owned();
             let unit = |key: &str, default: f32| -> ToolResultOf<f32> {
                 match args.opt_f64(key)? {

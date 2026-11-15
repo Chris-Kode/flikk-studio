@@ -3,6 +3,7 @@
 
 use crate::args::{kind_name, range_json, secs, short};
 use flikk_core::agent::{AgentSettings, AttachmentKind, ChatRole, EditorContext};
+use flikk_core::cloud::{DeliveryMarks, VoiceoverModel};
 use flikk_core::memory::{RuleScope, RuleStatus, StyleRule};
 use flikk_core::model::{ClipContent, Project};
 use flikk_core::skills::Entry;
@@ -166,44 +167,10 @@ song. After placing music under speech, duck it (`set_ducking`).
 Fixing what someone said: `replace_words` (generate group) has a misspoken \
 or missing word said again in the speaker's own voice and cut in where the \
 old words were; it costs credits like a voiceover. Use it only when the user \
-asked for the words to change; to take words out, cut them.
+asked for the words to change; to take words out, cut them.";
 
-Writing voiceovers: choose a voice with `find_voices`, which is free, and \
-pass its id as `voice`. The script is all the direction a voice gets, so \
-write the delivery into it. Bracketed audio tags go before or after the \
-words they colour: emotions (`[excited]`, `[sad]`, `[sarcastic]`), delivery \
-(`[whispers]`, or a description like `[low, gravelly voice]`) and reactions \
-(`[sighs]`, `[laughs]`, `[clears throat]`). A tag must describe something \
-heard, so never `[standing]` or `[grinning]`; never put the script's own \
-words in brackets; and leave out narration like \"she said excitedly\", \
-which is read aloud. A delivery the voice was never trained on may come out \
-weaker. CAPITALS stress a word and ellipses add weight. SSML doesn't work: \
-no `<break>` or `<phoneme>`. Pause with `...`, `[short pause]` or \
-`[long pause]`; those lengths aren't exact, so for an exact gap make two \
-voiceovers and set the gap on the timeline. Write numbers, dates, money and \
-web addresses out in words. For a word it would misread, give its IPA in \
-slashes, like `/ˌbaɪoʊˈkemɪstri/`, only where needed. Lower `stability` \
-reads with more emotional range; higher reads more evenly. There is no \
-speed setting, so retime the clip instead. One voice reads each clip, so \
-make a clip per speaker. Reads vary: when one falls short, tell the user and \
-offer another take, which costs credits again.
-
-Choosing a voice: `find_voices` lists the account's voices, the ones in \
-the user's library first with the stability and similarity they read \
-best at; use those. When none fits, search the shared Voice Library with \
-`find_voices` `library: true` and filters (gender, age, language, \
-use_case), and `add_voice` the best one; it takes a voice slot and waits \
-for approval. Mention a `rate` above 1, which \
-costs more credits. Only when neither has one, `design_voice` from a \
-description of age, gender, accent, tone, pace and texture, never a real \
-person's name; when it waits for approval, the user hears the takes and \
-keeps one (or picks another voice), and the result names the voice kept. \
-Added and designed voices are kept in the user's library \
-for every project. Cloning a voice from recordings is the user's to do \
-(the Voices dialog, or a speaker in the transcript): it needs the consent \
-of whoever it belongs to, so point them there and never imitate a real \
-person.
-
+/// After the voiceover guidance.
+const EDITOR_VIDEO: &str = "\
 Making video: `generate_video` (generate group) has the provider the user \
 set up make a shot into the pool's Video Generated bin; with `range` or `at` \
 it is proposed on a video track, its sound beside it. It costs the user money \
@@ -338,8 +305,13 @@ clock: CSS animations, rAF and timers follow clip time too, and \
 `window.flikkRender(time)` is called per frame if defined.";
 
 /// The system prompt; `images` when the turn may make pictures
-/// ([`crate::tools::image::offered`]).
-pub fn system_prompt(settings: &AgentSettings, images: bool) -> String {
+/// ([`crate::tools::image::offered`]), and the guidance for writing
+/// voiceovers on `voiceover`, the model picked for them.
+pub fn system_prompt(
+    settings: &AgentSettings,
+    images: bool,
+    voiceover: Option<VoiceoverModel>,
+) -> String {
     let mut out = String::from(if settings.web { TOOLS_WEB } else { TOOLS });
     if images {
         out.push_str("\n\n");
@@ -349,6 +321,10 @@ pub fn system_prompt(settings: &AgentSettings, images: bool) -> String {
     out.push_str(COMMON);
     out.push_str("\n\n");
     out.push_str(EDITOR);
+    out.push_str("\n\n");
+    out.push_str(&voiceovers(&voiceover.unwrap_or_default()));
+    out.push_str("\n\n");
+    out.push_str(EDITOR_VIDEO);
     out.push_str("\n\n");
     out.push_str(FX);
     if let Some(lang) = settings.language.as_deref().filter(|l| !l.is_empty()) {
@@ -360,6 +336,100 @@ pub fn system_prompt(settings: &AgentSettings, images: bool) -> String {
             "\n\nReply in the user's language. Captions follow the language of the source.",
         );
     }
+    out
+}
+
+/// How to write a voiceover and choose its voice on `model`: the delivery
+/// marks it reads, its tuning, and what can be done with its voices.
+fn voiceovers(model: &VoiceoverModel) -> String {
+    let marks = match model.marks {
+        DeliveryMarks::AudioTags => {
+            "Bracketed audio tags go before or after the words they colour: emotions \
+(`[excited]`, `[sad]`, `[sarcastic]`), delivery (`[whispers]`, or a \
+description like `[low, gravelly voice]`) and reactions (`[sighs]`, \
+`[laughs]`, `[clears throat]`). A tag must describe something heard, so \
+never `[standing]` or `[grinning]`; never put the script's own words in \
+brackets; and leave out narration like \"she said excitedly\", which is read \
+aloud. A delivery the voice was never trained on may come out weaker. \
+CAPITALS stress a word and ellipses add weight. SSML doesn't work: no \
+`<break>` or `<phoneme>`. Pause with `...`, `[short pause]` or `[long \
+pause]`; those lengths aren't exact, so for an exact gap make two voiceovers \
+and set the gap on the timeline. For a word it would misread, give its IPA \
+in slashes, like `/ˌbaɪoʊˈkemɪstri/`, only where needed."
+        }
+        DeliveryMarks::Interjections => {
+            "Interjections in parentheses go where they are heard: `(laughs)`, \
+`(sighs)`, `(coughs)`, `(clears throat)`, `(gasps)`, `(sniffs)`, `(groans)` \
+and `(yawns)`, and no others. Pause for an exact time with `<#0.5#>`, the \
+seconds between the marks (0.01 to 99.99). Bracketed tags and SSML are read \
+aloud, so leave them out, and leave out narration like \"she said \
+excitedly\". CAPITALS stress a word and ellipses add weight."
+        }
+        DeliveryMarks::Plain => {
+            "This model reads no tags: brackets, parentheses and SSML are read \
+aloud, as is narration like \"she said excitedly\". Direct it only with \
+punctuation, CAPITALS for stress and ellipses for weight, and pick a voice \
+whose name fits the delivery. For a gap, make two voiceovers and set the \
+gap on the timeline."
+        }
+    };
+    let tuning = if model.tuned {
+        "Lower `stability` reads with more emotional range; higher reads more evenly."
+    } else {
+        "It takes no `stability` or `similarity`; leave them out."
+    };
+    let mut out = format!(
+        "Writing voiceovers: the user picked {} for them. Choose a voice with \
+`find_voices`, which is free, and pass its id as `voice`. A script runs up \
+to {} characters and is all the direction a voice gets, so write the \
+delivery into it. {marks} Write numbers, dates, money and web addresses out \
+in words. {tuning} There is no speed setting, so retime the clip instead. \
+One voice reads each clip, so make a clip per speaker. Reads vary: when one \
+falls short, tell the user and offer another take, which costs credits \
+again.\n\nChoosing a voice: `find_voices` lists the voices the model reads \
+with, the ones in the user's library first{}; use those.",
+        model.name,
+        model.script_chars,
+        if model.tuned {
+            " with the stability and similarity they read best at"
+        } else {
+            ""
+        },
+    );
+    let ops = model.voices;
+    if ops.library {
+        out.push_str(
+            " When none fits, search the shared Voice Library with `find_voices` \
+`library: true` and filters (gender, age, language, use_case), and \
+`add_voice` the best one; it takes a voice slot and waits for approval. \
+Mention a `rate` above 1, which costs more credits.",
+        );
+    }
+    if ops.design {
+        out.push_str(
+            " Only when none has one, `design_voice` from a description of age, \
+gender, accent, tone, pace and texture, never a real person's name; when it \
+waits for approval, the user hears the takes and keeps one (or picks another \
+voice), and the result names the voice kept.",
+        );
+    }
+    if ops.library || ops.design {
+        out.push_str(
+            " Added and designed voices are kept in the user's library for every project.",
+        );
+    } else {
+        out.push_str(
+            " This model has no shared library and can't design voices: pick the \
+closest of its own by name, or tell the user.",
+        );
+    }
+    out.push_str(if ops.clone {
+        " Cloning a voice from recordings is the user's to do (the Voices dialog, \
+or a speaker in the transcript): it needs the consent of whoever it belongs \
+to, so point them there and never imitate a real person."
+    } else {
+        " Never imitate a real person."
+    });
     out
 }
 

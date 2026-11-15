@@ -196,7 +196,10 @@ pub fn fix(
     if text == old {
         return Err("Type something else to say.".into());
     }
-    cloud::check_script(&text).map_err(|e| e.to_string())?;
+    // The model's own limit is checked when the fix is made.
+    cloud::VoiceoverModel::default()
+        .check(&text)
+        .map_err(|e| e.to_string())?;
     let (track, clip) = project
         .timeline
         .clip(a.clip)

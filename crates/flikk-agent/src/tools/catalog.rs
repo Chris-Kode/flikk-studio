@@ -1900,7 +1900,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(
                 json!({
                     "kind": one_of(&["music", "sound_effect", "voiceover"], "What to make"),
-                    "prompt": string("Music and sound in English. Music: genre, mood, instruments, tempo, how it builds. Sound: what is heard, how close, the space around it. Voiceover: the script, in the language it is read in, up to 10,000 characters, with delivery written in as the system prompt says"),
+                    "prompt": string("Music and sound in English. Music: genre, mood, instruments, tempo, how it builds. Sound: what is heard, how close, the space around it. Voiceover: the script, in the language it is read in, up to the model's limit in the system prompt, with delivery written in as it says"),
                     "range": range("The timeline range it is for: sets its length, and where it is proposed"),
                     "duration": number("Seconds, when there is no `range`; the model sets the range (ElevenLabs: music 3–300, sound 0.5–30). Left out, the model picks"),
                     "sections": {
@@ -1922,8 +1922,8 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "loop": boolean("A sound effect made to repeat seamlessly (ambience, a hum), on models that loop (ElevenLabs)"),
                     "voice": string("Voiceover: the voice id from find_voices"),
                     "voice_name": string("Voiceover: the voice's name, for the approval card"),
-                    "stability": number("Voiceover, 0–1 (default 0.5): lower reads with more emotional range, higher more evenly"),
-                    "similarity": number("Voiceover, 0–1 (default 0.75): how closely it keeps to the original voice"),
+                    "stability": number("Voiceover, 0–1 (default 0.5), on models that take it: lower reads with more emotional range, higher more evenly"),
+                    "similarity": number("Voiceover, 0–1 (default 0.75), on models that take it: how closely it keeps to the original voice"),
                     "at": time("Propose it on the timeline from here (default: the start of `range`); leave out both to only add it to the pool"),
                     "track": string("Audio track to put it on (default: one with nothing there, else a new one)")
                 }),
@@ -2023,11 +2023,11 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "find_voices",
             Some(ReadProject),
-            "List the voices that can read a voiceover with the provider the user set up: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",
+            "List the voices the voiceover model the user picked reads with: their ids, names and what they are like, the ones in the user's library first (with how they read best), then ones they made. With `library`, search the provider's shared Voice Library instead, where it has one; a shared voice reads only once add_voice adds it. Free. Pick one for generate_audio; for several speakers, make a clip per speaker, each with its own voice.",
             object(
                 json!({
                     "text": string("Words the voice must have: \"calm british narration\". Left out, lists them"),
-                    "library": boolean("Search the provider's shared Voice Library rather than the account"),
+                    "library": boolean("Search the provider's shared Voice Library rather than the account, when the provider has one"),
                     "gender": one_of(&cloud::VOICE_GENDERS, "Only voices of this gender"),
                     "age": one_of(&cloud::VOICE_AGES, "Only voices of this age"),
                     "language": string("Only voices speaking this language: ISO 639-1, like \"es\""),
@@ -2040,7 +2040,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "add_voice",
             Some(Generate),
-            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with. It takes one of their plan's voice slots: it waits for their approval and then returns the voice id.",
+            "Add a voice found with find_voices `library: true` to the user's account and library, to read voiceovers with, when the provider has a shared library. It takes one of their plan's voice slots: it waits for their approval and then returns the voice id.",
             object(
                 json!({
                     "voice": string("The shared voice's id from find_voices"),
@@ -2053,7 +2053,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "design_voice",
             Some(Generate),
-            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. It waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
+            "Make a new voice from a description, kept on the user's account and in their library, to read voiceovers with, when the provider designs voices. Spends credits and a voice slot: only when neither the account nor the shared Voice Library (find_voices) has one that fits. It waits while the user hears the takes and keeps one, then returns the id of the voice they kept.",
             object(
                 json!({
                     "description": string("20–1,000 characters: age, gender, accent, tone, pace and texture, like \"A calm woman in her 60s with a soft Irish accent, warm and unhurried, slightly breathy\". No real person's name"),

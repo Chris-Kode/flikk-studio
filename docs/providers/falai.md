@@ -3,15 +3,16 @@
 fal (<https://fal.ai>) runs models from many vendors behind one queue
 API. One key gives access to all of them.
 
-The editor uses fal in four roles:
+The editor uses fal in five roles:
 
 - a video provider (see "Video");
 - an image provider (see "Image");
 - a source of music and sound effects (see "Audio");
+- a voiceover provider (see "Voiceovers");
 - a video upscaler (see "Upscaling").
 
-fal does not do voiceovers or transcription for the editor. For these
-capabilities, the editor answers `Unavailable`.
+fal does not do transcription for the editor. For it, the editor
+answers `Unavailable`.
 
 This file describes the client in `crates/flikk-cloud/src/fal/` as it
 is. The code is the source of each fact.
@@ -257,6 +258,36 @@ composition plan, it takes approximately 5 minutes.
 Mirelo makes two takes by default, and fal charges for each take. Thus
 the editor sends `num_samples: 1`.
 
+## Voiceovers
+
+`speech.rs`, with the fields each model takes described as a
+`HostedSpeech` (`crates/flikk-cloud/src/speech.rs`). The endpoint is the
+id of the model. A completed request has `audio.url`. We read the
+schemas on 2026-11-15 from
+`https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=<id>`.
+
+| Model | Script | Voice | Tuning | Other fields the editor sends | Delivery |
+| --- | --- | --- | --- | --- | --- |
+| `elevenlabs/tts/eleven-v4` (default) | `text`, 5,000 | `voice` | `stability`, `similarity_boost` | `output_format: mp3_44100_192` | audio tags |
+| `fal-ai/minimax/speech-2.8-hd` | `prompt`, 10,000 | `voice_setting.voice_id` | — | `output_format: url`, `audio_setting.format: flac`, `audio_setting.sample_rate: 44100` | interjections and `<#x#>` pauses |
+| `fal-ai/gemini-3.1-flash-tts` | `prompt`, 10,000 (the model takes 50,000) | `voice` | — | `output_format: wav` | audio tags |
+
+- fal lists no voices. Each model reads with the voices its schema
+  names, which the editor lists from `speech.rs`: the 20 example names
+  of Eleven v4, the 17 example ids of MiniMax, and the 30 voices of
+  Gemini's enum. A voice outside the list is refused before the
+  request, at no cost.
+- fal can't search, design, clone or rename voices, so the Voices dialog
+  shows only Find, and the agent's `add_voice` and `design_voice` are
+  refused.
+- No model takes the speech around a word fix (`previous_text`,
+  `next_text`); a fix is read without it.
+- Eleven v4's PCM formats have no header, so the editor takes MP3 at
+  192 kbps. MiniMax answers in hex unless `output_format` is `url`.
+- MiniMax reads only these interjections: `(laughs)`, `(sighs)`,
+  `(coughs)`, `(clears throat)`, `(gasps)`, `(sniffs)`, `(groans)`,
+  `(yawns)`. A pause is `<#x#>`, x from 0.01 to 99.99 seconds.
+
 ## Upscaling
 
 `upscale.rs`. The editor uploads the source and sends it as `video_url`.
@@ -282,3 +313,5 @@ file with them.
 
 - <https://fal.ai/dashboard/keys>
 - The endpoints in "Access"
+- The schemas of the voiceover models:
+  `https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=<id>`

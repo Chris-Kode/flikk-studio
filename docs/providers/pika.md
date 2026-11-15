@@ -13,6 +13,8 @@ The editor uses the API in three roles:
   operations").
 - A source of music and sound effects, from Pika and from other vendors
   (see "Audio operations").
+- A voiceover provider, from Pika and from other vendors, with the
+  voices the account clones (see "Voiceovers" and "Voices").
 
 We read these sources on 2026-11-02: `llms.txt`, the specification of
 each operation, the public catalog and `openapi.json` (links at the end).
@@ -183,13 +185,12 @@ The price is $0.02–0.09 per second, by resolution.
 - Pikadditions and Pikaswaps (`video-to-video`: add or swap something in
   a clip), Pikaffects (`image-to-video`, `video-to-video`: named
   effects);
-- Pika Dynamic Captions, Video Compose, Video Merge, Pika Speech and
-  Pika Soundtrack (sound for a full video);
+- Pika Dynamic Captions, Video Compose, Video Merge and Pika Soundtrack
+  (sound for a full video);
 - webhooks, idempotency keys, quotes, spend reports.
 
 Some of these operations edit media in a way that the video request of
-the editor has no field for. Others do the same work as ElevenLabs does
-here (speech).
+the editor has no field for.
 
 ## Other vendors' video models
 
@@ -352,6 +353,53 @@ The editor does not use these operations:
 - the video-to-audio operations (Sonilo, Kling, Pika Soundtrack);
 - stems.
 
+## Voiceovers
+
+The editor reads voiceovers with these operations (`pika/speech.rs`,
+with the fields each takes described as a `HostedSpeech` in
+`crates/flikk-cloud/src/speech.rs`). All are media jobs. A completed job
+has `output.audio.url`. We read the specifications on 2026-11-15.
+
+| Operation | Script | Voice | Tuning | Other fields the editor sends | Delivery |
+| --- | --- | --- | --- | --- | --- |
+| ElevenLabs v4 (`elevenlabs/eleven-v4/text-to-speech`, default) | `text`, 10,000 | `voice`: a stock voice or a clone | `voice_settings.stability`, `voice_settings.similarity_boost` | — (MP3) | audio tags |
+| MiniMax Speech 2.8 HD (`minimax/minimax-speech-2.8-hd/text-to-speech`) | `text`, 10,000 | `voice_id` | — | `format: flac`, `sample_rate: 44100` | interjections and `<#x#>` pauses |
+| Pika Speech (`pika/pika-audio/pika-speech`) | `script`, 10,000 | `voice_preset` (76 presets) | — | — (MP3) | none: tags are read aloud |
+
+- Each model reads with the voices `speech.rs` lists: the 17 stock
+  voices of ElevenLabs v4 (`darian` first), the 17 MiniMax ids that fal
+  also names, and Pika Speech's 76 presets. A voice outside the list,
+  and not a clone that the model reads, is refused before the job.
+- The editor does not send Pika Speech a `reference_audio`, MiniMax's
+  speed, pitch or emotion, or the speech around a word fix.
+- Pika's MiniMax page documents neither interjections nor `<#x#>`
+  pauses. The editor writes them as for MiniMax on fal, which reads
+  them; this is not verified through Pika.
+- The editor does not use ElevenLabs v4 Turbo, Multilingual v2, Turbo
+  2.5, Text to Dialogue, MiniMax 2.8 Turbo or Seed Audio.
+
+## Voices
+
+`pika/voices.rs`. The voice endpoints take the key as
+`Authorization: Bearer <key>`; the editor also sends `X-API-Key`.
+
+| Call | Endpoint | Notes |
+| --- | --- | --- |
+| List | `GET /v1/voices` | `{results: [{voice_id, name, kind, provider, created_at}]}`: stock voices first, then the account's clones, newest first. Only ElevenLabs v4 lists clones. |
+| Clone | `POST /v1/voices` | `{name (1–100), sample_urls (1–25, uploaded first), consent_attested: true}`, `201` with the voice. Synchronous: it can take over a minute. Never sent again on a server error. |
+| Delete | `DELETE /v1/voices/{voice_id}` | `204`; `404` counts as deleted. |
+
+- A clone's id is `voice_` and 32 hex digits. The editor checks it
+  before it goes in a path.
+- The user confirms the speaker's consent in the Voices dialog. Without
+  it, the editor sends nothing.
+- An organization keeps 100 clones at most (`409`). The first 5 are
+  free, deleted ones included; each one after costs $1.
+- A clone reads only on its provider's models: ElevenLabs v4 here.
+- Pika can't rename a voice (the name is kept in the library only),
+  take noise out of recordings, search a shared library or design a
+  voice.
+
 ## Upscaling
 
 Two operations make a video larger. Both are jobs, as above. Both take
@@ -408,6 +456,13 @@ pictures yet.
   - a fractional length to Sonilo SFX;
   - a length to Lyria.
 
+- On 2026-11-15, we sent with a made-up key each voiceover request that
+  the editor writes, a clone's id to ElevenLabs v4, and a clone to
+  `/v1/voices`. Pika accepted them (401). It refused an unknown stock
+  voice, an unknown preset and an unknown MiniMax `format` (422), with
+  enums that match the lists in `speech.rs`. `/v1/voices` reads
+  `X-API-Key` as the media endpoints do.
+
 We did not verify these items, because we have no paid key:
 
 - a real job end to end;
@@ -432,4 +487,8 @@ We did not verify these items, because we have no paid key:
 - <https://dev.pika.art/llms/pika/pika-audio/pika-music>,
   [pika-sfx](https://dev.pika.art/llms/pika/pika-audio/pika-sfx),
   [Sonilo text-to-music](https://dev.pika.art/llms/sonilo/sonilo-v1.1-music/text-to-music)
+- <https://dev.pika.art/llms/elevenlabs/eleven-v4/text-to-speech>,
+  [MiniMax Speech 2.8 HD](https://dev.pika.art/llms/minimax/minimax-speech-2.8-hd/text-to-speech),
+  [Pika Speech](https://dev.pika.art/llms/pika/pika-audio/pika-speech)
+- <https://dev.pika.art/llms/voice-cloning>
 - <https://dev.pika.art/models>, <https://dev.pika.art/pricing>

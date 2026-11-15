@@ -20,6 +20,7 @@ mod http;
 mod keys;
 mod picture;
 mod pika;
+mod speech;
 mod upscaled;
 
 pub use keys::{KeySource, Keys};
@@ -28,7 +29,7 @@ use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest,
     Generated, GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
     SpeechService, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage,
-    VoicePreview, VoiceQuery,
+    VoicePreview, VoiceQuery, VoiceoverModel, voice_source,
 };
 use flikk_os::sync::lock;
 use std::collections::BTreeSet;
@@ -162,13 +163,20 @@ pub trait Api: Sync {
         None
     }
 
-    /// The voices voiceovers can use with `key`.
-    fn voices(&self, _key: &str) -> CloudResult<Vec<Voice>> {
+    /// What voiceover model `model` reads, and what its voices can do;
+    /// only for providers offering voiceovers.
+    fn voiceover_model(&self, _model: &str) -> Option<&'static VoiceoverModel> {
+        None
+    }
+
+    /// The voices voiceover model `model` can read with on `key`'s account.
+    fn voices(&self, _key: &str, _model: &str) -> CloudResult<Vec<Voice>> {
         Err(CloudError::Unavailable("not offered".into()))
     }
 
     /// The provider's shared voices; only for providers offering
-    /// voiceovers, as are the calls below.
+    /// voiceovers, as are the calls below, and each only where the model's
+    /// [`VoiceoverModel::voices`] says the provider does it.
     fn search_voices(
         &self,
         _key: &str,
@@ -273,11 +281,11 @@ impl Cloud {
         })
     }
 
-    /// The client and key of the provider doing voiceovers: voices belong
-    /// to it.
-    fn voice_api(&self) -> CloudResult<(&'static dyn Api, String)> {
-        let (provider, _) = self.require(Capability::Voiceover)?;
-        Ok((provider.api, self.key(provider)?))
+    /// The client and key of the provider doing voiceovers, and the model:
+    /// voices belong to them.
+    fn voice_api(&self) -> CloudResult<(&'static dyn Api, String, &'static str)> {
+        let (provider, model) = self.require(Capability::Voiceover)?;
+        Ok((provider.api, self.key(provider)?, model.id))
     }
 
     fn require(
@@ -374,7 +382,12 @@ impl GenerationService for Cloud {
                     audio.check(request)?;
                 }
             }
-            Capability::Transcription | Capability::Voiceover => {}
+            Capability::Voiceover => {
+                if let Some(speech) = provider.api.voiceover_model(model.id) {
+                    speech.check(request.prompt())?;
+                }
+            }
+            Capability::Transcription => {}
         }
         std::fs::create_dir_all(dir)
             .map_err(|e| CloudError::Failed(format!("could not write {}: {e}", dir.display())))?;
@@ -402,28 +415,38 @@ impl GenerationService for Cloud {
             .map(|(p, _)| p.id.to_owned())
     }
 
+    fn voice_source(&self) -> Option<String> {
+        self.picked(Capability::Voiceover)
+            .map(|(p, m)| voice_source(p.id, m.id))
+    }
+
+    fn voiceover_model(&self) -> Option<VoiceoverModel> {
+        let (provider, model) = self.picked(Capability::Voiceover)?;
+        provider.api.voiceover_model(model.id).copied()
+    }
+
     fn voices(&self) -> CloudResult<Vec<Voice>> {
-        let (api, key) = self.voice_api()?;
-        api.voices(&key)
+        let (api, key, model) = self.voice_api()?;
+        api.voices(&key, model)
     }
 
     fn search_voices(&self, query: &VoiceQuery, page: usize) -> CloudResult<VoicePage> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.search_voices(&key, query, page)
     }
 
     fn similar_voices(&self, audio: &Path) -> CloudResult<Vec<Voice>> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.similar_voices(&key, audio)
     }
 
     fn add_voice(&self, voice: &Voice, name: &str) -> CloudResult<Voice> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.add_voice(&key, voice, name.trim())
     }
 
     fn design_voice(&self, design: &VoiceDesign) -> CloudResult<Designed> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.design_voice(&key, design)
     }
 
@@ -433,22 +456,22 @@ impl GenerationService for Cloud {
         preview: &VoicePreview,
         name: &str,
     ) -> CloudResult<Voice> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.save_voice(&key, design, preview, name.trim())
     }
 
     fn clone_voice(&self, clone: &VoiceClone) -> CloudResult<Voice> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.clone_voice(&key, clone)
     }
 
     fn rename_voice(&self, voice: &str, name: &str) -> CloudResult<()> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.rename_voice(&key, voice, name.trim())
     }
 
     fn delete_voice(&self, voice: &str) -> CloudResult<()> {
-        let (api, key) = self.voice_api()?;
+        let (api, key, _) = self.voice_api()?;
         api.delete_voice(&key, voice)
     }
 

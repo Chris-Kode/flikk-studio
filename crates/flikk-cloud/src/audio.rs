@@ -109,7 +109,7 @@ pub enum Fixed {
 }
 
 impl Fixed {
-    fn value(&self) -> Value {
+    pub(crate) fn value(&self) -> Value {
         match self {
             Self::Str(s) => json!(s),
             Self::Int(n) => json!(n),

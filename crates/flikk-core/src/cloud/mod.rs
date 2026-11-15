@@ -18,7 +18,7 @@ pub use request::{
     ReferenceLimits, SCRIPT_CHARS, SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel,
     VideoReference, VideoSound, resolution_lines,
 };
-pub use script::{check_script, spoken_words, without_breaks};
+pub use script::{DeliveryMarks, INTERJECTIONS, VoiceOps, VoiceoverModel, spoken_words};
 pub use task::{GenerationTask, Stage};
 pub use upscale::{Scale, UpscaleModel, UpscaleSource, Upscaling};
 pub use voice::{
@@ -94,8 +94,12 @@ pub struct ProviderChoice {
 #[serde(default)]
 pub struct CloudSettings {
     pub choices: BTreeMap<Capability, ProviderChoice>,
-    /// Id of the voice that last read a voiceover.
+    /// Id of the voice that last read a voiceover, before voices were kept
+    /// per model; [`Self::last_voice`] falls back to it.
     pub voice: Option<String>,
+    /// Id of the voice that last read a voiceover on each model, keyed by
+    /// [`voice_source`]: a voice of one model is no voice on another.
+    pub voices: BTreeMap<String, String>,
     /// Videos are made without sound, which costs less on some models. The
     /// media pool's form starts from it; the agent keeps to it.
     pub silent_video: bool,
@@ -123,6 +127,29 @@ impl CloudSettings {
             self.choices.insert(capability, choice);
         }
     }
+
+    /// The voice that last read on `source` ([`voice_source`]), else the
+    /// one kept before voices were kept per model.
+    pub fn last_voice(&self, source: &str) -> Option<&str> {
+        self.voices
+            .get(source)
+            .map(String::as_str)
+            .or(self.voice.as_deref())
+    }
+
+    /// Keep `voice` as the last to read on `source`; whether it changed.
+    pub fn remember_voice(&mut self, source: &str, voice: &str) -> bool {
+        if self.voices.get(source).map(String::as_str) == Some(voice) {
+            return false;
+        }
+        self.voices.insert(source.to_owned(), voice.to_owned());
+        true
+    }
+}
+
+/// The key voices are kept by: a provider's model, "fal:elevenlabs/tts/eleven-v4".
+pub fn voice_source(provider: &str, model: &str) -> String {
+    format!("{provider}:{model}")
 }
 
 /// Why a provider could not do what was asked.
@@ -249,6 +276,11 @@ pub trait GenerationService: Send + Sync {
     fn provider_for(&self, capability: Capability) -> Option<String>;
     /// Provider id ("elevenlabs") doing voiceovers, when one is picked.
     fn voice_provider(&self) -> Option<String>;
+    /// The provider and model doing voiceovers, as [`voice_source`] keys
+    /// them, when one is picked: what the voice list belongs to.
+    fn voice_source(&self) -> Option<String>;
+    /// What the model picked for voiceovers reads, when one is.
+    fn voiceover_model(&self) -> Option<VoiceoverModel>;
     /// What the model picked for video can make, when one is.
     fn video_model(&self) -> Option<VideoModel>;
     /// What the model picked for pictures can make, when one is.
@@ -272,7 +304,8 @@ pub trait GenerationService: Send + Sync {
         dir: &Path,
         task: &GenerationTask,
     ) -> CloudResult<Generated>;
-    /// The voices of the provider doing voiceovers. Slow: a request.
+    /// The voices the model doing voiceovers reads with. Slow: a request,
+    /// for providers that list them.
     fn voices(&self) -> CloudResult<Vec<Voice>>;
     /// A sample of `voice` on disk, fetched the first time. Slow: a request.
     fn voice_sample(&self, voice: &Voice) -> CloudResult<PathBuf>;

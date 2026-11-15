@@ -18,8 +18,8 @@ use crate::ui::listen::listen_button;
 use crate::ui::media_pool::form;
 use crate::ui::media_pool::import::is_audio;
 use flikk_core::cloud::{
-    self, Capability, CloudError, DESIGN_DESCRIPTION, Voice, VoiceClone, VoiceDesign, VoiceOrigin,
-    VoicePreview, VoiceQuery,
+    self, Capability, CloudError, DESIGN_DESCRIPTION, Voice, VoiceClone, VoiceDesign, VoiceOps,
+    VoiceOrigin, VoicePreview, VoiceQuery,
 };
 use flikk_core::model::{MediaItem, MediaKind};
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
@@ -167,6 +167,9 @@ pub struct VoicesDialog {
     /// whatever opened over it meanwhile.
     dialog: Option<DialogId>,
     page: Page,
+    /// What the provider can do with voices on the model picked when it
+    /// opened: the pages and controls it shows.
+    ops: VoiceOps,
     op: Option<Op>,
     error: Option<SharedString>,
     // Find
@@ -248,11 +251,20 @@ impl VoicesDialog {
             cx.subscribe(&sample_text, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         state.update(cx, |s, cx| s.want_voices(cx));
+        let ops = state.read(cx).voiceover_model().unwrap_or_default().voices;
+        // What the model can't do opens on its own voices instead.
+        let start = match start {
+            Start::Similar { .. } if !ops.library => Start::Find,
+            Start::Describe { .. } | Start::Design { .. } if !ops.design => Start::Find,
+            Start::Clone { .. } if !ops.clone => Start::Find,
+            start => start,
+        };
         let mut this = Self {
             state,
             on_kept,
             dialog: None,
             page: Page::Find,
+            ops,
             op: None,
             error: None,
             scope: Scope::Account,
@@ -828,9 +840,9 @@ impl VoicesDialog {
                             .min_w_0()
                             .child(Input::new(&self.search).search()),
                     )
-                    .child(scope),
+                    .when(self.ops.library, |el| el.child(scope)),
             )
-            .child(filters)
+            .when(self.ops.library, |el| el.child(filters))
             // The rows' hover reaches 8 px past the body padding. The margin
             // sits on a wrapper: the scroll area clips its own content.
             .child(
@@ -1065,7 +1077,7 @@ impl VoicesDialog {
     fn clone_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.clone_name.read(cx).value().trim().to_owned();
         let files = self.files.clone();
-        let denoise = self.denoise;
+        let (denoise, consent) = (self.denoise && self.ops.denoise, self.consent);
         let state = self.state.read(cx);
         let (Some(generation), media) = (state.generation(), state.services.media.clone()) else {
             return;
@@ -1096,6 +1108,7 @@ impl VoicesDialog {
                         description: String::new(),
                         files: files.clone(),
                         denoise,
+                        consent,
                     })
                     .map_err(|e| e.to_string())?;
                 let sample = files
@@ -1200,15 +1213,17 @@ impl VoicesDialog {
                         )
                     }),
             )
-            .child(
-                Switch::new("denoise")
-                    .label("Remove background noise")
-                    .checked(self.denoise)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        this.denoise = *on;
-                        cx.notify();
-                    })),
-            )
+            .when(self.ops.denoise, |el| {
+                el.child(
+                    Switch::new("denoise")
+                        .label("Remove background noise")
+                        .checked(self.denoise)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            this.denoise = *on;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Checkbox::new("consent")
                     .label("I have the right to clone this voice")
@@ -1273,33 +1288,51 @@ impl VoicesDialog {
     }
 }
 
+impl VoicesDialog {
+    /// The pages the model's voices offer, in tab order.
+    fn pages(&self) -> Vec<Page> {
+        let mut pages = vec![Page::Find];
+        if self.ops.design {
+            pages.push(Page::Describe);
+        }
+        if self.ops.clone {
+            pages.push(Page::Clone);
+        }
+        pages
+    }
+}
+
 impl Render for VoicesDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tabs = Tabs::new("voices-page")
-            .mx(px(-16.))
-            .px(px(16.))
-            .gap(px(16.))
-            .selected(match self.page {
-                Page::Find => 0,
-                Page::Describe => 1,
-                Page::Clone => 2,
-            })
-            .child(Tab::new("Find"))
-            .child(Tab::new("Describe"))
-            .child(Tab::new("From audio"))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                // The footer stays on the operation running.
-                if this.op.is_some() {
-                    return;
-                }
-                this.page = match ix {
-                    0 => Page::Find,
-                    1 => Page::Describe,
-                    _ => Page::Clone,
-                };
-                this.error = None;
-                cx.notify();
-            }));
+        let pages = self.pages();
+        let tabs = (pages.len() > 1).then(|| {
+            let shown = pages.clone();
+            pages
+                .iter()
+                .fold(
+                    Tabs::new("voices-page")
+                        .mx(px(-16.))
+                        .px(px(16.))
+                        .gap(px(16.))
+                        .selected(pages.iter().position(|p| *p == self.page).unwrap_or(0)),
+                    |tabs, page| {
+                        tabs.child(Tab::new(match page {
+                            Page::Find => "Find",
+                            Page::Describe => "Describe",
+                            Page::Clone => "From audio",
+                        }))
+                    },
+                )
+                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                    // The footer stays on the operation running.
+                    if this.op.is_some() {
+                        return;
+                    }
+                    this.page = shown.get(*ix).copied().unwrap_or(Page::Find);
+                    this.error = None;
+                    cx.notify();
+                }))
+        });
         let page = match self.page {
             Page::Find => self.find_page(cx),
             Page::Describe => self.describe_page(cx),
@@ -1307,7 +1340,7 @@ impl Render for VoicesDialog {
         };
         v_flex()
             .gap(px(12.))
-            .child(tabs)
+            .children(tabs)
             .child(page)
             .when_some(self.error.clone(), |el, error| {
                 el.child(form::problem(error))
