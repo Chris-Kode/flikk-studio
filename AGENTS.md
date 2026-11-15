@@ -83,6 +83,36 @@ Anything else a reviewer needs: details, trade-offs, follow-ups.
 - **Pull request titles** follow the same format: a merged pull request is
   listed under its title and the first paragraph of its description.
 
+### 6. Documentation follows ASD-STE100
+
+Write all documentation in ASD-STE100 Simplified Technical English: the
+files in [docs/tech-spec](docs/tech-spec/README.md), README files and other
+Markdown documents. This rule does not apply to interface copy
+([DESIGN.md](DESIGN.md)) or to commit messages (rule 5).
+
+- **Words:** Use a word in one meaning only, and use the same word for the
+  same thing each time. Use simple verbs: "use", not "utilize" or "make
+  use of". Do not use slang or idioms.
+- **Technical names:** Names of code, crates, files, tools and products
+  are permitted. Write them as they are in the code.
+- **Sentences:** An instruction has a maximum of 20 words. A description
+  has a maximum of 25 words. Write one topic in each sentence.
+- **Paragraphs:** A paragraph has one topic and a maximum of six
+  sentences.
+- **Verbs:** Use the active voice. Use the simple present, simple past
+  and simple future tenses. Do not use the "-ing" form of a verb as a
+  verb.
+- **Instructions:** Write an instruction as a command: "Add the row."
+  Write one instruction in each sentence. Put the condition first: "If
+  the GPU fails, the CPU draws the frame."
+- **Noun clusters:** Use a maximum of three nouns together.
+- **Lists and tables:** Use a list for steps or items that are parallel.
+  Use a table to compare items.
+- **Contractions:** Do not use contractions.
+
+Each new file in `docs/tech-spec` must also obey the rules in its
+[README](docs/tech-spec/README.md).
+
 ## Commands
 
 | Task | Command |

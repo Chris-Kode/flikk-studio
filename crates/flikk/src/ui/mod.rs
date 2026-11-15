@@ -10,6 +10,7 @@ pub mod deliver;
 pub mod editor_settings;
 pub mod format;
 pub mod inspector;
+pub mod jobs;
 pub mod kit;
 pub mod lettering;
 pub mod library;

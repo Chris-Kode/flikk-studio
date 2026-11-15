@@ -1,5 +1,5 @@
 //! Chat references for timeline objects, in the token grammar of
-//! TECHNICAL_DESIGN §8: token text as the agent reads it, chip label.
+//! `docs/tech-spec/agent.md`: token text as the agent reads it, chip label.
 
 use super::layout::{RULER_HEIGHT, Row};
 use crate::ui::RefDrag;

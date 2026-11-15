@@ -16,6 +16,10 @@
 //! those parts (speech, the sound pass, shot changes) and adds them to it.
 //! Results of another [`ANALYSIS_VERSION`] are not read.
 //!
+//! Whisper built for a GPU hears each stretch of speech in a GPU turn
+//! (`flikk_os::gpu`), as a job listed "Transcription: " and the file, asked
+//! for or in the background as the analysis job is.
+//!
 //! [`AnalysisService::cancel`] stops an item's jobs: one queued never runs,
 //! and one running stops at its next ffmpeg progress line or read, or
 //! before its next model step, keeping nothing (neither in memory nor on
@@ -580,6 +584,9 @@ fn has_script(item: &MediaItem) -> bool {
 struct Progress {
     job: JobProgress,
     steps: Vec<(Step, f32)>,
+    /// The transcription as a GPU job, listed once Whisper takes a turn.
+    #[cfg(feature = "whisper")]
+    transcribing: Arc<flikk_os::gpu::Job>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -598,6 +605,16 @@ impl Progress {
     /// Whether the job was cancelled: it stops, keeping nothing.
     fn cancelled(&self) -> bool {
         self.job.cancelled()
+    }
+
+    /// How Whisper's stretches take GPU turns: as the transcription job,
+    /// given up once the job is cancelled.
+    #[cfg(feature = "whisper")]
+    fn transcribing(&self) -> flikk_os::gpu::Unit<'_> {
+        flikk_os::gpu::Unit::Job {
+            job: &self.transcribing,
+            cancel: self.job.cancel_flag(),
+        }
     }
 
     /// Callback for `step` reporting its own 0..1; it does nothing for a
@@ -812,6 +829,15 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
     let progress = Progress {
         job: job.clone(),
         steps: weights,
+        #[cfg(feature = "whisper")]
+        transcribing: Arc::new(flikk_os::gpu::Job::new(
+            format!("Transcription: {}", file_name(&item.path)),
+            if job.asked() {
+                flikk_os::gpu::Level::Asked
+            } else {
+                flikk_os::gpu::Level::Background
+            },
+        )),
     };
 
     // The parts made again start empty; the rest is the old result's.
@@ -954,7 +980,7 @@ fn run(shared: &Shared, task: &Task, job: &JobProgress) -> Result<(), String> {
                             // After the aligner, so that a hole is where no
                             // word is.
                             let speech = &analysis.speech;
-                            if let Err(e) = fill_holes(shared, &audio, speech, &mut t, &cancel) {
+                            if let Err(e) = fill_holes(shared, &audio, speech, &mut t, &progress) {
                                 problems.push(format!("transcript: {e:#}"));
                             }
                             if cancel() {
@@ -1129,11 +1155,17 @@ fn transcript(
         None => anyhow::bail!("Whisper waits for the voice activity model"),
     };
     if !stretches.is_empty() {
+        let step = progress.step(Step::Transcript);
+        let listed = progress.transcribing.clone();
         let out = shared.transcriber.get().transcribe(
             audio,
             stretches,
             language,
-            Arc::new(progress.step(Step::Transcript)),
+            Arc::new(move |f| {
+                step(f);
+                listed.progress(f);
+            }),
+            progress.transcribing(),
         )?;
         words = out.words;
         detected = Some(out.language);
@@ -1745,14 +1777,14 @@ impl<'a> Shortened<'a> {
 /// in, and add the words found there, aligned. Whisper now and then gives
 /// one sentence a segment that runs on over seconds of speech it skips, or
 /// takes the short last phrase of a stretch for silence. Stops between
-/// holes once `cancel` says so.
+/// holes once the job is cancelled.
 #[cfg(feature = "whisper")]
 fn fill_holes(
     shared: &Shared,
     audio: &[f32],
     speech: &[TimeRange],
     transcript: &mut Transcript,
-    cancel: &dyn Fn() -> bool,
+    progress: &Progress,
 ) -> anyhow::Result<()> {
     let holes = vad::holes(speech, &transcript.words);
     if holes.is_empty() {
@@ -1763,7 +1795,7 @@ fn fill_holes(
     let language = Some(transcript.language.as_str()).filter(|l| *l != "und");
     let transcriber = shared.transcriber.get();
     for hole in holes {
-        if cancel() {
+        if progress.cancelled() {
             anyhow::bail!(CANCELLED);
         }
         // The hole's audio alone: the aligner looks for words seconds
@@ -1780,6 +1812,7 @@ fn fill_holes(
                 std::slice::from_ref(&all),
                 language,
                 Arc::new(|_| {}),
+                progress.transcribing(),
             )?
             .words;
         align_words(shared, heard, &transcript.language, &mut found, &|_| {})?;
@@ -1799,7 +1832,7 @@ fn fill_holes(
     _audio: &[f32],
     _speech: &[TimeRange],
     _transcript: &mut Transcript,
-    _cancel: &dyn Fn() -> bool,
+    _progress: &Progress,
 ) -> anyhow::Result<()> {
     Ok(())
 }
@@ -1947,7 +1980,7 @@ fn analyzed_end(analysis: &Analysis) -> Time {
     speech.chain(words).max().unwrap_or(Time::ZERO)
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())

@@ -95,6 +95,12 @@ impl JobProgress {
         self.flags.cancel.load(Ordering::Relaxed)
     }
 
+    /// The flag [`Self::cancelled`] reads, for waits that take one (a GPU
+    /// turn).
+    pub fn cancel_flag(&self) -> &AtomicBool {
+        &self.flags.cancel
+    }
+
     /// Whether someone asked for the job ([`JobQueue::push_first`]), when
     /// it was queued or while it waited; `false` for one only queued in
     /// the background ([`JobQueue::push`]).

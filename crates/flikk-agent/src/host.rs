@@ -27,6 +27,7 @@ use flikk_core::agent::{ActivityEntry, AgentEvent, AgentSettings, Backend, Edito
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::command::ToolCategory;
+use flikk_core::jobs::JobQueue;
 use flikk_core::memory::{SourceFact, StyleRule};
 use flikk_core::model::MediaItem;
 use flikk_core::services::Services;
@@ -46,6 +47,17 @@ pub(crate) fn external_author() -> Author {
     Author::External {
         name: "External agent".into(),
     }
+}
+
+/// Calls' jobs running at once; the others wait their turn, the order
+/// called. Enough for a turn's calls made together (frames, a measure, a
+/// search) to run side by side, few enough that they don't swamp the
+/// machine; their GPU work takes turns besides.
+const JOBS_AT_ONCE: usize = 4;
+
+/// What a job stopped with its turn answers: not an error.
+fn stopped() -> Done {
+    Done::text("Stopped", "Stopped.")
 }
 
 /// External clients connected now and when one last called.
@@ -192,6 +204,8 @@ pub struct AgentHost {
     queued: Option<Queued>,
     turn: Option<Turn>,
     events: Vec<AgentEvent>,
+    /// Where the calls' jobs run, [`JOBS_AT_ONCE`] at a time.
+    jobs: JobQueue<u64>,
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
     approvals: Vec<PendingApproval>,
@@ -231,6 +245,7 @@ impl AgentHost {
             queued: None,
             turn: None,
             events: Vec::new(),
+            jobs: JobQueue::new("flikk-agent-job", JOBS_AT_ONCE),
             jobs_tx,
             jobs_rx,
             approvals: Vec::new(),
@@ -837,8 +852,9 @@ impl AgentHost {
         }
     }
 
-    /// Run `job` off-thread, shown in the chat while it runs. `from` is
-    /// the turn (for the editor's own calls) and project it started in.
+    /// Run `job` off-thread, shown in the chat while it runs: queued
+    /// behind the others when [`JOBS_AT_ONCE`] run already. `from` is the
+    /// turn (for the editor's own calls) and project it started in.
     fn spawn_job(
         &mut self,
         origin: Origin,
@@ -856,7 +872,8 @@ impl AgentHost {
         });
         let tx = self.jobs_tx.clone();
         let (turn, project) = from;
-        std::thread::spawn(move || {
+        self.jobs.clear_finished();
+        self.jobs.push_first(call, tool.clone(), None, move |_| {
             // A job that panics still answers its call and counts as done,
             // so its turn or the external set doesn't wait on it forever.
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
@@ -871,6 +888,7 @@ impl AgentHost {
                 out,
                 call,
             });
+            Ok(())
         });
     }
 
@@ -918,6 +936,7 @@ impl AgentHost {
             };
             let done = match out {
                 JobDone::Done(done) => done,
+                JobDone::Stopped => stopped(),
                 JobDone::Fetched { item, done, bin } => {
                     let author = match origin {
                         Origin::Turn => turn_author(),
@@ -988,6 +1007,7 @@ impl AgentHost {
                     project's media pool when it is opened again.";
         match out {
             JobDone::Done(done) => done,
+            JobDone::Stopped => stopped(),
             JobDone::Fetched { item, .. } => {
                 self.orphans.push((project, *item));
                 Done::text("Kept for its project", kept)

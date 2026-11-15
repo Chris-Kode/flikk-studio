@@ -7,19 +7,19 @@ use crate::interpolation::Interpolator;
 use crate::onnx::GpuSessions;
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
-use flikk_os::sync::lock;
+use flikk_os::gpu;
 use ort::value::{Tensor, TensorRef};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// The model, loaded on first use for each size; it makes one frame at a
 /// time.
 #[derive(Default)]
 pub struct Rife {
-    sessions: Mutex<GpuSessions>,
+    sessions: GpuSessions,
 }
 
 impl Interpolator for Rife {
-    fn between(&self, a: &Frame, b: &Frame, at: f32) -> Result<Frame> {
+    fn between(&self, a: &Frame, b: &Frame, at: f32, unit: gpu::Unit<'_>) -> Result<Frame> {
         if (a.width, a.height) != (b.width, b.height) {
             bail!("frames to interpolate differ in size");
         }
@@ -48,43 +48,50 @@ impl Interpolator for Rife {
             ("dynamic_dim_2", mh as i64),
             ("dynamic_dim_3", mw as i64),
         ];
-        let mut sessions = lock(&self.sessions);
         // Its file was deleted: let go of it, and fail as if never there.
         if !super::MODEL.is_downloaded() {
-            sessions.forget();
+            self.sessions.forget();
         }
-        let rgba = sessions.run(&FILE.locate()?, FILE.what, &sizes, |session| {
-            let shape = [1usize, 6, mh as usize, mw as usize];
-            let input =
-                TensorRef::from_array_view((shape, &input[..])).map_err(|e| anyhow!("{e}"))?;
-            let step =
-                Tensor::from_array(((), vec![at.clamp(0.0, 1.0)])).map_err(|e| anyhow!("{e}"))?;
-            let outputs = session
-                .run(ort::inputs!["input" => input, "timestep" => step])
-                .map_err(|e| anyhow!("frame interpolation failed: {e}"))?;
-            let (_, out) = outputs["output"]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| anyhow!("{e}"))?;
-            if out.len() < plane * 3 {
-                bail!("frame interpolation gave {} values", out.len());
-            }
-            if out.iter().any(|v| !v.is_finite()) {
-                bail!("frame interpolation gave a frame that is not numbers");
-            }
-            let mut rgba = vec![255u8; plane * 4];
-            for i in 0..plane {
-                for c in 0..3 {
-                    rgba[i * 4 + c] = (out[c * plane + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let model = FILE.locate()?;
+        let rgba = self
+            .sessions
+            .run(&model, FILE.what, &sizes, unit, |session| {
+                let shape = [1usize, 6, mh as usize, mw as usize];
+                let input =
+                    TensorRef::from_array_view((shape, &input[..])).map_err(|e| anyhow!("{e}"))?;
+                let step = Tensor::from_array(((), vec![at.clamp(0.0, 1.0)]))
+                    .map_err(|e| anyhow!("{e}"))?;
+                let outputs = session
+                    .run(ort::inputs!["input" => input, "timestep" => step])
+                    .map_err(|e| anyhow!("frame interpolation failed: {e}"))?;
+                let (_, out) = outputs["output"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| anyhow!("{e}"))?;
+                if out.len() < plane * 3 {
+                    bail!("frame interpolation gave {} values", out.len());
                 }
-            }
-            Ok(rgba)
-        })?;
+                if out.iter().any(|v| !v.is_finite()) {
+                    bail!("frame interpolation gave a frame that is not numbers");
+                }
+                let mut rgba = vec![255u8; plane * 4];
+                for i in 0..plane {
+                    for c in 0..3 {
+                        rgba[i * 4 + c] =
+                            (out[c * plane + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                }
+                Ok(rgba)
+            })?;
         let made = Frame {
             width: mw,
             height: mh,
             rgba: Arc::from(rgba),
         };
         Ok(resize(&made, w, h))
+    }
+
+    fn on_gpu(&self) -> bool {
+        self.sessions.on_gpu()
     }
 }
 

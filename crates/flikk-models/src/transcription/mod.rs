@@ -6,6 +6,7 @@ pub mod whisper;
 use crate::Model;
 use anyhow::Result;
 use flikk_core::analysis::Word;
+use flikk_os::gpu;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,13 +17,16 @@ pub const MODELS: &[&Model] = &whisper::SIZES;
 pub trait Transcriber: Send + Sync {
     /// The words in the stretches `speech` (in samples) of
     /// [`SPEECH_RATE`](crate::SPEECH_RATE) mono `audio`. `language` is an
-    /// ISO 639-1 hint; `None` detects it.
+    /// ISO 639-1 hint; `None` detects it. On the GPU each stretch is heard
+    /// in a turn of `unit` (`flikk_os::gpu`), and it fails with "canceled"
+    /// once that is cancelled while it waits.
     fn transcribe(
         &self,
         audio: &[f32],
         speech: &[Range<usize>],
         language: Option<&str>,
         progress: Progress,
+        unit: gpu::Unit<'_>,
     ) -> Result<Transcribed>;
 
     /// The model's code for the two-letter language `tag`, if it knows it.

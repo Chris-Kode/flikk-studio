@@ -94,7 +94,9 @@ impl<K: Hash + Eq + Clone> Claims<K> {
     /// its answer, when it gives one, is returned and nothing is claimed.
     /// While another thread holds `key`, `busy` is asked the same way;
     /// without an answer this waits for a release, or at most `step` when
-    /// given (to ask `busy` again), and tries again.
+    /// given (to ask `busy` again), and tries again. While it waits, this
+    /// thread's GPU turn is given back ([`flikk_os::gpu::aside`]): the
+    /// holder may need it to finish.
     pub(crate) fn claim<T>(
         &self,
         key: &K,
@@ -116,10 +118,13 @@ impl<K: Hash + Eq + Clone> Claims<K> {
             if let Some(answer) = busy() {
                 return Err(answer);
             }
-            held = match step {
-                Some(step) => wait_timeout(&self.released, held, step),
-                None => wait(&self.released, held),
-            };
+            // The claims are unlocked while the turn is taken back, so a
+            // holder that has it can release them meanwhile.
+            flikk_os::gpu::aside(|| match step {
+                Some(step) => drop(wait_timeout(&self.released, held, step)),
+                None => drop(wait(&self.released, held)),
+            });
+            held = lock(&self.held);
         }
     }
 

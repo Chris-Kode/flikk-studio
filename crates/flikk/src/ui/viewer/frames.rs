@@ -10,6 +10,7 @@ use flikk_core::Time;
 use flikk_core::compose::{self, MaskView, Stills};
 use flikk_core::model::Project;
 use flikk_core::services::{PixelOrder, Services};
+use flikk_os::gpu;
 use gpui_kit::*;
 use std::sync::Arc;
 
@@ -202,6 +203,8 @@ impl ViewerPanel {
                     }
                     let size = compose::size_for_width(&job.project, width);
                     let mut stills = Stills::new(job.services.media.clone(), width);
+                    // The user waits on it: never queued behind other GPU work.
+                    let _watching = gpu::watching();
                     let frame = compose::submit_program(
                         &job.project,
                         job.t,

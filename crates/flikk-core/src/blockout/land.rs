@@ -2,6 +2,7 @@
 //! worked out once as heights on a grid, which rays walk over and things
 //! are stood on, and which repeats too far off to be seen doing it.
 
+use super::gpu::Words;
 use super::motion::mixed;
 use super::space::Vec3;
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,16 @@ impl Land {
         }
     }
 
+    /// Write its measures for the GPU as `land.wgsl` reads a `Land`.
+    pub fn pack(&self, words: &mut Words) {
+        words.floats([self.cell, self.highest, self.steepest, 0.0]);
+    }
+
+    /// Write its heights for the GPU, as `land.wgsl` reads them.
+    pub fn pack_heights(&self, words: &mut Words) {
+        self.heights.iter().for_each(|height| words.float(*height));
+    }
+
     /// The height at grid place (`col`, `row`), counted round its edges.
     fn at(&self, col: i64, row: i64) -> f32 {
         // The side is a power of two.
@@ -181,6 +192,17 @@ impl Land {
         // Still skimming it far off: as good as met.
         Some(along).filter(|along| *along <= reach)
     }
+}
+
+/// The GPU's side of this module: heights as [`Land::pack_heights`] writes
+/// them from `heights_at` in the tables, walked over as [`Land::met`].
+pub(super) fn shader(heights_at: usize) -> String {
+    format!(
+        "const LAND_SIDE: i32 = {SIDE};\nconst LAND_STEPS: u32 = {STEPS}u;\n\
+         const HASTE: f32 = {HASTE:?};\nconst FAR: f32 = {FAR:?};\n\
+         const HEIGHTS_AT: u32 = {heights_at}u;\n{}",
+        include_str!("land.wgsl")
+    )
 }
 
 /// A height from 0 to 1 at (`x`, `z`), counted in hills, rolling smoothly

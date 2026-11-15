@@ -21,6 +21,7 @@ use flikk_core::{JobId, RuleId, Time, TimeRange};
 use flikk_deliver::{RenderQueue, RenderRequest, RenderSettings};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// What approving started.
 pub enum Started {
@@ -133,7 +134,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
             let project = inputs.project.clone();
             Ok(Started::Generate(Box::new(move || {
                 let request = shot
-                    .prepare(&project, &services, &|| false)
+                    .prepare(&project, &services, &AtomicBool::new(false))
                     .map_err(|e| anyhow!(e))?;
                 let made = generation
                     .generate(

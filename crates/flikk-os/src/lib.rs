@@ -8,11 +8,14 @@
 //! - [`sync`]: locks that survive a panic of their holder, and the text of
 //!   a caught panic;
 //! - [`backoff`]: failures remembered for a while and then tried again,
-//!   never cached for the session.
+//!   never cached for the session;
+//! - [`gpu`]: GPU work taking turns, one unit at a time, and the list of
+//!   the jobs taking them.
 //!
 //! Only `std`: every crate of the workspace may depend on it.
 
 pub mod backoff;
 pub mod fs;
+pub mod gpu;
 pub mod process;
 pub mod sync;

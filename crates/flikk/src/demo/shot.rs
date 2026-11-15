@@ -101,7 +101,7 @@ pub fn seed(state: &mut EditorState) {
     };
     let blockout = Blockout::new(scene, shape);
     // Stills of the blockout stand in for the pictures a project would have.
-    let picture = |at: f64| blockout.still(at).ok();
+    let picture = |at: f64| blockout.still(&state.services.blockout, at).ok();
     let (first, reference) = (picture(0.0), picture(4.5));
     let shot = Shot {
         request: GenerateRequest::Video {

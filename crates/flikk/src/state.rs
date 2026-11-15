@@ -592,13 +592,15 @@ fn services(cloud: &Arc<flikk_cloud::Cloud>) -> Services {
             None
         }
     };
-    let fx = match flikk_gpu::GpuFx::new() {
-        Ok(gpu) => Some(Arc::new(gpu) as Arc<dyn flikk_core::services::FxService>),
+    let gpu = match flikk_gpu::GpuFx::new() {
+        Ok(gpu) => Some(Arc::new(gpu)),
         Err(e) => {
             eprintln!("GPU effects unavailable: {e}");
             None
         }
     };
+    let fx = (gpu.clone()).map(|gpu| gpu as Arc<dyn flikk_core::services::FxService>);
+    let compute = gpu.map(|gpu| gpu as Arc<dyn flikk_core::services::ComputeService>);
     let html = match flikk_html::HtmlEngine::new() {
         Ok(h) => Some(Arc::new(h) as Arc<dyn flikk_core::services::HtmlService>),
         Err(e) => {
@@ -630,6 +632,7 @@ fn services(cloud: &Arc<flikk_cloud::Cloud>) -> Services {
         depth,
         // Made with the caption styles, see `CaptionStyles::refresh_lettering`.
         lettering: None,
+        blockout: flikk_core::blockout::Renderer::new(compute),
         generation: Some(cloud.clone() as Arc<dyn flikk_core::cloud::GenerationService>),
     }
 }

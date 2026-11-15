@@ -13,6 +13,11 @@
 //! [`Player::render_ahead`] runs the same loop over the frames after a
 //! paused playhead, only filling the cache. Frames the background render
 //! put on disk ([`crate::render_cache`]) are read instead of composed.
+//!
+//! Playback is watched GPU work ([`gpu::watching`]): it never waits, and
+//! background work keeps off the GPU meanwhile. Rendering ahead is
+//! background work, one frame per turn, and not listed: it starts over
+//! each time the playhead rests.
 
 use super::PlayKey;
 use super::cache::SharedCache;
@@ -21,6 +26,7 @@ use flikk_core::Time;
 use flikk_core::compose::{self, Pending, Streams};
 use flikk_core::model::Project;
 use flikk_core::services::{Frame, PixelOrder, Services};
+use flikk_os::gpu;
 use gpui_kit::RenderImage;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -278,6 +284,7 @@ fn play(shared: Arc<Shared>, mut job: Job, mut quality: Quality) {
         }
     };
     while !shared.stop.load(Ordering::Relaxed) {
+        let _watching = gpu::watching();
         let frame = Time(shared.target.load(Ordering::Relaxed)).to_frame(rate);
         if shown == Some(frame) {
             match flight.take() {
@@ -308,12 +315,17 @@ fn ahead(shared: Arc<Shared>, mut job: Job, frames: std::ops::Range<i64>) {
         if cached {
             continue;
         }
+        let Some(_turn) = gpu::turn(gpu::Level::Background, &shared.stop) else {
+            return;
+        };
         let next = job.begin(frame, 0, &mut streams, false);
         if let Some(previous) = flight.replace(next) {
             job.end(previous);
         }
     }
-    if let Some(last) = flight {
+    if let Some(last) = flight
+        && let Some(_turn) = gpu::turn(gpu::Level::Background, &shared.stop)
+    {
         job.end(last);
     }
 }

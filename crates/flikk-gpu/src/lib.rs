@@ -17,10 +17,13 @@
 //! path and modification time; textures and buffers are pooled by size.
 //! All of these belong to one device ([`Gpu`]): when wgpu reports it lost,
 //! the next batch opens a new one with empty caches (see [`GpuFx::gpu`]).
-//! Layer compositing for the program frame lives in [`composite`].
+//! Layer compositing for the program frame lives in [`composite`];
+//! compute programs ([`flikk_core::services::ComputeService`], which draw
+//! blockouts) in [`compute`].
 
 mod batch;
 mod composite;
+mod compute;
 mod wrap;
 
 use anyhow::Context as _;
@@ -108,6 +111,7 @@ struct State {
     textures: HashMap<(u32, u32, wgpu::TextureFormat), Vec<wgpu::Texture>>,
     readbacks: Vec<wgpu::Buffer>,
     uniforms: Option<wgpu::Buffer>,
+    compute: compute::Kept,
 }
 
 impl GpuFx {

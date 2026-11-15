@@ -22,7 +22,7 @@ use super::view::{image_content, save_png};
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, secs, track_id};
 use crate::bridge::{Content, ToolResult};
-use flikk_core::blockout::{Detail, Outside, Scene};
+use flikk_core::blockout::{Detail, Look, Outside, Renderer, Scene};
 use flikk_core::cloud::{
     CloudError, GenerateRequest, GenerationService, VideoModel, VideoReference,
 };
@@ -33,6 +33,7 @@ use flikk_core::{Time, paths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// Widest frame sent as a first or last frame.
 const FRAME_WIDTH: u32 = 1920;
@@ -73,7 +74,9 @@ impl FrameGrab {
 }
 
 /// Write the program at `at` as a PNG at `path`: the sequence's picture,
-/// at most [`FRAME_WIDTH`] wide, as the viewer shows it.
+/// at most [`FRAME_WIDTH`] wide, as the viewer shows it. Composed in an
+/// asked GPU turn, waited for whatever: a grab is a frame or two that a
+/// generation about to start needs.
 pub(crate) fn grab_frame(
     project: &Project,
     services: &Services,
@@ -84,7 +87,11 @@ pub(crate) fn grab_frame(
     let width = settings.width.clamp(2, FRAME_WIDTH);
     let size = compose::size_for_width(project, width);
     let mut stills = Stills::new(services.media.clone(), width);
-    let frame = compose::program(project, at, size, services, &mut stills);
+    let never = AtomicBool::new(false);
+    let frame = super::on_gpu(services, &never, || {
+        compose::program(project, at, size, services, &mut stills)
+    })
+    .expect("never stopped");
     let fail = |e: String| format!("could not grab the frame at {:.2} s: {e}", at.as_secs_f64());
     super::view::write_png(path, &frame).map_err(|e| fail(e.to_string()))
 }
@@ -145,12 +152,14 @@ impl Blockout {
         Time::from_secs_f64(self.scene.duration)
     }
 
-    /// The scene at `at` seconds as a new PNG among the grabbed frames,
-    /// for a picture model to turn into a finished frame.
-    pub fn still(&self, at: f64) -> Result<PathBuf, String> {
+    /// The scene at `at` seconds, drawn by `renderer`, as a new PNG among
+    /// the grabbed frames, for a picture model to turn into a finished
+    /// frame. The user waits on it where they clicked, so it is drawn as
+    /// what they watch: never behind other work on the GPU.
+    pub fn still(&self, renderer: &Renderer, at: f64) -> Result<PathBuf, String> {
         let name = format!("{}.png", uuid::Uuid::new_v4().simple());
         let path = paths::cache().join("frames").join(name);
-        let frame = (self.scene).render(at, self.size.0, self.size.1, Detail::Full);
+        let frame = renderer.render_watched(&self.scene, at, self.size, Look::Shot(Detail::Full));
         super::view::write_png(&path, &frame)
             .map(|()| path)
             .map_err(|e| format!("could not write the blockout's frame: {e}"))
@@ -241,16 +250,17 @@ impl Shot {
 
     /// Put what the request names on disk (the program's frames, grabbed
     /// from `project`, and the blockout's clip) and hand back the request
-    /// to send. `cancelled` stops the clip between frames.
+    /// to send. `cancel` stops the clip.
     pub fn prepare(
         &self,
         project: &Project,
         services: &Services,
-        cancelled: &dyn Fn() -> bool,
+        cancel: &AtomicBool,
     ) -> Result<GenerateRequest, String> {
         grab_all(project, services, &self.grabs)?;
         if let Some(blockout) = &self.blockout {
-            (blockout.scene).write_clip(blockout.size, &blockout.clip, cancelled)?;
+            let renderer = &services.blockout;
+            (blockout.scene).write_clip(renderer, blockout.size, &blockout.clip, cancel)?;
         }
         Ok(self.sent())
     }
@@ -536,13 +546,15 @@ pub(crate) fn preview(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError>
             return fail("give `blockout`, the scene to look at, or the `id` of one kept");
         }
     };
-    let job: Job = Box::new(move || JobDone::Done(drawn(&id, &scene, shape)));
+    let renderer = ctx.services.blockout.clone();
+    let job: Job = Box::new(move || JobDone::Done(drawn(&renderer, &id, &scene, shape)));
     Ok(Step::Job(job))
 }
 
-/// `scene`, kept as `id`, in a picture `shape` wide to one high: as a
-/// collage of frames across it and as what its camera sees.
-fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
+/// `scene`, kept as `id`, in a picture `shape` wide to one high, drawn by
+/// `renderer`: as a collage of frames across it and as what its camera
+/// sees.
+fn drawn(renderer: &Renderer, id: &str, scene: &Scene, shape: f64) -> Done {
     let (wide, high) = Scene::clip_size(shape);
     let scale = PREVIEW_SIDE / wide.max(high) as f64;
     let size = [wide, high].map(|side| ((side as f64 * scale) as u32).max(8));
@@ -551,7 +563,7 @@ fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
         .collect();
     let mut tiles: Vec<_> = (times.iter())
         .map(|t| {
-            let frame = scene.render(*t, size[0], size[1], Detail::Full);
+            let frame = renderer.render(scene, *t, (size[0], size[1]), Look::Shot(Detail::Full));
             (frame, format!("{t:.1}s"))
         })
         .collect();
@@ -564,7 +576,8 @@ fn drawn(id: &str, scene: &Scene, shape: f64) -> Done {
         closer: 1.0,
     };
     let middle = scene.duration * 0.5;
-    let plan = scene.render_outside(middle, (size[0], size[1]), &above, Detail::Full);
+    let look = Look::Outside(above, Detail::Full);
+    let plan = renderer.render(scene, middle, (size[0], size[1]), look);
     tiles.push((plan, "plan".into()));
     let image = save_png(&collage(&tiles, (size[0], size[1])))
         .and_then(|path| Ok((image_content(&path)?, path)));

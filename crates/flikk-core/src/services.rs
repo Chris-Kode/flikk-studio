@@ -563,6 +563,46 @@ pub struct CompositeLayer<'a> {
     pub placement: Placement,
 }
 
+/// A WGSL compute program run once over its buffers
+/// ([`ComputeService::run`]).
+///
+/// Group 0 holds, in binding order: `uniforms` at binding 0, then each of
+/// `inputs` as a read-only storage buffer, then each of `scratch` as a
+/// read-write storage buffer of that many bytes (its contents undefined
+/// until a step writes them). The steps run in order, each one compute
+/// dispatch of its entry point that sees everything the steps before it
+/// wrote.
+#[derive(Clone, Copy, Debug)]
+pub struct ComputeJob<'a> {
+    /// What it is, for the GPU's own tools and its errors.
+    pub label: &'static str,
+    /// The program. Compiled once per engine and kept.
+    pub source: &'static str,
+    pub uniforms: &'a [u8],
+    pub inputs: &'a [&'a [u8]],
+    pub scratch: &'a [u64],
+    pub steps: &'a [ComputeStep],
+    /// How many bytes come back from the start of the last scratch
+    /// buffer.
+    pub read: u64,
+}
+
+/// One dispatch of a [`ComputeJob`]: `entry` over `groups` workgroups
+/// across and down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputeStep {
+    pub entry: &'static str,
+    pub groups: [u32; 2],
+}
+
+/// Compute programs on the GPU (`flikk-gpu`). Thread-safe and blocking.
+pub trait ComputeService: Send + Sync {
+    /// Run `job` and return the bytes it asks for. Fails, and changes
+    /// nothing, when the GPU can't: no device, a lost one, a buffer or a
+    /// dispatch past its limits, or a program it rejects.
+    fn run(&self, job: &ComputeJob<'_>) -> ServiceResult<Vec<u8>>;
+}
+
 /// HTML generators in a headless browser (`flikk-html`).
 pub trait HtmlService: Send + Sync {
     /// Load the document at `call.time` and return script and console errors
@@ -634,6 +674,9 @@ pub struct Services {
     pub interpolation: Option<Arc<dyn InterpolationService>>,
     /// Depth maps for depth effects and masks.
     pub depth: Option<Arc<dyn crate::depth::DepthService>>,
+    /// Draws blockouts: on the GPU when there is one, else on the CPU.
+    /// Always there; the default draws on the CPU.
+    pub blockout: crate::blockout::Renderer,
 }
 
 impl std::fmt::Debug for Services {
@@ -650,6 +693,7 @@ impl std::fmt::Debug for Services {
             .field("stabilizer", &self.stabilizer.is_some())
             .field("interpolation", &self.interpolation.is_some())
             .field("depth", &self.depth.is_some())
+            .field("blockout", &self.blockout)
             .finish()
     }
 }

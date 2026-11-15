@@ -79,7 +79,7 @@ pub fn export_frame_until(
     );
     args.push(tmp.path().into());
     if spec.piped {
-        let mut frames = Frames::new(project, services, &spec);
+        let mut frames = Frames::new(project, services, &spec, path);
         composed::run(&args, &g, &mut frames, &|_| {}, cancel)?;
     } else {
         ffmpeg::run(&args, 0.0, &|_| {}, cancel)?;

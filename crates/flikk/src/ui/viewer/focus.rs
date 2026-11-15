@@ -63,7 +63,11 @@ impl ViewerPanel {
                 .spawn(async move {
                     let frame = TimeRange::new(source, source + Time(1));
                     let cancel = AtomicBool::new(false);
-                    service.complete(&item, frame, &|_| {}, &cancel).ok()?;
+                    // The user clicked and waits on it.
+                    let asked = flikk_os::gpu::Level::Asked;
+                    service
+                        .complete(&item, frame, asked, &|_| {}, &cancel)
+                        .ok()?;
                     Some(service.depth(&item, source)?.around(uv))
                 })
                 .await;

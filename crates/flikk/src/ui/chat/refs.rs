@@ -1,4 +1,4 @@
-//! `@` references to project objects (PRD AG3, TECHNICAL_DESIGN §8). In text
+//! `@` references to project objects (PRD AG3, `docs/tech-spec/agent.md`). In text
 //! they are tokens such as `@clip 3f2a91c0`, `@effect 3f2a91c0/9c1d2e3f`,
 //! `@fx cross_dissolve` or `@range 1.000-4.500`, which is what the agent
 //! reads; `flikk_core::query::resolve_project_references` parses them.

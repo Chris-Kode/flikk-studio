@@ -575,7 +575,7 @@ fn encode(
     args.extend(codec.into_iter().map(OsString::from));
     args.push(tmp.into());
     if spec.piped {
-        let mut frames = Frames::new(&request.project, &request.services, spec);
+        let mut frames = Frames::new(&request.project, &request.services, spec, &request.output);
         composed::run(&args, g, &mut frames, progress, cancel)
     } else {
         ffmpeg::run(&args, g.seconds, progress, cancel).map(|_| ())

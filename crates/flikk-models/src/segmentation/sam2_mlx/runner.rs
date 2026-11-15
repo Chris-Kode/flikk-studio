@@ -3,6 +3,10 @@
 //! while tracking, features and memory stay on the device. A tracked frame
 //! attends to every prompted frame and the latest tracked ones, as SAM 2
 //! does.
+//!
+//! With Metal the work runs on the GPU, so each frame's takes its turn
+//! there (`flikk_os::gpu`): from after the frame is read and squared until
+//! its object is back on the CPU.
 
 use super::config::{GRID, HIDDEN, INPUT, LABEL_BOX, LABEL_OFF, LABEL_ON, LOGITS, MEMORY, WEIGHTS};
 use super::net::{Decoded, Features, Memory, Net};
@@ -10,6 +14,7 @@ use crate::segmentation::plan::{self, POINTERS};
 use crate::segmentation::{Encoded, Prompt, Segment, Segmenter};
 use anyhow::{Result, anyhow, bail};
 use flikk_core::services::Frame;
+use flikk_os::gpu;
 use flikk_os::sync::lock;
 use mlx_rs::{Array, ops};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -23,6 +28,15 @@ pub struct Sam2Mlx {
 
 fn err(e: impl std::fmt::Display) -> anyhow::Error {
     anyhow!("{e}")
+}
+
+/// `unit`'s turn for one frame's work, which runs on the GPU with Metal;
+/// none on the CPU. Fails with "canceled" once `unit` is cancelled.
+fn turn(unit: gpu::Unit<'_>) -> Result<Option<gpu::Held<'_>>> {
+    if !cfg!(feature = "metal") {
+        return Ok(None);
+    }
+    unit.take().map(Some).ok_or_else(|| anyhow!("canceled"))
 }
 
 impl Sam2Mlx {
@@ -85,17 +99,20 @@ fn segment(d: &Decoded) -> Result<Segment> {
 }
 
 impl Segmenter for Sam2Mlx {
-    fn encode(&self, picture: &Frame) -> Result<Encoded> {
+    fn encode(&self, picture: &Frame, unit: gpu::Unit<'_>) -> Result<Encoded> {
+        let input = plan::square(picture, INPUT as usize)?;
+        let _turn = turn(unit)?;
         let net = self.net()?;
         let net = net.as_ref().expect("loaded");
-        let f = net.encode(&plan::square(picture, INPUT as usize)?)?;
+        let f = net.encode(&input)?;
         Ok(Encoded {
             model: super::ID,
             features: vec![host(&f.fine[0])?, host(&f.fine[1])?, host(&f.coarse)?],
         })
     }
 
-    fn segment(&self, frame: &Encoded, prompt: &Prompt) -> Result<Segment> {
+    fn segment(&self, frame: &Encoded, prompt: &Prompt, unit: gpu::Unit<'_>) -> Result<Segment> {
+        let _turn = turn(unit)?;
         let net = self.net()?;
         let net = net.as_ref().expect("loaded");
         let f = upload(frame)?;
@@ -107,6 +124,7 @@ impl Segmenter for Sam2Mlx {
         &self,
         count: usize,
         prompts: &[(usize, Prompt)],
+        unit: gpu::Unit<'_>,
         frame: &mut dyn FnMut(usize) -> Result<Frame>,
         done: &mut dyn FnMut(usize, Segment) -> Result<()>,
     ) -> Result<()> {
@@ -118,11 +136,15 @@ impl Segmenter for Sam2Mlx {
         let net = net.as_ref().expect("loaded");
         let mut prompted: BTreeMap<usize, Memory> = BTreeMap::new();
         for (i, prompt) in prompts {
-            let f = net.encode(&plan::square(&frame(*i)?, INPUT as usize)?)?;
+            let input = plan::square(&frame(*i)?, INPUT as usize)?;
+            let held = turn(unit)?;
+            let f = net.encode(&input)?;
             let cond = net.without_memory(&f.coarse)?;
             let decoded = net.decode(&f.fine, &cond, &points(prompt))?;
             prompted.insert(*i, net.memorize(&f.coarse, &decoded, true)?);
-            done(*i, segment(&decoded)?)?;
+            let found = segment(&decoded)?;
+            drop(held);
+            done(*i, found)?;
         }
         let keys: BTreeSet<usize> = prompted.keys().copied().collect();
         let forward = (first + 1..count).collect::<Vec<_>>();
@@ -133,7 +155,9 @@ impl Segmenter for Sam2Mlx {
                 if prompted.contains_key(&i) {
                     continue;
                 }
-                let f = net.encode(&plan::square(&frame(i)?, INPUT as usize)?)?;
+                let input = plan::square(&frame(i)?, INPUT as usize)?;
+                let held = turn(unit)?;
+                let f = net.encode(&input)?;
                 let bank = plan::bank(&keys, |j| tracked.contains_key(&j), i, count, reverse, None);
                 let memory_of = |j: &usize| {
                     tracked
@@ -175,7 +199,9 @@ impl Segmenter for Sam2Mlx {
                 // Only the frames the bank can still reach.
                 let reach = plan::MEMORY_FRAMES.max(POINTERS);
                 tracked.retain(|j, _| j.abs_diff(i) < reach);
-                done(i, segment(&decoded)?)?;
+                let found = segment(&decoded)?;
+                drop(held);
+                done(i, found)?;
             }
         }
         Ok(())

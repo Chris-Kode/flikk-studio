@@ -25,6 +25,11 @@
 //! machine is fast enough, and shows the nearest made frame's map
 //! meanwhile. A frame that fails is not asked for again for
 //! [`RETRY_AFTER`]; renders try it again all the same.
+//!
+//! On the GPU, the model takes turns there (`flikk_os::gpu`), a frame
+//! each: the worker's frames are for the picture on screen, so they never
+//! wait (watched); [`DepthService::complete`] lists its frames as a job,
+//! "Depth: " and the file, at the level its caller asks for.
 
 mod store;
 
@@ -35,6 +40,7 @@ use flikk_core::services::{Frame, FrameStream, MediaService, ServiceError, Servi
 use flikk_core::time::{Rate, Time, TimeRange};
 use flikk_models::depth::{DepthEstimator, Disparity};
 use flikk_models::{Model, Task as ModelTask};
+use flikk_os::gpu::{self, Level, Unit};
 use flikk_os::sync::{lock, panic_message};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -76,8 +82,8 @@ pub struct LocalDepth {
 
 struct Shared {
     media: Arc<dyn MediaService>,
-    /// The model, loaded on first use; one frame at a time.
-    runner: Mutex<Option<(&'static str, Box<dyn DepthEstimator>)>>,
+    /// The model, loaded on first use; it runs one frame at a time.
+    runner: Mutex<Option<(&'static str, Arc<dyn DepthEstimator>)>>,
     raw: Mutex<VecDeque<(Key, Arc<Raw>)>>,
     /// Keys looked for on disk and not there.
     absent: Mutex<HashSet<Key>>,
@@ -99,10 +105,10 @@ struct Wanted {
     working: bool,
 }
 
-fn runner(model: &'static Model) -> Option<Box<dyn DepthEstimator>> {
+fn runner(model: &'static Model) -> Option<Arc<dyn DepthEstimator>> {
     #[cfg(feature = "depth")]
     {
-        Some(flikk_models::depth::runner(model))
+        Some(Arc::from(flikk_models::depth::runner(model)))
     }
     #[cfg(not(feature = "depth"))]
     {
@@ -349,17 +355,28 @@ impl Shared {
         here
     }
 
-    /// Run the model on `picture`.
-    fn estimate(&self, model: &'static Model, picture: &Frame) -> anyhow::Result<Raw> {
+    /// The runner of `model`, made anew when another model was picked;
+    /// `None` in a build without depth maps.
+    fn runner(&self, model: &'static Model) -> Option<Arc<dyn DepthEstimator>> {
         let mut slot = lock(&self.runner);
         if slot.as_ref().is_none_or(|(id, _)| *id != model.id) {
             *slot = runner(model).map(|r| (model.id, r));
         }
-        let Some((_, runner)) = slot.as_ref() else {
+        slot.as_ref().map(|(_, runner)| runner.clone())
+    }
+
+    /// Run `runner` on `picture`, in `unit`'s turn on the GPU.
+    fn estimate(
+        &self,
+        runner: Option<&dyn DepthEstimator>,
+        picture: &Frame,
+        unit: Unit<'_>,
+    ) -> anyhow::Result<Raw> {
+        let Some(runner) = runner else {
             anyhow::bail!("Depth maps are not in this build.");
         };
         let start = Instant::now();
-        let disparity = runner.estimate(picture)?;
+        let disparity = runner.estimate(picture, unit)?;
         *lock(&self.seconds_per_frame) = Some(start.elapsed().as_secs_f32());
         Ok(normalize(&disparity))
     }
@@ -386,15 +403,26 @@ impl Shared {
             .is_some_and(|(_, at)| at.elapsed() < RETRY_AFTER)
     }
 
-    /// Make `key` from `picture` unless it is made. When another thread is
-    /// making it, waits for that (`wait`) or leaves it to it.
+    /// Make `key` from `picture` unless it is made, the model running in
+    /// `unit`'s turn on the GPU. When another thread is making it, waits
+    /// for that (`wait`) or leaves it to it. Cancelled, it fails without
+    /// counting as a failure.
     fn make(
         &self,
         key: &Key,
         model: &'static Model,
         wait: bool,
-        picture: impl FnOnce() -> ServiceResult<Frame>,
+        unit: Unit<'_>,
+        picture: ServiceResult<Frame>,
     ) -> Result<(), String> {
+        let runner = self.runner(model);
+        // The turn before the claim: a thread that claimed a frame never
+        // waits for its turn, so the frames on screen never wait behind
+        // a background render's. The model's own turn is this one.
+        let _turn = match &runner {
+            Some(runner) if runner.on_gpu() => Some(unit.take().ok_or("canceled")?),
+            _ => None,
+        };
         let claimed = self.making.claim(
             key,
             || self.made(key).then_some(()),
@@ -405,8 +433,9 @@ impl Shared {
             return Ok(());
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let picture = picture().map_err(|e| e.to_string())?;
-            self.estimate(model, &picture).map_err(|e| format!("{e:#}"))
+            let picture = picture.map_err(|e| e.to_string())?;
+            self.estimate(runner.as_deref(), &picture, unit)
+                .map_err(|e| format!("{e:#}"))
         }))
         .unwrap_or_else(|payload| {
             // Load the model anew rather than trust what it was left as.
@@ -418,6 +447,7 @@ impl Shared {
                 self.store(key, raw);
                 Ok(())
             }
+            Err(e) if unit.cancelled() => Err(e),
             Err(e) => {
                 self.fail(key, e.clone());
                 Err(e)
@@ -480,13 +510,22 @@ impl Shared {
             else {
                 continue;
             };
-            // It may have failed since it was queued (a render tried it).
-            if self.failed_lately(&key) {
+            // It may have failed since it was queued (a render tried it),
+            // or be made or being made by one meanwhile.
+            if self.failed_lately(&key) || self.made(&key) || self.making.held(&key) {
                 continue;
             }
-            let _ = self.make(&key, model, false, || {
+            let picture = catch_unwind(AssertUnwindSafe(|| {
                 self.media.frame(&item, time_of(&item, key.2), DECODE_WIDTH)
+            }))
+            .unwrap_or_else(|payload| {
+                Err(ServiceError(panic_message(
+                    "making the depth map",
+                    payload.as_ref(),
+                )))
             });
+            // For the frames on screen: never behind other GPU work.
+            let _ = self.make(&key, model, false, Unit::Watched, picture);
         }
     }
 
@@ -634,6 +673,7 @@ impl DepthService for LocalDepth {
         &self,
         item: &MediaItem,
         range: TimeRange,
+        level: Level,
         progress: &dyn Fn(f32),
         cancel: &AtomicBool,
     ) -> ServiceResult<()> {
@@ -653,6 +693,8 @@ impl DepthService for LocalDepth {
             item,
             stream: None,
         };
+        let job = gpu::Job::new(format!("Depth: {}", crate::file_name(&item.path)), level);
+        let unit = Unit::Job { job: &job, cancel };
         for (i, frame) in missing.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ServiceError("canceled".into()));
@@ -668,10 +710,14 @@ impl DepthService for LocalDepth {
                     )))
                 });
             // Tried again even when it failed lately: a render waits for it.
-            if let Err(why) = shared.make(&key, model, true, || picture) {
-                return Err(ServiceError(format!("frame {frame}: {why}")));
+            match shared.make(&key, model, true, unit, picture) {
+                Err(_) if unit.cancelled() => return Err(ServiceError("canceled".into())),
+                Err(why) => return Err(ServiceError(format!("frame {frame}: {why}"))),
+                Ok(()) => {}
             }
-            progress((i + 1) as f32 / missing.len() as f32);
+            let done = (i + 1) as f32 / missing.len() as f32;
+            job.progress(done);
+            progress(done);
         }
         Ok(())
     }

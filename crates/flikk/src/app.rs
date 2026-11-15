@@ -115,6 +115,12 @@ pub struct Flikk {
     agent_open: bool,
     /// The notice list is dropped down.
     notices_open: bool,
+    /// The jobs taking GPU turns as last read, and whether their list is
+    /// dropped down.
+    jobs: Vec<flikk_os::gpu::Listed>,
+    jobs_open: bool,
+    /// Reads the jobs again, repainting when they changed.
+    _jobs_poll: Task<()>,
     /// Unsaved changes as last told to the window.
     edited: bool,
     /// The title bar was pressed: moving the pointer moves the window.
@@ -207,6 +213,21 @@ impl Flikk {
         }
         let settings = cx.new(|cx| EditorSettings::new(state.clone(), window, cx));
         EditorSettings::register(&settings, cx);
+        let _jobs_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(crate::ui::jobs::POLL).await;
+                let alive = this.update(cx, |this: &mut Self, cx| {
+                    let jobs = flikk_os::gpu::jobs();
+                    if this.jobs != jobs {
+                        this.jobs = jobs;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
             viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
@@ -224,6 +245,9 @@ impl Flikk {
             settings,
             agent_open: true,
             notices_open: false,
+            jobs: flikk_os::gpu::jobs(),
+            jobs_open: false,
+            _jobs_poll,
             edited: false,
             moving: false,
             render_poll: None,
@@ -288,12 +312,13 @@ impl Flikk {
         cx: &mut Context<Self>,
     ) {
         self.notices_open = false;
+        self.jobs_open = false;
         cx.notify();
         EditorSettings::open(&self.settings, tab, window, cx);
     }
 
-    /// Project menu on the left, workspaces centred, history, notices,
-    /// Settings and Render on the right. On macOS the bar also holds the
+    /// Project menu on the left, workspaces centred, history, jobs,
+    /// notices, Settings and Render on the right. On macOS the bar also holds the
     /// window buttons and moves the window.
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let macos = cfg!(target_os = "macos");
@@ -467,13 +492,22 @@ impl Flikk {
             })
     }
 
-    /// Undo and redo, the notices bell, Settings and, outside Deliver,
-    /// Render, which goes there.
+    /// Undo and redo, the jobs, the notices bell, Settings and, outside
+    /// Deliver, Render, which goes there.
     fn top_right(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.state.read(cx);
         let (can_undo, can_redo) = (s.bus.history().can_undo(), s.bus.history().can_redo());
         let delivering = s.workspace == Workspace::Deliver;
         let this = cx.entity().downgrade();
+        let jobs = crate::ui::jobs::button(&self.jobs, self.jobs_open, {
+            let this = this.clone();
+            move |open, _, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.jobs_open = *open;
+                    cx.notify();
+                });
+            }
+        });
         let notices = crate::ui::notices::button(
             &self.state,
             self.notices_open,
@@ -524,6 +558,7 @@ impl Flikk {
                 .mx(px(6.))
                 .bg(t::LN)
                 .into_any_element(),
+            jobs.into_any_element(),
             notices.into_any_element(),
             Button::new("settings")
                 .ghost()

@@ -2,6 +2,6 @@
 name = "flikk-os"
 version.workspace = true
 edition.workspace = true
-description = "Operating-system plumbing shared by every Flikk crate: whole-or-nothing file writes, child processes that never outlive their owner, poison-tolerant locks and failure back-off."
+description = "Operating-system plumbing shared by every Flikk crate: whole-or-nothing file writes, child processes that never outlive their owner, poison-tolerant locks, failure back-off and GPU work taking turns."
 
 [dependencies]

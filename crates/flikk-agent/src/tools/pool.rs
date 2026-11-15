@@ -125,6 +125,7 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                         range,
                         detail,
                         Clock::Source,
+                        stop.clone(),
                     ),
                     Span::Sound if pictured(range) && services.media.is_some() => {
                         picture_step(&alone, &services, range)

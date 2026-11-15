@@ -1,13 +1,16 @@
 //! Whisper hearing each stretch of speech on its own, the longest first,
 //! after a short silence when it fits one window, and its tokens put
-//! together into words.
+//! together into words. Built for a GPU, each stretch is heard in a GPU
+//! turn of its own (`flikk_os::gpu`): one `full` run, the stretch's 30 s
+//! windows one after another.
 
 use super::config::{BEAM_SIZE, FADE, GPU, LEAD, MAX_THREADS, WINDOW};
 use crate::transcription::{Progress, Transcribed, Transcriber};
 use crate::{ModelFile, SPEECH_RATE};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use flikk_core::analysis::Word;
 use flikk_core::time::{Time, TimeRange};
+use flikk_os::gpu;
 use flikk_os::sync::lock;
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -65,6 +68,7 @@ impl Transcriber for Whisper {
         speech: &[Range<usize>],
         language: Option<&str>,
         progress: Progress,
+        unit: gpu::Unit<'_>,
     ) -> Result<Transcribed> {
         // Route whisper.cpp's chatter through `log` instead of stderr.
         whisper_rs::install_logging_hooks();
@@ -104,9 +108,14 @@ impl Transcriber for Whisper {
                 progress(done + share * p as f32 / 100.0)
             });
             let lead = if LEAD + r.len() <= WINDOW { LEAD } else { 0 };
-            state
-                .full(params, &padded(&audio[r.clone()], lead))
-                .context("Whisper failed")?;
+            let samples = padded(&audio[r.clone()], lead);
+            let turn = if GPU {
+                Some(unit.take().ok_or_else(|| anyhow!("canceled"))?)
+            } else {
+                None
+            };
+            state.full(params, &samples).context("Whisper failed")?;
+            drop(turn);
             if language.is_none() {
                 language =
                     whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string);
