@@ -1,701 +1,992 @@
 # Agent
 
-* **Backends** (`flikk-agent/src/backend/`): Claude runs as
-  `claude -p --input-format stream-json --output-format stream-json` with
-  only the flikk MCP server (`--strict-mcp-config`, `--tools ""`,
-  `--permission-mode dontAsk`, no setting sources or slash commands), the
-  system prompt, `--model`/`--effort`, and `--resume` or `--session-id`.
-  Codex runs as `codex exec --json --sandbox read-only` with the user's
-  config and rules ignored, shell and patch tools off, and the MCP server,
-  developer instructions, model and reasoning effort as `-c` overrides,
-  resuming its thread. Each turn runs in an empty workdir under
-  `agent/work`, so the user's own CLAUDE.md/AGENTS.md are not picked up. A
-  backend that lost its session is retried fresh. `FLIKK_CLAUDE` and
-  `FLIKK_CODEX` point at the CLIs.
-* **Models and thinking:** two pickers next to Send list what the installed
-  CLI offers (Claude's stream-JSON `initialize` request, Codex's
-  `model/list` on `codex app-server`), cached in `agent/models.json` and
-  refreshed in the background; each model brings its thinking levels.
-  Choices are kept per backend in the user settings.
-* **MCP server:** `flikk_agent::mcp::run()`, launched by the backend as
-  `$FLIKK_MCP`, else the `flikk-mcp` binary next to the editor, else
-  `flikk mcp`. It connects to the editor over TCP on 127.0.0.1 with the
-  turn's token (`FLIKK_BRIDGE`/`FLIKK_TOKEN`).
-* **Permissions** (`flikk-core/src/bus.rs`): one agent role, the editor.
-  Permissions are per `ToolCategory`: read and view are always allowed;
-  edit categories are Off or Propose (never auto-applied); skills and
-  styles are Off, Ask or Allow (deleting one always asks); project memory
-  (rules, facts, saving to the library) and deliver (renders, exports) always need the
-  user's approval, asked with Approve/Deny cards above the composer and
-  carried out by `agent_link/approve.rs`. The call waits: the host holds
-  its MCP reply until the user decides and answers it with the outcome
-  (a generated voiceover's media id, for one), so the turn carries on; an
-  outcome whose call is gone (the turn ended or was cancelled) reaches the
-  agent in the next turn's `<approvals>` block. Backends allow a tool call
-  an hour for this. Generate media (music, sound effects, voiceovers and
-  voices, pictures, videos and upscales: whatever spends the user's money
-  or credits with a provider, `ToolCategory::costs`) is Off or Ask each
-  time (the default). No setting lets it run unasked: a saved "Allow" from
-  before reads as asking (`Permissions::get`), the handlers that ran one as
-  a tool job are gone, and the only code that calls a provider for the
-  agent is `agent_link/approve.rs`, on the user's click. `Permissions::choices`
-  says what each category can be set to, and Settings → Agent draws its
-  rows from it. A "Web" switch (off by default) gives Claude WebSearch/WebFetch and Codex web
-  search. Both read pages as text only, so the same switch lists the `flikk`
-  tool `view_web_image`: it downloads a PNG, JPEG, GIF or WebP (at most
-  25 MB), returns it scaled to 1568 px on its long side, and with `add` keeps
-  the original under `paths::web()` and adds it to the pool's "Web Images"
-  bin as the user's edit. The `flikk` tool `generate_image` (Generate
-  category, so it asks each time) is
-  offered while someone can make the picture (`image::route`): the image
-  provider picked in Settings → Integrations when one is set with a key,
-  whatever the agent's own setting says (see "Generating pictures"), else
-  the user's ChatGPT plan. The "Image generation" switch (off by default,
-  either backend) is for the ChatGPT plan only: it turns on, and the tool
-  and its prompt section are offered that way, only while Codex's saved
-  sign-in carries a paid ChatGPT plan (`chatgpt_plan_type` in its ID token,
-  not `free`); the switch is dimmed with a tooltip otherwise, and dimmed
-  with the provider and model in its tooltip while an image provider is
-  set, keeping its value for when it is not. The ChatGPT plan makes
-  pictures from a description only. It sends the request Codex's own image tool
-  sends (`POST chatgpt.com/backend-api/codex/images/generations`: the
-  prompt, `gpt-image-2`, automatic size and quality, opaque or transparent
-  background) with Codex's ChatGPT sign-in from `$CODEX_HOME/auth.json`
-  (bearer token and `ChatGPT-Account-ID`, `originator: flikk`). Flikk never
-  refreshes or writes that login: an expired one asks the user to open
-  Codex, and plans without image generation (free) answer 403. The picture
-  goes to `paths::generated()` and the pool's "Images Generated" bin, as the
-  user's edit. Codex turns run with its own `features.image_generation`
-  off, so there is one image tool. Web calls show as `web_search` and
-  `web_fetch`, read from each backend's stream, whatever the backend calls
-  them.
-* **Tools** (`flikk-agent/src/tools/`): 106 in the catalog (104 plus
-  `load_tools` and `run_tool`). Remove, move and detail operations are flags
-  of their `set_*`/`view_*` sibling (for example `view_range` with `detail`).
-  Each turn lists 26 core tools (`load_tools` among them) plus `run_tool`, and the groups (`edit`,
-  `transform`, `captions`, `color`, `audio`, `effects`, `overlays`,
-  `generate`, `memory`, `deliver`) the turn is likely to need, picked from the
-  workspace, the selection and words in the message. A chat keeps the list
-  it started with (`agent/tool_groups.json`) so the backend's prompt cache
-  holds; later groups come through `load_tools` and are called with
-  `run_tool`. External MCP clients see every tool. Each turn's use, with
-  result sizes, is logged to `agent/tool_usage.jsonl`. Results are compact
-  JSON that leave out neutral defaults.
-* **Seeing and hearing:** `view_range` (collages, opening with the sound
-  script), `view_frame` (annotated, with a `zoom` region under a pixel
-  grid, or with `masks` showing what masks cut away tinted, naming subjects
-  still being found), `get_layout`, `get_scopes`, `preview_fx`, `get_audio` (the sound
-  script for any range), `get_music` (tempo, downbeats, level changes; every
-  beat with `beats`), `search_sounds` (2 s steps ranked by a description or
-  an example range) and `view_audio` (up to 30 s of spectrogram lanes).
-  `view_media` (`tools/pool.rs`) sees a pool item on its own, placed or
-  not, in its own seconds: it puts the item alone on a scratch timeline at
-  its own size and frame rate, from its first frame, so the views above
-  run on it unchanged (a video's collage and script, with `detail`; one
-  frame with `t` and `zoom` in its pixels; a picture whole or zoomed; with
-  `audio`, or for audio, the whole script and a spectrogram up to 30 s).
-  An item whose analysis is missing is analysed first (`analyze`, as the
-  pool's Analyze) and the call waits on that job, stopping with the turn;
-  `list_media` says which items are analysed.
-  `blade` and `ripple_delete` take `align: beat | downbeat | onset`; a
-  target clear of words wins over a nearer one on a word.
-* **Subject masks:** `set_mask` with `shape.type: subject` (`tools/masks.rs`)
-  takes `include` and `exclude` points and a `box`, in picture fractions
-  or frame pixels, on the frame at `at`; each list given replaces that
-  frame's own. Before proposing, it runs the model on that frame and says
-  what it kept (its share of the picture, its box in frame pixels, the
-  model's confidence), with advice when it found nothing, took nearly the
-  whole picture or is unsure; with `track` it says how many frames are
-  left and how long that takes here. `get_clip` lists a subject's prompts
-  on the timeline and how far it is tracked. The prompt steers the agent to
-  subjects for objects and one person among several, and to check with
-  `view_frame` `masks`.
-* **Person masks:** `remove_background` (`tools/masks.rs`, transform
-  group) gives each of `clips` a person mask, or changes its own: `keep:
-  background` inverts it, `edge`, `feather` and `expansion` set its edge,
-  `restore` takes the clips' person masks away. `set_mask` takes
-  `shape.type: person` (with `edge`) too; `get_clip` says how many frames
-  are matted, and `view_frame` names person masks not matted there yet.
-* **Speed ramps:** `set_speed` (`tools/speed.rs`) takes one `speed`, a
-  `ramp` of [position 0..1, speed] points or a `preset` (`ramp_in`,
-  `ramp_out`, `hero`, `bullet`, `montage`, at `speed` or the clip's),
-  `keep_length`, `interpolation` (`nearest`, `blend`, `optical_flow`) and
-  `ramp_audio` (`stretch`, `mute`); `speed` alone on a ramped clip ends the
-  ramp. `get_clip` reports a ramp as its points. The tool retimes one
-  clip; a video's linked audio clip is retimed by its own call (the
-  inspector ramps both).
-* **Depth:** `add_depth_effect` (`tools/depth.rs`) puts a `lens_blur`,
-  `fog` or `camera` on clips and says when depth maps cannot be made yet;
-  `set_depth_focus` focuses a clip's lens blur (or a camera's pivot) on
-  what is at a point of the picture at `at`: it makes that frame's map off
-  the UI thread, then proposes the focus, keyed at `at` with `key` or when
-  it already has keyframes. Depth masks are `set_mask`'s `depth` shape.
-* **Generating audio:** `generate_audio` (`tools/generate.rs`) makes music
-  (a prompt and a length, or `sections` with lengths of their own, so it
-  changes on cue), a sound effect (optionally looping) or a
-  voiceover (a script of up to 10,000 characters, one voice from
-  `find_voices`, its stability and similarity) with the provider picked
-  for it. The file goes to `paths::generated()` with a `<file>.json` of
-  what was asked, and into the pool's "Music Generated", "Sound Effects
-  Generated" or "Voiceover Generated" bin as the user's edit (`CommandBus::execute_shared_as`, which also adds it to the
-  drafts waiting for review), so a rejected placement keeps what was paid
-  for; `MediaItem::generated` records the provider, model and prompt, and
-  for a voiceover who read it, so the pool can regenerate it. With
-  `at` or `range` it is proposed on an audio track free over its length,
-  else a new one. The approval runs it in the background, proposes the
-  placement into the chat's set and answers the waiting call with the
-  media id. A
-  refused prompt (an artist's name) comes back with the provider's rewrite.
-* **Music and sound effect providers:** ElevenLabs (its own API), fal and
-  Pika. On fal, music: ElevenLabs Music v2.5 (the default), Sonilo 1.1,
-  Lyria 3.5, Lyria 3 Pro, Stable Audio 3; sound effects: ElevenLabs Sound
-  Effects v3 (the default), Sonilo 1.1, Mirelo SFX 2.0, Stable Audio 3
-  SFX. On Pika, music: Pika Music (the default), Sonilo 1.1, MiniMax Music
-  3.0, Lyria 3.5, Lyria 3 Pro; sound effects: Pika SFX (the default),
-  Sonilo 1.1, ElevenLabs Sound Effects v2. Each model's
-  `cloud::AudioModel` says the lengths it makes (a range and a step, or
-  none when it picks the length itself) and whether it loops; the media
-  pool's Generate dialog offers only those (no Length row for a model that
-  picks, no Loop switch for one that can't), and `AudioModel::check`
-  refuses the rest before anything is spent: in `Cloud::generate`, and
-  before the agent's request waits for approval. A hosted model is a
-  `HostedAudio` entry in `fal/audio.rs` or `pika/audio.rs` naming its
-  fields; `audio.rs` writes a request in them, and asks in words for what
-  a model has no field for: no vocals ("Instrumental only, no vocals."),
-  and sections as timed lines in the prompt (`0:00–0:12 Intro: soft
-  piano`) with their lyrics, or in a lyrics field as `[Name]` blocks. An
-  ElevenLabs model on fal gets the same composition plan as ElevenLabs'
-  own API, and Sonilo on Pika gets `segments`. fal runs them on its queue,
-  Pika as media jobs, and `audio::fetch` names the file by what it is
-  (WAV, FLAC, M4A, Ogg, else MP3). Mirelo is sent `num_samples: 1`: it
-  makes, and bills, two takes by default.
+* **Backends** (`flikk-agent/src/backend/`): Flikk runs the agent through
+  the Claude CLI or the Codex CLI.
+  - Claude runs as
+    `claude -p --input-format stream-json --output-format stream-json`.
+    It gets only the flikk MCP server (`--strict-mcp-config`,
+    `--tools ""`, `--permission-mode dontAsk`, no setting sources or slash
+    commands). It also gets the system prompt, `--model`/`--effort`, and
+    `--resume` or `--session-id`.
+  - Codex runs as `codex exec --json --sandbox read-only`. It runs without
+    the user's config and rules, and with its shell and patch tools off.
+    The MCP server, the developer instructions, the model and the reasoning
+    effort go to Codex as `-c` overrides. Codex resumes its thread.
+  - Each turn runs in an empty workdir under `agent/work`. Thus the backend
+    does not read the user's own CLAUDE.md/AGENTS.md.
+  - If a backend lost its session, Flikk tries it again with a new session.
+  - `FLIKK_CLAUDE` and `FLIKK_CODEX` give the location of the CLIs.
+* **Models and thinking:** Two pickers next to Send list the models that
+  the installed CLI offers. For Claude, the list comes from its stream-JSON
+  `initialize` request. For Codex, the list comes from `model/list` on
+  `codex app-server`. Flikk keeps the list in `agent/models.json` and
+  refreshes it in the background. Each model has its own thinking levels.
+  The user settings keep the choices for each backend.
+* **MCP server:** The server is `flikk_agent::mcp::run()`. The backend
+  starts it as `$FLIKK_MCP`. If there is no `$FLIKK_MCP`, the backend uses
+  the `flikk-mcp` binary next to the editor. Else it uses `flikk mcp`. The
+  server connects to the editor over TCP on 127.0.0.1 with the token of the
+  turn (`FLIKK_BRIDGE`/`FLIKK_TOKEN`).
+* **Permissions** (`flikk-core/src/bus.rs`): The agent has one role, the
+  editor. Each `ToolCategory` has its own permission.
+  - Read and view are always allowed.
+  - Edit categories are Off or Propose. Flikk never applies an edit
+    automatically.
+  - Skills and styles are Off, Ask or Allow. A delete of a skill or a style
+    always asks.
+  - Project memory (rules, facts, saves to the library) and deliver
+    (renders, exports) always need the user's approval. Approve/Deny cards
+    above the composer ask for it. `agent_link/approve.rs` does the
+    approved work.
+  - The call waits. The host keeps its MCP reply until the user decides.
+    Then the host answers the call with the outcome, for example the media
+    id of a generated voiceover. Thus the turn continues.
+  - Sometimes the call is gone, because the turn ended or a cancel stopped
+    it. Then the outcome goes to the agent in the `<approvals>` block of the
+    next turn. For this wait, backends allow one hour for a tool call.
+  - Generate media is Off or Ask each time (the default). It includes
+    music, sound effects, voiceovers and voices, pictures, videos and
+    upscales. It is all work that spends the user's money or credits with a
+    provider (`ToolCategory::costs`).
+  - No setting lets generate media run without a question:
+    - A saved "Allow" from before reads as a question (`Permissions::get`).
+    - Flikk no longer has the handlers that ran it as a tool job.
+    - The only code that calls a provider for the agent is
+      `agent_link/approve.rs`, after the user's click.
+  - `Permissions::choices` gives the possible settings of each category.
+    Settings → Agent makes its rows from it.
+  - A "Web" switch is off by default. It gives Claude WebSearch/WebFetch
+    and gives Codex web search. The two backends read pages only as text.
+    Thus the same switch also lists the `flikk` tool `view_web_image`. This
+    tool:
+    - downloads a PNG, JPEG, GIF or WebP of a maximum of 25 MB;
+    - returns it scaled to 1568 px on its long side;
+    - with `add`, keeps the original under `paths::web()` and adds it to the
+      "Web Images" bin of the pool, as the user's edit.
+  - The `flikk` tool `generate_image` is in the Generate category, so it
+    asks each time. The agent gets it while a source can make the picture
+    (`image::route`). The first source is the image provider picked in
+    Settings → Integrations, when it has a key. This applies whatever the
+    agent's own setting says (see "Generating pictures"). Else the source is
+    the user's ChatGPT plan.
+  - The "Image generation" switch is for the ChatGPT plan only. It is off
+    by default and applies to either backend. It turns on only while
+    Codex's saved sign-in carries a paid ChatGPT plan (`chatgpt_plan_type`
+    in its ID token, not `free`). Only then does the agent get the tool and
+    its prompt section through the ChatGPT plan.
+  - At other times, the switch is dimmed and has a tooltip. While an image
+    provider is set, the switch is dimmed and its tooltip shows the provider
+    and the model. The switch keeps its value for the time when no provider
+    is set.
+  - The ChatGPT plan makes pictures only from a description. Flikk sends
+    the same request as Codex's own image tool
+    (`POST chatgpt.com/backend-api/codex/images/generations`). The request
+    has the prompt, `gpt-image-2`, automatic size and quality, and an opaque
+    or transparent background. It uses Codex's ChatGPT sign-in from
+    `$CODEX_HOME/auth.json` (bearer token and `ChatGPT-Account-ID`,
+    `originator: flikk`).
+  - Flikk never refreshes or writes that login. If the login expired, Flikk
+    asks the user to open Codex. Plans without image generation (free)
+    answer 403.
+  - The picture goes to `paths::generated()` and to the "Images Generated"
+    bin of the pool, as the user's edit.
+  - Codex turns run with Codex's own `features.image_generation` off. Thus
+    there is one image tool.
+  - Web calls show as `web_search` and `web_fetch`. Flikk reads them from
+    the stream of each backend, whatever name the backend uses for them.
+* **Tools** (`flikk-agent/src/tools/`): The catalog has 106 tools: 104,
+  plus `load_tools` and `run_tool`.
+  - Remove, move and detail operations are flags of their
+    `set_*`/`view_*` sibling, for example `view_range` with `detail`.
+  - Each turn lists 26 core tools (`load_tools` is one of them) plus
+    `run_tool`. It also lists the groups that the turn will probably need:
+    `edit`, `transform`, `captions`, `color`, `audio`, `effects`,
+    `overlays`, `generate`, `memory`, `deliver`. Flikk picks the groups
+    from the workspace, the selection and the words in the message.
+  - A chat keeps the list that it started with (`agent/tool_groups.json`).
+    Thus the prompt cache of the backend stays valid. Later groups come
+    through `load_tools`, and the agent calls them with `run_tool`.
+  - External MCP clients see every tool.
+  - Flikk logs the tool use of each turn, with the result sizes, to
+    `agent/tool_usage.jsonl`.
+  - Results are compact JSON without neutral defaults.
+* **Seeing and hearing:** These tools let the agent see and hear the edit:
+  - `view_range` gives collages. They start with the sound script.
+  - `view_frame` gives an annotated frame. With `zoom`, it shows a region
+    under a pixel grid. With `masks`, it shows with a tint the areas that
+    the masks cut away. It also names the subjects that Flikk has not found
+    yet.
+  - The agent also has `get_layout`, `get_scopes` and `preview_fx`.
+  - `get_audio` gives the sound script for any range.
+  - `get_music` gives the tempo, the downbeats and the level changes. With
+    `beats`, it gives every beat.
+  - `search_sounds` gives 2 s steps in a rank order from a description or
+    an example range.
+  - `view_audio` gives spectrogram lanes for a maximum of 30 s.
+  - `view_media` (`tools/pool.rs`) sees one pool item alone, placed or not,
+    in the seconds of the item. It puts the item alone on a scratch
+    timeline at its own size and frame rate, from its first frame. Thus
+    the views above run on it without change:
+    - for a video, its collage and script, with `detail`;
+    - one frame with `t` and `zoom` in its pixels;
+    - a picture, whole or zoomed;
+    - with `audio`, or for audio, the whole script and a spectrogram of a
+      maximum of 30 s.
+  - If an item has no analysis, Flikk analyses it first (`analyze`, as the
+    Analyze of the pool). The call waits for that job and stops with the
+    turn. `list_media` tells which items have an analysis.
+  - `blade` and `ripple_delete` take `align: beat | downbeat | onset`. A
+    target with no words on it wins over a nearer target on a word.
+* **Subject masks:** `set_mask` with `shape.type: subject`
+  (`tools/masks.rs`) takes `include` and `exclude` points and a `box`.
+  - The points and the box are in picture fractions or frame pixels, on the
+    frame at `at`. Each list that the call gives replaces the list of that
+    frame.
+  - Before it proposes the mask, the tool runs the model on that frame. It
+    then tells what it kept: its share of the picture, its box in frame
+    pixels and the confidence of the model.
+  - It gives advice when it found nothing, when it took almost the whole
+    picture, or when it is not sure.
+  - With `track`, it tells how many frames remain and how long that takes
+    on this computer.
+  - `get_clip` lists the prompts of a subject on the timeline. It also
+    tells how far the tracking of the subject has gone.
+  - The prompt tells the agent to use subjects for objects and for one
+    person among several. It also tells the agent to check with
+    `view_frame` `masks`.
+* **Person masks:** `remove_background` (`tools/masks.rs`, transform group)
+  gives each of `clips` a person mask, or changes the mask that it has.
+  - `keep: background` inverts the mask.
+  - `edge`, `feather` and `expansion` set its edge.
+  - `restore` removes the person masks of the clips.
+  - `set_mask` also takes `shape.type: person` (with `edge`).
+  - `get_clip` tells how many frames have a matte. `view_frame` names the
+    person masks that have no matte at that frame yet.
+* **Speed ramps:** `set_speed` (`tools/speed.rs`) takes these inputs:
+  - one `speed`;
+  - a `ramp` of [position 0..1, speed] points;
+  - a `preset` (`ramp_in`, `ramp_out`, `hero`, `bullet`, `montage`), at
+    `speed` or at the speed of the clip;
+  - `keep_length`;
+  - `interpolation` (`nearest`, `blend`, `optical_flow`);
+  - `ramp_audio` (`stretch`, `mute`).
+
+  If a clip has a ramp, `speed` alone ends the ramp. `get_clip` gives a
+  ramp as its points. The tool changes the timing of one clip. The linked
+  audio clip of a video needs its own call. The inspector ramps the two
+  clips.
+* **Depth:** Two tools add depth to clips:
+  - `add_depth_effect` (`tools/depth.rs`) puts a `lens_blur`, `fog` or
+    `camera` on clips. It tells when Flikk cannot make depth maps yet.
+  - `set_depth_focus` focuses the lens blur of a clip (or the pivot of a
+    camera). The focus goes on the object at a point of the picture at
+    `at`. It
+    makes the map of that frame off the UI thread, then proposes the focus.
+    The focus gets a key at `at` with `key`, or when it already has
+    keyframes.
+  - Depth masks are the `depth` shape of `set_mask`.
+* **Generating audio:** `generate_audio` (`tools/generate.rs`) makes audio.
+  - It makes one of these, with the provider picked for it:
+    - music, from a prompt and a length, or from `sections` with their own
+      lengths, so that the music changes on cue;
+    - a sound effect, which can loop;
+    - a voiceover, from a script of a maximum of 10,000 characters, one
+      voice from `find_voices`, and its stability and similarity.
+  - The file goes to `paths::generated()` with a `<file>.json` of the
+    request. It also goes into the "Music Generated", "Sound Effects
+    Generated" or "Voiceover Generated" bin of the pool, as the user's
+    edit.
+  - This edit uses `CommandBus::execute_shared_as`, which also adds the
+    file to the drafts that wait for review. Thus a rejected placement
+    keeps the media that the user paid for.
+  - `MediaItem::generated` records the provider, the model and the prompt.
+    For a voiceover, it also records the voice that read it. Thus the pool
+    can generate it again.
+  - With `at` or `range`, the tool proposes the file on an audio track that
+    is free over its length. Else it proposes it on a new track.
+  - The approval runs the request in the background. It proposes the
+    placement into the set of the chat and answers the waiting call with
+    the media id.
+  - If the provider refuses a prompt (for example, an artist's name), the
+    result has the rewrite of the provider.
+* **Music and sound effect providers:** The providers are ElevenLabs (its
+  own API), fal and Pika. On fal and Pika, these models are available:
+
+  | Provider | Music | Sound effects |
+  | --- | --- | --- |
+  | fal | ElevenLabs Music v2.5 (the default), Sonilo 1.1, Lyria 3.5, Lyria 3 Pro, Stable Audio 3 | ElevenLabs Sound Effects v3 (the default), Sonilo 1.1, Mirelo SFX 2.0, Stable Audio 3 SFX |
+  | Pika | Pika Music (the default), Sonilo 1.1, MiniMax Music 3.0, Lyria 3.5, Lyria 3 Pro | Pika SFX (the default), Sonilo 1.1, ElevenLabs Sound Effects v2 |
+
+  - The `cloud::AudioModel` of each model tells the lengths that it makes.
+    These are a range and a step, or none when the model picks the length
+    itself. It also tells if the model loops.
+  - The Generate dialog of the media pool offers only those options. It
+    has no Length row for a model that picks the length. It has no Loop
+    switch for a model that cannot loop.
+  - `AudioModel::check` refuses the other requests before Flikk spends
+    anything. It does this in `Cloud::generate`, and before the agent's
+    request waits for approval.
+  - A hosted model is a `HostedAudio` entry in `fal/audio.rs` or
+    `pika/audio.rs` that names its fields. `audio.rs` writes a request in
+    these fields. If a model has no field for an item, `audio.rs` asks for
+    the item in words:
+    - no vocals: "Instrumental only, no vocals.";
+    - sections: timed lines in the prompt (`0:00–0:12 Intro: soft piano`)
+      with their lyrics, or `[Name]` blocks in a lyrics field.
+  - An ElevenLabs model on fal gets the same composition plan as the own
+    API of ElevenLabs. Sonilo on Pika gets `segments`.
+  - fal runs these models on its queue, and Pika runs them as media jobs.
+    `audio::fetch` names the file by its type (WAV, FLAC, M4A, Ogg, else
+    MP3).
+  - Flikk sends `num_samples: 1` to Mirelo. By default, Mirelo makes two
+    takes and bills the two.
 * **Generating video:** `generate_video` (`tools/video.rs`) makes a shot
-  with the provider and model picked for video (on fal: Seedance 2.0, 2.0
-  Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse
-  1.1, Gemini Omni Flash 1.1, FLUX 3 Max, LTX 2.5 Pro; on Pika: Pika H3
-  Flex and Pika 2.5, and Seedance, Kling, MiniMax H3, Hailuo, Wan, Happy
-  Horse, Gemini Omni Flash, FLUX and Grok Imagine as Pika hosts them): from the prompt alone, from a first frame (a picture in the pool,
-  or the program at a time, grabbed with `compose::program` into
-  `paths::cache()/frames` just before) to an optional last one, or after
-  references (pictures, clips and sounds in the pool, which the prompt names
-  `@Image1`, `@Video1`, `@Audio1`). The agent writes the prompt as a brief
-  (`catalog::VIDEO_PROMPT`: what each reference is for, the clip in a
-  sentence, timed shots of one action and one camera move, the sound, and
-  limits last), the shape video models follow best. Each model's `cloud::VideoModel` (its
-  lengths, shapes, resolutions and reference limits) refuses what it can't
-  make before anything is spent. Models name their endpoints and fields
-  differently (`duration` as text or a number, `image_url` or
-  `start_image_url`, a word for "the model picks the shape"), so each is
-  an entry in `fal/models.rs` saying how it takes a request; references
-  named `@Image1` are renamed to what the model reads (`Image 1`,
-  `character1`, `<IMAGE_REF_0>`). fal runs it on its queue
-  (`fal/queue.rs`), uploading the files it follows to fal's storage first;
-  Pika runs it as a media job (`pika/jobs.rs`, [`pika.md`](pika.md)) after
-  uploading to Pika, each model an entry in `pika/models.rs` as on fal, and
-  sends a last frame on Pika 2.5 to Pikaframes.
-  `cloud::GenerationTask` carries where it is (queued, running, coming
-  down) to the media pool's row, which can stop it until it is made where
-  the provider can stop it (fal can; Pika can't, so its job is marked
-  `unstoppable` once taken). It
-  lands in the "Video Generated" bin and, with `at` or `range`, is proposed
-  on a video track free over its length (else a new one on top), its sound
-  on an audio track beside it. The media pool's Video form makes the same
-  request, starting on a pool picture or the frame at the playhead. However
-  a generated item reaches the pool (the media pool or an approval),
-  `analyze_new` queues it once like any new item (see [Analysis and models](analysis-and-models.md)): a video is
-  asked about first while a provider is picked to transcribe; a
-  voiceover, whose script stands in for its words, never is, nor are
-  music and sound effects, which are heard only.
-  Items already in a project when it opens are left as they were. Settings → Integrations has a "Video sound"
-  switch under Video (`CloudSettings::silent_video`; sound costs more on
-  some models): the media pool's form starts its Sound switch from it, and
-  with it off the agent's videos are made silent whatever it asks. Each
-  model's `cloud::VideoSound` says whether it makes sound at all, always
-  (no switch: Pika H3 Flex, Kling 4.0, Kling 3.0 Turbo on Pika), or on a
-  switch; only the last are made silent. Beside it, a resolution
-  (`CloudSettings::video_resolution`: Auto, 480p, 720p, 1080p, 2K, 4K):
-  `VideoModel::resolution_for` fits it to the model picked (the largest of
-  its own at or below it, else its smallest), the media pool's form starts
-  on it, and the agent's videos use it when they ask for none. Auto leaves
-  the model's default.
+  with the provider and the model picked for video.
+  - These models are available:
+
+    | Provider | Models |
+    | --- | --- |
+    | fal | Seedance 2.0, 2.0 Fast and 2.5, Kling 4.0 and O3 Pro, MiniMax H3 Max, Wan 3.0, Happy Horse 1.1, Gemini Omni Flash 1.1, FLUX 3 Max, LTX 2.5 Pro |
+    | Pika | Pika H3 Flex and Pika 2.5, and Seedance, Kling, MiniMax H3, Hailuo, Wan, Happy Horse, Gemini Omni Flash, FLUX and Grok Imagine as Pika hosts them |
+
+  - The shot starts from one of these:
+    - the prompt alone;
+    - a first frame, to an optional last frame. A first frame is a picture
+      in the pool, or the program at a time. Flikk grabs the program frame
+      with `compose::program` into `paths::cache()/frames` just before the
+      request.
+    - references: pictures, clips and sounds in the pool. The prompt names
+      them `@Image1`, `@Video1`, `@Audio1`.
+  - The agent writes the prompt as a brief (`catalog::VIDEO_PROMPT`). The
+    brief gives the purpose of each reference, the clip in a sentence, and
+    timed shots of one action and one camera move. Then it gives the sound,
+    and the limits last. Video models follow this shape best.
+  - The `cloud::VideoModel` of each model gives its lengths, shapes,
+    resolutions and reference limits. It refuses what the model cannot make
+    before Flikk spends anything.
+  - Models use different names for their endpoints and fields. Examples are
+    `duration` as text or a number, `image_url` or `start_image_url`, and a
+    word for "the model picks the shape". Thus each model is an entry in
+    `fal/models.rs` that tells how it takes a request.
+  - Flikk renames references named `@Image1` to the name that the model
+    reads (`Image 1`, `character1`, `<IMAGE_REF_0>`).
+  - fal runs the request on its queue (`fal/queue.rs`). Before that, Flikk
+    uploads the files that the model follows to the storage of fal.
+  - Pika runs the request as a media job (`pika/jobs.rs`,
+    [`pika.md`](pika.md)) after an upload to Pika. Each model is an entry in
+    `pika/models.rs`, as on fal. Flikk sends a last frame on Pika 2.5 to
+    Pikaframes.
+  - `cloud::GenerationTask` carries the state of the request (queued,
+    running, coming down) to the row of the media pool. The row can stop
+    the request until it is made, where the provider can stop it. fal can.
+    Pika cannot, so Flikk marks its job `unstoppable` once Pika takes it.
+  - The result goes into the "Video Generated" bin. With `at` or `range`,
+    Flikk proposes it on a video track that is free over its length. Else
+    it proposes it on a new track on top. Its sound goes on an audio track
+    next to it.
+  - The Video form of the media pool makes the same request. It starts on a
+    pool picture or on the frame at the playhead.
+  - A generated item can come into the pool from the media pool or from an
+    approval. In the two cases, `analyze_new` puts it in the queue once,
+    like any new item (see [Analysis and models](analysis-and-models.md)):
+    - While a provider is picked to transcribe, Flikk asks about a video
+      first.
+    - Flikk never asks about a voiceover, because its script is in place of
+      its words.
+    - Flikk never asks about music and sound effects, because they are
+      only heard.
+  - Flikk does not change the items that are already in a project when it
+    opens.
+  - Settings → Integrations has a "Video sound" switch under Video
+    (`CloudSettings::silent_video`). Sound costs more on some models. The
+    Sound switch of the media pool's form starts from this switch. If it is
+    off, Flikk makes the agent's videos silent, whatever the agent asks.
+  - The `cloud::VideoSound` of each model tells if it makes sound at all.
+    Some models always make sound and have no switch: Pika H3 Flex,
+    Kling 4.0, Kling 3.0 Turbo on Pika. Other models make sound on a switch.
+    Flikk makes only the last group silent.
+  - Next to the switch is a resolution (`CloudSettings::video_resolution`:
+    Auto, 480p, 720p, 1080p, 2K, 4K). `VideoModel::resolution_for` fits it
+    to the model picked: the largest of its own at or below it, else its
+    smallest. The media pool's form starts on this resolution. The agent's
+    videos use it when they ask for none. Auto keeps the model's default.
 * **Blockouts** (`flikk-core/src/blockout/`, `tools/video.rs`,
-  `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): video generation is
-  expensive and each take invents camera, staging and timing again, so
-  `generate_video` takes a `blockout`: a rough 3D scene the agent writes
-  as JSON (`blockout::Scene`: objects, models, a camera or several with
-  the cuts between them, an optional sun direction; metres, Y up, the ground at `y = 0`, at most 30 s). Nothing
-  in it is ready-made: there are no built-in people, props or actions,
-  so the agent is not held to what Flikk thought of. An object is a
-  plain solid (box, sphere, cylinder, cone, capsule, dome, wedge, roof,
-  pyramid), a joint with no shape that only carries others, or a copy of
-  a model. Things are built by hanging solids from one another
-  (`parent`: a part's place and turn are in its parent's space) at the
-  point they turn about (`anchor`: base, middle, or top for a limb hung
-  from its joint). They move by keys, for what happens once, and by a
-  `Cycle`, for what repeats: a few keys over one round, added to what
-  the keys make of the object, running by the clock (`seconds`), by the
-  ground covered (`metres`: the round follows how far the thing the part
-  belongs to has travelled, so a wheel keeps up with the road at any
-  speed) or by the strides its thing's feet have taken (`strides`: arms
-  in time with legs); a round that returns to its start eases to rest
-  when the thing stands still, and `from` and `until` have a cycle go on
-  between two times only, in and out over 0.3 s. A thing built once goes under
-  `models` and is placed with `model`; a copy can be scaled and shaded,
-  and its `parts` give, by part name, the fields that replace the
-  model's (another pose, no walk). `build.rs` writes every copy out into
-  `Part`s named `copy/part`, swaps names for places in the list, works
-  out how each part's keys move it (`motion::Moves`) and the order parts
-  are placed in, gives each joint the box its parts fill, and tabulates
-  the ground each moving thing has covered. An object may also face
-  something about the vertical (`face`: the way it travels, the camera,
-  an object or a point), keep spinning, come and go (`hidden`), shake
-  without repeating (`shake`: metres and degrees either way, and about
-  how long a wobble takes), and say what it stands on (`on`: the ground
-  or an object by name). A camera has a place, a `look_at` point or
-  object, a width (`lens` in millimetres on a frame 36 mm along its
-  longer side, as Blender fits a sensor, or `fov` in degrees), a roll, a
-  hand-held `shake`, and may ride an object. The shot opens on `camera`;
-  `cameras` holds more by name and `cuts` says when the picture goes
-  over to which (`main` is the first), each camera moving on whether or
-  not the picture is its own. `build.rs` turns each into a `motion::Rig`,
-  the names it looks at and rides swapped for places among the parts.
-  A camera, or a key of one, may say what its picture holds in place of
-  where it stands (`frame`: the objects, a shot size from `close_up` to
-  `very_wide`, and `left`, `centre` or `right`). It then keeps the way
-  it looks from its `at` and stands as far off as fits the box of the
-  solids that reach into the share of the subjects' height the size
-  keeps (`motion::framed_from`, the fit Blender's camera-to-selected
-  makes): the top 17% filling three quarters of the picture's height
-  for a close-up, all of it filling a quarter for a very wide. That
-  depends on the picture's shape, so it is worked out as each frame is
-  drawn (`Scene::stood`), with things standing as they do when the
-  camera or the key gets there, and a third is reached by looking a
-  third of half the picture's width to the other side.
-  Everything keys move follows a smooth curve through them
-  (`motion::Track`), place, turn, size, grey, and the camera's field of
-  view, roll and what it looks at: where a value turns back or rests it
-  stops, between stops its pace changes least from key to key (a
-  tridiagonal solve, as Blender's animation curves place their handles),
-  and each pace is held within three times the straight one either
-  side, so the curve never goes past a key. Two keys give a straight
-  move. An ease times one stretch of the curve (linear, in, out, in-out,
-  `back`, `bounce`) and `cut` holds and then jumps, ending one curve and
-  starting the next (a camera's cut to another set-up). A key with a
-  place and no time is passed on the way: `motion::key_times` spreads
-  such keys by the ground between them, between the timed keys either
-  side, so an orbit or a route is a list of places. Angles are taken as
-  written (a wheel turns from 0 to 360); the review says when a turn of
-  270 degrees or more stops short of a whole one. Shake, the camera's
-  and an object's, is fractal noise: smooth noise at three rates, each
-  twice as quick and half as strong as the last, seeded for an object
-  by its name.
-  At a time, `Scene::moment` places every part once, in the order built
-  (`build::placing_order`): each after what it rides, and after what it
-  faces and stands on. Where that goes round in a loop (two people
-  facing each other) the part placed first turns to where the other
-  stands before anything faces, which a first, rough pass gives. A part
-  with `on` is set down: its solids are put where its limbs have them,
-  the lowest point of them is found (`Solid::lowest`) and a ray is cast
-  down from over it onto the solids of what it stands on, the ground
-  where it meets none, so a walker's feet stay on a ramp or a stage and
-  the height written is how far above that it is. `solid.rs` has the
-  solids: where a ray meets each, its lowest point and whether a point
-  is inside it.
-  A part's front can be turned to something (`aim`: an object, the
-  camera, a point; a key retargets it): the least turn that puts its +Z
-  on the target, no more than 85 degrees from how it would else face. A
-  part can be the end of a limb brought somewhere (`reach`: `to`, and
-  optionally `from` and `until`): the part it rides and the part that
-  one rides are the limb (`build::Limb`, hung on the upper of the two),
-  and `Scene::bend` solves it in closed form each frame from the two
-  lengths, bent the way its pose has it bent (a limb posed straight
-  bends forward when it hangs, back when held out), each part turned
-  the least that puts the joint and the end in place; out of reach it
-  goes straight toward the target, and it moves there and back over
-  0.35 s. A foot can step (`step`): `Scene::planted` says where it is
-  from the strides its thing has taken by then (`build::strides`,
-  tabulated a frame: a stride is as long as legs of that length take at
-  the speed, 2.3 leg lengths times the 0.3rd power of speed squared
-  over gravity and leg length, unless `metres` gives it). It is down
-  where the thing passes over it for three quarters of a leg's length
-  of ground, at most 0.6 of the stride, so a run has both feet in the
-  air, and swings to its next landing in between, lifted an eighth of
-  the leg; standing still it is as posed. Its leg is bent to it as a
-  limb is, and a thing with `on` is held no higher than its grounded
-  legs reach (`Scene::lift`), which is the rise and fall of a walk.
-  Because a landing is found from a count of strides, any frame is
-  still drawn without the ones before it.
-  A key with `parent` gives its object to another from that second on,
-  from where it is at that moment (`"none"` lets it go where it is):
-  `build::take_hold` works out, in order of time, where each is within
-  what takes it, the scene built as far as the one before (Blender's
-  Child Of with its inverse set). What is held is placed last each
-  frame, with all that rides it, and a limb that has taken what it
-  reached for leaves for where it took it from, so reaching and holding
-  never wait on each other.
-  `world::World` is the scene at a moment as rays meet it: the solids
-  where they stand, a ray from the camera trying only those listed for
-  its 16 px tile of the picture, a ray toward the sun only those listed
-  for its cell of a grid across the light (`world::Cells`, each solid's
-  cells widened by as far as a ray toward the sun's edge strays), and
-  rays any other way a tree of boxes (`world::Solids`). All three are
-  rebuilt each frame. `Scene::render` (`render.rs`) makes the picture on
-  the CPU: one ray a pixel, lit by the sun, the sky from above, the
-  ground from below and a fill from across the sun that reaches round
-  what turns from it, with metre tiles on the ground and haze. Light is
-  worked out as light and turned into screen greys at the end, pixels
-  between two greys scattered so gradients show no steps. Every picture
-  has lines, from which solid each pixel shows: darker than both sides,
-  a pixel wide on the side away from the camera, strong round a thing
-  and light between its parts, and a solid's own edges a little lighter
-  where they stick out. `Detail::Full` also softens shadows (one ray a
-  pixel toward a spot on the sun's disc, seven more where the pixels
-  around disagree, evened out over 5 px on the same surface), darkens
-  surfaces where the picture shows another close (eight looks along a
-  spiral within 0.7 m at every fourth pixel, shared with the pixels
-  around on the same surface, round solids too), and draws pixels an
-  edge runs through again from four rays, the line taking the share of
-  the pixel the nearer solid leaves and the rest of its width in the
-  pixel outside. `Detail::Draft` is what plays. The values kept a pixel
-  on the way (about 50 bytes in full) stay allocated from one picture to
-  the next (`render::Sheets`). With no GPU and no model, a 1280×720
-  frame of the demo shot takes about 36 ms as a draft and 85 ms in full
-  on four cores.
-  Larger worlds are written short. A box, a cylinder or a capsule takes
-  a `taper` (its top against its base, inside the same size): cylinder,
-  cone and capsule share one ray test for a round side whose radius
-  changes with height. `repeat` (`repeat.rs`) lays one object out as a
-  row or a grid (`step`), a `ring` or a scatter over an `area` (each
-  place the candidate, of twelve, furthest from those before it), every
-  copy the whole object with its keys moved over, called `name 1` and
-  on and riding a joint of the object's name that stands for them all;
-  `vary` turns, scales, shades and puts each out of step by a hash of
-  the name and the copy's number. A solid with `cut` is not drawn but
-  taken out of the object it names: every solid is convex, so a ray is
-  inside one over a single stretch (`Solid::span`, the ordinary test
-  from outside each way), and a ray that meets a cut solid in a hole
-  goes on to where it leaves the hole, the hole's far side turned round
-  being the surface seen. `hills` (`land.rs`) makes the ground roll:
-  smooth noise on a 256 × 256 grid that repeats beyond the haze, walked
-  by rays in strides four times what its steepest slope makes sure is
-  clear and met between the last two places; every height is then above
-  the ground under that thing (`Part::lands`, cameras and points too),
-  so scenes are written as on a level floor. A scene holds 6000 parts.
-  What made more slow was measured: the tree of boxes is rebuilt in
-  under 3 ms at 13 000 parts, so it still is each frame; parts nothing
-  ever moves are placed once (`Part::still`), and the review sets its
-  moments up on several threads.
-  Nothing is simulated, but what is let go falls (`flight.rs`): a key
-  with `"parent": "none"` leaves a thing with the speed it was carried
-  at over the frame before, and a key with `throw` gives it the speed
-  that brings it to an object, the camera or a point, after the seconds
-  it says or those of the throw that takes the least speed, aimed at
-  where a moving target will be. From there its place at any time is
-  its speed and gravity, so a frame still draws on its own. Where it
-  comes to rest is found once at build, frame by frame, as its lowest
-  point comes down on a solid that is not its own or its thrower's, or
-  on the ground; thrown to an object it is caught, a hold by that object
-  timed by the flight. The scene's `gravity`, or an object's own in its
-  place, says how strongly things fall against the Earth's pull: at 0 it goes on in a straight line or stays
-  where it was let go at rest, under 0 it rises. The review says when each lands or is caught,
-  and doubts a throw over 30 m/s or one still in the air at the end.
-  `Scene::render_outside` draws the scene from outside its shot
-  (`Outside`: around, above, how near), toward the middle of a ball that
-  holds the scene over its whole length, with the shot's camera, its
-  move and the way each travelling thing goes, a tick a second, stroked
-  over the picture against its depth. `Scene::render_pass` draws the
-  shot as its depth, its lines or each thing in a colour of its own
-  (`Pass`), and `Scene::thing_at` names what a place in the shot shows.
-  Passes are shown, not sent: whether a video model follows one better
-  than the greys is untested.
-  `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264 MP4,
-  1280 px on the longer side. `Scene::review` says a scene in words for
-  a writer that can't watch it: what the camera sees at the start, the
-  middle, the end and after each cut (which things, where across the
-  picture, how tall, hidden behind what: found from spots on each thing
-  and from a spread of rays through the picture), what looks like a
-  mistake a viewer would see (`doubts`: the subject out of the opening
-  picture, a walker going sideways, a turn the long way round) and what
-  could be tidied (`notes`: a thing never in
-  the picture, a key after the end, a camera never cut to). Between the
-  moments it describes it watches the whole scene twelve times a second
-  (`review::Watch`) and adds to the doubts: the camera's subject hidden
-  or out of the picture, from when until when; the camera inside an
-  object or under the ground; one thing going through another (the
-  middle of a solid inside a solid of the other, the two moving past
-  each other); something on stepping feet faster than 12.5 m/s; a
-  walker with its feet off the ground and no `on`; a limb short of what
-  it reaches for. What the camera looks at is named as a shot is called
-  from its height in the picture. A thing is what a viewer would
-  name: what stands by itself, and each copy, not their parts; the
-  copies of a repeat are said as one, with how many of them show.
-  `preview_blockout` (the Generate group, a read) gives the agent that
-  text with a collage of eight frames and the set from straight above
-  with the camera drawn in, so it looks at a scene and fixes it before
-  it asks for the video.
-  A scene is long to write and quick to change, so it is written whole
-  only once. `Scene::changed` (`change.rs`) makes a change that says
-  only what differs: the scene's JSON with `objects`, and each model's
-  parts, held by name; a name that is there has the fields given put in
-  place of its own, a new name is added, `null` removes. Every blockout
-  is kept on disk under a short id (`tools/drafts.rs`, the newest 40 in
-  `paths::cache()/blockouts`): `preview_blockout` keeps a scene given as
-  `blockout` and from then on takes `id` and `changes`, `generate_video`
-  takes `blockout_id`, and the request's summary names the id, so the
-  outcome the agent is told carries it. What the user changes on the
-  card goes into the same kept scene (`Blockout::with_scene`), and it
-  stays after they approve or deny, so another take, or the next try
-  after a denial, starts from the scene as it was left. The backend runs
-  that change a scene in the dialog, and the second look at a drafted
-  one, answer with a change too.
-  A `video::Shot` is the request with what it is made from: the
-  `GenerateRequest::Video` as the user reads it, the frames to grab, the
-  placement, and the `Blockout` (scene, clip path under
-  `paths::cache()/upload`, clip size). Models follow references or start
-  on a frame, not both, so `Shot::sent` lowers it for the provider: the
-  blockout's clip is the first clip followed (`@Video1`) and a first
-  frame the first picture (`@Image1`); `parse` adds a line to the prompt
-  saying what each is unless the prompt names them. `Shot::check` refuses
-  what the model can't make (a model that follows no clips, a last
-  frame), and `Shot::prepare` grabs the frames and writes the clip just
-  before the provider is called, in the approval's job or the tool's.
-  The request waiting on the user is a card of its own (`ShotCard`, one
-  entity per waiting `generate_video`, kept by `ChatPanel::sync_shots`):
-  the blockout playing in a loop (`BlockoutPlayer`: draft frames drawn
-  off the UI thread, the newest wanted next, narrower while drawing
-  can't keep up, and the frame it stops on drawn again in full; drawn on
-  the GPU when there is one, see [Blockouts on the GPU](blockout-gpu.md)), a tile for the first frame and each reference with the tag the
-  prompt calls it, and the prompt as it is sent, in a field. A tile's menu
-  fills it with a picture made for it (`EditorState::generate_then`, the
-  user's own generation: it runs as a row of the media pool, lands in the
-  Images Generated bin and fills the tile; an empty first frame beside a
-  blockout is made after the blockout's opening frame, a filled tile
-  after its picture), the program's frame at the playhead (grabbed at
-  once) or a pool item, or empties it. Frames the agent named by time are
-  grabbed when the card appears, so the tiles show what is sent. Every
-  change is written into the waiting request
-  (`AgentHost::revise_approval`), so Approve makes what the card shows;
-  it is off while the model can't make the shot, with why beside it.
-  A request without a blockout has a Blockout tile whose button has one
-  written, for when the agent judged it not worth one, where the model
-  picked follows clips: `Reblock::draft` is the same kind of backend run,
-  given the shot's prompt without its role lines (`Shot::look`), its
-  length and its shape. A first draft whose review has doubts is handed
-  back once with the review to be put right, and stands if the second
-  answer has no scene. What it answers becomes the shot's blockout, and
-  an answer without a scene shows as why on the tile. Whenever a blockout
-  or a first frame beside one comes or goes on the card,
-  `Shot::settle_roles` puts the lines saying what `@Video1` and `@Image1`
-  are into the prompt, or takes its own lines out again. Tiles have one
-  size whatever the video's shape; the player paints its frame fitted
-  inside its box (`paint_image` on a canvas: an image element takes its
-  height from its width, so an upright frame overflowed a wide box).
-  Clicking the blockout opens its dialog (`blockout::editor`): the scene
-  large with play, seek and Undo, and a thread where the user says what
-  should change. Above the picture the player's `Looking` is chosen:
-  the shot, the set from outside (dragged round, the wheel bringing it
-  nearer), or the shot's depth, lines or parts; a button lays the thirds
-  over the shot, and a click on a thing in the shot puts its name into
-  the ask (`Picked`). Each ask is one backend run without tools
-  (`reblock::Reblock`: `TurnSpec::mcp` is `None`, so Claude gets an empty
-  MCP config and no allowed tools, Codex no MCP server) given the scene,
-  its review, the earlier asks and the format's schema; it answers with
-  a sentence
-  and a change to the scene, read from the reply's outermost braces and
-  made by `Scene::changed`. Save puts the scene into the shot, and into
-  the kept blockout, under a new clip path. Nothing in the dialog reaches a video provider.
+  `reblock.rs`, `ui/blockout*`, `ui/chat/shot.rs`): Video generation is
+  expensive. Each take makes the camera, the staging and the timing again.
+  Thus `generate_video` takes a `blockout`. A blockout is a rough 3D scene
+  that the agent writes as JSON (`blockout::Scene`).
+  - **The scene:**
+    - A scene has objects, models, one or more cameras with the cuts
+      between them, and an optional sun direction. The units are metres, Y
+      is up, and the ground is at `y = 0`. The maximum length is 30 s.
+    - Nothing in the scene is ready-made: there are no built-in people,
+      props or actions. Thus the agent is not limited to the ideas of
+      Flikk.
+    - An object is a plain solid (box, sphere, cylinder, cone, capsule,
+      dome, wedge, roof, pyramid). It can also be a joint with no shape
+      that only carries other objects, or a copy of a model.
+    - The agent builds things when it hangs solids from other solids
+      (`parent`). The place and turn of a part are in the space of its
+      parent.
+    - A part hangs at the point that it turns about (`anchor`: base,
+      middle, or top for a limb that hangs from its joint).
+  - **Motion by keys and cycles:**
+    - Keys move a thing for events that occur once.
+    - A `Cycle` moves a thing for events that repeat. A cycle is a few keys
+      over one round. Flikk adds it to the motion that the keys give the
+      object.
+    - A cycle runs by the clock (`seconds`), or by the ground covered
+      (`metres`). With `metres`, the round follows the distance that the
+      thing of the part has travelled. Thus a wheel stays with the road at
+      all speeds.
+    - A cycle can also run by the strides of the feet of its thing
+      (`strides`). Thus arms move in time with legs.
+    - If a round returns to its start, it eases to rest when the thing
+      stands still.
+    - `from` and `until` let a cycle run only between two times. The cycle
+      eases in and out over 0.3 s.
+  - **Models and copies:**
+    - A thing that the agent builds once goes under `models`. The agent
+      places it with `model`.
+    - A copy can have a scale and a shade. Its `parts` give, by part name,
+      the fields that replace the fields of the model (for example, another
+      pose, or no walk).
+    - `build.rs` does these steps:
+      - It writes every copy out into `Part`s named `copy/part`.
+      - It changes the names in the list to places.
+      - It calculates how the keys of each part move it (`motion::Moves`),
+        and the order in which Flikk places the parts.
+      - It gives each joint the box that its parts fill.
+      - It makes a table of the ground that each moving thing has covered.
+  - **Other object fields:** An object can also do these things:
+    - face a target about the vertical (`face`: the direction that it
+      travels, the camera, an object or a point);
+    - spin without stop;
+    - come and go (`hidden`);
+    - shake without repetition (`shake`: metres and degrees to each side,
+      and about how long one wobble takes);
+    - tell what it stands on (`on`: the ground, or an object by name).
+  - **Cameras:**
+    - A camera has a place, a `look_at` point or object, and a width. The
+      width is `lens` in millimetres on a frame 36 mm along its longer side
+      (as Blender fits a sensor), or `fov` in degrees.
+    - A camera also has a roll and a hand-held `shake`. It can ride an
+      object.
+    - The shot opens on `camera`. `cameras` holds more cameras by name.
+      `cuts` tells when the picture goes to which camera (`main` is the
+      first).
+    - Each camera continues its move when the picture is not its own.
+    - `build.rs` turns each camera into a `motion::Rig`. It changes the
+      names that the camera looks at and rides into places among the
+      parts.
+  - **Framing:**
+    - A camera, or a key of a camera, can tell what its picture holds
+      instead of its place (`frame`). `frame` gives the objects, a shot
+      size from `close_up` to `very_wide`, and `left`, `centre` or `right`.
+    - The camera then keeps its view direction from its `at`. It stands at
+      the distance that fits a box. The box holds the solids that reach into
+      the share of the subjects' height that the shot size keeps
+      (`motion::framed_from`). This is the fit that Blender's
+      camera-to-selected makes.
+    - For a close-up, the top 17% fills three quarters of the picture
+      height. For a very wide shot, all of it fills a quarter.
+    - This fit depends on the shape of the picture. Thus Flikk calculates
+      it when it draws each frame (`Scene::stood`). The things stand as they
+      do when the camera or the key gets there.
+    - For a third, the camera looks to the other side by a third of half
+      the picture width.
+  - **Curves:**
+    - All values that keys move follow a smooth curve through the keys
+      (`motion::Track`). These values are the place, turn, size and grey,
+      and the field of view, the roll and the look target of the camera.
+    - Where a value turns back or rests, the curve stops. Between stops,
+      the pace changes as little as possible from key to key. This is a
+      tridiagonal solve, as Blender's animation curves place their handles.
+    - Each pace stays within three times the straight pace on each side.
+      Thus the curve never goes past a key.
+    - Two keys give a straight move.
+    - An ease sets the timing of one part of the curve (linear, in, out,
+      in-out, `back`, `bounce`).
+    - `cut` holds and then jumps. It ends one curve and starts the next,
+      for example for the cut of a camera to another set-up.
+    - A thing passes a key with a place and no time on its way.
+      `motion::key_times` spreads these keys by the ground between them,
+      between the timed keys on each side. Thus an orbit or a route is a
+      list of places.
+    - Flikk uses angles as written: a wheel turns from 0 to 360. The review
+      tells when a turn of 270 degrees or more stops before a full turn.
+    - The shake of the camera and of an object is fractal noise. It is
+      smooth noise at three rates. Each rate is twice as fast and half as
+      strong as the last. The seed for an object is its name.
+  - **Placement at a time:**
+    - At a given time, `Scene::moment` places each part once, in the build
+      order (`build::placing_order`). Each part comes after the part that
+      it rides, and after the parts that it faces and stands on.
+    - Sometimes this order makes a loop, for example two people that face
+      each other. Then the part placed first turns to the place of the
+      other before any part faces. A first, rough pass gives that place.
+    - Flikk sets down a part with `on`. It puts the solids of the part
+      where its limbs have them and finds their lowest point
+      (`Solid::lowest`). Then it casts a ray down from above that point
+      onto the solids of the object that the part stands on. If the ray
+      meets no solid, the part stands on the ground.
+    - Thus the feet of a walker stay on a ramp or a stage. The height in
+      the scene is the distance above that surface.
+    - `solid.rs` has the solids. For each solid, it finds where a ray meets
+      it, its lowest point, and if a point is inside it.
+  - **Aim, reach and step:**
+    - `aim` turns the front of a part to a target: an object, the camera or
+      a point. A key can change the target. The part turns as little as
+      possible to put its +Z on the target. The turn is a maximum of 85
+      degrees from the direction that the part would else face.
+    - `reach` brings the end of a limb to a place (`to`, and optionally
+      `from` and `until`). The limb is the part that the end rides and the
+      part that this part rides (`build::Limb`, hung on the upper of the
+      two).
+    - `Scene::bend` solves the limb in closed form for each frame, from the
+      two lengths. The limb bends the way its pose bends it. A limb with a
+      straight pose bends forward when it hangs, and back when the pose
+      holds it out. Each part turns as little as possible to put the joint
+      and the end in place.
+    - If the target is out of reach, the limb goes straight toward it. The
+      limb moves there and back over 0.35 s.
+    - A foot can step (`step`). `Scene::planted` gives the place of the
+      foot from the strides that its thing has taken by then
+      (`build::strides`, in a table for each frame).
+    - A stride is as long as legs of that length take at the speed, unless
+      `metres` gives it. This length is 2.3 leg lengths times the 0.3rd
+      power of speed squared over gravity and leg length.
+    - The foot is down while its thing passes over it for three quarters
+      of a leg length of ground. This is a maximum of 0.6 of the stride, so
+      a run has the two feet in the air.
+    - Between landings, the foot swings to its next landing and lifts an
+      eighth of the leg. When the thing stands still, the foot is as posed.
+    - Flikk bends the leg to the foot as it bends a limb. A thing with `on`
+      stays no higher than its grounded legs reach (`Scene::lift`). This
+      gives the rise and fall of a walk.
+    - A count of strides gives each landing. Thus Flikk can draw any frame
+      without the frames before it.
+  - **Holds:**
+    - A key with `parent` gives its object to another object from that
+      second. The object starts from its place at that moment. The value
+      `"none"` releases the object at its place.
+    - `build::take_hold` calculates, in time order, the place of each held
+      object in its holder. For each hold, the scene is built up to the hold
+      before it. This is Blender's Child Of with its inverse set.
+    - Flikk places a held object last in each frame, with all the parts that
+      ride it.
+    - A limb that took its reach target moves to the place where it took
+      the target from. Thus reach and hold never wait for each other.
+  - **World and render:**
+    - `world::World` is the scene at a moment, as rays meet it. It has the
+      solids at their places.
+    - A camera ray tests only the solids listed for its 16 px tile of the
+      picture.
+    - A ray toward the sun tests only the solids listed for its cell of a
+      grid across the light (`world::Cells`). Flikk widens the cells of each
+      solid by the distance that a ray toward the edge of the sun strays.
+    - Rays in other directions use a tree of boxes (`world::Solids`).
+      Flikk builds all three again for each frame.
+    - `Scene::render` (`render.rs`) makes the picture on the CPU with one
+      ray for each pixel. The light comes from the sun, the sky from above,
+      the ground from below, and a fill from across the sun. The fill
+      reaches round surfaces that turn away from the sun. The ground has
+      metre tiles, and there is haze.
+    - Flikk calculates light as light and changes it into screen greys at
+      the end. It scatters pixels between two greys, so gradients show no
+      steps.
+    - Every picture has lines, from the solid that each pixel shows. A line
+      is darker than the two sides. It is one pixel wide on the side away
+      from the camera. It is strong round a thing and light between its
+      parts. The own edges of a solid are a little lighter where they stick
+      out.
+    - `Detail::Full` adds these steps:
+      - It softens shadows. One ray for each pixel goes toward a spot on
+        the disc of the sun. Seven more go where the pixels around
+        disagree. Flikk evens out the result over 5 px on the same surface.
+      - It darkens surfaces where the picture shows another surface close
+        by. It uses eight looks along a spiral within 0.7 m at every fourth
+        pixel. It shares the result with the pixels around on the same
+        surface. This also applies to round solids.
+      - It draws again, from four rays, the pixels that an edge runs
+        through. The line takes the share of the pixel that the nearer
+        solid leaves. The rest of its width is in the pixel outside.
+    - `Detail::Draft` is the detail for playback.
+    - The values that Flikk keeps for each pixel during a render (about 50
+      bytes in full) stay allocated from one picture to the next
+      (`render::Sheets`).
+    - A 1280×720 frame of the demo shot takes about 36 ms as a draft and
+      85 ms in full. This is with no GPU and no model, on four cores.
+  - **Larger worlds:** The scene format has short forms for larger worlds.
+    - A box, a cylinder or a capsule takes a `taper`: its top against its
+      base, inside the same size. Cylinder, cone and capsule share one ray
+      test for a round side with a radius that changes with height.
+    - `repeat` (`repeat.rs`) lays out one object as a row or a grid
+      (`step`), a `ring`, or a scatter over an `area`. In a scatter, each
+      place is the candidate (of twelve) furthest from the places before
+      it.
+    - Every copy is the whole object with its keys moved over. The names of
+      the copies start at `name 1`. The copies ride a joint with the name of
+      the object, which stands for all of them.
+    - `vary` turns, scales and shades each copy, and moves it out of step,
+      by a hash of the name and the copy number.
+    - Flikk does not draw a solid with `cut`. It removes the solid from the
+      object that it names.
+    - Every solid is convex, so a ray is inside a solid over one stretch
+      only (`Solid::span`, the usual test from outside in each direction).
+      If a ray meets a cut solid in a hole, it continues to the point where
+      it leaves the hole. The far side of the hole, turned round, is the
+      visible surface.
+    - `hills` (`land.rs`) makes the ground roll. It is smooth noise on a
+      256 × 256 grid that repeats beyond the haze. Rays walk it in strides
+      of four times the distance that its steepest slope makes sure is
+      clear. A ray meets the ground between its last two places.
+    - Every height is then above the ground under that thing
+      (`Part::lands`, also for cameras and points). Thus the agent writes
+      scenes as on a level floor.
+    - A scene holds 6000 parts.
+    - The causes of slow scenes were measured. The tree of boxes is built
+      again in less than 3 ms at 13 000 parts, so Flikk still builds it
+      each frame. Flikk places parts that nothing ever moves only once
+      (`Part::still`). The review prepares its moments on several threads.
+  - **Falls and throws** (`flight.rs`):
+    - Flikk does not simulate physics, but a thing that is let go falls.
+    - A key with `"parent": "none"` releases a thing with the speed at
+      which it was carried over the frame before.
+    - A key with `throw` gives the thing the speed that brings it to an
+      object, the camera or a point. The flight takes the seconds that the
+      key gives, or the seconds of the throw with the least speed. The aim
+      is the future place of a moving target.
+    - From that point, the place of the thing at any time comes from its
+      speed and gravity. Thus a frame still draws by itself.
+    - The build finds once, frame by frame, where the thing comes to rest.
+      That is where its lowest point comes down on a solid that is not its
+      own or its thrower's, or on the ground.
+    - If the thing goes to an object, that object catches it. The catch is
+      a hold by that object, timed by the flight.
+    - The `gravity` of the scene, or an object's own `gravity` in its place,
+      tells how strongly things fall, relative to the pull of the Earth. At
+      0, a thing continues in a straight line, or stays at rest where it was
+      let go. Under 0, it rises.
+    - The review tells when each thing lands or is caught. It adds a doubt
+      for a throw over 30 m/s, or for a thing still in the air at the end.
+  - **Other views:**
+    - `Scene::render_outside` draws the scene from outside its shot
+      (`Outside`: around, above, how near). It looks toward the middle of a
+      ball that holds the scene over its full length.
+    - This view shows the camera of the shot, its move, and the path of
+      each travelling thing, with a tick for each second. Flikk strokes these
+      over the picture against its depth.
+    - `Scene::render_pass` draws the shot as its depth, its lines, or each
+      thing in its own colour (`Pass`). `Scene::thing_at` names what a place
+      in the shot shows.
+    - Flikk shows passes but does not send them. Nobody has tested if a
+      video model follows a pass better than the greys.
+  - **Clip and review:**
+    - `Scene::write_clip` pipes full frames to FFmpeg as a 24 fps H.264
+      MP4, 1280 px on the longer side.
+    - `Scene::review` describes a scene in words for a writer that cannot
+      watch it. It gives these items:
+      - What the camera sees at the start, the middle, the end and after
+        each cut. This is which things, where across the picture, how
+        tall, and hidden behind what. Flikk finds this from spots on each thing and
+        from a spread of rays through the picture.
+      - Possible mistakes that a viewer would see (`doubts`). Examples are
+        the subject out of the opening picture, a walker that goes
+        sideways, and a turn the long way round.
+      - Possible tidy-ups (`notes`): a thing never in the picture, a key
+        after the end, a camera that no cut goes to.
+    - Between the moments that it describes, the review watches the whole
+      scene twelve times a second (`review::Watch`). It adds these doubts:
+      - the subject of the camera hidden or out of the picture, from when
+        until when;
+      - the camera inside an object or under the ground;
+      - one thing through another: the middle of a solid inside a solid of
+        the other, while the two move past each other;
+      - a thing on feet that step, faster than 12.5 m/s;
+      - a walker with its feet off the ground and no `on`;
+      - a limb that does not get to the target that it reaches for.
+    - The review names the camera target with a shot name, from the height
+      of the target in the picture.
+    - A thing is what a viewer would name: an object that stands by itself,
+      and each copy, but not their parts. The review gives the copies of a
+      repeat as one item, with the number that show.
+    - `preview_blockout` is in the Generate group and is a read. It gives
+      the agent that text and a collage of eight frames. It also gives the
+      set from straight above, with the camera drawn in. Thus the agent looks at a scene and fixes it
+      before it asks for the video.
+  - **Changes and kept blockouts:**
+    - A scene takes long to write but is quick to change. Thus the agent
+      writes it in full only once.
+    - `Scene::changed` (`change.rs`) applies a change that gives only the
+      differences. The change is the JSON of the scene, with `objects` and
+      the parts of each model held by name.
+    - If a name exists, the given fields replace its own fields. A new name
+      adds an item. `null` removes an item.
+    - Flikk keeps every blockout on disk under a short id
+      (`tools/drafts.rs`, the newest 40 in `paths::cache()/blockouts`).
+    - `preview_blockout` keeps a scene given as `blockout`. After that, it
+      takes `id` and `changes`. `generate_video` takes `blockout_id`. The
+      summary of the request names the id, so the outcome that the agent
+      gets carries it.
+    - The user's changes on the card go into the same kept scene
+      (`Blockout::with_scene`). The scene stays after the user approves or
+      denies. Thus another take, or the next try after a denial, starts from
+      the scene as it was left.
+    - The backend runs that change a scene in the dialog also answer with a
+      change. The second look at a drafted scene also answers with a change.
+  - **The shot:**
+    - A `video::Shot` is the request together with its sources:
+      - the `GenerateRequest::Video` as the user reads it;
+      - the frames to grab;
+      - the placement;
+      - the `Blockout` (scene, clip path under `paths::cache()/upload`, clip
+        size).
+    - Models follow references or start on a frame, but not the two. Thus
+      `Shot::sent` lowers the shot for the provider. The clip of the
+      blockout is the first clip followed (`@Video1`). A first frame is the
+      first picture (`@Image1`).
+    - `parse` adds a line to the prompt that tells what each one is, unless
+      the prompt names them.
+    - `Shot::check` refuses what the model cannot make, for example a model
+      that follows no clips, or a last frame.
+    - `Shot::prepare` grabs the frames and writes the clip just before Flikk
+      calls the provider. It runs in the job of the approval or of the
+      tool.
+  - **The shot card:**
+    - The request that waits for the user has its own card (`ShotCard`).
+      There is one entity for each waiting `generate_video`, and
+      `ChatPanel::sync_shots` keeps them. The card has these items:
+      - The blockout in a loop (`BlockoutPlayer`). The player draws draft
+        frames off the UI thread. It draws the newest wanted frame next. It
+        draws narrower frames while it cannot keep up. It draws the frame
+        that it stops on again in full. It draws on the GPU when there is
+        one (see [Blockouts on the GPU](blockout-gpu.md)).
+      - A tile for the first frame and for each reference, with the tag
+        that the prompt uses for it.
+      - The prompt as Flikk sends it, in a field.
+    - The menu of a tile can empty the tile. It can also fill the tile
+      with one of these:
+      - A picture made for it (`EditorState::generate_then`). This is the
+        user's own generation. It runs as a row of the media pool, goes
+        into the Images Generated bin and fills the tile. For an empty first
+        frame next to a blockout, Flikk makes the picture from the opening
+        frame of the blockout. For a filled tile, Flikk makes it from the
+        picture of the tile.
+      - The frame of the program at the playhead, grabbed at once.
+      - A pool item.
+    - Flikk grabs the frames that the agent named by time when the card
+      appears. Thus the tiles show what Flikk sends.
+    - Each change goes into the waiting request
+      (`AgentHost::revise_approval`). Thus Approve makes what the card
+      shows. Approve is off while the model cannot make the shot, and the
+      reason shows next to it.
+  - **Blockout drafts:**
+    - A request without a blockout has a Blockout tile when the model
+      picked follows clips. The button of the tile writes a blockout. This
+      is for when the agent judged that a blockout was not worth it.
+    - `Reblock::draft` is the same type of backend run. It gets the prompt
+      of the shot without its role lines (`Shot::look`), its length and its
+      shape.
+    - If the review of a first draft has doubts, Flikk gives the draft
+      back once with the review, for a correction. The first draft stays if
+      the second answer has no scene.
+    - The answer becomes the blockout of the shot. If the answer has no
+      scene, the tile shows the reason.
+    - When a blockout, or a first frame next to one, comes or goes on the
+      card, `Shot::settle_roles` changes the prompt. It puts in the lines
+      that tell what `@Video1` and `@Image1` are, or it takes its own lines
+      out again.
+    - Tiles have one size for all video shapes. The player paints its frame
+      to fit inside its box (`paint_image` on a canvas). An image element
+      takes its height from its width, so an upright frame overflowed a wide
+      box.
+  - **The blockout dialog:**
+    - A click on the blockout opens its dialog (`blockout::editor`). The
+      dialog shows the scene large, with play, seek and Undo. It also has a
+      thread where the user tells what to change.
+    - Above the picture, the user chooses the `Looking` of the player:
+      - the shot;
+      - the set from outside (a drag turns it, and the wheel brings it
+        nearer);
+      - the depth, lines or parts of the shot.
+    - A button puts the thirds over the shot. A click on a thing in the shot
+      puts its name into the ask (`Picked`).
+    - Each ask is one backend run without tools (`reblock::Reblock`).
+      `TurnSpec::mcp` is `None`, so Claude gets an empty MCP config and no
+      allowed tools, and Codex gets no MCP server. The run gets the scene,
+      its review, the earlier asks and the schema of the format.
+    - The run answers with a sentence and a change to the scene. Flikk reads
+      the change from the outermost braces of the reply and applies it with
+      `Scene::changed`.
+    - Save puts the scene into the shot and into the kept blockout, under a
+      new clip path. Nothing in the dialog goes to a video provider.
 * **Generating pictures:** `Capability::Image` is a row in Settings →
-  Integrations like video, with fal and Pika as providers. On fal: Nano
-  Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and
-  Sunburst, FLUX 3 and FLUX 3 Klein, Seedream 5.5 and 5.0 Pro, Ideogram
-  4.5, Grok Imagine Image 2.0, Qwen Image 3, Krea 3 and Recraft V4.1 Pro.
-  On Pika: Nano Banana 2.1 (the default) and Pro, GPT Image 2, 2.6 Flare
-  and 2.6 Sunburst, Seedream 5.5, 5.0 Pro and Lite, Ideogram 4.5, Grok Imagine Image
-  2.0, Muse Image and Recraft 4.1. A `GenerateRequest::Image` carries a
-  prompt, an optional shape and resolution, a transparent background, and
-  the pictures it edits or follows (`ImageMode::Edit` when there are any:
-  image to image), which the prompt names `@Image1`, `@Image2` and the
-  models read as "image 1". Each model's `cloud::ImageModel` (shapes,
-  whether it can pick one, resolutions, how many pictures it follows,
-  transparency) refuses what it can't make before anything is spent. Each
-  model is an entry in `fal/models.rs` or `pika/models.rs` (`IMAGE`)
-  saying how it takes a request: `aspect_ratio` and `resolution`, or fal's
-  named `image_size` (only the five ratios fal names), or Pika's `size` in
-  pixels (Ideogram), or no shape at all (Muse, Recraft on Pika); the
-  pictures it follows in
-  `image_urls`, or one to edit plus `reference_image_urls` (Ideogram on
-  fal). fal runs it on its queue (`fal/image.rs`), Pika as a media job
-  (`pika/image.rs`), both after uploading the pictures as for video; the
-  file comes back as `images[0]`, and `picture::fetch` names it by what
-  its first bytes say it is. It lands in the "Images Generated" bin with a
-  `<file>.json`, and is not analyzed. The media pool's Image form (the
-  Generate menu, or "Generate image…" on a picture, which it then edits)
-  takes the prompt, pictures in the pool and the frame at the playhead
-  (grabbed when it is made), the model's shapes (starting on the
-  sequence's), resolutions and transparency. With a provider picked, the
-  agent's `generate_image` makes the same request through it, whatever the
-  agent's "Image generation" switch says, taking `aspect`, `resolution`,
-  `references` (pictures in the pool) and `frames_at` (the program at
-  those times, grabbed just before); the approval carries which way it
-  goes (`via`), so an older ChatGPT request still reads. The agent writes
-  the prompt as `catalog::IMAGE_PROMPT` lays out (a few sentences with
-  what the picture is and its subject first, words in it quoted, an edit
-  as the change and then what stays), the shape image models follow best.
-  The shot card's first-frame form starts from the shot's prompt, told to
-  show only its opening instant.
+  Integrations, as video is. Its providers are fal and Pika.
+  - These models are available:
+
+    | Provider | Models |
+    | --- | --- |
+    | fal | Nano Banana 2.1 (the default) and Pro, GPT Image 2, GPT Image 2.6 Flare and Sunburst, FLUX 3 and FLUX 3 Klein, Seedream 5.5 and 5.0 Pro, Ideogram 4.5, Grok Imagine Image 2.0, Qwen Image 3, Krea 3 and Recraft V4.1 Pro |
+    | Pika | Nano Banana 2.1 (the default) and Pro, GPT Image 2, 2.6 Flare and 2.6 Sunburst, Seedream 5.5, 5.0 Pro and Lite, Ideogram 4.5, Grok Imagine Image 2.0, Muse Image and Recraft 4.1 |
+
+  - A `GenerateRequest::Image` carries a prompt, an optional shape and
+    resolution, and a transparent background. It also carries the pictures
+    that it edits or follows. If there are pictures, the mode is
+    `ImageMode::Edit` (image to image).
+  - The prompt names these pictures `@Image1`, `@Image2`. The models read
+    them as "image 1".
+  - The `cloud::ImageModel` of each model gives its shapes, if it can pick
+    one, its resolutions, how many pictures it follows, and its
+    transparency. It refuses what the model cannot make before Flikk spends
+    anything.
+  - Each model is an entry in `fal/models.rs` or `pika/models.rs`
+    (`IMAGE`). The entry tells how the model takes a request. The shape is
+    one of these:
+    - `aspect_ratio` and `resolution`;
+    - fal's named `image_size` (only the five ratios that fal names);
+    - Pika's `size` in pixels (Ideogram);
+    - no shape at all (Muse, Recraft on Pika).
+  - The pictures that the model follows go in `image_urls`. Ideogram on fal
+    takes one picture to edit plus `reference_image_urls`.
+  - fal runs the request on its queue (`fal/image.rs`). Pika runs it as a
+    media job (`pika/image.rs`). The two run after an upload of the
+    pictures, as for video.
+  - The file comes back as `images[0]`. `picture::fetch` names it by the
+    type that its first bytes give.
+  - The file goes into the "Images Generated" bin with a `<file>.json`.
+    Flikk does not analyze it.
+  - The Image form of the media pool opens from the Generate menu, or from
+    "Generate image…" on a picture. In the second case, the form edits that
+    picture. The form takes these inputs:
+    - the prompt;
+    - pictures in the pool;
+    - the frame at the playhead, grabbed when the picture is made;
+    - the shapes of the model (it starts on the shape of the sequence);
+    - the resolutions and the transparency.
+  - With a provider picked, the agent's `generate_image` makes the same
+    request through that provider. This applies whatever the agent's "Image
+    generation" switch says. The tool takes `aspect`, `resolution`,
+    `references` (pictures in the pool) and `frames_at` (the program at
+    those times, grabbed just before).
+  - The approval carries the path of the request (`via`). Thus an older
+    ChatGPT request still reads correctly.
+  - The agent writes the prompt as `catalog::IMAGE_PROMPT` tells. The
+    prompt is a few sentences. It gives what the picture is and its subject
+    first, and puts words in the picture in quotes. For an edit, it gives
+    the change and then what stays. Image models follow this shape best.
+  - The first-frame form of the shot card starts from the prompt of the
+    shot. Flikk tells it to show only the opening instant of the shot.
 * **Upscaling video:** `Capability::Upscale` is a row in Settings →
-  Integrations like video. On fal: Topaz Precision (Proteus, the default)
-  and Starlight, SeedVR2, Crystal, FLUX Video Upscale and Gemini Omni
-  Flash 1.2. On Pika: Topaz Proteus (the default), Starlight Precise and
-  Starlight Fast, and Pika H3 Flex's own upscale (`draft-to-video`, for
-  sources up to 768p). A `GenerateRequest::Upscale` carries the source
-  (`cloud::UpscaleSource`: its path, name, size, length and whether it has
-  sound) and a resolution ("1080p", "2k", "4k": the lines on the short
-  side), or none for the model's default (1080p where it can, else its
-  smallest). Each model's `cloud::UpscaleModel` (its resolutions, how it
-  is told how much larger: the resolution itself, a factor in a range, or
-  whole steps such as Topaz's ×2, ×3, ×4 on Pika, the longest and largest
-  source it takes, the most pixels it makes) works out the factor and
-  refuses what it can't make before anything is spent. Each model is an
-  entry in `fal/upscale.rs` or `pika/upscale.rs` with its endpoint and a
-  function writing its input; Pika's uploads stop at 50 MB, which is
-  checked first. The source is uploaded as for video and the job followed
-  the same way. Upscalers drop or encode the sound again, so `upscaled.rs`
-  puts the picture made together with the source's own sound (copied as it
-  is, else as AAC) into `<stem>.mov`, keeping the provider's file when
-  FFmpeg can't. It lands in the "Video Upscaled" bin, named
-  `upscale-<source name>`, and is analyzed like footage. In the media pool,
-  "Upscale…" on a video (`media_pool/upscale.rs`) offers the resolutions
-  the model can make it at (`UpscaleModel::targets_for`, starting on its
-  default) and, when a clip shows it, "Replace clips":
-  `EditorState::upscale` then runs `Command::SwapMedia` once the file
-  lands, as an undo step of its own. `SwapMedia { from, to }` points every
-  clip of `from` on an unlocked picture track at `to`, at the same source
-  times; sound clips keep `from`, whose sound the upscaled video carries
-  anyway.
-  The agent's `upscale_video` (`tools/upscale.rs`, Generate) takes a pool
-  video, a resolution (default: the model's default for it) and `replace`,
-  and is approved like `generate_video`. Where a generated file goes once
-  in the pool is a `generate::Destination`: the pool only, a placement on
-  the timeline, or `Replace(media)`, which proposes `SwapMedia` in the
-  agent's change set for review.
-* **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery from
-  the script: audio tags, ellipses and capitals, with no SSML, so
-  `cloud::check_script` refuses a `<break>` before any credits are spent and
-  offers the script with pauses in its place. Only stability and similarity
-  are sent; speed is left to retiming the clip. The media pool's form picks
-  the voice (`/v2/voices`, samples cached under `paths::cache()`) and puts
-  tags in at the cursor, and the system prompt teaches the agent the same
-  rules. A script runs to one request, about 10 minutes; longer ones are
-  several clips, one voice each. The form lists the user's own voices
-  first, starts a library voice on the stability and similarity it last read
-  with (`EditorState::keep_reading` keeps them), and its + button opens the
-  Voices dialog over it.
+  Integrations, as video is.
+  - These models are available:
+
+    | Provider | Models |
+    | --- | --- |
+    | fal | Topaz Precision (Proteus, the default) and Starlight, SeedVR2, Crystal, FLUX Video Upscale and Gemini Omni Flash 1.2 |
+    | Pika | Topaz Proteus (the default), Starlight Precise and Starlight Fast, and Pika H3 Flex's own upscale (`draft-to-video`, for sources up to 768p) |
+
+  - A `GenerateRequest::Upscale` carries the source
+    (`cloud::UpscaleSource`: its path, name, size, length and if it has
+    sound). It also carries a resolution ("1080p", "2k", "4k": the lines on
+    the short side). With no resolution, Flikk uses the default of the
+    model: 1080p where it can, else its smallest.
+  - The `cloud::UpscaleModel` of each model gives these items:
+    - its resolutions;
+    - how Flikk tells it the scale: the resolution itself, a factor in a
+      range, or whole steps such as Topaz's ×2, ×3, ×4 on Pika;
+    - the longest and largest source that it takes;
+    - the most pixels that it makes.
+  - It calculates the factor and refuses what the model cannot make before
+    Flikk spends anything.
+  - Each model is an entry in `fal/upscale.rs` or `pika/upscale.rs`, with
+    its endpoint and a function that writes its input. Pika's uploads stop
+    at 50 MB, and Flikk checks this first.
+  - Flikk uploads the source as for video, and follows the job in the same
+    way.
+  - Upscalers drop the sound or encode it again. Thus `upscaled.rs` puts
+    the new picture together with the source's own sound into
+    `<stem>.mov`. It copies the sound as it is, else it encodes it as AAC.
+    If FFmpeg cannot do this, Flikk keeps the provider's file.
+  - The file goes into the "Video Upscaled" bin with the name
+    `upscale-<source name>`. Flikk analyzes it like footage.
+  - In the media pool, "Upscale…" on a video (`media_pool/upscale.rs`)
+    offers the resolutions that the model can make for it
+    (`UpscaleModel::targets_for`). It starts on the default of the model.
+    When a clip shows the video, it also offers "Replace clips".
+  - With "Replace clips", `EditorState::upscale` runs `Command::SwapMedia`
+    when the file arrives. This is a separate undo step.
+  - `SwapMedia { from, to }` points every clip of `from` on an unlocked
+    picture track at `to`, at the same source times. Sound clips keep
+    `from`, because the upscaled video carries the sound of `from` anyway.
+  - The agent's `upscale_video` (`tools/upscale.rs`, Generate) takes a pool
+    video, a resolution (default: the default of the model for it) and
+    `replace`. It needs approval as `generate_video` does.
+  - A `generate::Destination` tells where a generated file goes after it
+    is in the pool. It is one of these:
+    - the pool only;
+    - a placement on the timeline;
+    - `Replace(media)`, which proposes `SwapMedia` in the agent's change set
+      for review.
+* **Voiceovers:** Eleven v4 (`elevenlabs/speech.rs`) takes its delivery
+  from the script: audio tags, ellipses and capitals, with no SSML.
+  - Thus `cloud::check_script` refuses a `<break>` before Flikk spends any
+    credits. It offers the script with pauses in place of the `<break>`.
+  - Flikk sends only stability and similarity. For speed, the user changes
+    the timing of the clip.
+  - The form of the media pool picks the voice (`/v2/voices`, with samples
+    cached under `paths::cache()`). It puts tags in at the cursor. The
+    system prompt teaches the agent the same rules.
+  - A script fits in one request, about 10 minutes. A longer script is
+    several clips, with one voice each.
+  - The form lists the user's own voices first. It starts a library voice
+    on the stability and similarity of its last reading
+    (`EditorState::keep_reading` keeps them). Its + button opens the Voices
+    dialog over the form.
 * **Voices** (`ui/voices.rs`, `state/voices.rs`, `elevenlabs/voices.rs`,
-  `elevenlabs/design.rs`): one dialog, from the pool's Generate menu, the
-  voiceover form and the transcript. *Find* lists the account's voices
-  (`/v2/voices`, read once per session into `EditorState::account_voices`)
-  or searches the shared Voice Library (`/v1/shared-voices`, by words,
-  gender, age, language and use, 30 a page), each with its sample; a shared
-  one is added to the account (`/v1/voices/add/{owner}/{voice}`, a voice
-  slot), and one with a custom rate shows it. *Describe* designs voices from
-  a description (`/v1/text-to-voice/design` on `eleven_ttv_v3`, 20–1,000
-  characters, checked before credits are spent), plays each and keeps the
-  one picked (`/v1/text-to-voice`). *From audio* clones a voice
-  (`/v1/voices/add`, multipart) from files or pool items, sent as their
-  sound when they are video, with background-noise removal and a consent
-  box it needs. In the transcript, a speaker's words open the dialog as one
-  WAV of where they speak (`state::voices::speaker_spans`, padded and
-  joined stretches of the source they say most in, up to 3 minutes,
-  `flikk_analysis::cut_speech`): to clone it, or to find shared voices that
-  sound like the first 30 s (`/v1/similar-voices`). Whatever is picked,
-  added or made is kept in the library (`library::save_voice`) and the next
-  voiceover starts on it. The library's Voices section reads a voiceover on
-  a voice, plays its sample, renames it (on the account too, for voices the
-  user made), removes it, or deletes it from the account after asking;
-  one the account no longer has is dimmed, and a designed one can be
-  designed again from its description. A voiceover in the pool can save
-  the voice that read it. The agent's `find_voices` lists the user's
-  library first, with how each reads, or searches the Voice Library with
-  `library` and filters; `add_voice` and `design_voice` (Generate media,
-  so approved each time) add or design one and keep it in the library.
-  Their approval cards are heard first: `find_voices` remembers where each
-  voice listed can be heard and the request carries it, so the card of an
-  `add_voice` or a voiceover plays the voice's sample (the library's copy
-  when it has one). Approving a design opens the Voices dialog on the
-  agent's description, designing; the user hears the takes and keeps one
-  (or any other voice), which settles the request, and closing the dialog
-  leaves it waiting. Cloning is not a tool: it needs the speaker's consent, so the prompt
-  sends the user to the dialog.
-* **Fixing words:** in the transcript, Retype… (the selection's menu, or
-  Enter) turns the selected words into an editor; Enter or the mic button
-  says what is typed in the speaker's voice (`ui/transcript/retype.rs`,
-  `state/respeak.rs`). The voice is the library voice linked to that
-  speaker (`SavedVoice::speakers`: fingerprint and speaker id); without
-  one, the Voices dialog opens on cloning theirs from what they say in the
-  recording, and the voice kept there, cloned or found, is linked and
-  used. The user's click is their leave to spend the credits; the request
-  runs as a row of the media pool, which shows it fail, and lands as the
-  user's edits (the item in the Voiceover Generated bin, then the cut).
-  The agent's `replace_words` (`tools/respeak.rs`, Generate) takes the
-  words by the times they start (`from`, `to`, checked against `words`),
-  the new `text` and, without a linked voice, a `voice` from
-  `find_voices`; it can't clone. The approval card plays the voice;
-  approving makes the words off the UI thread
-  (`approve::Started::Respeak`), adds them to the pool and proposes the
-  `ReplaceSpeech` in the chat's set.
+  `elevenlabs/design.rs`): One dialog opens from the Generate menu of the
+  pool, from the voiceover form and from the transcript.
+  - *Find* lists the voices of the account (`/v2/voices`, read once for
+    each session into `EditorState::account_voices`). It can also search
+    the shared Voice Library (`/v1/shared-voices`) by words, gender, age,
+    language and use, 30 for each page. Each voice has its sample.
+  - Flikk adds a shared voice to the account
+    (`/v1/voices/add/{owner}/{voice}`). This uses a voice slot. If a voice
+    has a custom rate, the dialog shows it.
+  - *Describe* designs voices from a description (`/v1/text-to-voice/design`
+    on `eleven_ttv_v3`, 20–1,000 characters). Flikk checks the description
+    before it spends credits. The dialog plays each voice and keeps the one
+    picked (`/v1/text-to-voice`).
+  - *From audio* clones a voice (`/v1/voices/add`, multipart) from files or
+    pool items. For a video, Flikk sends its sound. The tab has
+    background-noise removal and a consent box, which the clone needs.
+  - In the transcript, the words of a speaker open the dialog as one WAV of
+    the places where the speaker speaks
+    (`state::voices::speaker_spans`). The WAV has padded and joined parts
+    of the source where the speaker says most, up to 3 minutes
+    (`flikk_analysis::cut_speech`). The user can clone it, or find shared
+    voices that sound like the first 30 s (`/v1/similar-voices`).
+  - Flikk keeps the voice that the user picks, adds or makes in the library
+    (`library::save_voice`). The next voiceover starts on it.
+  - The Voices section of the library can do these things with a voice:
+    - read a voiceover on it;
+    - play its sample;
+    - rename it (on the account too, for voices that the user made);
+    - remove it;
+    - delete it from the account, after a question.
+  - If the account no longer has a voice, the voice is dimmed. The user can
+    design a designed voice again from its description.
+  - A voiceover in the pool can save the voice that read it.
+  - The agent's `find_voices` lists the user's library first, with how each
+    voice reads. With `library` and filters, it searches the Voice Library.
+  - `add_voice` and `design_voice` are Generate media, so they need
+    approval each time. They add or design a voice and keep it in the
+    library.
+  - The user hears a voice on its approval card first. `find_voices`
+    remembers where the user can hear each voice in its list, and the
+    request carries it. Thus the card of an `add_voice` or a voiceover plays
+    the sample of the voice. If the library has a copy, the card plays that
+    copy.
+  - The approval of a design opens the Voices dialog on the agent's
+    description, in design mode. The user hears the takes and keeps one, or
+    any other voice. This settles the request. If the user closes the
+    dialog, the request continues to wait.
+  - Cloning is not a tool, because it needs the consent of the speaker.
+    Thus the prompt sends the user to the dialog.
+* **Fixing words:** In the transcript, Retype… (from the menu of the
+  selection, or Enter) turns the selected words into an editor. Enter or
+  the mic button says the typed text in the voice of the speaker
+  (`ui/transcript/retype.rs`, `state/respeak.rs`).
+  - The voice is the library voice linked to that speaker
+    (`SavedVoice::speakers`: fingerprint and speaker id).
+  - If there is no linked voice, the Voices dialog opens to clone the voice
+    of the speaker from the recording. Flikk links and uses the voice that
+    the user keeps there, cloned or found.
+  - The user's click is their permission to spend the credits. The request
+    runs as a row of the media pool, which shows if it fails. The result
+    comes in as the user's edits: the item in the Voiceover Generated bin,
+    then the cut.
+  - The agent's `replace_words` (`tools/respeak.rs`, Generate) takes the
+    words by their start times (`from`, `to`, checked against `words`). It
+    also takes the new `text`. Without a linked voice, it takes a `voice`
+    from `find_voices`. It cannot clone.
+  - The approval card plays the voice. The approval makes the words off the
+    UI thread (`approve::Started::Respeak`). It adds them to the pool and
+    proposes the `ReplaceSpeech` in the set of the chat.
 * **Finding sounds:** `find_sounds` (`tools/sounds.rs`) searches the user's
-  library and the project's audio by words (name, category, tags, what a
-  provider was asked) and, where analysis left vectors, by how they sound;
-  it says how many had none. `use_library_sound` adds a sound to the pool's
-  "Library" bin as the user's edit, like generated audio, and with `at`
-  proposes it the same way. `save_sound_to_library` waits for approval.
-  The media pool's ♫ menu makes the same from a form (Music runs as long as
-  In/Out).
-* **Prompt** (`flikk-agent/src/prompt.rs`): the system prompt is the tool
-  guidance (with or without web and images), the shared rules (seeing and hearing,
-  time formats, references, cutting in pauses, protected ranges), the
-  editor's part, the FX conventions and the language. Each message carries an `<editor_context>` (project
-  summary, format, workspace, playhead, selection, in/out, selected words),
-  the approved style rules, the picked style as a `<style>` block, a skill
-  line, `<approvals>`, and a
-  `<references>` block when the user referenced objects.
-* **Chat** (`ui/chat*`): sessions per project in
-  `paths::projects()/<project>.chats.json`, each resuming its own backend
-  conversation (`agent/sessions.json`). Tool calls stack into one card per
-  run. A call that runs off-thread (a `flikk` job, or the backend's own web
-  search and fetch) shows with a spinner from `AgentEvent::ToolStarted`
-  until its `ToolFinished` replaces it; one still running when the turn ends
-  is marked Stopped. The change-set card sits above the composer, once per set however
-  many turns grew it, and stays with its outcome until the next message;
-  it has Preview, Review (a checklist with ticks), Reject and Accept. `ask_user` shows up to six choices. Skills run as
-  `/name …`, the rest of the message being their input; none are built
-  in. Skills and styles are Markdown files under `paths::skills()` and
-  `paths::styles()` (`flikk-core/src/skills.rs`), managed in Settings and by
-  the agent; the style picker sits beside send. cmd/ctrl-K opens the quick
-  command bar.
-* **References:** the composer's `@` picker and drops (Alt-drag clips,
-  transitions and markers from the timeline; media, effects, audio effects,
-  transitions and transcript words; "Add to chat" menu items) insert chips
-  that are sent as tokens the agent reads: `@clip <id8>`, `@media <id8>`,
-  `@marker <id8 or name>`, `@track <id8 or name>`, `@bin <id8>`,
-  `@effect <clip id8>/<effect id8>`, `@transition <clip id8>/in|out`,
-  `@fx <builtin key or project id8>`, `@audiofx <kind>`,
-  `@range <start>-<end>` (timeline seconds, three decimals) and
-  `@time <secs>`. `<id8>` is the id's `Display`. Clicking a chip reveals
-  the object in the editor.
+  library and the audio of the project.
+  - It searches by words: name, category, tags, and the request to the
+    provider. Where the analysis left vectors, it also searches by sound.
+    It tells how many items had no vectors.
+  - `use_library_sound` adds a sound to the "Library" bin of the pool, as
+    the user's edit, like generated audio. With `at`, it proposes the sound
+    in the same way.
+  - `save_sound_to_library` waits for approval.
+  - The ♫ menu of the media pool does the same from a form. Music runs for
+    the length of In/Out.
+* **Prompt** (`flikk-agent/src/prompt.rs`): The system prompt has these
+  parts:
+  - the tool guidance (with or without web and images);
+  - the shared rules (seeing and hearing, time formats, references, cuts in
+    pauses, protected ranges);
+  - the part of the editor;
+  - the FX conventions;
+  - the language.
+
+  Each message carries these items:
+  - an `<editor_context>` (project summary, format, workspace, playhead,
+    selection, in/out, selected words);
+  - the approved style rules;
+  - the picked style as a `<style>` block;
+  - a skill line;
+  - `<approvals>`;
+  - a `<references>` block, when the user referenced objects.
+* **Chat** (`ui/chat*`): Each project has its sessions in
+  `paths::projects()/<project>.chats.json`. Each session resumes its own
+  backend conversation (`agent/sessions.json`).
+  - The tool calls of one run go into one card.
+  - Some calls run off-thread, for example a `flikk` job, or the backend's
+    own web search and fetch. Such a call shows with a spinner from
+    `AgentEvent::ToolStarted` until its `ToolFinished` replaces it. If it
+    still runs when the turn ends, Flikk marks it Stopped.
+  - The change-set card is above the composer. There is one card for each
+    set, for all the turns that added to it. It stays with its outcome
+    until the next message. It has Preview, Review (a checklist with
+    ticks), Reject and Accept.
+  - `ask_user` shows a maximum of six choices.
+  - Skills run as `/name …`. The remaining text of the message is their
+    input. Flikk has no built-in skills.
+  - Skills and styles are Markdown files under `paths::skills()` and
+    `paths::styles()` (`flikk-core/src/skills.rs`). The user manages them
+    in Settings, and the agent manages them too. The style picker is next
+    to send.
+  - cmd/ctrl-K opens the quick command bar.
+* **References:** The `@` picker of the composer and drops insert chips.
+  - Drops come from these sources:
+    - Alt-drag of clips, transitions and markers from the timeline;
+    - media, effects, audio effects, transitions and transcript words;
+    - "Add to chat" menu items.
+  - Flikk sends the chips as tokens that the agent reads:
+    - `@clip <id8>`, `@media <id8>`;
+    - `@marker <id8 or name>`, `@track <id8 or name>`, `@bin <id8>`;
+    - `@effect <clip id8>/<effect id8>`, `@transition <clip id8>/in|out`;
+    - `@fx <builtin key or project id8>`, `@audiofx <kind>`;
+    - `@range <start>-<end>` (timeline seconds, three decimals);
+    - `@time <secs>`.
+  - `<id8>` is the `Display` of the id.
+  - A click on a chip shows the object in the editor.
 
 ## Driving the editor from an external agent
 
-While the editor runs it publishes its MCP bridge in
-`paths::home()/bridge.json` (address, token, pid; owner-only). Any MCP
-client can then use the same tools as the built-in agent:
+While the editor runs, it publishes its MCP bridge in
+`paths::home()/bridge.json` (address, token, pid; owner-only). Then any MCP
+client can use the same tools as the built-in agent:
 
 ```sh
 claude mcp add flikk -- flikk mcp          # Claude Code
 ```
 
-or for Codex, in `~/.codex/config.toml`:
+For Codex, add this to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.flikk]
@@ -703,7 +994,7 @@ command = "flikk"
 args = ["mcp"]
 ```
 
-External calls act with the agent's current role and permissions. Their
-edits land in an "External agent" change set that goes to review when the
-client disconnects or after 90 s without a call; `ask_user` is not
-available to them.
+External calls use the current role and permissions of the agent. Their
+edits go into an "External agent" change set. This set goes to review when
+the client disconnects, or after 90 s without a call. External clients
+cannot use `ask_user`.
