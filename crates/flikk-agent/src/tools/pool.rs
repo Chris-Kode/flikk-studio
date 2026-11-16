@@ -5,7 +5,8 @@
 //! is its source time and the timeline's own views (collages, frames,
 //! zooms, the sound script, spectrograms) see it as they see the program.
 //! An item whose analysis is missing is analysed first, as the pool's
-//! Analyze does, and the call waits for it.
+//! Analyze does, and the call waits for it. `view_web_video` shows a video
+//! file from the web the same way ([`view_alone`]).
 
 use super::audio::{picture_step, pictured, script_done};
 use super::read::media_name;
@@ -15,12 +16,15 @@ use super::view::{
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, fail, media_id, short};
 use crate::bridge::{Content, ToolResult};
+use flikk_core::agent::VisionSettings;
+use flikk_core::memory::SourceFact;
 use flikk_core::model::{
     Clip, ClipContent, MediaInfo, MediaItem, MediaKind, Project, Timeline, Track, TrackKind,
 };
 use flikk_core::services::{AnalysisService, Coverage, JobState, Services};
 use flikk_core::time::FLICKS_PER_SECOND;
 use flikk_core::{Time, TimeRange};
+use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -63,6 +67,48 @@ enum Analysed {
     Stopped,
 }
 
+/// What viewing one item alone needs from the turn it is for, taken on
+/// the UI thread so that the view can be made off it ([`view_alone`]).
+pub(super) struct Viewing {
+    /// The open project's id, name and sequence settings, without its
+    /// media or tracks: what the item's own timeline is made from.
+    project: Project,
+    services: Services,
+    facts: Vec<SourceFact>,
+    vision: VisionSettings,
+    stop: Arc<AtomicBool>,
+}
+
+impl Viewing {
+    pub(super) fn of(ctx: &ToolCtx) -> Self {
+        let open = ctx.project();
+        let mut project = Project::new(open.name.clone());
+        project.id = open.id;
+        project.timeline.settings = open.timeline.settings.clone();
+        Self {
+            project,
+            services: ctx.services.clone(),
+            facts: ctx.memory.facts.clone(),
+            vision: ctx.settings.vision.clone(),
+            stop: ctx.stop.flag(),
+        }
+    }
+
+    /// Set when the turn is stopped.
+    pub(super) fn stop(&self) -> &Arc<AtomicBool> {
+        &self.stop
+    }
+}
+
+/// The item a view is of.
+pub(super) struct Subject {
+    pub item: MediaItem,
+    /// What summaries and errors call it: its file's name.
+    pub name: String,
+    /// What the view opens with: `Media 3f2a91c0 (name)` for a pool item.
+    pub label: String,
+}
+
 pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let id = media_id(project, args.str("media")?)?;
@@ -71,19 +117,45 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .cloned()
         .ok_or_else(|| ToolError("media not found".into()))?;
     let name = media_name(project, id);
+    let subject = Subject {
+        label: format!("Media {} ({name})", short(id)),
+        item,
+        name,
+    };
+    view_alone(Viewing::of(ctx), subject, args.0)
+}
+
+/// What `view_media` shows of `subject` for the looking arguments `args`
+/// (`range`, `detail`, `t`, `zoom`, `audio`), read in the item's own
+/// seconds and at its own frame rate. Fails when the item could not be
+/// read or the arguments don't fit it; a span of it waits for its
+/// analysis first, in the step's job.
+pub(super) fn view_alone(
+    viewing: Viewing,
+    subject: Subject,
+    args: &Map<String, Value>,
+) -> Result<Step, ToolError> {
+    let Subject { item, name, label } = subject;
     let Some(info) = item.info.clone() else {
         return fail(format!(
             "{name} could not be read, so there is nothing to see."
         ));
     };
-    let alone = alone(project, &item);
+    let Viewing {
+        project,
+        services,
+        facts,
+        vision,
+        stop,
+    } = viewing;
+    let alone = alone(&project, &item, &name);
     // Its times are its own seconds; timecode and frames at its own rate.
-    let args = Args(args.0, alone.timeline.settings.rate);
+    let args = Args(args, alone.timeline.settings.rate);
     let look = look(&item, &info, &alone, &args)?;
-    let about = about(&item, &info, &name);
+    let about = about(&item, &info, &label);
     match look {
         Look::Picture { at, zoom } => {
-            let Some(media) = ctx.services.media.clone() else {
+            let Some(media) = services.media.clone() else {
                 return fail("Frames are not available in this build yet.");
             };
             let frame_w = alone.timeline.settings.width;
@@ -93,12 +165,8 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             Ok(Step::Job(job))
         }
         Look::Span { range, span } => {
-            let analysis = to_analyse(ctx.services, &item);
+            let analysis = to_analyse(&services, &item);
             let unanalysable = item.kind != MediaKind::Image && item.fingerprint.is_none();
-            let services = ctx.services.clone();
-            let facts = ctx.memory.facts.clone();
-            let vision = ctx.settings.vision.clone();
-            let stop = ctx.stop.flag();
             let job: Job = Box::new(move || {
                 let mut intro = about;
                 match analysis.map(|a| analyse(&*a, &item, &stop)) {
@@ -155,10 +223,11 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     }
 }
 
-/// `item` alone on a timeline of its own, from its first frame, at its own
-/// size and frame rate (the sequence's, for what has no picture): timeline
-/// time there is its source time.
-fn alone(project: &Project, item: &MediaItem) -> Project {
+/// `item`, called `name`, alone on a timeline of its own in a copy of
+/// `project` (whose sequence settings fill in what the item has not),
+/// from its first frame, at its own size and frame rate (the sequence's,
+/// for what has no picture): timeline time there is its source time.
+fn alone(project: &Project, item: &MediaItem, name: &str) -> Project {
     let info = item.info.as_ref();
     let video = info.and_then(|i| i.video.as_ref());
     let sequence = &project.timeline.settings;
@@ -178,7 +247,7 @@ fn alone(project: &Project, item: &MediaItem) -> Project {
         MediaKind::Video => (TrackKind::Video, info.map_or(Time::ZERO, |i| i.duration)),
         MediaKind::Audio => (TrackKind::Audio, info.map_or(Time::ZERO, |i| i.duration)),
     };
-    let mut track = Track::new(kind, media_name(project, item.id));
+    let mut track = Track::new(kind, name);
     track.clips.push(Clip::new(
         Time::ZERO,
         length,
@@ -285,9 +354,9 @@ fn look(
     }
 }
 
-/// The line a view opens with: which item, what it is, and its clock.
-fn about(item: &MediaItem, info: &MediaInfo, name: &str) -> String {
-    let id = short(item.id);
+/// The line a view opens with: which item (`label`), what it is, and its
+/// clock.
+fn about(item: &MediaItem, info: &MediaInfo, label: &str) -> String {
     let video = info.video.as_ref();
     let length = info.duration.as_secs_f64();
     let sound = if info.audio.is_empty() {
@@ -297,19 +366,17 @@ fn about(item: &MediaItem, info: &MediaInfo, name: &str) -> String {
     };
     match item.kind {
         MediaKind::Image => match video {
-            Some(v) => format!("Media {id} ({name}): a {}×{} picture.", v.width, v.height),
-            None => format!("Media {id} ({name}): a picture."),
+            Some(v) => format!("{label}: a {}×{} picture.", v.width, v.height),
+            None => format!("{label}: a picture."),
         },
         MediaKind::Video => {
             let picture = video
                 .map(|v| format!(" {}×{} at {:.3} fps", v.width, v.height, v.rate.fps()))
                 .unwrap_or_default();
-            format!(
-                "Media {id} ({name}): video{picture}, {length:.2} s, {sound}. Times are its own seconds."
-            )
+            format!("{label}: video{picture}, {length:.2} s, {sound}. Times are its own seconds.")
         }
         MediaKind::Audio => {
-            format!("Media {id} ({name}): audio, {length:.2} s. Times are its own seconds.")
+            format!("{label}: audio, {length:.2} s. Times are its own seconds.")
         }
     }
 }

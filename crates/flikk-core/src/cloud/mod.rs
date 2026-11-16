@@ -12,7 +12,9 @@ mod task;
 mod upscale;
 mod voice;
 
-pub use crate::pool::{generated_bin, image_item, media_item, pool_commands, sample_item};
+pub use crate::pool::{
+    WEB_VIDEOS, generated_bin, image_item, media_item, pool_commands, sample_item, video_item,
+};
 pub use request::{
     AudioLengths, AudioModel, GenerateRequest, ImageMode, ImageModel, MusicSection, Reading,
     ReferenceLimits, SCRIPT_CHARS, SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel,

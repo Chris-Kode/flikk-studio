@@ -7,7 +7,11 @@ use crate::ids::BinId;
 use crate::model::{Bin, MediaItem, MediaKind, Project};
 use std::path::PathBuf;
 
-/// Name of the bin generated `item` goes into.
+/// The pool bin videos the agent took from the web go into.
+pub const WEB_VIDEOS: &str = "Web Videos";
+
+/// Name of the bin `item` goes into: made by a provider or an agent
+/// backend, by what made it; a video nothing made, [`WEB_VIDEOS`].
 pub fn generated_bin(item: &MediaItem) -> &'static str {
     if item.kind == MediaKind::Image {
         return "Images Generated";
@@ -17,6 +21,7 @@ pub fn generated_bin(item: &MediaItem) -> &'static str {
         Some(Capability::Voiceover) => "Voiceover Generated",
         Some(Capability::Video) => "Video Generated",
         Some(Capability::Upscale) => "Video Upscaled",
+        None if item.kind == MediaKind::Video => WEB_VIDEOS,
         _ => "Music Generated",
     }
 }
@@ -44,10 +49,26 @@ pub fn media_item(
 /// Not in a bin yet; with no provider, it has no
 /// [`GenerationInfo`](crate::cloud::GenerationInfo).
 pub fn image_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
+    file_item(path, MediaKind::Image, media)
+}
+
+/// `path`, a video file the agent took from the web, as an item, probed
+/// and fingerprinted by `media` when there is one. Not in a bin yet. Its
+/// `info` is `None` when the file could not be read; whether it has a
+/// picture is for the caller to check.
+pub fn video_item(path: PathBuf, media: Option<&dyn crate::services::MediaService>) -> MediaItem {
+    file_item(path, MediaKind::Video, media)
+}
+
+fn file_item(
+    path: PathBuf,
+    kind: MediaKind,
+    media: Option<&dyn crate::services::MediaService>,
+) -> MediaItem {
     MediaItem {
         fingerprint: media.and_then(|m| m.fingerprint(&path).ok()),
         info: media.and_then(|m| m.probe(&path).ok()),
-        ..MediaItem::new(path, MediaKind::Image)
+        ..MediaItem::new(path, kind)
     }
 }
 

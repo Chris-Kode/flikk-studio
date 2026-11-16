@@ -82,7 +82,7 @@ pub fn generated() -> PathBuf {
     sub("generated")
 }
 
-/// Pictures the agent took from the web for the pool.
+/// Pictures and videos the agent took from the web for the pool.
 pub fn web() -> PathBuf {
     sub("web")
 }

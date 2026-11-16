@@ -1,7 +1,12 @@
-//! `view_web_image`: a picture from the web, shown to the agent. The
-//! backends' own web tools read pages as text only, so the agent cannot see
-//! the pictures on them. With `add`, the picture also goes into the pool's
-//! Web Images bin. Only offered when the user allows the web.
+//! Pictures and videos from the web, shown to the agent: `view_web_image`
+//! here, `view_web_video` in [`video`]. The backends' own web tools read
+//! pages as text only, so the agent cannot see the pictures and videos on
+//! them. With `add`, what it looked at also goes into the pool, in the Web
+//! Images or Web Videos bin. Only offered when the user allows the web.
+
+pub(crate) mod video;
+
+mod page;
 
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail, short};
@@ -9,7 +14,7 @@ use crate::bridge::{Content, ToolResult};
 use base64::Engine;
 use flikk_core::bus::{Author, CommandBus};
 use flikk_core::cloud;
-use flikk_core::model::MediaItem;
+use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::paths;
 use flikk_core::services::MediaService;
 use image::ImageFormat;
@@ -18,6 +23,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub const TOOL: &str = "view_web_image";
+
+/// Whether `name` is one of the tools that reach the web, offered only
+/// when the user allows it.
+pub fn is_tool(name: &str) -> bool {
+    name == TOOL || name == video::TOOL
+}
 
 /// The pool bin added pictures go to.
 pub const BIN: &str = "Web Images";
@@ -29,14 +40,7 @@ const MAX_BYTES: u64 = 25 << 20;
 const MAX_SIDE: u32 = 1568;
 
 pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
-    if !ctx.settings.web {
-        return fail("The user has not allowed the web for the agent.");
-    }
-    let url = args.str("url")?.trim().to_owned();
-    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
-    if !matches!(scheme.as_deref(), Some("http" | "https")) {
-        return fail("`url` is the http or https address of a picture");
-    }
+    let url = address(ctx, args, "a picture")?;
     let add = args.opt_bool("add")?.unwrap_or(false);
     let media = ctx.services.media.clone();
     let job: Job = Box::new(move || match fetch(&url, add, media.as_deref()) {
@@ -44,6 +48,21 @@ pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         Err(ToolError(e)) => JobDone::Done(Done::error(e)),
     });
     Ok(Step::Job(job))
+}
+
+/// The `url` a web tool was given, once the user allows the web and it is
+/// an http or https address; else an error saying it is the address of
+/// `what`.
+fn address(ctx: &ToolCtx, args: &Args, what: &str) -> ToolResultOf<String> {
+    if !ctx.settings.web {
+        return fail("The user has not allowed the web for the agent.");
+    }
+    let url = args.str("url")?.trim().to_owned();
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    if !matches!(scheme.as_deref(), Some("http" | "https")) {
+        return fail(format!("`url` is the http or https address of {what}"));
+    }
+    Ok(url)
 }
 
 fn fetch(url: &str, add: bool, media: Option<&dyn MediaService>) -> ToolResultOf<JobDone> {
@@ -85,7 +104,7 @@ fn fetch(url: &str, add: bool, media: Option<&dyn MediaService>) -> ToolResultOf
     }
     // The original file, kept with the user's data so the project can use it.
     let kept = paths::web().join(format!("{}.{ext}", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&kept, &bytes)?;
+    flikk_os::fs::write_atomic(&kept, &bytes)?;
     Ok(JobDone::Fetched {
         item: Box::new(cloud::image_item(kept, media)),
         done: Box::new(done),
@@ -197,9 +216,9 @@ pub(super) fn http_agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-/// Back on the UI thread: add the picture to the pool's `bin` at once, as
-/// `author`'s change (the user's when the turn is gone), so a proposal can
-/// use it.
+/// Back on the UI thread: add the picture or video to the pool's `bin` at
+/// once, as `author`'s change (the user's when the turn is gone), so a
+/// proposal can use it.
 pub fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
@@ -207,10 +226,14 @@ pub fn finish(
     mut done: Done,
     bin: &str,
 ) -> Done {
-    let id = item.id;
+    let (id, kind) = (item.id, item.kind);
     let commands = cloud::pool_commands(bus.project(), item, bin);
     let author = author.cloned().unwrap_or(Author::User);
-    let note = match bus.execute_shared_as(commands, "Add picture", author) {
+    let label = match kind {
+        MediaKind::Image => "Add picture",
+        _ => "Add video",
+    };
+    let note = match bus.execute_shared_as(commands, label, author) {
         Ok(_) => format!(
             " Added to the pool as media {} in the {bin} bin.",
             short(id)

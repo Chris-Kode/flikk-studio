@@ -610,7 +610,9 @@ impl EditorState {
 
     /// [`Self::add_generated`] as `author`: the agent's for what it asked
     /// for and the user approved, applied at once (the approval was the
-    /// permission), so its own proposals to place it don't conflict.
+    /// permission), so its own proposals to place it don't conflict. A
+    /// video nothing made (one the agent took from the web) goes to the
+    /// Web Videos bin instead ([`flikk_core::cloud::generated_bin`]).
     pub(crate) fn add_generated_as(
         &mut self,
         item: MediaItem,
@@ -624,6 +626,7 @@ impl EditorState {
             Some(Capability::Voiceover) => "Generate voiceover",
             Some(Capability::Video) => "Generate video",
             Some(Capability::Upscale) => "Upscale video",
+            None if item.kind == MediaKind::Video => "Add video",
             _ => "Generate music",
         };
         let bin = flikk_core::cloud::generated_bin(&item);
