@@ -3,22 +3,30 @@
 //! files on that page. A file is downloaded once into the cache, under a
 //! name made from its address that it gets only once whole; with `add` it
 //! moves into the user's data and goes into the pool's Web Videos bin.
+//!
+//! When the provider picked to transcribe would be paid to analyse a video
+//! the agent looks at, the first look asks the user, on an approval card,
+//! once per video in a session; approving runs [`transcribe`]. Until the
+//! video is transcribed, a look shows it without its sound script, as it
+//! does with `add`, whose video the pool's import asks about instead.
 
-use super::super::pool::{Subject, Viewing, view_alone};
-use super::super::{Done, Job, JobDone, Step, ToolCtx};
+use super::super::pool::{Analysed, Paid, Subject, Viewing, analyse, view_alone};
+use super::super::{ApprovalRequest, Done, Job, JobDone, Step, ToolCtx};
 use super::{address, http_agent, page};
 use crate::args::{Args, ToolError, ToolResultOf, fail};
 use flikk_core::cloud;
-use flikk_core::model::MediaItem;
-use flikk_core::services::MediaService;
+use flikk_core::command::ToolCategory;
+use flikk_core::model::{Fingerprint, MediaItem};
+use flikk_core::services::{MediaService, Services};
 use flikk_core::{cache_sweep, paths};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use ureq::ResponseExt;
 
@@ -35,7 +43,12 @@ const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Read and written at a time; the turn's stop is checked between.
 const CHUNK: usize = 256 << 10;
 
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+/// The videos the user was asked this app session to have transcribed by
+/// a provider, by fingerprint: each is asked about once. Kept in memory
+/// only, so the next session may ask again.
+static ASKED: LazyLock<Mutex<HashSet<Fingerprint>>> = LazyLock::new(Default::default);
+
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let call = Call {
         url: address(
             ctx,
@@ -95,6 +108,7 @@ impl Call {
             item: item.clone(),
             name: name_of(&self.url),
             label: self.url.clone(),
+            paid: self.paid(&item),
         };
         let done = match view_alone(self.viewing, subject, &self.looking) {
             Ok(Step::Done(done)) => *done,
@@ -104,6 +118,11 @@ impl Call {
             },
             Err(ToolError(e)) => Done::error(e),
         };
+        if done.approval.is_some()
+            && let Some(fp) = &item.fingerprint
+        {
+            flikk_os::sync::lock(&ASKED).insert(fp.clone());
+        }
         if !self.add || done.result.is_error {
             return Ok(JobDone::Done(done));
         }
@@ -113,6 +132,73 @@ impl Call {
             done: Box::new(done),
             bin: cloud::WEB_VIDEOS,
         })
+    }
+
+    /// What a look at `item` does when analysing it would pay a provider
+    /// to transcribe it: with `add`, or once the user was asked about it,
+    /// it is shown without its sound; otherwise the user is asked.
+    fn paid(&self, item: &MediaItem) -> Paid {
+        let asked =
+            (item.fingerprint.as_ref()).is_some_and(|fp| flikk_os::sync::lock(&ASKED).contains(fp));
+        if self.add || asked {
+            return Paid::Skip;
+        }
+        let length = item.info.as_ref().map_or(String::new(), |i| {
+            format!(" ({})", length_text(i.duration.as_secs_f64()))
+        });
+        Paid::Ask(ApprovalRequest {
+            tool: TOOL.into(),
+            // What a provider does for money.
+            category: ToolCategory::Generate,
+            args: json!({ "url": self.url }),
+            summary: format!(
+                "Transcribe {}{length} with your transcription provider",
+                name_of(&self.url)
+            ),
+            allowed: false,
+        })
+    }
+}
+
+/// What approving a request of this tool does: analyse the video it names
+/// as the pool's Analyze does, with the provider picked to transcribe, and
+/// wait for it. Slow; run it off the UI thread. Returns what to tell the
+/// agent, or why it failed: the video left the cache, it could not be
+/// read, or its analysis failed or was cancelled.
+pub fn transcribe(services: &Services, args: &Value) -> Result<String, String> {
+    let url = (args.get("url").and_then(Value::as_str)).ok_or("the request could not be read")?;
+    let name = name_of(url);
+    let file = cached(url);
+    if !file.is_file() {
+        return Err(format!(
+            "{name} left the cache before it could be transcribed."
+        ));
+    }
+    cache_sweep::mark_used(&file);
+    let (Some(media), Some(analysis)) = (services.media.as_deref(), services.analysis.as_deref())
+    else {
+        return Err("Analysis is not available in this build.".into());
+    };
+    let item = cloud::video_item(file, Some(media));
+    if item.fingerprint.is_none() {
+        return Err(format!("{name} could not be read for analysis."));
+    }
+    // Nothing stops it but the analysis itself: approving is the go-ahead.
+    match analyse(analysis, &item, &AtomicBool::new(false)) {
+        Analysed::Done => Ok(format!(
+            "{name} is transcribed: call {TOOL} on it again to see and hear it."
+        )),
+        Analysed::Failed(e) => Err(format!("Analysing {name} failed: {e}")),
+        Analysed::Cancelled | Analysed::Stopped => Err(format!("Analysing {name} was cancelled.")),
+    }
+}
+
+/// `secs` as the approval card says a length: `45 s`, `2 min 05 s`.
+fn length_text(secs: f64) -> String {
+    let secs = secs.round() as u64;
+    match secs / 60 {
+        0 => format!("{secs} s"),
+        min => format!("{min} min {:02} s", secs % 60),
     }
 }
 

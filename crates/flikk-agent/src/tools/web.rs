@@ -4,7 +4,7 @@
 //! them. With `add`, what it looked at also goes into the pool, in the Web
 //! Images or Web Videos bin. Only offered when the user allows the web.
 
-pub(crate) mod video;
+pub mod video;
 
 mod page;
 
@@ -39,7 +39,7 @@ const MAX_BYTES: u64 = 25 << 20;
 /// Longest side of the copy the agent sees; bigger pictures are scaled down.
 const MAX_SIDE: u32 = 1568;
 
-pub fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
+pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
     let url = address(ctx, args, "a picture")?;
     let add = args.opt_bool("add")?.unwrap_or(false);
     let media = ctx.services.media.clone();
@@ -219,7 +219,7 @@ pub(super) fn http_agent(timeout: Duration) -> ureq::Agent {
 /// Back on the UI thread: add the picture or video to the pool's `bin` at
 /// once, as `author`'s change (the user's when the turn is gone), so a
 /// proposal can use it.
-pub fn finish(
+pub(crate) fn finish(
     bus: &mut CommandBus,
     author: Option<&Author>,
     item: MediaItem,

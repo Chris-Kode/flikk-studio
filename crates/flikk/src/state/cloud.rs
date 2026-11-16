@@ -736,7 +736,9 @@ impl EditorState {
     /// Whether analyzing `item` now would send its sound to the provider
     /// picked to transcribe: it has sound, it may hold speech (it is not
     /// music or a sound effect, [`MediaItem::heard_only`]), and no script
-    /// stands in for its words.
+    /// stands in for its words. For a file outside the pool, such as a web
+    /// video the agent looks at, `AnalysisService::pays_for` answers the
+    /// same question, from the service's own settings and cached results.
     fn would_pay(&self, item: &MediaItem) -> bool {
         let script = item.generated.as_deref().and_then(|g| g.script());
         let heard = item.info.as_ref().is_none_or(|i| !i.audio.is_empty());

@@ -25,7 +25,9 @@ say what you looked up. Keep private details of the project out of your \
 searches. Reading a page gives you its text only. To see a picture on it, \
 pass the picture's address to `view_web_image`. To see a video file (MP4, \
 MOV, M4V, WebM, MKV), pass its address to `view_web_video`, which shows it \
-as `view_media` does (frames, one frame, a zoom, its sound); pass it the \
+as `view_media` does (frames, one frame, a zoom, its sound); when \
+transcribing it costs the user money, the first look asks them, and a \
+video they did not allow is shown without its sound. Pass it the \
 page's address to list the video files on the page. Both add what they \
 show to the pool only when the user asks for it. Nothing else from the web \
 comes into the project.";

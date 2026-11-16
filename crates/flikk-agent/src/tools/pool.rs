@@ -6,14 +6,15 @@
 //! zooms, the sound script, spectrograms) see it as they see the program.
 //! An item whose analysis is missing is analysed first, as the pool's
 //! Analyze does, and the call waits for it. `view_web_video` shows a video
-//! file from the web the same way ([`view_alone`]).
+//! file from the web the same way ([`view_alone`]), asking the user first
+//! when that analysis would pay a provider to transcribe it ([`Paid`]).
 
 use super::audio::{picture_step, pictured, script_done};
 use super::read::media_name;
 use super::view::{
     self, Clock, DETAIL_MAX, FRAME_WIDTH, image_content, save_png, zoom_region, zoom_width, zoomed,
 };
-use super::{Done, Job, JobDone, Step, ToolCtx};
+use super::{ApprovalRequest, Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, fail, media_id, short};
 use crate::bridge::{Content, ToolResult};
 use flikk_core::agent::VisionSettings;
@@ -56,7 +57,7 @@ enum Span {
 }
 
 /// How waiting for an item's analysis ended.
-enum Analysed {
+pub(super) enum Analysed {
     Done,
     /// The job failed; its results hold what was made before it did.
     Failed(String),
@@ -107,6 +108,21 @@ pub(super) struct Subject {
     pub name: String,
     /// What the view opens with: `Media 3f2a91c0 (name)` for a pool item.
     pub label: String,
+    /// What a span does when analysing the item would send its sound to a
+    /// provider to transcribe, for money ([`AnalysisService::pays_for`]).
+    pub paid: Paid,
+}
+
+/// What a view does when the analysis it waits for would pay a provider
+/// to transcribe the item.
+pub(super) enum Paid {
+    /// Analyse anyway: a pool item, as `view_media` always has.
+    Analyse,
+    /// Ask the user with this request; the call waits on their answer and
+    /// gets it as its result.
+    Ask(ApprovalRequest),
+    /// Show it unanalysed, saying why.
+    Skip,
 }
 
 pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
@@ -121,6 +137,7 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         label: format!("Media {} ({name})", short(id)),
         item,
         name,
+        paid: Paid::Analyse,
     };
     view_alone(Viewing::of(ctx), subject, args.0)
 }
@@ -129,13 +146,20 @@ pub fn view_media(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 /// (`range`, `detail`, `t`, `zoom`, `audio`), read in the item's own
 /// seconds and at its own frame rate. Fails when the item could not be
 /// read or the arguments don't fit it; a span of it waits for its
-/// analysis first, in the step's job.
+/// analysis first, in the step's job, unless that would pay a provider
+/// and the subject says otherwise ([`Paid`]). A single frame or picture
+/// never waits for analysis.
 pub(super) fn view_alone(
     viewing: Viewing,
     subject: Subject,
     args: &Map<String, Value>,
 ) -> Result<Step, ToolError> {
-    let Subject { item, name, label } = subject;
+    let Subject {
+        item,
+        name,
+        label,
+        paid,
+    } = subject;
     let Some(info) = item.info.clone() else {
         return fail(format!(
             "{name} could not be read, so there is nothing to see."
@@ -169,6 +193,18 @@ pub(super) fn view_alone(
             let unanalysable = item.kind != MediaKind::Image && item.fingerprint.is_none();
             let job: Job = Box::new(move || {
                 let mut intro = about;
+                let analysis = match (analysis, paid) {
+                    (Some(service), Paid::Ask(request)) if service.pays_for(&item) => {
+                        return JobDone::Done(asking(request, &name));
+                    }
+                    (Some(service), Paid::Skip) if service.pays_for(&item) => {
+                        intro.push_str(
+                            " Its sound is not analysed: transcribing it is paid for, and the user has not allowed that.",
+                        );
+                        None
+                    }
+                    (analysis, _) => analysis,
+                };
                 match analysis.map(|a| analyse(&*a, &item, &stop)) {
                     None if unanalysable => {
                         intro.push_str(" Its file could not be read for analysis.")
@@ -391,10 +427,14 @@ fn to_analyse(services: &Services, item: &MediaItem) -> Option<Arc<dyn AnalysisS
 }
 
 /// Analyse `item` as the pool's Analyze does (only what its results lack)
-/// and wait until that is done, unless the turn is stopped first. The pool
+/// and wait until that is done, unless `stop` is set first. The pool
 /// shows the job's progress meanwhile; a job of the item already queued or
 /// running is the one waited on.
-fn analyse(service: &dyn AnalysisService, item: &MediaItem, stop: &AtomicBool) -> Analysed {
+pub(super) fn analyse(
+    service: &dyn AnalysisService,
+    item: &MediaItem,
+    stop: &AtomicBool,
+) -> Analysed {
     let job = service.analyze(item);
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -465,6 +505,18 @@ fn picture(
         summary: format!("{name}: {what}"),
         images: vec![path],
         ..Default::default()
+    }
+}
+
+/// The call about `name` waiting on the user to answer `request`: its
+/// result is what they decide, so this one's text is only for the log.
+fn asking(request: ApprovalRequest, name: &str) -> Done {
+    Done {
+        approval: Some(request),
+        ..Done::text(
+            format!("{name}: asked to transcribe"),
+            "Waiting for the user to allow transcribing its sound.",
+        )
     }
 }
 

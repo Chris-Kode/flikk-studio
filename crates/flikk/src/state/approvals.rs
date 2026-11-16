@@ -114,6 +114,15 @@ impl EditorState {
                 };
                 self.settle_later(id, summary, work, done, cx)
             }
+            Ok(approve::Started::Transcribe(work)) => {
+                let what = summary.clone();
+                let done = move |this: &mut Self, line: String, _: &mut Context<Self>| {
+                    this.agent
+                        .report_outcome(id, format!("approved: {what}; {line}"));
+                    ApprovalOutcome::Done("Transcribed".into())
+                };
+                self.settle_later(id, summary, work, done, cx)
+            }
             Ok(approve::Started::Respeak(work)) => {
                 let what = summary.clone();
                 let done =

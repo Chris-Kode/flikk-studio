@@ -210,6 +210,16 @@ pub trait AnalysisService: Send + Sync {
     fn analyze_in_background(&self, item: &MediaItem) -> JobId {
         self.analyze(item)
     }
+    /// Whether [`AnalysisService::analyze`] on `item` now would send its
+    /// sound to a provider to transcribe, which costs the user money: a
+    /// provider transcribes, `item` has a fingerprint and sound, words
+    /// are wanted from it (it is not music, a sound effect or a voiceover
+    /// with its script), and its cached results lack them. Cheap enough
+    /// to ask before every look; it may read the disk cache. A service
+    /// that never pays answers `false`.
+    fn pays_for(&self, _item: &MediaItem) -> bool {
+        false
+    }
     /// Drop the analysis waiting in the background that would transcribe:
     /// a provider was picked to transcribe. The files whose analysis was
     /// dropped, in the order queued, to ask the user about.

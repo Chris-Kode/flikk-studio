@@ -371,6 +371,22 @@ impl AnalysisService for LocalAnalysis {
         self.analyze_with(item, options)
     }
 
+    fn pays_for(&self, item: &MediaItem) -> bool {
+        // As `analyze_with` and `run` decide it for a plain request: the
+        // plan wants a transcript whether or not the file has sound, and
+        // `run` sends only what the cached result lacks.
+        let Some(fp) = item.fingerprint.as_ref().filter(|_| has_audio(item)) else {
+            return false;
+        };
+        let plan = Plan::for_item(&self.shared, item, item.heard_only());
+        let plan = match self.shared.entry(fp) {
+            Some(cached) if cached.steps.covers(&plan.ran()) => return false,
+            Some(cached) => plan.missing(&cached.steps),
+            None => plan,
+        };
+        plan.online.is_some()
+    }
+
     fn analyze_sound(&self, item: &MediaItem) {
         let wanted = cfg!(feature = "sounds")
             && lock(&self.shared.config).steps.sounds

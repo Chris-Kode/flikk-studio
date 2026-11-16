@@ -35,7 +35,7 @@ pub mod upscale;
 pub mod video;
 mod view;
 pub mod voices;
-pub(crate) mod web;
+pub mod web;
 
 pub(crate) use catalog::{ToolSpec, catalog};
 
