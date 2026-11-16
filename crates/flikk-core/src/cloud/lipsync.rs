@@ -83,6 +83,18 @@ impl LipSyncVoice {
                 .filter(|d| *d > Time::ZERO),
         })
     }
+
+    /// Whether it runs to the end of video `face`: the video made ends
+    /// where the shorter of the two does, so only then is it as long as
+    /// the face and can stand in for it in its clips. `false` when either
+    /// length isn't known.
+    pub fn covers(&self, face: &LipSyncFace) -> bool {
+        match (self.length, face.length) {
+            // A length read off a file can land a hair short.
+            (Some(voice), Some(face)) => voice.as_secs_f64() + 0.05 >= face.as_secs_f64(),
+            _ => false,
+        }
+    }
 }
 
 /// What one lip-sync model takes, so a request is checked before it costs

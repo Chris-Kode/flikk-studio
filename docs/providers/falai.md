@@ -320,7 +320,7 @@ The result is at `video.url`, and it goes to the Video Lip-synced bin.
 | `fal-ai/sync-lipsync/v2/pro` | video | `video_url`, `audio_url`, `sync_mode: "cut_off"` | — |
 | `fal-ai/sync-lipsync/v3` | video | `video_url`, `audio_url`, `sync_mode: "cut_off"` | — |
 | `veed/lipsync/v2` | video | `video_url`, `audio_url` | — |
-| `fal-ai/heygen/v3/lipsync/precision` | video | `video_url`, `audio_url` | — |
+| `fal-ai/heygen/v3/lipsync/precision` | video | `video_url`, `audio_url`, `enable_dynamic_duration: false` | — |
 | `fal-ai/kling-video/lipsync/audio-to-video` | video | `video_url`, `audio_url` | video mp4 or mov, 2–10 s, 720p or 1080p (sides 720–1920 px), 100 MB at most; voice 2–60 s, 5 MB at most |
 | `fal-ai/latentsync` | video | `video_url`, `audio_url` | — |
 | `fal-ai/sync-lipsync/v3/image-to-video` | picture | `image_url`, `audio_url` | JPEG, PNG or WebP |
@@ -336,9 +336,13 @@ The result is at `video.url`, and it goes to the Video Lip-synced bin.
   length out of range, a length it does not know where the model has a
   range, a Kling video with a side out of range, and a Kling file that
   is too large. The other limits are fal's to check.
-- The editor does not send the optional fields: HeyGen's
-  `enable_dynamic_duration` (on by default), `start_time` and
-  `end_time`, LatentSync's `loop_mode` and `guidance_scale`, a prompt to
+- HeyGen gets `enable_dynamic_duration: false`, so that it does not
+  change the length of the video.
+- The editor offers "Replace clips" only when the voice is as long as
+  the video or longer. With a shorter voice, the result is shorter than
+  the clips that show the video.
+- The editor does not send the optional fields: HeyGen's `start_time`
+  and `end_time`, LatentSync's `loop_mode` and `guidance_scale`, a prompt to
   the picture models, or the `options` of Sync 3.
 
 We read the schemas on 2026-11-16. fal checks the key before the body,

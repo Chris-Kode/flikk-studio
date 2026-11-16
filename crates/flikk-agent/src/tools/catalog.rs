@@ -2016,7 +2016,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                 json!({
                     "face": string("Media id of the video or picture in the pool whose face speaks"),
                     "voice": string("Media id of the sound in the pool it says, such as a voiceover"),
-                    "replace": boolean("Propose the lip-synced video in place of this video in its clips on picture tracks (default false: it only goes to the pool); not for a picture")
+                    "replace": boolean("Propose the lip-synced video in place of this video in its clips on picture tracks (default false: it only goes to the pool); not for a picture, and only with a voice at least as long as the video")
                 }),
                 &["face", "voice"],
             ),

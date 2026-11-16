@@ -38,6 +38,11 @@ pub(crate) fn parse(
     if replace && face.kind == FaceKind::Picture {
         return fail("`replace` is for a video face; leave it out for a picture");
     }
+    if replace && !voice.covers(&face) {
+        return fail(
+            "`replace` needs a voice at least as long as the video: the result ends where the shorter of the two does, so its clips would run past it. Leave `replace` out, or use a voice that covers the video",
+        );
+    }
     let request = GenerateRequest::LipSync { face, voice };
     if let Some(model) = model {
         model

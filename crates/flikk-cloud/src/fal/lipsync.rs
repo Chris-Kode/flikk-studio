@@ -93,7 +93,14 @@ pub const LIPSYNC: &[FalLipSync] = &[
             ..VIDEO
         },
         largest: (None, None),
-        input: |face, voice, _| json!({ "video_url": face, "audio_url": voice }),
+        // Its length stays the face's, so it can stand in for it in clips.
+        input: |face, voice, _| {
+            json!({
+                "video_url": face,
+                "audio_url": voice,
+                "enable_dynamic_duration": false,
+            })
+        },
     },
     // An mp4 or mov of 2 to 10 s at 720p or 1080p (sides of 720 to 1920),
     // 100 MB at most; a voice of 2 to 60 s, 5 MB at most.

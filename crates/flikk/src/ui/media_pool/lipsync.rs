@@ -29,7 +29,8 @@ pub struct LipSyncForm {
     voice: Option<Picker>,
     /// The face is a video a clip shows on a picture track.
     used: bool,
-    /// Those clips show the lip-synced video once it lands.
+    /// Those clips show the lip-synced video once it lands, when it is as
+    /// long as the face ([`Self::replaceable`]).
     replace: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -81,6 +82,12 @@ impl LipSyncForm {
         })
     }
 
+    /// The lip-synced video can stand in for the face in its clips: a
+    /// clip shows the face, and the voice picked runs to its end.
+    fn replaceable(&self, cx: &App) -> bool {
+        self.used && self.voice(cx).is_some_and(|v| v.covers(&self.face))
+    }
+
     /// Why the model can't make it, when it can't.
     fn problem(&self, cx: &App) -> Option<String> {
         let Some(request) = self.request(cx) else {
@@ -101,7 +108,7 @@ impl LipSyncForm {
         let Some(request) = self.request(cx) else {
             return false;
         };
-        let (media, replace) = (self.media, self.used && self.replace);
+        let (media, replace) = (self.media, self.replaceable(cx) && self.replace);
         self.state
             .update(cx, |s, cx| s.make_version(media, request, replace, cx));
         true
@@ -178,7 +185,7 @@ impl Render for LipSyncForm {
                         ),
                 ))
             })
-            .when(self.used, |el| {
+            .when(self.replaceable(cx), |el| {
                 el.child(form::row(
                     "Timeline",
                     Switch::new("lipsync-replace")
