@@ -45,7 +45,7 @@ pub enum Destination {
     /// Proposed on the timeline as well.
     Timeline(Placement),
     /// Proposed in place of this video in its clips: it is a version of it
-    /// (an upscale).
+    /// (an upscale, or a lip sync).
     Replace(MediaId),
 }
 
@@ -53,6 +53,39 @@ impl From<Option<Placement>> for Destination {
     fn from(placement: Option<Placement>) -> Self {
         placement.map_or(Self::Pool, Self::Timeline)
     }
+}
+
+/// A new version of a pool video ("Upscale to 1080P: Interview_A.mov"),
+/// and whether its clips switch to it.
+pub(crate) fn version_summary(request: &GenerateRequest, replaces: Option<MediaId>) -> String {
+    let text = request.summary();
+    match replaces {
+        Some(_) => format!("{text}, in place of its clips"),
+        None => text,
+    }
+}
+
+/// A new version of a pool video with the video it replaces, as an
+/// approval carries it.
+pub(crate) fn version_json(request: &GenerateRequest, replaces: Option<MediaId>) -> Value {
+    json!({
+        "request": request,
+        "replace": replaces.map(|m| m.0.to_string()),
+    })
+}
+
+/// What [`version_json`] made.
+pub fn version_from_json(value: &Value) -> Option<(GenerateRequest, Destination)> {
+    let request = serde_json::from_value(value.get("request")?.clone()).ok()?;
+    let replaces = value
+        .get("replace")
+        .and_then(Value::as_str)
+        .and_then(|m| uuid::Uuid::parse_str(m).ok())
+        .map(MediaId);
+    Some((
+        request,
+        replaces.map_or(Destination::Pool, Destination::Replace),
+    ))
 }
 
 /// The request and its placement, from the tool's arguments.

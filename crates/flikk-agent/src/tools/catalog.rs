@@ -2009,6 +2009,19 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::lipsync::TOOL,
+            Some(Generate),
+            "Make a face in the pool say a sound in the pool with the lip-sync provider and model the user set up: the mouth in a video is moved to the voice, or a picture is brought to life speaking it. Each model takes either videos or pictures. On fal, Sync Lipsync 2, Sync Lipsync 2 Pro, Sync 3, VEED Lipsync, HeyGen Lipsync Precision, Kling LipSync (videos of 2–10 s at 720p or 1080p, voices of 2–60 s) and LatentSync take videos; Sync 3 Avatar, Kling AI Avatar, Creatify Aurora and OmniHuman 1.5 (voices of 60 s at most) take pictures. On Pika, Sync Lipsync 2, Sync Lipsync 2 Pro, Sync 3 and Kling Lipsync (the same limits as on fal) take videos; Kling AI Avatar (voices of 2–300 s) takes pictures. ElevenLabs has no lip sync on video: it only animates pictures, with Creatify Aurora. The result's sound is the voice; a Sync model ends it where the shorter of the video and the voice ends. It lands in the pool's Video Lip-synced bin; with `replace` (videos only) it is also proposed in place of the source in its clips on picture tracks (same source times; sound clips keep the source). It costs the user money and takes minutes: each call waits for their approval and then returns its media id. Offer it after a voiceover or a fixed word changes what a speaker on screen says. A face or voice the model can't take is refused with why before anything is spent.",
+            object(
+                json!({
+                    "face": string("Media id of the video or picture in the pool whose face speaks"),
+                    "voice": string("Media id of the sound in the pool it says, such as a voiceover"),
+                    "replace": boolean("Propose the lip-synced video in place of this video in its clips on picture tracks (default false: it only goes to the pool); not for a picture")
+                }),
+                &["face", "voice"],
+            ),
+        ),
+        spec(
             super::image::TOOL,
             Some(Generate),
             "Make a picture: a still, a background, a title card, a texture, a cutout, or an edit of pictures in the pool or frames of the program (restyle a shot, change what is in it, combine a character with a place). It is made by the image provider and model the user set up in Settings → Integrations (on fal: Nano Banana, GPT Image, FLUX 3, Seedream, Ideogram, Grok Imagine, Qwen Image, Krea or Recraft; on Pika: Nano Banana, GPT Image, Seedream, Ideogram, Grok Imagine, Muse or Recraft), else with the user's ChatGPT plan (GPT Image, through their Codex sign-in), which makes pictures from a description only. It lands in the pool's Images Generated bin, to use like any other picture. Each one costs the user money or counts against their plan: make one only when the user asks for a picture. Each call waits for their approval and then returns its media id. It takes up to a couple of minutes. Shapes, resolutions, how many pictures it follows and transparency depend on the model the user picked; a request it can't make is refused with its limits before anything is spent.",

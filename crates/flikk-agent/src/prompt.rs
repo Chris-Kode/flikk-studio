@@ -234,6 +234,15 @@ generated small (480p) and upscaled once kept cost less than making every \
 take large. `generate_video` makes videos at the resolution the user set \
 in Settings unless you ask for one.
 
+Making a speaker say new words: `lip_sync` (generate group) has the \
+provider the user set up for lip sync move the mouth in a pool video to a \
+pool sound, or bring a pool picture to life speaking it, into the pool's \
+Video Lip-synced bin; with `replace` a video is proposed in place of the \
+source in its clips. It costs the user money, so offer it, don't just do \
+it: after a voiceover or a fixed word (`replace_words`) changes what a \
+speaker on screen says, so the mouth matches the new words. Each model \
+takes either videos or pictures, and refuses what it can't take with why.
+
 Placing things on screen: pictures, overlays, generators, captions and \
 titles all move, scale, stretch, rotate and skew about an anchor. \
 `get_layout` says where everything visible sits at a time (its box, \

@@ -3,14 +3,13 @@
 //! sound. It spends the user's money, so each call waits for their
 //! approval. The file goes to the pool's Video Upscaled bin;
 //! with `replace` it is also proposed in place of the source in its clips
-//! on picture tracks. Adding to the pool and proposing are `generate`'s.
+//! on picture tracks. Adding to the pool, proposing, and the approval's
+//! summary and JSON are `generate`'s.
 
-use super::generate::Destination;
 use crate::args::{Args, ToolError, ToolResultOf, fail, media_id, short};
 use flikk_core::MediaId;
 use flikk_core::cloud::{CloudError, GenerateRequest, UpscaleModel, UpscaleSource};
 use flikk_core::model::Project;
-use serde_json::{Value, json};
 
 pub const TOOL: &str = "upscale_video";
 
@@ -53,35 +52,4 @@ pub fn error_text(e: &CloudError) -> String {
         ),
         e => super::generate::error_text(e),
     }
-}
-
-/// "Upscale to 1080P: Interview_A.mov", and whether its clips switch.
-pub(crate) fn summary(request: &GenerateRequest, replaces: Option<MediaId>) -> String {
-    let text = request.summary();
-    match replaces {
-        Some(_) => format!("{text}, in place of its clips"),
-        None => text,
-    }
-}
-
-/// The request with the video it replaces, as an approval carries it.
-pub(crate) fn request_json(request: &GenerateRequest, replaces: Option<MediaId>) -> Value {
-    json!({
-        "request": request,
-        "replace": replaces.map(|m| m.0.to_string()),
-    })
-}
-
-/// What [`request_json`] made.
-pub fn from_json(value: &Value) -> Option<(GenerateRequest, Destination)> {
-    let request = serde_json::from_value(value.get("request")?.clone()).ok()?;
-    let replaces = value
-        .get("replace")
-        .and_then(Value::as_str)
-        .and_then(|m| uuid::Uuid::parse_str(m).ok())
-        .map(MediaId);
-    Some((
-        request,
-        replaces.map_or(Destination::Pool, Destination::Replace),
-    ))
 }

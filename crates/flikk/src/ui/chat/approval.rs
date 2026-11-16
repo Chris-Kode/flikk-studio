@@ -397,9 +397,9 @@ fn card(id: impl Into<ElementId>, framed: bool) -> Stateful<Div> {
 /// What a request makes or does: a voice, a sound, a picture, a video, a
 /// render, or something kept in memory.
 fn request_icon(request: &ApprovalRequest) -> IconName {
-    use flikk_agent::tools::{generate, image, upscale};
+    use flikk_agent::tools::{generate, image, lipsync, upscale};
     match request.tool.as_str() {
-        "generate_video" | upscale::TOOL => IconName::Video,
+        "generate_video" | upscale::TOOL | lipsync::TOOL => IconName::Video,
         image::TOOL => IconName::Image,
         "generate_audio" => match generate::from_json(&request.args).map(|(r, _)| r.capability()) {
             Some(Capability::Voiceover) => IconName::Mic,

@@ -20,6 +20,7 @@ pub mod generate;
 pub(crate) mod groups;
 pub mod image;
 mod layout;
+pub mod lipsync;
 mod masks;
 mod music;
 mod pool;

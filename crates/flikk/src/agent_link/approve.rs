@@ -1,7 +1,7 @@
 //! Carrying out an approved agent request: memory goes to the store, skills
 //! and styles to their files,
 //! programs and sounds to the user's library, renders and exports to `flikk-deliver`,
-//! music, sound effects, voiceovers, videos and upscales to the provider set for them, as are
+//! music, sound effects, voiceovers, videos, upscales and lip syncs to the provider set for them, as are
 //! voices added or designed, which then go to the library; pictures to the
 //! user's ChatGPT plan; a web video's sound to the provider picked to
 //! transcribe. Outputs always
@@ -154,10 +154,15 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 })
             })))
         }
-        flikk_agent::tools::upscale::TOOL => {
-            use flikk_agent::tools::upscale;
-            let (request, destination) =
-                upscale::from_json(args).ok_or_else(|| anyhow!("the request could not be read"))?;
+        tool @ (flikk_agent::tools::upscale::TOOL | flikk_agent::tools::lipsync::TOOL) => {
+            use flikk_agent::tools::{lipsync, upscale};
+            let error_text = if tool == upscale::TOOL {
+                upscale::error_text
+            } else {
+                lipsync::error_text
+            };
+            let (request, destination) = generate::version_from_json(args)
+                .ok_or_else(|| anyhow!("the request could not be read"))?;
             let generation = inputs
                 .services
                 .generation
@@ -171,7 +176,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                         &flikk_core::paths::generated(),
                         &flikk_core::cloud::GenerationTask::default(),
                     )
-                    .map_err(|e| anyhow!(upscale::error_text(&e)))?;
+                    .map_err(|e| anyhow!(error_text(&e)))?;
                 Ok(Generated {
                     item: flikk_core::cloud::media_item(&made, media.as_deref()),
                     destination,
