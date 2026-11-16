@@ -137,18 +137,7 @@ pub fn run(
         }
     }
     let result = queue::run(key, endpoint.id, &Value::Object(input), task)?;
-    let video = &result["video"];
-    let url = video["url"]
-        .as_str()
-        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
-    let mut name = stem.as_os_str().to_owned();
-    name.push(".");
-    name.push(extension(video));
-    let path = PathBuf::from(name);
-    task.report(Stage::Downloading(0.0));
-    // A public file on fal's CDN: the key doesn't go with it.
-    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
-    Ok((path, None))
+    Ok((fetch(&result, stem, task)?, None))
 }
 
 /// `prompt` with the editor's reference tags (`@Image1`, `@Video2`,
@@ -193,9 +182,26 @@ fn retag(prompt: &str, tags: Tags) -> String {
     out
 }
 
+/// Download the video a fal `result` names (its `video.url`) to
+/// `<stem>.<ext>`, reporting to `task`; the file written.
+pub(super) fn fetch(result: &Value, stem: &Path, task: &GenerationTask) -> CloudResult<PathBuf> {
+    let video = &result["video"];
+    let url = video["url"]
+        .as_str()
+        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
+    let mut name = stem.as_os_str().to_owned();
+    name.push(".");
+    name.push(extension(video));
+    let path = PathBuf::from(name);
+    task.report(Stage::Downloading(0.0));
+    // A public file on fal's CDN: the key doesn't go with it.
+    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
+    Ok(path)
+}
+
 /// The extension of the file fal made, from its type or name; mp4 when it
 /// says neither.
-pub(super) fn extension(video: &Value) -> &'static str {
+fn extension(video: &Value) -> &'static str {
     let named = video["file_name"]
         .as_str()
         .and_then(|n| n.rsplit_once('.'))

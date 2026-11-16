@@ -177,18 +177,7 @@ pub fn run(
         }
     };
     let job = jobs::run(key, path, &Value::Object(input), task)?;
-    let video = &job["output"]["video"];
-    let url = video["url"]
-        .as_str()
-        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
-    let mut name = stem.as_os_str().to_owned();
-    name.push(".");
-    name.push(extension(video));
-    let path = PathBuf::from(name);
-    task.report(Stage::Downloading(0.0));
-    // A download URL of its own: the key doesn't go with it.
-    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
-    Ok((path, None))
+    Ok((fetch(&job, stem, task)?, None))
 }
 
 /// The fields of another vendor's model, past the prompt and resolution.
@@ -358,9 +347,27 @@ fn spaced(prompt: &str) -> String {
     out
 }
 
+/// Download the video a finished Pika `job` names (its
+/// `output.video.url`) to `<stem>.<ext>`, reporting to `task`; the file
+/// written.
+pub(super) fn fetch(job: &Value, stem: &Path, task: &GenerationTask) -> CloudResult<PathBuf> {
+    let video = &job["output"]["video"];
+    let url = video["url"]
+        .as_str()
+        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
+    let mut name = stem.as_os_str().to_owned();
+    name.push(".");
+    name.push(extension(video));
+    let path = PathBuf::from(name);
+    task.report(Stage::Downloading(0.0));
+    // A download URL of its own: the key doesn't go with it.
+    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
+    Ok(path)
+}
+
 /// The extension of the file Pika made, from its type; mp4 when it doesn't
 /// say.
-pub(super) fn extension(video: &Value) -> &'static str {
+fn extension(video: &Value) -> &'static str {
     match video["content_type"].as_str() {
         Some("video/webm") => "webm",
         Some("video/quicktime") => "mov",

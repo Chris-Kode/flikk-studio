@@ -1,17 +1,18 @@
-//! Pika (dev.pika.art): video and pictures, from the models in
-//! [`models`], larger videos, from the operations in [`upscale`],
-//! music and sound effects, from those in [`audio`], and voiceovers, from
-//! those in [`speech`], with the voices in [`voices`].
-//! Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes) and the
-//! other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo, Wan, Happy
-//! Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from a
-//! description or from pictures: Nano Banana, GPT Image, Seedream,
+//! Pika (dev.pika.art): video and pictures, from the models in [`models`],
+//! larger videos, from the operations in [`upscale`], lip-synced videos,
+//! from those in [`lipsync`], music and sound effects, from those in
+//! [`audio`], and voiceovers, from those in [`speech`], with the voices in
+//! [`voices`]. Video: Pika's own (Pika H3 Flex, Pika 2.5 with Pikaframes)
+//! and the other vendors' Pika hosts (Seedance, Kling, MiniMax, Hailuo,
+//! Wan, Happy Horse, Gemini Omni Flash, FLUX, Grok Imagine). Pictures, from
+//! a description or from pictures: Nano Banana, GPT Image, Seedream,
 //! Ideogram, Grok Imagine, Muse, Recraft. Larger videos: Topaz, and Pika H3
-//! Flex's own upscale. Music: Pika Music, Sonilo, MiniMax, Lyria. Sound
-//! effects: Pika SFX, Sonilo, ElevenLabs. Voiceovers: ElevenLabs (with
-//! the account's clones), MiniMax, Pika Speech. Every call sends the key
-//! as `X-API-Key`. All are made as media jobs ([`jobs`]); what goes in is
-//! [`video`]'s, [`image`]'s, [`upscale`]'s, [`audio`]'s or [`speech`]'s,
+//! Flex's own upscale. Lip sync: Sync and Kling on a video, Kling AI Avatar
+//! on a picture. Music: Pika Music, Sonilo, MiniMax, Lyria. Sound effects:
+//! Pika SFX, Sonilo, ElevenLabs. Voiceovers: ElevenLabs (with the account's
+//! clones), MiniMax, Pika Speech. Every call sends the key as `X-API-Key`.
+//! All are made as media jobs ([`jobs`]); what goes in is [`video`]'s,
+//! [`image`]'s, [`upscale`]'s, [`lipsync`]'s, [`audio`]'s or [`speech`]'s,
 //! and the files they follow are uploaded to Pika first ([`files`]). See
 //! `docs/providers/pika.md`.
 
@@ -19,6 +20,7 @@ mod audio;
 mod files;
 mod image;
 mod jobs;
+mod lipsync;
 mod models;
 mod speech;
 mod upscale;
@@ -29,7 +31,7 @@ use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
-    UpscaleModel, VideoModel, Voice, VoiceClone, VoiceoverModel,
+    LipSyncModel, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceoverModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -37,6 +39,12 @@ use std::path::{Path, PathBuf};
 const NAME: &str = "Pika";
 
 const BASE: &str = "https://api.dev.pika.art";
+
+/// The largest video Pika takes as an upload.
+const LARGEST_VIDEO: u64 = 50 << 20;
+
+/// The largest picture or sound Pika takes as an upload.
+const LARGEST_FILE: u64 = 20 << 20;
 
 pub static PROVIDER: Provider = Provider {
     id: "pika",
@@ -199,6 +207,32 @@ pub static PROVIDER: Provider = Provider {
             ],
         },
         Offer {
+            capability: Capability::LipSync,
+            // The ids and order of `lipsync::LIPSYNC`, the default first.
+            models: &[
+                CloudModel {
+                    id: "sync/lipsync-2/avatar",
+                    name: "Sync Lipsync 2",
+                },
+                CloudModel {
+                    id: "sync/lipsync-2-pro/avatar",
+                    name: "Sync Lipsync 2 Pro",
+                },
+                CloudModel {
+                    id: "sync/sync-3/avatar",
+                    name: "Sync 3",
+                },
+                CloudModel {
+                    id: "kling/kling-lipsync/avatar",
+                    name: "Kling Lipsync",
+                },
+                CloudModel {
+                    id: "kling/kling-ai-avatar-v2/avatar",
+                    name: "Kling AI Avatar",
+                },
+            ],
+        },
+        Offer {
             capability: Capability::Music,
             // The ids and order of `audio::MUSIC`, the default first.
             models: &[
@@ -310,6 +344,10 @@ impl Api for Pika {
                 let model = upscale::find(model).ok_or_else(missing)?;
                 upscale::run(key, model, request, stem, task)
             }
+            Capability::LipSync => {
+                let model = lipsync::find(model).ok_or_else(missing)?;
+                lipsync::run(key, model, request, stem, task)
+            }
             Capability::Music | Capability::SoundEffects => {
                 let model = audio::find(model).ok_or_else(missing)?;
                 audio::run(key, model, request, stem, task)
@@ -339,6 +377,10 @@ impl Api for Pika {
 
     fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
         upscale::find(model).map(|m| &m.spec)
+    }
+
+    fn lipsync_model(&self, model: &str) -> Option<&'static LipSyncModel> {
+        lipsync::find(model).map(|m| &m.spec)
     }
 
     fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {

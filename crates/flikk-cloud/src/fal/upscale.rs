@@ -4,10 +4,9 @@
 //! next to the others; the provider's catalog lists the same ids, in the
 //! same order, the default first.
 
-use super::{NAME, files, queue, video};
-use crate::http;
+use super::{files, queue, video};
 use flikk_core::cloud::{
-    CloudError, CloudResult, GenerateRequest, GenerationTask, Scale, Stage, UpscaleModel, Upscaling,
+    CloudError, CloudResult, GenerateRequest, GenerationTask, Scale, UpscaleModel, Upscaling,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -166,16 +165,5 @@ pub fn run(
     let url = files::url(key, &source.path, task)?;
     task.check()?;
     let result = queue::run(key, model.id, &(model.input)(&url, upscaling), task)?;
-    let made = &result["video"];
-    let url = made["url"]
-        .as_str()
-        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
-    let mut name = stem.as_os_str().to_owned();
-    name.push(".");
-    name.push(video::extension(made));
-    let path = PathBuf::from(name);
-    task.report(Stage::Downloading(0.0));
-    // A public file on fal's CDN: the key doesn't go with it.
-    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
-    Ok((path, None))
+    Ok((video::fetch(&result, stem, task)?, None))
 }

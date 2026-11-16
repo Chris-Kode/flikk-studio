@@ -1,23 +1,24 @@
-//! fal (fal.ai): video and pictures, from the models in [`models`],
-//! larger videos, from those in [`upscale`], music and sound effects,
-//! from those in [`audio`], and voiceovers, from those in [`speech`].
-//! Video: Seedance, Kling,
-//! MiniMax, Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX. Pictures, from
-//! a description or from pictures: Nano Banana, GPT Image, FLUX 3,
-//! Seedream, Ideogram, Grok Imagine, Qwen Image, Krea, Recraft. Larger
-//! videos: Topaz, SeedVR2, Crystal, FLUX, Gemini Omni Flash. Music:
-//! ElevenLabs, Sonilo, Lyria, Stable Audio. Sound effects: ElevenLabs,
-//! Sonilo, Mirelo, Stable Audio. Voiceovers: ElevenLabs, MiniMax, Gemini,
-//! each with its own voices. Every call
-//! sends the key as `Authorization: Key <key>`. All are made on fal's
-//! queue ([`queue`]); what goes in is [`video`]'s, [`image`]'s,
-//! [`upscale`]'s, [`audio`]'s or [`speech`]'s, and the files they follow
-//! are uploaded to fal's storage first ([`files`]). See
-//! `docs/providers/falai.md`.
+//! fal (fal.ai): video and pictures, from the models in [`models`], larger
+//! videos, from those in [`upscale`], lip-synced videos, from those in
+//! [`lipsync`], music and sound effects, from those in [`audio`], and
+//! voiceovers, from those in [`speech`]. Video: Seedance, Kling, MiniMax,
+//! Wan, Happy Horse, Gemini Omni Flash, FLUX, LTX. Pictures, from a
+//! description or from pictures: Nano Banana, GPT Image, FLUX 3, Seedream,
+//! Ideogram, Grok Imagine, Qwen Image, Krea, Recraft. Larger videos: Topaz,
+//! SeedVR2, Crystal, FLUX, Gemini Omni Flash. Lip sync: Sync, VEED, HeyGen,
+//! Kling, LatentSync on a video; Sync, Kling, Creatify, OmniHuman on a
+//! picture. Music: ElevenLabs, Sonilo, Lyria, Stable Audio. Sound effects:
+//! ElevenLabs, Sonilo, Mirelo, Stable Audio. Voiceovers: ElevenLabs,
+//! MiniMax, Gemini, each with its own voices. Every call sends the key as
+//! `Authorization: Key <key>`. All are made on fal's queue ([`queue`]);
+//! what goes in is [`video`]'s, [`image`]'s, [`upscale`]'s, [`lipsync`]'s,
+//! [`audio`]'s or [`speech`]'s, and the files they follow are uploaded to
+//! fal's storage first ([`files`]). See `docs/providers/falai.md`.
 
 mod audio;
 mod files;
 mod image;
+mod lipsync;
 mod models;
 mod queue;
 mod speech;
@@ -28,7 +29,7 @@ use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, GenerateRequest, GenerationTask, ImageModel,
-    UpscaleModel, VideoModel, Voice, VoiceoverModel,
+    LipSyncModel, UpscaleModel, VideoModel, Voice, VoiceoverModel,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -184,6 +185,56 @@ pub static PROVIDER: Provider = Provider {
             ],
         },
         Offer {
+            capability: Capability::LipSync,
+            // The ids and order of `lipsync::LIPSYNC`, the default first.
+            models: &[
+                CloudModel {
+                    id: "fal-ai/sync-lipsync/v2",
+                    name: "Sync Lipsync 2",
+                },
+                CloudModel {
+                    id: "fal-ai/sync-lipsync/v2/pro",
+                    name: "Sync Lipsync 2 Pro",
+                },
+                CloudModel {
+                    id: "fal-ai/sync-lipsync/v3",
+                    name: "Sync 3",
+                },
+                CloudModel {
+                    id: "veed/lipsync/v2",
+                    name: "VEED Lipsync",
+                },
+                CloudModel {
+                    id: "fal-ai/heygen/v3/lipsync/precision",
+                    name: "HeyGen Lipsync Precision",
+                },
+                CloudModel {
+                    id: "fal-ai/kling-video/lipsync/audio-to-video",
+                    name: "Kling LipSync",
+                },
+                CloudModel {
+                    id: "fal-ai/latentsync",
+                    name: "LatentSync",
+                },
+                CloudModel {
+                    id: "fal-ai/sync-lipsync/v3/image-to-video",
+                    name: "Sync 3 Avatar",
+                },
+                CloudModel {
+                    id: "fal-ai/kling-video/ai-avatar/v2/pro",
+                    name: "Kling AI Avatar",
+                },
+                CloudModel {
+                    id: "fal-ai/creatify/aurora",
+                    name: "Creatify Aurora",
+                },
+                CloudModel {
+                    id: "fal-ai/bytedance/omnihuman/v1.5",
+                    name: "OmniHuman 1.5",
+                },
+            ],
+        },
+        Offer {
             capability: Capability::Music,
             // The ids and order of `audio::MUSIC`, the default first.
             models: &[
@@ -301,6 +352,10 @@ impl Api for Fal {
                 let model = upscale::find(model).ok_or_else(missing)?;
                 upscale::run(key, model, request, stem, task)
             }
+            Capability::LipSync => {
+                let model = lipsync::find(model).ok_or_else(missing)?;
+                lipsync::run(key, model, request, stem, task)
+            }
             Capability::Music | Capability::SoundEffects => {
                 let model = audio::find(model).ok_or_else(missing)?;
                 audio::run(key, model, request, stem, task)
@@ -330,6 +385,10 @@ impl Api for Fal {
 
     fn upscale_model(&self, model: &str) -> Option<&'static UpscaleModel> {
         upscale::find(model).map(|m| &m.spec)
+    }
+
+    fn lipsync_model(&self, model: &str) -> Option<&'static LipSyncModel> {
+        lipsync::find(model).map(|m| &m.spec)
     }
 
     fn audio_model(&self, model: &str) -> Option<&'static AudioModel> {

@@ -27,9 +27,9 @@ pub use keys::{KeySource, Keys};
 
 use flikk_core::cloud::{
     AudioModel, Capability, CloudError, CloudResult, CloudSettings, Designed, GenerateRequest,
-    Generated, GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, SpeechRequest,
-    SpeechService, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceDesign, VoicePage,
-    VoicePreview, VoiceQuery, VoiceoverModel, voice_source,
+    Generated, GenerationInfo, GenerationService, GenerationTask, Heard, ImageModel, LipSyncModel,
+    SpeechRequest, SpeechService, UpscaleModel, VideoModel, Voice, VoiceClone, VoiceDesign,
+    VoicePage, VoicePreview, VoiceQuery, VoiceoverModel, voice_source,
 };
 use flikk_os::sync::lock;
 use std::collections::BTreeSet;
@@ -154,6 +154,12 @@ pub trait Api: Sync {
     /// What upscale model `model` can do; only for providers offering
     /// upscaling.
     fn upscale_model(&self, _model: &str) -> Option<&'static UpscaleModel> {
+        None
+    }
+
+    /// What lip-sync model `model` takes; only for providers offering lip
+    /// sync.
+    fn lipsync_model(&self, _model: &str) -> Option<&'static LipSyncModel> {
         None
     }
 
@@ -347,6 +353,11 @@ impl GenerationService for Cloud {
         provider.api.upscale_model(model.id).cloned()
     }
 
+    fn lipsync_model(&self) -> Option<LipSyncModel> {
+        let (provider, model) = self.picked(Capability::LipSync)?;
+        provider.api.lipsync_model(model.id).cloned()
+    }
+
     fn audio_model(&self, capability: Capability) -> Option<AudioModel> {
         let (provider, model) = self.picked(capability)?;
         provider.api.audio_model(model.id).copied()
@@ -375,6 +386,11 @@ impl GenerationService for Cloud {
             Capability::Upscale => {
                 if let Some(upscale) = provider.api.upscale_model(model.id) {
                     upscale.check(request)?;
+                }
+            }
+            Capability::LipSync => {
+                if let Some(lipsync) = provider.api.lipsync_model(model.id) {
+                    lipsync.check(request)?;
                 }
             }
             Capability::Music | Capability::SoundEffects => {
@@ -540,6 +556,7 @@ fn free_stem(dir: &Path, request: &GenerateRequest) -> Stem {
         GenerateRequest::Video { .. } => "video",
         GenerateRequest::Image { .. } => "image",
         GenerateRequest::Upscale { .. } => "upscale",
+        GenerateRequest::LipSync { .. } => "lipsync",
     };
     let words: Vec<String> = request
         .prompt()
@@ -595,7 +612,15 @@ fn hold(reserved: &mut BTreeSet<PathBuf>, path: PathBuf, placeholder: Option<Pat
 }
 
 /// What [`free_stem`] names its stems after.
-const KINDS: [&str; 6] = ["music", "sfx", "voiceover", "video", "image", "upscale"];
+const KINDS: [&str; 7] = [
+    "music",
+    "sfx",
+    "voiceover",
+    "video",
+    "image",
+    "upscale",
+    "lipsync",
+];
 
 /// How old a placeholder or part must be to count as left by a run that
 /// ended: a generation is followed for a couple of hours at most, and a
@@ -669,6 +694,36 @@ fn is_leftover(name: &str) -> bool {
     }
     file.rsplit_once('.')
         .is_some_and(|(stem, ext)| generated(stem) && alnum(ext))
+}
+
+/// Refuse the file at `path` (what the pool calls `name`) before it is
+/// uploaded when it is larger than `largest` bytes, the most `provider`
+/// takes of a file of its kind.
+pub(crate) fn check_upload(
+    path: &Path,
+    name: &str,
+    largest: u64,
+    provider: &str,
+) -> CloudResult<()> {
+    let size = std::fs::metadata(path)
+        .map_err(|e| CloudError::Failed(format!("could not read {name}: {e}")))?
+        .len();
+    if size <= largest {
+        return Ok(());
+    }
+    let what = match http::media_mime(path).split('/').next() {
+        Some("video") => "videos",
+        Some("image") => "pictures",
+        _ => "sounds",
+    };
+    Err(CloudError::BadPrompt {
+        message: format!(
+            "{provider} takes {what} of {} MB at most; {name} is {} MB",
+            largest >> 20,
+            size.div_ceil(1 << 20)
+        ),
+        suggestion: None,
+    })
 }
 
 /// Move the finished file at `from` to `to`, never over a file already

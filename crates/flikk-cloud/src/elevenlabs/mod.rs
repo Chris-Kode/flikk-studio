@@ -1,9 +1,11 @@
 //! ElevenLabs (api.elevenlabs.io): transcription with Scribe, music, sound
 //! effects, voiceovers, and the voices that read them: listed, searched in
-//! the shared library, designed, cloned. Every call sends the key as
-//! `xi-api-key`. See `docs/providers/elevenlabs.md`.
+//! the shared library, designed, cloned. Lip sync on a picture, with
+//! Creatify Aurora ([`flows`]); it has none on a video. Every call sends
+//! the key as `xi-api-key`. See `docs/providers/elevenlabs.md`.
 
 mod design;
+mod flows;
 mod music;
 mod sound;
 mod speech;
@@ -16,8 +18,8 @@ use crate::http::{self, Reply};
 use crate::{Account, Api, CloudModel, Offer, Provider};
 use flikk_core::cloud::{
     AudioLengths, AudioModel, Capability, CloudError, CloudResult, DeliveryMarks, Designed,
-    GenerateRequest, GenerationTask, Heard, SCRIPT_CHARS, SpeechRequest, Voice, VoiceClone,
-    VoiceDesign, VoiceOps, VoicePage, VoicePreview, VoiceQuery, VoiceoverModel,
+    GenerateRequest, GenerationTask, Heard, LipSyncModel, SCRIPT_CHARS, SpeechRequest, Voice,
+    VoiceClone, VoiceDesign, VoiceOps, VoicePage, VoicePreview, VoiceQuery, VoiceoverModel,
 };
 use flikk_os::sync::lock;
 use serde_json::Value;
@@ -81,6 +83,13 @@ pub static PROVIDER: Provider = Provider {
             models: &[CloudModel {
                 id: "eleven_v4",
                 name: "Eleven v4",
+            }],
+        },
+        Offer {
+            capability: Capability::LipSync,
+            models: &[CloudModel {
+                id: "creatify-aurora",
+                name: "Creatify Aurora",
             }],
         },
     ],
@@ -193,6 +202,7 @@ impl Api for ElevenLabs {
             GenerateRequest::Upscale { .. } => Err(CloudError::Unavailable(format!(
                 "{NAME} doesn't upscale video"
             ))),
+            GenerateRequest::LipSync { .. } => flows::run(key, model, request, stem, task),
         }
     }
 
@@ -205,6 +215,10 @@ impl Api for ElevenLabs {
 
     fn voiceover_model(&self, model: &str) -> Option<&'static VoiceoverModel> {
         (model == "eleven_v4").then_some(&SPEECH)
+    }
+
+    fn lipsync_model(&self, model: &str) -> Option<&'static LipSyncModel> {
+        (model == "creatify-aurora").then_some(&flows::AURORA)
     }
 
     /// Every model reads the account's voices.

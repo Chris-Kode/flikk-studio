@@ -1,11 +1,12 @@
 //! Work an online provider does instead of this machine: transcription (in
 //! place of the local speech models), music, sound effects, voiceovers,
-//! video, pictures and larger videos (upscaling).
+//! video, pictures, larger videos (upscaling) and lip-synced videos.
 //! What can be done ([`Capability`]), who the user picked for each ([`CloudSettings`]),
 //! and the interfaces the editor calls ([`SpeechService`],
 //! [`GenerationService`]). `flikk-cloud` implements them for each provider it
 //! knows; nothing here names one.
 
+mod lipsync;
 mod request;
 mod script;
 mod task;
@@ -15,6 +16,7 @@ mod voice;
 pub use crate::pool::{
     WEB_VIDEOS, generated_bin, image_item, media_item, pool_commands, sample_item, video_item,
 };
+pub use lipsync::{FaceKind, LipSyncFace, LipSyncModel, LipSyncVoice};
 pub use request::{
     AudioLengths, AudioModel, GenerateRequest, ImageMode, ImageModel, MusicSection, Reading,
     ReferenceLimits, SCRIPT_CHARS, SpeechContext, VIDEO_RESOLUTIONS, VideoMode, VideoModel,
@@ -22,6 +24,7 @@ pub use request::{
 };
 pub use script::{DeliveryMarks, INTERJECTIONS, VoiceOps, VoiceoverModel, spoken_words};
 pub use task::{GenerationTask, Stage};
+use upscale::pool_name;
 pub use upscale::{Scale, UpscaleModel, UpscaleSource, Upscaling};
 pub use voice::{
     DESIGN_DESCRIPTION, DESIGN_TEXT, Designed, VOICE_AGES, VOICE_GENDERS, VOICE_LANGUAGES,
@@ -49,10 +52,13 @@ pub enum Capability {
     Image,
     /// A video in the pool made again at a larger resolution.
     Upscale,
+    /// A face in the pool (a video, or a picture) made to say a sound in
+    /// the pool.
+    LipSync,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 8] = [
         Self::Transcription,
         Self::Music,
         Self::SoundEffects,
@@ -60,6 +66,7 @@ impl Capability {
         Self::Video,
         Self::Image,
         Self::Upscale,
+        Self::LipSync,
     ];
 
     pub fn label(self) -> &'static str {
@@ -71,6 +78,7 @@ impl Capability {
             Self::Video => "Video",
             Self::Image => "Image",
             Self::Upscale => "Upscale",
+            Self::LipSync => "Lip sync",
         }
     }
 
@@ -298,6 +306,8 @@ pub trait GenerationService: Send + Sync {
     fn image_model(&self) -> Option<ImageModel>;
     /// What the model picked for upscaling can do, when one is.
     fn upscale_model(&self) -> Option<UpscaleModel>;
+    /// What the model picked for lip sync takes, when one is.
+    fn lipsync_model(&self) -> Option<LipSyncModel>;
     /// What the model picked for `capability` (music or sound effects) can
     /// make, when one is.
     fn audio_model(&self, capability: Capability) -> Option<AudioModel>;

@@ -3,13 +3,14 @@
 fal (<https://fal.ai>) runs models from many vendors behind one queue
 API. One key gives access to all of them.
 
-The editor uses fal in five roles:
+The editor uses fal in six roles:
 
 - a video provider (see "Video");
 - an image provider (see "Image");
 - a source of music and sound effects (see "Audio");
 - a voiceover provider (see "Voiceovers");
-- a video upscaler (see "Upscaling").
+- a video upscaler (see "Upscaling");
+- a lip-sync provider, on a video or a picture (see "Lip sync").
 
 fal does not do transcription for the editor. For it, the editor
 answers `Unavailable`.
@@ -47,8 +48,8 @@ All work goes through the queue of fal (`queue.rs`).
    - If the initiate or the `PUT` fails, the editor sends the file inline
      as a `data:` URI. This is possible only up to 8 MiB. A bad key or no
      credits does not cause this fallback.
-   - The editor uploads frames, references, edit pictures and the source
-     of an upscale.
+   - The editor uploads frames, references, edit pictures, the source
+     of an upscale, and the face and voice of a lip sync.
 2. **Submit**: `POST https://queue.fal.run/<endpoint>` with the JSON
    input.
    - The answer must have `request_id`.
@@ -73,7 +74,7 @@ All work goes through the queue of fal (`queue.rs`).
 4. **Result**: `GET response_url`.
    - After `COMPLETED`, the job cannot stop. The result is made and paid
      for.
-   - The editor reads `video.url` for video and upscale. It reads
+   - The editor reads `video.url` for video, upscale and lip sync. It reads
      `images[0].url` for an image. For audio, it reads the first of
      `audio`, `audio_file` and `audios[0]`.
    - The extension comes from `content_type` or `file_name`.
@@ -306,6 +307,44 @@ Proteus is the default because it fits most footage and keeps the
 picture of the source. FLUX gets `creativity: 0`, so that it does not
 add new detail.
 
+## Lip sync
+
+`lipsync.rs`. A lip sync has a face and a voice from the pool. The face
+is a video or a picture. The voice is a sound. The editor uploads both
+and sends their URLs. Each model takes a video or a picture, not both.
+The result is at `video.url`, and it goes to the Video Lip-synced bin.
+
+| Model | Face | Fields | Limits |
+| --- | --- | --- | --- |
+| `fal-ai/sync-lipsync/v2` (default) | video | `video_url`, `audio_url`, `model: "lipsync-2"`, `sync_mode: "cut_off"` | — |
+| `fal-ai/sync-lipsync/v2/pro` | video | `video_url`, `audio_url`, `sync_mode: "cut_off"` | — |
+| `fal-ai/sync-lipsync/v3` | video | `video_url`, `audio_url`, `sync_mode: "cut_off"` | — |
+| `veed/lipsync/v2` | video | `video_url`, `audio_url` | — |
+| `fal-ai/heygen/v3/lipsync/precision` | video | `video_url`, `audio_url` | — |
+| `fal-ai/kling-video/lipsync/audio-to-video` | video | `video_url`, `audio_url` | video mp4 or mov, 2–10 s, 720p or 1080p (sides 720–1920 px), 100 MB at most; voice 2–60 s, 5 MB at most |
+| `fal-ai/latentsync` | video | `video_url`, `audio_url` | — |
+| `fal-ai/sync-lipsync/v3/image-to-video` | picture | `image_url`, `audio_url` | JPEG, PNG or WebP |
+| `fal-ai/kling-video/ai-avatar/v2/pro` | picture | `image_url`, `audio_url` | — |
+| `fal-ai/creatify/aurora` | picture | `image_url`, `audio_url`, `resolution: "720p"` | — |
+| `fal-ai/bytedance/omnihuman/v1.5` | picture | `image_url`, `audio_url`, `resolution` | voice 60 s at most |
+
+- `sync_mode: "cut_off"` ends the video where the shorter of the face
+  and the voice ends. Thus the video does not loop or play backwards.
+- OmniHuman makes 1080p for a voice of 30 s or less, and 720p for a
+  longer voice. At 1080p it takes 30 s at most.
+- Before the upload, the editor refuses a face of the wrong kind, a
+  length out of range, a length it does not know where the model has a
+  range, a Kling video with a side out of range, and a Kling file that
+  is too large. The other limits are fal's to check.
+- The editor does not send the optional fields: HeyGen's
+  `enable_dynamic_duration` (on by default), `start_time` and
+  `end_time`, LatentSync's `loop_mode` and `guidance_scale`, a prompt to
+  the picture models, or the `options` of Sync 3.
+
+We read the schemas on 2026-11-16. fal checks the key before the body,
+so a made-up key does not check a body. The bodies follow the schemas,
+but no paid run has verified them.
+
 ## Sources
 
 The code has no links to the documents of fal. We did not compare this
@@ -313,5 +352,5 @@ file with them.
 
 - <https://fal.ai/dashboard/keys>
 - The endpoints in "Access"
-- The schemas of the voiceover models:
+- The schemas of the voiceover and lip-sync models:
   `https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=<id>`

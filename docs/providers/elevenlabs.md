@@ -8,10 +8,12 @@ uses its API in these roles:
 - a source of sound effects (see "Sound effects");
 - a voiceover provider (see "Voiceovers");
 - the voices that read voiceovers: list, search, design, clone, rename
-  and delete (see "Voices").
+  and delete (see "Voices");
+- a lip-sync provider, on a picture only (see "Lip sync").
 
-ElevenLabs does not make video or pictures, and it does not upscale. For
-these capabilities, the editor answers `Unavailable`.
+ElevenLabs does not make video or pictures, and it does not upscale.
+It has no lip sync on a video. For these capabilities, the editor
+answers `Unavailable`.
 
 This file describes the client in `crates/flikk-cloud/src/elevenlabs/`
 as it is. The code is the source of each fact.
@@ -33,8 +35,9 @@ folder. The environment variable has priority over the two.
 
 ## Request flow
 
-ElevenLabs has no job queue. Each request is one HTTP call, and the
-answer is the result.
+ElevenLabs has no job queue for audio. Each request is one HTTP call,
+and the answer is the result. Lip sync is the exception: it is a job
+(see "Lip sync").
 
 - The audio comes back in the body. The editor writes it to a `.part`
   file, then renames the file to `<stem>.<ext>`. The extension is the
@@ -229,6 +232,52 @@ the whole file in one request.
 - The agent has no tool to clone a voice, because a clone needs the
   consent of the speaker.
 
+## Lip sync
+
+`flows.rs`. Creatify Aurora (`creatify-aurora`) animates a picture so
+that it says a sound. ElevenLabs has no model that moves the mouth in a
+video, so the editor offers lip sync on pictures only.
+
+1. **Submit**: `POST /v1/flows/video` with
+   `{"model_id": "creatify-aurora", "image", "audio", "resolution": "720p"}`.
+   The answer is `{"id", "status": "pending"}`.
+   - `image` and `audio` are inline:
+     `{"type": "inline_base64", "content_base64", "mime_type"}`.
+   - Each file is 25 MB at most, decoded.
+   - The picture is `image/jpeg`, `image/png`, `image/webp`,
+     `image/heic` or `image/heif`. The sound is `audio/mpeg` or
+     `audio/wav`. The editor reads the type from the extension.
+   - The editor refuses another type, or a larger file, before it sends
+     the request.
+   - The editor does not send a submit again after a 5xx.
+2. **Poll**: `GET /v1/flows/video/{id}`, every 3 s. After failed looks,
+   the time doubles to a maximum of 60 s.
+   - `status` is `pending`, `generating`, `completed` or `failed`.
+   - A completed generation has `content_url` and `content_mime_type`.
+     The URL is signed, and it expires after about an hour. The editor
+     downloads it at once, without the key.
+   - A failed generation has `failure_reason` and `error_message`.
+     ElevenLabs does not charge for it.
+3. **Cancel**: there is no cancel. After the submit, the user can't
+   stop the generation. The editor follows it to the end and keeps the
+   video, because ElevenLabs charges for it.
+
+| `failure_reason` | Result in the editor |
+| --- | --- |
+| `moderated`, `invalid_parameters` | refused prompt |
+| `charging_failed` | out of credits |
+| `timeout`, `model_error`, `dependency_failed`, `internal_error` | failed, with `error_message` |
+
+The editor does not send `guidance_scale`, `audio_guidance_scale` or a
+`webhook`. It does not use `POST /v1/assets`, which uploads a file once
+and names it by `asset_id`.
+
+On 2026-11-16, we sent the request with a made-up key and a few bytes as
+each file. ElevenLabs checks the body before the key: it accepted the
+request (401). It refused `image/gif` and a request without `image` and
+`audio` (422). We did not verify a real generation, its failure bodies
+or the download, because we have no paid key.
+
 ## Sources
 
 The code has no links to the documents of ElevenLabs. We did not
@@ -236,3 +285,4 @@ compare this file with them.
 
 - <https://elevenlabs.io/app/settings/api-keys>
 - The endpoints above, on `https://api.elevenlabs.io`
+- The OpenAPI document of the API, for `/v1/flows/video`

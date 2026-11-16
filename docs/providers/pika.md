@@ -5,7 +5,7 @@ is now a paid, prepaid aggregator. One key gives access to Pika's own
 models and to approximately 170 operations from other vendors. These
 vendors include Seedance, Kling, Veo, Wan, MiniMax, ElevenLabs and more.
 
-The editor uses the API in three roles:
+The editor uses the API in these roles:
 
 - A video provider for Pika's own models, and for the video models of
   other vendors that fit its video request (see "What the editor uses").
@@ -15,6 +15,8 @@ The editor uses the API in three roles:
   (see "Audio operations").
 - A voiceover provider, from Pika and from other vendors, with the
   voices the account clones (see "Voiceovers" and "Voices").
+- A video upscaler (see "Upscaling").
+- A lip-sync provider, on a video or a picture (see "Lip sync").
 
 We read these sources on 2026-11-02: `llms.txt`, the specification of
 each operation, the public catalog and `openapi.json` (links at the end).
@@ -432,6 +434,34 @@ Starlight Mini, HQ and Sharp. It does not use Topaz Image Upscale
 (`topaz/topaz-image-upscale/image-upscale`), because it does not upscale
 pictures yet.
 
+## Lip sync
+
+Five operations make a face say a voice. Each is a job, as above. The
+face is a video (50 MB at most) or a picture (20 MB at most). The voice
+is a sound (20 MB at most). The editor uploads both, and refuses a file
+that is too large before the upload. Each answers `output.video.url`,
+and the result goes to the Video Lip-synced bin. We read this data on
+2026-11-16 from the `input_schema` of the catalog.
+
+| Operation | Face | Fields the editor sends | Limits | Price |
+| --- | --- | --- | --- | --- |
+| Sync Lipsync 2 (`sync/lipsync-2/avatar`, default) | video | `video_url`, `audio_url`, `sync_mode: "cut_off"` | — | $3.15 a minute |
+| Sync Lipsync 2 Pro (`sync/lipsync-2-pro/avatar`) | video | the same | — | $5.229 a minute |
+| Sync 3 (`sync/sync-3/avatar`) | video | the same | — | $8.379 a minute |
+| Kling Lipsync (`kling/kling-lipsync/avatar`) | video | `video_url`, `audio_url`, `sound_end_time` (the voice's length in ms, required) | none in the schema; the editor uses Kling's own: video 2–10 s, sides 720–1920 px, voice 2–60 s | $0.012 a second |
+| Kling AI Avatar (`kling/kling-ai-avatar-v2/avatar`) | picture | `image_url`, `sound_file`, `mode: "pro"` | sound 2–300 s | $0.09 a second (pro) |
+
+- `sync_mode` defaults to `bounce` on Pika: the video plays forward and
+  back until the voice ends. The editor sends `cut_off`, so the video
+  ends where the shorter of the two ends.
+- Sync also takes `temperature`, `active_speaker_detection` and
+  `occlusion_detection`. Kling Lipsync also takes `sound_insert_time`,
+  `sound_start_time`, `sound_volume` and `original_audio_volume`. Kling
+  AI Avatar also takes `prompt`, and `mode: "std"` at half the price.
+  The editor does not send them.
+- Kling Lipsync must know where the voice ends. Thus the editor refuses
+  a voice whose length it does not know.
+
 ## Verified
 
 - A script verified every field, enum and limit above against the live
@@ -470,13 +500,20 @@ pictures yet.
   enums that match the lists in `speech.rs`. `/v1/voices` reads
   `X-API-Key` as the media endpoints do.
 
+- On 2026-11-16, we sent with a made-up key each lip-sync request that
+  the editor writes, with public placeholder URLs. Pika accepted them
+  (401). It refused a Kling Lipsync request without `sound_end_time`, a
+  `sync_mode` that is not in its enum, and `audio_url` in place of
+  `sound_file` for Kling AI Avatar (422).
+
 We did not verify these items, because we have no paid key:
 
 - a real job end to end;
 - the exact `headers` that an upload gives;
 - if `output.video.url` downloads without the key;
 - the failed-job bodies for balance, rate limits and moderation (they
-  come from the specification).
+  come from the specification);
+- the limits of Kling Lipsync on Pika.
 
 ## Sources
 
@@ -499,3 +536,5 @@ We did not verify these items, because we have no paid key:
   [Pika Speech](https://dev.pika.art/llms/pika/pika-audio/pika-speech)
 - <https://dev.pika.art/llms/voice-cloning>
 - <https://dev.pika.art/models>, <https://dev.pika.art/pricing>
+- `https://api.dev.pika.art/catalog/apis/{api_id}?expand=inputs` for the
+  lip-sync operations

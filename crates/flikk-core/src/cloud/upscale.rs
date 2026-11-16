@@ -38,14 +38,9 @@ impl UpscaleSource {
             .video
             .as_ref()
             .filter(|v| v.width > 0 && v.height > 0)?;
-        let name = item.name.clone().unwrap_or_else(|| {
-            item.path
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-        });
         Some(Self {
             path: item.path.clone(),
-            name,
+            name: pool_name(item),
             width: video.width,
             height: video.height,
             length: Some(info.duration).filter(|d| *d > Time::ZERO),
@@ -226,6 +221,15 @@ impl UpscaleModel {
             _ => Ok(()),
         }
     }
+}
+
+/// What the pool calls `item`: its name there, else its file's.
+pub(super) fn pool_name(item: &MediaItem) -> String {
+    item.name.clone().unwrap_or_else(|| {
+        item.path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    })
 }
 
 fn too_far(name: &str, most: f64, short: u32) -> String {

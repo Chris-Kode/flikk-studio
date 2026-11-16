@@ -5,9 +5,9 @@ the editor uses it. The clients are in `crates/flikk-cloud/src/`.
 
 | Provider | Capabilities in the editor |
 | --- | --- |
-| [ElevenLabs](elevenlabs.md) | Transcription, music, sound effects, voiceovers and voices |
-| [fal](falai.md) | Video, images, music, sound effects, voiceovers and upscaling |
-| [Pika](pika.md) | Video, images, music, sound effects, voiceovers, cloned voices and upscaling |
+| [ElevenLabs](elevenlabs.md) | Transcription, music, sound effects, voiceovers, voices and lip sync on pictures |
+| [fal](falai.md) | Video, images, music, sound effects, voiceovers, upscaling and lip sync |
+| [Pika](pika.md) | Video, images, music, sound effects, voiceovers, cloned voices, upscaling and lip sync |
 
 ## How to add a file
 

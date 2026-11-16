@@ -1,7 +1,7 @@
 //! What a provider is asked to make, and what each video and image model
 //! can make, so a request is checked before it costs anything.
 
-use super::{Capability, CloudError, CloudResult, UpscaleSource};
+use super::{Capability, CloudError, CloudResult, LipSyncFace, LipSyncVoice, UpscaleSource};
 use crate::model::MediaKind;
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,13 @@ pub enum GenerateRequest {
         /// source.
         #[serde(default)]
         resolution: Option<String>,
+    },
+    /// A face in the pool made to say `voice`: a video's mouth moved to
+    /// it, or a picture brought to life speaking it; see
+    /// [`super::LipSyncModel`].
+    LipSync {
+        face: LipSyncFace,
+        voice: LipSyncVoice,
     },
 }
 
@@ -571,11 +578,12 @@ impl GenerateRequest {
             Self::Video { .. } => Capability::Video,
             Self::Image { .. } => Capability::Image,
             Self::Upscale { .. } => Capability::Upscale,
+            Self::LipSync { .. } => Capability::LipSync,
         }
     }
 
     /// What it asks for: the prompt, a voiceover's script, or the name of
-    /// the video to upscale.
+    /// the video to upscale or the face to lip-sync.
     pub fn prompt(&self) -> &str {
         match self {
             Self::Music { prompt, .. }
@@ -584,6 +592,7 @@ impl GenerateRequest {
             | Self::Image { prompt, .. } => prompt,
             Self::Voiceover { text, .. } => text,
             Self::Upscale { source, .. } => &source.name,
+            Self::LipSync { face, .. } => &face.name,
         }
     }
 
@@ -616,7 +625,8 @@ impl GenerateRequest {
         }
     }
 
-    /// The length asked for: the sections' together, else `length`.
+    /// The length asked for: the sections' together, else `length`; a lip
+    /// sync's voice, which the video runs no longer than.
     pub fn length(&self) -> Option<Time> {
         match self {
             Self::Music { sections, .. } if !sections.is_empty() => {
@@ -626,6 +636,7 @@ impl GenerateRequest {
             | Self::SoundEffect { length, .. }
             | Self::Video { length, .. } => *length,
             Self::Upscale { source, .. } => source.length,
+            Self::LipSync { voice, .. } => voice.length,
             Self::Voiceover { .. } | Self::Image { .. } => None,
         }
     }
@@ -643,6 +654,9 @@ impl GenerateRequest {
                 None => format!("Upscale: {}", source.name),
             };
         }
+        if let Self::LipSync { face, voice } = self {
+            return format!("Lip sync to {}: {}", voice.name, face.name);
+        }
         let what = match self {
             Self::Music { .. } => "Music",
             Self::SoundEffect { .. } => "Sound effect",
@@ -650,6 +664,7 @@ impl GenerateRequest {
             Self::Video { .. } => "Video",
             Self::Image { .. } => "Image",
             Self::Upscale { .. } => "Upscale",
+            Self::LipSync { .. } => "Lip sync",
         };
         match self.length() {
             Some(t) => format!("{what}, {:.0} s: {}", t.as_secs_f64(), self.prompt()),

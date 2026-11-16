@@ -4,10 +4,9 @@
 //! to the others; the provider's catalog lists the same ids, in the same
 //! order, the default first. See `docs/providers/pika.md`.
 
-use super::{NAME, files, jobs, video};
-use crate::http;
+use super::{LARGEST_VIDEO, NAME, files, jobs, video};
 use flikk_core::cloud::{
-    CloudError, CloudResult, GenerateRequest, GenerationTask, Scale, Stage, UpscaleModel, Upscaling,
+    CloudError, CloudResult, GenerateRequest, GenerationTask, Scale, UpscaleModel, Upscaling,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -22,9 +21,6 @@ pub struct PikaUpscale {
     /// Its input for the source at `url`, upscaled as `upscaling` says.
     pub input: fn(url: &str, upscaling: Upscaling) -> Value,
 }
-
-/// The largest video Pika takes as an upload.
-const LARGEST_UPLOAD: u64 = 50 << 20;
 
 const TOPAZ: &str = "topaz/topaz-video-upscale/video-upscale";
 
@@ -112,33 +108,9 @@ pub fn run(
         )));
     };
     let upscaling = model.spec.plan(request)?;
-    let size = std::fs::metadata(&source.path)
-        .map_err(|e| CloudError::Failed(format!("could not read {}: {e}", source.name)))?
-        .len();
-    if size > LARGEST_UPLOAD {
-        return Err(CloudError::BadPrompt {
-            message: format!(
-                "{NAME} takes videos of {} MB at most; {} is {} MB",
-                LARGEST_UPLOAD >> 20,
-                source.name,
-                size.div_ceil(1 << 20)
-            ),
-            suggestion: None,
-        });
-    }
+    crate::check_upload(&source.path, &source.name, LARGEST_VIDEO, NAME)?;
     let url = files::url(key, &source.path, task)?;
     task.check()?;
     let job = jobs::run(key, model.path, &(model.input)(&url, upscaling), task)?;
-    let made = &job["output"]["video"];
-    let url = made["url"]
-        .as_str()
-        .ok_or_else(|| CloudError::Failed(format!("{NAME} sent no video back")))?;
-    let mut name = stem.as_os_str().to_owned();
-    name.push(".");
-    name.push(video::extension(made));
-    let path = PathBuf::from(name);
-    task.report(Stage::Downloading(0.0));
-    // A download URL of its own: the key doesn't go with it.
-    http::download(url, &path, &|f| task.report(Stage::Downloading(f)))?;
-    Ok((path, None))
+    Ok((video::fetch(&job, stem, task)?, None))
 }
