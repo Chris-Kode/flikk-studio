@@ -3,7 +3,8 @@
 //! programs and sounds to the user's library, renders and exports to `flikk-deliver`,
 //! music, sound effects, voiceovers, videos and upscales to the provider set for them, as are
 //! voices added or designed, which then go to the library; pictures to the
-//! user's ChatGPT plan. Outputs always
+//! user's ChatGPT plan; a web video's sound to the provider picked to
+//! transcribe. Outputs always
 //! get a free name, so nothing here overwrites a file.
 
 use crate::persistence;
@@ -37,6 +38,9 @@ pub enum Started {
     /// Runs off the UI thread, adding or designing a voice that lands in
     /// the library; yields what to tell the agent.
     Voice(Box<dyn FnOnce() -> Result<String> + Send>),
+    /// Runs off the UI thread, analysing a video with the provider picked
+    /// to transcribe; yields what to tell the agent.
+    Transcribe(Box<dyn FnOnce() -> Result<String> + Send>),
     /// Runs off the UI thread, saying a fix's words again; yields them for
     /// the pool, with the fix to cut them in by.
     Respeak(Box<dyn FnOnce() -> Result<Respoken> + Send>),
@@ -229,6 +233,13 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                     &name,
                 )
                 .map_err(|e| anyhow!(e))
+            })))
+        }
+        flikk_agent::tools::web::video::TOOL => {
+            let services = inputs.services.clone();
+            let args = args.clone();
+            Ok(Started::Transcribe(Box::new(move || {
+                flikk_agent::tools::web::video::transcribe(&services, &args).map_err(|e| anyhow!(e))
             })))
         }
         tool if flikk_agent::tools::caption_styles::TOOLS.contains(&tool) => {

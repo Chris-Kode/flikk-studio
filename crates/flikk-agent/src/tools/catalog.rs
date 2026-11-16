@@ -747,6 +747,31 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            super::web::video::TOOL,
+            Some(View),
+            "See or hear a video file on the web as view_media does a pool item: an MP4, MOV, M4V, WebM or MKV address, at most 500 MB, downloaded once and analysed the first time you look; when transcribing it costs the user money, that first look asks them, and one they did not allow is shown without its sound script. Times are the video's own seconds. Its sound script and a collage of up to 30 frames over `range` (default: all of it), denser with `detail` (at most 20 s); with `t`, one full frame, and `zoom` magnifies a region of it under a grid in the video's pixels; with `audio`, its whole sound script and a spectrogram when `range` is at most 30 s. Given a page's address, it lists the video files on the page instead; videos that play as streams (YouTube, HLS) cannot be brought in. With `add`, the video also goes into the pool's Web Videos bin and you get its media id; add only what the user asked for.",
+            examples(
+                object(
+                    json!({
+                        "url": string("Address of the video file, or of a page to list the video files on it"),
+                        "add": boolean("Also add it to the pool"),
+                        "range": range("Part of the video, in its own seconds (default: all of it)"),
+                        "detail": boolean("Denser frames over at most 20 s"),
+                        "t": time("One frame at this second of the video"),
+                        "zoom": numbers(4, "[left, top, width, height] in the video's pixels, of the frame at `t`"),
+                        "audio": boolean("Hear its sound instead of seeing frames")
+                    }),
+                    &["url"],
+                ),
+                json!([
+                    { "url": "https://example.com/talks/keynote" },
+                    { "url": "https://example.com/media/keynote.mp4", "range": { "start": 4.0, "end": 9.0 }, "detail": true },
+                    { "url": "https://example.com/media/keynote.mp4", "t": 6.5, "zoom": [640, 200, 480, 360] },
+                    { "url": "https://example.com/media/keynote.mp4", "add": true }
+                ]),
+            ),
+        ),
+        spec(
             "list_files",
             Some(Files),
             "List what is inside the files and folders the user attached to the chat, the only places on disk you may read. Like git sees them: ignored, hidden, dependency and build folders are left out. Paths are relative to their attached folder.",

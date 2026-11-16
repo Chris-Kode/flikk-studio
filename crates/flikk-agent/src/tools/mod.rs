@@ -35,7 +35,7 @@ pub mod upscale;
 pub mod video;
 mod view;
 pub mod voices;
-pub(crate) mod web;
+pub mod web;
 
 pub(crate) use catalog::{ToolSpec, catalog};
 
@@ -202,8 +202,8 @@ pub(crate) enum JobDone {
         /// are proposed from `since`.
         rebase: Option<Rebase>,
     },
-    /// A picture from the web to add to the pool on the UI thread, with
-    /// what the call returns.
+    /// A picture or video from the web to add to the pool on the UI
+    /// thread, with what the call returns.
     Fetched {
         item: Box<flikk_core::model::MediaItem>,
         done: Box<Done>,
@@ -257,8 +257,9 @@ impl From<Done> for Step {
 
 /// Tools the author may see: categories that are not `Off`. With `groups` (the editor's own turns), only
 /// the core tools and those groups, plus `load_tools` and `run_tool` for the
-/// rest; without (external clients), every tool. `view_web_image` only
-/// with `web`, `generate_image` only when [`image::offered`].
+/// rest; without (external clients), every tool. The web tools
+/// ([`web::is_tool`]) only with `web`, `generate_image` only when
+/// [`image::offered`].
 pub(crate) fn list(
     bus: &CommandBus,
     groups: Option<&BTreeSet<ToolCategory>>,
@@ -269,7 +270,7 @@ pub(crate) fn list(
     catalog()
         .iter()
         .filter(|t| t.category.is_none_or(|c| visible(bus, c)))
-        .filter(|t| settings.web || t.name != web::TOOL)
+        .filter(|t| settings.web || !web::is_tool(t.name))
         .filter(|t| t.name != image::TOOL || images)
         .filter(|t| match groups {
             Some(g) => t.name == groups::RUN_TOOL || groups::listed(t, g),
@@ -369,6 +370,7 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         video::PREVIEW => video::preview(ctx, &args),
         "measure_loudness" => view::measure_loudness(ctx, &args),
         web::TOOL => web::serve(ctx, &args),
+        web::video::TOOL => web::video::serve(ctx, &args),
 
         "match_grade" => preview::match_grade(ctx, &args),
         "create_fx" | "update_fx" => fx::author(ctx, tool, &args),

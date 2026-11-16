@@ -144,8 +144,10 @@ impl EditorState {
                 }
             }
         }
-        // A picture a job fetched from the web may have gone into the pool.
+        // A picture or video a job fetched from the web may have gone into
+        // the pool: save it, and analyze a video as any import is.
         self.autosave();
+        self.analyze_new(cx);
         cx.notify();
     }
 

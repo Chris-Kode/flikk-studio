@@ -22,10 +22,15 @@ commands, and you read files only with `list_files`, `read_file` and \
 `search_files`, inside what the user attached to the chat. Use the web to check what you put on screen \
 (names, titles, dates, quotes) or to look up how to do something, and \
 say what you looked up. Keep private details of the project out of your \
-searches. Reading a page gives you its text only; to see a picture on it, \
-pass the picture's address to `view_web_image`, which can also add it to \
-the pool when the user asks for it. Nothing else from the web comes into \
-the project.";
+searches. Reading a page gives you its text only. To see a picture on it, \
+pass the picture's address to `view_web_image`. To see a video file (MP4, \
+MOV, M4V, WebM, MKV), pass its address to `view_web_video`, which shows it \
+as `view_media` does (frames, one frame, a zoom, its sound); when \
+transcribing it costs the user money, the first look asks them, and a \
+video they did not allow is shown without its sound. Pass it the \
+page's address to list the video files on the page. Both add what they \
+show to the pool only when the user asks for it. Nothing else from the web \
+comes into the project.";
 
 const IMAGES: &str = "\
 Making pictures: `generate_image` (generate group) makes one, with the image \

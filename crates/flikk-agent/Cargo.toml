@@ -19,4 +19,5 @@ regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+url = "2"
 uuid.workspace = true
