@@ -179,6 +179,25 @@ pub(super) fn item_menu(
         }
         None => menu,
     };
+    // A video or picture can be made to say a sound by the lip-sync model,
+    // when it takes that kind of face.
+    let face = (panel.read(cx).state.read(cx).bus.project())
+        .media(id)
+        .and_then(flikk_core::cloud::LipSyncFace::of)
+        .map(|f| f.kind);
+    let lipsync = panel.read(cx).lipsync_model(cx);
+    let menu = match lipsync.filter(|m| face.is_some_and(|kind| m.takes(kind))) {
+        Some(model) => {
+            let p = panel.clone();
+            menu.item(
+                PopupMenuItem::new("Lip-sync…").on_click(move |_, window, cx| {
+                    let model = model.clone();
+                    p.update(cx, |this, cx| this.open_lipsync(model, id, window, cx))
+                }),
+            )
+        }
+        None => menu,
+    };
     menu.separator().item(
         PopupMenuItem::new("Remove from project")
             .icon(IconName::Trash)

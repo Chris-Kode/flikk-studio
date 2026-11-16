@@ -1,7 +1,7 @@
 //! Online providers in the editor: each one's key and account as Settings →
 //! Integrations shows them, the provider picked for each capability, and
-//! music, sound effects, voiceovers, videos and pictures made from the media
-//! pool or approved for the agent. The requests themselves are
+//! music, sound effects, voiceovers, videos, pictures, upscales and lip
+//! syncs made from the media pool or approved for the agent. The requests themselves are
 //! `flikk-cloud`'s.
 
 use super::{ApprovalOutcome, EditorState};
@@ -226,6 +226,7 @@ impl EditorState {
                         Capability::Video,
                         Capability::Image,
                         Capability::Upscale,
+                        Capability::LipSync,
                     ] {
                         let unset = this.cloud.settings().provider(capability).is_none();
                         if unset && provider.offer(capability).is_some() {
@@ -420,11 +421,11 @@ impl EditorState {
         self.start_generation(request, grabs, Some(Box::new(then)), cx)
     }
 
-    /// Make pool video `source` larger as `request` says (an
-    /// [`GenerateRequest::Upscale`] of it), into the Video Upscaled bin;
-    /// with `replace`, its clips on picture tracks then show the upscaled
-    /// video, as a step of its own to undo.
-    pub fn upscale(
+    /// Make a new version of pool video `source` as `request` says (an
+    /// [`GenerateRequest::Upscale`] or [`GenerateRequest::LipSync`] of
+    /// it), into its bin; with `replace`, its clips on picture tracks then
+    /// show the new video, as a step of its own to undo.
+    pub fn make_version(
         &mut self,
         source: MediaId,
         request: GenerateRequest,
@@ -626,6 +627,7 @@ impl EditorState {
             Some(Capability::Voiceover) => "Generate voiceover",
             Some(Capability::Video) => "Generate video",
             Some(Capability::Upscale) => "Upscale video",
+            Some(Capability::LipSync) => "Lip-sync video",
             None if item.kind == MediaKind::Video => "Add video",
             _ => "Generate music",
         };

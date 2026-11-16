@@ -105,7 +105,7 @@ impl UpscaleForm {
         let request = self.request(cx);
         let (media, replace) = (self.media, self.used && self.replace);
         self.state
-            .update(cx, |s, cx| s.upscale(media, request, replace, cx));
+            .update(cx, |s, cx| s.make_version(media, request, replace, cx));
         true
     }
 }
