@@ -2,6 +2,7 @@
 
 use super::fx::{asset_json, fx_asset, instance_json, kind_name as fx_kind, param_spec_json};
 use super::layout::without_neutral;
+use super::parts::{self, Window};
 use super::{Done, Step, ToolCtx};
 use crate::args::{Args, ToolError, clip_id, kind_name, num, range_json, secs, short};
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
@@ -523,7 +524,6 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let language = args.opt_str("language")?;
     let category = args.opt_str("category")?.map(str::to_lowercase);
     let text = args.opt_str("text")?.map(str::to_lowercase);
-    let specs = args.opt_bool("params")?.unwrap_or(false);
     let wanted_kind = match kind {
         None | Some("audio") => None,
         Some("effect") => Some(FxKind::Effect),
@@ -541,9 +541,10 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         text.as_ref()
             .is_none_or(|t| hay.iter().any(|h| h.to_lowercase().contains(t.as_str())))
     };
-    let programs: Vec<Value> = if kind == Some("audio") {
-        Vec::new()
-    } else {
+    let programs_with = |specs: bool| -> Vec<Value> {
+        if kind == Some("audio") {
+            return Vec::new();
+        }
         fx::library(project)
             .filter(|a| wanted_kind.is_none_or(|k| a.kind == k))
             .filter(|a| wanted_language.is_none_or(|l| a.language == l))
@@ -553,10 +554,13 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     .is_none_or(|c| a.category.to_lowercase() == *c)
             })
             .filter(|a| matches_text(&[&a.name, &a.description, &a.category, &a.id.to_string()]))
-            .map(|a| asset_json(project, a, false, specs))
+            .map(|a| asset_json(a, specs))
             .collect()
     };
-    let audio: Vec<Value> = if kind.is_none_or(|k| k == "audio") && language.is_none() {
+    let audio_with = |specs: bool| -> Vec<Value> {
+        if !(kind.is_none_or(|k| k == "audio") && language.is_none()) {
+            return Vec::new();
+        }
         AudioFxKind::ALL
             .into_iter()
             .filter(|k| matches_text(&[k.name(), k.label()]))
@@ -569,8 +573,6 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 json!({ "kind": k.name(), "name": k.label(), "params": params })
             })
             .collect()
-    } else {
-        Vec::new()
     };
     // The user's library, less what the project already has a copy of.
     let library: Vec<Value> = if kind == Some("audio") {
@@ -601,15 +603,35 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             })
             .collect()
     };
-    let n = programs.len() + audio.len() + library.len();
-    let mut out = json!({ "programs": programs });
-    if !audio.is_empty() {
-        out["audio_effects"] = json!(audio);
+    // The project's own programs first: they are listed nowhere else.
+    let specs = args.opt_bool("params")?.unwrap_or(false);
+    let (builtins, own): (Vec<Value>, Vec<Value>) = programs_with(specs)
+        .into_iter()
+        .partition(|p| p["builtin"] == true);
+    let entries: Vec<(&str, Value)> = [
+        ("programs", own),
+        ("programs", builtins),
+        ("audio_effects", audio_with(specs)),
+        ("library", library),
+    ]
+    .into_iter()
+    .flat_map(|(section, entries)| entries.into_iter().map(move |e| (section, e)))
+    .collect();
+    let (entries, more) = parts::listed(entries, &Window::of(args)?, |(_, entry)| entry);
+    let n = entries.len();
+    let mut out = json!({ "programs": [] });
+    for (section, entry) in entries {
+        match &mut out[section] {
+            Value::Array(listed) => listed.push(entry),
+            empty => *empty = json!([entry]),
+        }
     }
-    if !library.is_empty() {
-        out["library"] = json!(library);
+    if !out["library"].is_null() {
         out["library_note"] =
             json!("The user's own programs: use_library_fx copies one into this project.");
+    }
+    if let Some(more) = more {
+        out["more"] = json!(more);
     }
     Ok(Done::json(format!("{n} effects"), &out).into())
 }
@@ -617,6 +639,13 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 pub fn get_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let asset = fx_asset(project, args.str("fx")?, None)?;
-    let v = asset_json(project, asset, true, true);
-    Ok(Done::json(format!("{} {}", fx_kind(asset.kind), asset.id), &v).into())
+    let mut about = asset_json(asset, true);
+    let used: Vec<String> = fx::uses(project, &asset.id)
+        .iter()
+        .map(|clip| clip.to_string())
+        .collect();
+    about["used_by_clips"] = json!(used);
+    let code = parts::numbered(&asset.code, &Window::of(args)?);
+    let text = format!("{about}\n\nCode:\n{code}");
+    Ok(Done::text(format!("{} {}", fx_kind(asset.kind), asset.id), text).into())
 }

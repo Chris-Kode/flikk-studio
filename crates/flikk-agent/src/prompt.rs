@@ -286,7 +286,8 @@ a program; each use has its own parameter values and keyframes.
 Workflow: `list_fx` (and `get_fx` for code) → reuse a built-in or one of \
 the user's library programs (`use_library_fx` copies it into the \
 project), or `create_fx` → `preview_fx` and look at the collage → fix \
-with `update_fx` until it looks right → apply with `add_effect`, \
+with `update_fx` until it looks right (its `edits` replace the lines that \
+change, so the rest is not sent again) → apply with `add_effect`, \
 `set_transition` or `add_generator`. Never apply a program you have not \
 previewed, unless preview says the engine is unavailable; then say so. \
 When a program you wrote is worth keeping for other projects, offer \

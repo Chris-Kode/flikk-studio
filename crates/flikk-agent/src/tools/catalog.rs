@@ -480,6 +480,23 @@ fn caption_style_props(mut props: Value) -> Value {
     props
 }
 
+/// Replacements in a long text (`what`: "the code"), so it is not sent
+/// whole to change a line of it.
+fn edits(what: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": format!("Replacements in {what}, made in order; all or none"),
+        "items": {
+            "type": "object",
+            "properties": {
+                "old": string("Text that is there exactly once, as you read it, without line numbers"),
+                "new": string("What takes its place; empty to delete it")
+            },
+            "required": ["old", "new"]
+        }
+    })
+}
+
 fn reason() -> Value {
     string("One line shown to the user with the change; cite the style rule that drove it, if any")
 }
@@ -576,14 +593,15 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "list_fx",
             Some(ReadProject),
-            "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text.",
+            "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text. A long list comes in parts; pass `offset` for the next.",
             object(
                 json!({
                     "kind": one_of(&["effect", "transition", "generator", "audio"], "Only this kind"),
                     "language": one_of(&["glsl", "html"], "Only this language"),
                     "category": string("Library group, e.g. Blur"),
                     "text": string("Words in the name or description"),
-                    "params": boolean("Include full parameter specs (types, ranges, defaults); default names only")
+                    "params": boolean("Include full parameter specs (types, ranges, defaults); default names only"),
+                    "offset": number("First entry to list, from 1")
                 }),
                 &[],
             ),
@@ -591,9 +609,13 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_fx",
             Some(ReadProject),
-            "One FX program: its code, parameter specs and the clips that use it. Read a built-in before writing a similar one.",
+            "One FX program: its parameter specs, the clips that use it and its code with line numbers. Long code comes in parts; pass `offset` for the next. Read a built-in before writing a similar one.",
             object(
-                json!({ "fx": string("Built-in key, project id or `@fx` token") }),
+                json!({
+                    "fx": string("Built-in key, project id or `@fx` token"),
+                    "offset": number("First line of code to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
                 &["fx"],
             ),
         ),
@@ -1758,12 +1780,13 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "update_fx",
             Some(Effects),
-            "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow.",
+            "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow. Change code with `edits` rather than sending all of it again.",
             object(
                 json!({
                     "fx": string("Project program id or `@fx` token"),
                     "name": string("New name"),
-                    "code": string("New code"),
+                    "code": string("New code, whole; not with `edits`"),
+                    "edits": edits("the code"),
                     "params": { "type": "array", "description": "Replaces the parameter list (same shape as create_fx)", "items": { "type": "object" } },
                     "category": string("Library group"),
                     "description": string("One line"),
@@ -1806,38 +1829,66 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "list_skills",
             Some(Skills),
-            "The user's skills (slash commands they run from the chat), with their instructions.",
+            "The user's skills (slash commands they run from the chat): names and one-line descriptions. get_skill reads one.",
             object(json!({}), &[]),
         ),
         spec(
             "list_styles",
             Some(Skills),
-            "The user's styles (standing editing instructions picked in the chat), with their instructions; `in_chat` marks the one in use.",
+            "The user's styles (standing editing instructions picked in the chat) by name; `in_chat` marks the one in use. get_style reads one.",
             object(json!({}), &[]),
+        ),
+        spec(
+            "get_skill",
+            Some(Skills),
+            "One skill's instructions. Long ones come in parts; pass `offset` for the next.",
+            object(
+                json!({
+                    "name": string("Slash name"),
+                    "offset": number("First line to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
+                &["name"],
+            ),
+        ),
+        spec(
+            "get_style",
+            Some(Skills),
+            "One style's instructions. Long ones come in parts; pass `offset` for the next.",
+            object(
+                json!({
+                    "name": string("Style name"),
+                    "offset": number("First line to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
+                &["name"],
+            ),
         ),
         spec(
             "save_skill",
             Some(Skills),
-            "Create a skill the user runs as /name, or replace the one with that name. Text typed after /name reaches you as the user's input.",
+            "Create a skill the user runs as /name, or change the one with that name: `instructions` writes it anew, `edits` replace pieces of it (get_skill first). Text typed after /name reaches you as the user's input.",
             object(
                 json!({
                     "name": string("Slash name, lowercase-with-dashes"),
                     "description": string("One line for the / list"),
-                    "instructions": string("What to do when the skill runs, as steps")
+                    "instructions": string("What to do when the skill runs, as steps; not with `edits`"),
+                    "edits": edits("the instructions")
                 }),
-                &["name", "instructions"],
+                &["name"],
             ),
         ),
         spec(
             "save_style",
             Some(Skills),
-            "Create a style, or replace the one with that name: how edits should feel (pace, music, captions, zooms), applied to every message while it is picked.",
+            "Create a style, or change the one with that name: `instructions` writes it anew, `edits` replace pieces of it (get_style first). A style is how edits should feel (pace, music, captions, zooms), applied to every message while it is picked.",
             object(
                 json!({
                     "name": string("Short name, e.g. Documentary"),
-                    "instructions": string("The style's rules, as instructions")
+                    "instructions": string("The style's rules, as instructions; not with `edits`"),
+                    "edits": edits("the instructions")
                 }),
-                &["name", "instructions"],
+                &["name"],
             ),
         ),
         spec(
