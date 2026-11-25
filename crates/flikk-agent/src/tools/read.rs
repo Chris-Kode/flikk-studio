@@ -2,6 +2,7 @@
 
 use super::fx::{asset_json, fx_asset, instance_json, kind_name as fx_kind, param_spec_json};
 use super::layout::without_neutral;
+use super::parts::{self, Window};
 use super::{Done, Step, ToolCtx};
 use crate::args::{Args, ToolError, clip_id, kind_name, num, range_json, secs, short};
 use flikk_core::audiofx::{AudioFx, AudioFxKind};
@@ -553,7 +554,7 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                     .is_none_or(|c| a.category.to_lowercase() == *c)
             })
             .filter(|a| matches_text(&[&a.name, &a.description, &a.category, &a.id.to_string()]))
-            .map(|a| asset_json(project, a, false, specs))
+            .map(|a| asset_json(a, specs))
             .collect()
     };
     let audio: Vec<Value> = if kind.is_none_or(|k| k == "audio") && language.is_none() {
@@ -617,6 +618,13 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
 pub fn get_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let project = ctx.project();
     let asset = fx_asset(project, args.str("fx")?, None)?;
-    let v = asset_json(project, asset, true, true);
-    Ok(Done::json(format!("{} {}", fx_kind(asset.kind), asset.id), &v).into())
+    let mut about = asset_json(asset, true);
+    let used: Vec<String> = fx::uses(project, &asset.id)
+        .iter()
+        .map(|clip| clip.to_string())
+        .collect();
+    about["used_by_clips"] = json!(used);
+    let code = parts::numbered(&asset.code, &Window::of(args)?);
+    let text = format!("{about}\n\nCode:\n{code}");
+    Ok(Done::text(format!("{} {}", fx_kind(asset.kind), asset.id), text).into())
 }

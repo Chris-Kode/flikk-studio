@@ -3,7 +3,7 @@
 //! (`create_fx`, `update_fx`) validates and compiles before proposing.
 
 use super::edit::{ease, edge, new_track, propose_then, track_or_new};
-use super::{Done, Step, ToolCtx, propose};
+use super::{Done, Step, ToolCtx, parts, propose};
 use crate::args::*;
 use flikk_core::command::{Command, Edge};
 use flikk_core::fx::{
@@ -16,6 +16,8 @@ use flikk_core::services::FxCall;
 use flikk_core::{EffectId, FxId, Time};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::sync::LazyLock;
 
 /// Edit operations served here (some are flags of a listed tool; see
 /// `tools::internal`).
@@ -34,6 +36,16 @@ pub const TOOLS: [&str; 10] = [
 
 /// Default transition length when none is given or set.
 const TRANSITION: f64 = 0.5;
+/// Longest program, in lines, a failed compile shows whole.
+const SHOWN_WHOLE: usize = 150;
+/// Lines it shows on each side of an error in a longer program.
+const AROUND: usize = 4;
+/// Longest a line reads there, in characters.
+const SHOWN_WIDTH: usize = 240;
+/// The author's line an engine's error names: `line 12, column 3` (GLSL)
+/// or `(line 12)` (HTML).
+static ERROR_LINE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\bline (\d+)").expect("a valid pattern"));
 
 pub fn kind_name(kind: FxKind) -> &'static str {
     match kind {
@@ -611,8 +623,11 @@ pub fn author(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolEr
         if let Some(name) = args.opt_str("name")? {
             asset.name = name.trim().to_owned();
         }
-        if let Some(code) = args.opt_str("code")? {
-            asset.code = code.to_owned();
+        match (args.opt_str("code")?, args.value("edits")) {
+            (Some(_), Some(_)) => return fail("Pass `code` or `edits`, not both."),
+            (Some(code), None) => asset.code = code.to_owned(),
+            (None, Some(edits)) => asset.code = edited(&asset.code, edits)?,
+            (None, None) => {}
         }
         asset
     };
@@ -632,8 +647,8 @@ pub fn author(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolEr
         Ok(compiled) => compiled,
         Err(errors) => {
             let mut done = Done::error(format!(
-                "Not saved: the program does not compile. Fix these and call {tool} again:\n{errors}\n\nYour code with line numbers:\n{}",
-                numbered(&asset.code)
+                "Not saved: the program does not compile. Fix these and call {tool} again:\n{errors}{}",
+                rejected_code(&asset.code, &errors)
             ));
             done.summary = format!("{tool} {}: compile errors", asset.name);
             return Ok(done.into());
@@ -702,12 +717,76 @@ fn check(ctx: &ToolCtx, asset: &FxAsset) -> Result<bool, String> {
     }
 }
 
-fn numbered(code: &str) -> String {
-    code.lines()
-        .enumerate()
-        .map(|(i, l)| format!("{:>3} | {l}", i + 1))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// `code` after `edits` (`[{old, new}]`) made in order: each `old` is text
+/// found exactly once in the code as the edits before it left it. Fails,
+/// naming the edit, when one is not.
+fn edited(code: &str, edits: &Value) -> ToolResultOf<String> {
+    let edits = edits
+        .as_array()
+        .filter(|list| !list.is_empty())
+        .ok_or_else(|| ToolError("`edits` is a list of {old, new}".into()))?;
+    // get_fx shows the code line by line, so `old` joins lines with `\n`
+    // whatever the program was saved with.
+    let mut code = code.replace("\r\n", "\n");
+    for (i, edit) in edits.iter().enumerate() {
+        let n = i + 1;
+        let text = |key: &str| {
+            edit.get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError(format!("edit {n} needs `{key}` as text")))
+        };
+        let (old, new) = (text("old")?, text("new")?);
+        if old.is_empty() {
+            return fail(format!("edit {n}: `old` is empty"));
+        }
+        match code.matches(old).count() {
+            1 => code = code.replacen(old, new, 1),
+            0 => {
+                return fail(format!(
+                    "edit {n}: `old` is not in the code. Copy it from get_fx as written, without the line numbers. Nothing was changed."
+                ));
+            }
+            times => {
+                return fail(format!(
+                    "edit {n}: `old` is in the code {times} times; take in the lines around it until it is there once. Nothing was changed."
+                ));
+            }
+        }
+    }
+    Ok(code)
+}
+
+/// What a failed compile shows of the code it was given, numbered as the
+/// errors number it: a short program whole, else the lines around each
+/// error. The code was not saved, so `get_fx` cannot show these lines.
+fn rejected_code(code: &str, errors: &str) -> String {
+    let lines: Vec<&str> = code.lines().collect();
+    let whole = lines.len() <= SHOWN_WHOLE;
+    let named: Vec<usize> = ERROR_LINE
+        .captures_iter(errors)
+        .filter_map(|found| found[1].parse().ok())
+        .collect();
+    let shown: Vec<usize> = (1..=lines.len())
+        .filter(|n| whole || named.iter().any(|at| n.abs_diff(*at) <= AROUND))
+        .collect();
+    let Some(first) = shown.first() else {
+        return String::new();
+    };
+    let mut out = String::from(if whole {
+        "\n\nYour code with line numbers:\n"
+    } else {
+        "\n\nYour code around them (it was not saved):\n"
+    });
+    let mut before = first - 1;
+    for n in shown {
+        if n != before + 1 {
+            out.push_str("    …\n");
+        }
+        let line = parts::clipped(lines[n - 1], SHOWN_WIDTH);
+        let _ = writeln!(out, "{n:>3} | {line}");
+        before = n;
+    }
+    out
 }
 
 /// `params` of `create_fx`: `[{name, type, label?, default, min?, max?,
@@ -783,8 +862,9 @@ fn param_specs(v: &Value) -> ToolResultOf<Vec<ParamSpec>> {
         .collect()
 }
 
-/// An asset as the agent reads it.
-pub fn asset_json(project: &Project, asset: &FxAsset, code: bool, specs: bool) -> Value {
+/// An asset as the agent reads it, less its code: with the full parameter
+/// specs when `specs`, else their names.
+pub fn asset_json(asset: &FxAsset, specs: bool) -> Value {
     let mut v = json!({
         "fx": asset.id.to_string(),
         "name": asset.name,
@@ -808,14 +888,6 @@ pub fn asset_json(project: &Project, asset: &FxAsset, code: bool, specs: bool) -
                 .map(|p| p.name.as_str())
                 .collect::<Vec<_>>()
         );
-    }
-    if code {
-        v["code"] = json!(asset.code);
-        let used: Vec<_> = fx::uses(project, &asset.id)
-            .iter()
-            .map(|c| c.to_string())
-            .collect();
-        v["used_by_clips"] = json!(used);
     }
     v
 }

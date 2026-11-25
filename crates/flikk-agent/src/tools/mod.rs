@@ -22,6 +22,7 @@ pub mod image;
 mod layout;
 mod masks;
 mod music;
+mod parts;
 mod pool;
 mod preview;
 mod read;

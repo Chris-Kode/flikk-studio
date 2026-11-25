@@ -1,8 +1,9 @@
-//! The user's skills and styles, for the agent: reading them, and creating,
-//! changing or deleting one. Saves run directly when the user allowed it;
-//! otherwise, and for every delete, [`request`] turns the call into what the
-//! approval card shows and the editor applies.
+//! The user's skills and styles, for the agent: listing them, reading one,
+//! and creating, changing or deleting one. Saves run directly when the user
+//! allowed it; otherwise, and for every delete, [`request`] turns the call
+//! into what the approval card shows and the editor applies.
 
+use super::parts::{self, Window};
 use super::{Done, ToolCtx};
 use crate::args::{Args, ToolError};
 use flikk_core::bus::Permission;
@@ -10,9 +11,11 @@ use flikk_core::skills::{self, Draft, Entry, Kind};
 use serde_json::{Value, json};
 
 /// Every tool this module serves.
-pub const TOOLS: [&str; 6] = [
+pub const TOOLS: [&str; 8] = [
     "list_skills",
     "list_styles",
+    "get_skill",
+    "get_style",
     "save_skill",
     "save_style",
     "delete_skill",
@@ -32,6 +35,19 @@ pub fn serve(ctx: &ToolCtx, tool: &str, args: &Args) -> Result<Done, ToolError> 
     match tool {
         "list_skills" => Ok(list(Kind::Skill, None)),
         "list_styles" => Ok(list(Kind::Style, ctx.settings.style.as_deref())),
+        "get_skill" | "get_style" => {
+            let kind = kind_of(tool);
+            let entry = find(kind, args.str("name")?)?;
+            let mut text = label(kind, &entry.name);
+            if !entry.description.is_empty() {
+                text.push_str(&format!(": {}", entry.description));
+            }
+            let instructions = parts::plain(&entry.instructions, &Window::of(args)?);
+            Ok(Done::text(
+                label(kind, &entry.name),
+                format!("{text}\n\n{instructions}"),
+            ))
+        }
         "save_skill" | "save_style" => {
             let change = Change::read(tool, args)?;
             let saved = skills::save(change.kind, change.previous_id(), &change.draft)
@@ -127,7 +143,7 @@ impl Change {
 }
 
 fn kind_of(tool: &str) -> Kind {
-    if tool.ends_with("_style") || tool == "list_styles" {
+    if tool.ends_with("_style") {
         Kind::Style
     } else {
         Kind::Skill
@@ -151,6 +167,8 @@ fn find(kind: Kind, name: &str) -> Result<Entry, ToolError> {
         .ok_or_else(|| ToolError(format!("there is no {} named {name}", kind.noun())))
 }
 
+/// The entries of `kind` without their instructions (`get_skill` and
+/// `get_style` read those), so the list stays small however many there are.
 fn list(kind: Kind, in_chat: Option<&str>) -> Done {
     let entries = skills::list(kind);
     let items: Vec<Value> = entries
@@ -159,11 +177,9 @@ fn list(kind: Kind, in_chat: Option<&str>) -> Done {
             Kind::Skill => json!({
                 "name": e.name,
                 "description": e.description,
-                "instructions": e.instructions,
             }),
             Kind::Style => json!({
                 "name": e.name,
-                "instructions": e.instructions,
                 "in_chat": in_chat == Some(e.id.as_str()),
             }),
         })

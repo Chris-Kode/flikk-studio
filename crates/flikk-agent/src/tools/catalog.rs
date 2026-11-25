@@ -591,9 +591,13 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "get_fx",
             Some(ReadProject),
-            "One FX program: its code, parameter specs and the clips that use it. Read a built-in before writing a similar one.",
+            "One FX program: its parameter specs, the clips that use it and its code with line numbers. Long code comes in parts; pass `offset` for the next. Read a built-in before writing a similar one.",
             object(
-                json!({ "fx": string("Built-in key, project id or `@fx` token") }),
+                json!({
+                    "fx": string("Built-in key, project id or `@fx` token"),
+                    "offset": number("First line of code to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
                 &["fx"],
             ),
         ),
@@ -1758,12 +1762,24 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "update_fx",
             Some(Effects),
-            "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow.",
+            "Change one of this project's FX programs (code, params, name…); validated and compiled like create_fx. Clips that use it follow. Change code with `edits` rather than sending all of it again.",
             object(
                 json!({
                     "fx": string("Project program id or `@fx` token"),
                     "name": string("New name"),
-                    "code": string("New code"),
+                    "code": string("New code, whole; not with `edits`"),
+                    "edits": {
+                        "type": "array",
+                        "description": "Replacements in the code, made in order; all or none",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": string("Text in the code exactly once, as get_fx shows it without the line numbers"),
+                                "new": string("What takes its place; empty to delete it")
+                            },
+                            "required": ["old", "new"]
+                        }
+                    },
                     "params": { "type": "array", "description": "Replaces the parameter list (same shape as create_fx)", "items": { "type": "object" } },
                     "category": string("Library group"),
                     "description": string("One line"),
@@ -1806,19 +1822,45 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "list_skills",
             Some(Skills),
-            "The user's skills (slash commands they run from the chat), with their instructions.",
+            "The user's skills (slash commands they run from the chat): names and one-line descriptions. get_skill reads one.",
             object(json!({}), &[]),
         ),
         spec(
             "list_styles",
             Some(Skills),
-            "The user's styles (standing editing instructions picked in the chat), with their instructions; `in_chat` marks the one in use.",
+            "The user's styles (standing editing instructions picked in the chat) by name; `in_chat` marks the one in use. get_style reads one.",
             object(json!({}), &[]),
+        ),
+        spec(
+            "get_skill",
+            Some(Skills),
+            "One skill's instructions. Long ones come in parts; pass `offset` for the next.",
+            object(
+                json!({
+                    "name": string("Slash name"),
+                    "offset": number("First line to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
+                &["name"],
+            ),
+        ),
+        spec(
+            "get_style",
+            Some(Skills),
+            "One style's instructions. Long ones come in parts; pass `offset` for the next.",
+            object(
+                json!({
+                    "name": string("Style name"),
+                    "offset": number("First line to read, from 1"),
+                    "limit": number("Lines to read (default 2000)")
+                }),
+                &["name"],
+            ),
         ),
         spec(
             "save_skill",
             Some(Skills),
-            "Create a skill the user runs as /name, or replace the one with that name. Text typed after /name reaches you as the user's input.",
+            "Create a skill the user runs as /name, or replace the one with that name (get_skill first: `instructions` replaces all of it). Text typed after /name reaches you as the user's input.",
             object(
                 json!({
                     "name": string("Slash name, lowercase-with-dashes"),
@@ -1831,7 +1873,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "save_style",
             Some(Skills),
-            "Create a style, or replace the one with that name: how edits should feel (pace, music, captions, zooms), applied to every message while it is picked.",
+            "Create a style, or replace the one with that name (get_style first: `instructions` replaces all of it): how edits should feel (pace, music, captions, zooms), applied to every message while it is picked.",
             object(
                 json!({
                     "name": string("Short name, e.g. Documentary"),

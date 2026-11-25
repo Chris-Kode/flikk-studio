@@ -4,6 +4,7 @@
 //! [`resolve`], which canonicalizes it first, so `..` and symlinks that lead
 //! out are refused like any other path outside.
 
+use super::parts::{self, Window};
 use super::web::picture;
 use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, ToolResultOf, fail};
@@ -36,9 +37,6 @@ const SKIP: [&str; 7] = [
 const LIST_MAX: usize = 500;
 const DEPTH_DEFAULT: usize = 3;
 const DEPTH_MAX: usize = 12;
-const LINES_DEFAULT: usize = 2000;
-/// Most text a `read_file` call returns.
-const TEXT_MAX: usize = 256 << 10;
 /// Biggest file read whole.
 const READ_MAX: u64 = 10 << 20;
 /// Bigger files are left out of a search.
@@ -69,11 +67,8 @@ pub fn serve(ctx: &mut ToolCtx, tool: &str, args: &Args) -> ToolResultOf<Step> {
         }
         "read_file" => {
             let path = args.str("path")?.to_owned();
-            let offset = args.opt_f64("offset")?.map_or(1, |o| o.max(1.0) as usize);
-            let limit = args
-                .opt_f64("limit")?
-                .map_or(LINES_DEFAULT, |l| l.max(1.0) as usize);
-            Box::new(move || done(read(&roots, &path, offset, limit)))
+            let window = Window::of(args)?;
+            Box::new(move || done(read(&roots, &path, &window)))
         }
         "search_files" => {
             let pattern = regex::Regex::new(args.str("pattern")?)
@@ -278,7 +273,7 @@ fn list(
     Ok(Done::text(summary, out))
 }
 
-fn read(roots: &[Attachment], path: &str, offset: usize, limit: usize) -> ToolResultOf<Done> {
+fn read(roots: &[Attachment], path: &str, window: &Window) -> ToolResultOf<Done> {
     let (file, root) = resolve(roots, Some(path))?;
     let meta = std::fs::metadata(&file)?;
     if meta.is_dir() {
@@ -322,28 +317,7 @@ fn read(roots: &[Attachment], path: &str, offset: usize, limit: usize) -> ToolRe
         ));
     }
     let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
-    let first = offset.min(total.max(1));
-    let mut out = String::new();
-    let mut last = first - 1;
-    for (i, line) in lines.iter().enumerate().skip(first - 1).take(limit) {
-        if out.len() + line.len() > TEXT_MAX {
-            break;
-        }
-        let _ = writeln!(out, "{:>6}\t{line}", i + 1);
-        last = i + 1;
-    }
-    if total == 0 {
-        out.push_str("(empty file)\n");
-    } else if last < total {
-        let _ = writeln!(
-            out,
-            "(lines {first}–{last} of {total}; pass offset {} for more)",
-            last + 1
-        );
-    }
-    Ok(Done::text(name, out))
+    Ok(Done::text(name, parts::numbered(&text, window)))
 }
 
 /// Text has no NUL bytes in its first few kilobytes.
@@ -394,12 +368,7 @@ fn search(
                     continue;
                 }
                 matches += 1;
-                let line = line.trim();
-                let line: String = if line.chars().count() > MATCH_WIDTH {
-                    line.chars().take(MATCH_WIDTH).chain(['…']).collect()
-                } else {
-                    line.to_owned()
-                };
+                let line = parts::clipped(line.trim(), MATCH_WIDTH);
                 let _ = writeln!(out, "{}:{}: {line}", shown(entry.path(), root), i + 1);
             }
             files += hit as usize;
