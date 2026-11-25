@@ -195,6 +195,23 @@ impl Composer {
         }
     }
 
+    /// Say what the message is for, where the composer is not a chat's
+    /// own: the home page's, which starts a project.
+    pub fn set_placeholder(&self, text: &'static str, window: &mut Window, cx: &mut App) {
+        self.input
+            .update(cx, |input, cx| input.set_placeholder(text, window, cx));
+    }
+
+    /// Put `text` back as the message: what it was sent for did not go
+    /// ahead.
+    pub fn restore(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |input, cx| {
+            if input.value().is_empty() {
+                input.set_value(text, window, cx);
+            }
+        });
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }

@@ -22,7 +22,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 mod chats;
 mod proposals;
 
-pub use chats::{ChatSession, Chats, load_chats, save_chats};
+pub use chats::{ChatSession, Chats, forget_chats, load_chats, save_chats};
 pub use proposals::Proposals;
 
 /// Everything needed to start editing a project.

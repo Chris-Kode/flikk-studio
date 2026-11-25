@@ -19,7 +19,7 @@ use crate::ui::kit::{
     Button, DialogExt as _, Icon, IconName, Kbd, Panel, PanelHeader, ScrollableElement as _,
     Spinner, Tooltip, h_flex, theme as t, v_flex,
 };
-use composer::{Composer, ComposerEvent};
+pub(crate) use composer::{Composer, ComposerEvent};
 use flikk_core::agent::{ChatMessage, ChatRole};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::{ChangeItemId, ChangeSetId};

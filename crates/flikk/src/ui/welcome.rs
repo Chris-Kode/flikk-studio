@@ -120,15 +120,14 @@ pub struct Welcome {
     selected: usize,
     /// Files from outside held over the drop zone.
     dropping: Option<Vec<PathBuf>>,
-    /// What the next agent is asked for.
-    prompt: Entity<InputState>,
-    /// The files and folders the next agent's project starts with.
-    footage: Vec<PathBuf>,
-    /// The prompt's agent started: the prompt empties on the next draw.
-    clear_prompt: bool,
+    /// What the next agent is asked in, made when the agents first show
+    /// (see `board`), and its subscription.
+    composer: Option<(Entity<crate::ui::chat::Composer>, Subscription)>,
+    /// A message whose project was not made after all: it goes back into
+    /// the composer on the next draw.
+    restore: Option<String>,
     focus: FocusHandle,
     _search: Subscription,
-    _prompt: Subscription,
     _desk: Subscription,
     /// Redraws with the project in the editor, whose setup, status and
     /// unsaved changes the page shows.
@@ -161,8 +160,6 @@ impl Welcome {
             state.entity_id(),
             cx.observe(&state, |_, _, cx| cx.notify()),
         );
-        let prompt = Self::prompt_input(window, cx);
-        let _prompt = Self::watch_prompt(&prompt, window, cx);
         Self {
             desk,
             agents: Agents::Unchecked,
@@ -172,12 +169,10 @@ impl Welcome {
             recent,
             selected: 0,
             dropping: None,
-            prompt,
-            footage: Vec::new(),
-            clear_prompt: false,
+            composer: None,
+            restore: None,
             focus,
             _search,
-            _prompt,
             _desk,
             _state,
         }

@@ -45,16 +45,7 @@ pub struct Session {
 
 impl Session {
     fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Desk>) -> Self {
-        // What this project saves for every project, the others read again.
-        let shared = cx.subscribe(&state, |desk, from, change: &SharedChange, cx| {
-            let others: Vec<_> = (desk.sessions.iter())
-                .filter(|s| s.state != from)
-                .map(|s| s.state.clone())
-                .collect();
-            for state in others {
-                state.update(cx, |s, cx| s.read_again(*change, cx));
-            }
-        });
+        let shared = Desk::share(&state, cx);
         Self {
             timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
             viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
@@ -84,6 +75,8 @@ pub struct Desk {
     sessions: Vec<Session>,
     /// The one in the editor.
     editor: Entity<EditorState>,
+    /// See [`Self::draft`].
+    draft: Option<(Entity<EditorState>, Subscription)>,
     /// See [`Self::times_opened`].
     opened: u64,
 }
@@ -105,6 +98,7 @@ impl Desk {
             Self {
                 sessions: vec![Session::new(state.clone(), window, cx)],
                 editor: state,
+                draft: None,
                 opened: 0,
             }
         });
@@ -115,6 +109,44 @@ impl Desk {
     /// The app's desk.
     pub fn get(cx: &App) -> Entity<Self> {
         cx.global::<TheDesk>().0.clone()
+    }
+
+    /// What `state` saves for every project (settings, the library,
+    /// presets, keys), the other states read again.
+    fn share(state: &Entity<EditorState>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(state, |desk, from, change: &SharedChange, cx| {
+            let draft = desk.draft.iter().map(|(draft, _)| draft);
+            let others: Vec<_> = (desk.states().chain(draft))
+                .filter(|state| **state != from)
+                .cloned()
+                .collect();
+            for state in others {
+                state.update(cx, |s, cx| s.read_again(*change, cx));
+            }
+        })
+    }
+
+    /// The session being written on the home page, before its project
+    /// exists: a state of its own, so the message that starts an agent is
+    /// written with everything a chat's composer has (style, skills, model
+    /// and thinking level, attachments). Not one of the open projects.
+    pub fn draft(&mut self, cx: &mut Context<Self>) -> Entity<EditorState> {
+        if let Some((draft, _)) = &self.draft {
+            return draft.clone();
+        }
+        let untitled = persistence::new_project("Untitled", SequenceSettings::default());
+        let shared = self.editor.read(cx).shared();
+        let draft = cx.new(|cx| EditorState::open(untitled, shared, cx));
+        self.draft = Some((draft.clone(), Self::share(&draft, cx)));
+        draft
+    }
+
+    /// The draft's message started a project: forget the draft, with what
+    /// was attached to it. The next one starts empty.
+    pub fn forget_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some((draft, _)) = self.draft.take() {
+            persistence::forget_chats(draft.read(cx).bus.project().id);
+        }
     }
 
     /// The session in the editor.

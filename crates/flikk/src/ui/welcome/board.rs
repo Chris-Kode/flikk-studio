@@ -1,5 +1,5 @@
-//! The agents on the home page: a prompt that starts a new project with an
-//! agent at work on it, and the open projects side by side, each as it is
+//! The agents on the home page: a composer that starts a new project with
+//! an agent at work on its message, and the open projects side by side, each as it is
 //! in the editor: its picture, and its agent's chat with the thread, the
 //! requests waiting on the user and the composer (style, skills, model and
 //! thinking level). A tile's header saves its project, renders it, opens it
@@ -9,10 +9,8 @@ use super::{Welcome, WelcomeEvent, aspect, meta};
 use crate::desk::Session;
 use crate::projects;
 use crate::state::AgentStatus;
-use crate::ui::kit::{
-    Button, DialogExt as _, Icon, IconName, Input, Spinner, h_flex, theme as t, v_flex,
-};
-use gpui_kit::base::input::{InputEvent, InputState};
+use crate::ui::chat::{Composer, ComposerEvent};
+use crate::ui::kit::{Button, DialogExt as _, Icon, IconName, Spinner, h_flex, theme as t, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -22,68 +20,54 @@ const GAP: f32 = 12.;
 /// The least a tile is high: its picture and a few lines of chat over the
 /// composer.
 const TILE_MIN_HEIGHT: f32 = 460.;
+/// How high the composer is before a message grows it.
+const COMPOSER: f32 = 80.;
 /// The part of a tile's height its picture takes.
 const PICTURE: f32 = 0.34;
 
 impl Welcome {
-    /// The field a new agent's first message is written in.
-    pub(super) fn prompt_input(window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
-        cx.new(|cx| InputState::new(window, cx).placeholder("Describe a video"))
-    }
-
-    /// Enter in the prompt starts the agent.
-    pub(super) fn watch_prompt(
-        prompt: &Entity<InputState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.subscribe_in(prompt, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.start(cx);
-            }
-        })
-    }
-
-    /// Ask the window for a new project whose agent starts on the prompt,
-    /// with the footage picked for it. The prompt stays until the project
-    /// is made (see [`Self::agent_started`]): New project can be cancelled.
-    fn start(&mut self, cx: &mut Context<Self>) {
-        let prompt = self.prompt.read(cx).value().trim().to_owned();
-        if prompt.is_empty() || self.state(cx).read(cx).projects_wait() {
-            return;
+    /// The composer the next agent's first message is written in: a
+    /// chat's own, on the desk's draft session, so the message is written
+    /// with a style, skills, a model and thinking level, and attachments.
+    fn composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Composer> {
+        if let Some((composer, _)) = &self.composer {
+            return composer.clone();
         }
-        cx.emit(WelcomeEvent::Start {
-            prompt,
-            footage: self.footage.clone(),
+        let draft = self.desk.update(cx, |desk, cx| desk.draft(cx));
+        let composer = cx.new(|cx| Composer::new(draft, window, cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_placeholder("Describe a video, / for skills", window, cx)
         });
+        let sent = cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| {
+            let ComposerEvent::Submit(text) = event;
+            this.start(text.clone(), cx);
+        });
+        self.composer = Some((composer.clone(), sent));
+        composer
     }
 
-    /// The agent asked for with the prompt started: the prompt and its
-    /// footage are its own now.
+    /// Ask the window for a new project whose agent starts on `prompt`,
+    /// with what was attached to the draft: imported into the project, and
+    /// attached to its chat.
+    fn start(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let draft = self.desk.update(cx, |desk, cx| desk.draft(cx));
+        let attached = draft.read(cx).attachments().iter();
+        let footage = attached.map(|a| a.path.clone()).collect();
+        cx.emit(WelcomeEvent::Start { prompt, footage });
+    }
+
+    /// The agent asked for with the draft's message started: the next
+    /// message is written on a new draft.
     pub fn agent_started(&mut self, cx: &mut Context<Self>) {
-        self.footage.clear();
-        self.clear_prompt = true;
+        self.composer = None;
+        self.desk.update(cx, |desk, cx| desk.forget_draft(cx));
         cx.notify();
     }
 
-    /// Pick the files and folders the next agent's project starts with.
-    fn pick_footage(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.footage = paths;
-                cx.notify();
-            });
-        })
-        .detach();
+    /// New project was cancelled: `prompt` goes back into the composer.
+    pub fn restore_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+        self.restore = Some(prompt);
+        cx.notify();
     }
 
     /// Open `session`'s project in the editor.
@@ -91,35 +75,6 @@ impl Welcome {
         cx.emit(WelcomeEvent::ForgetFootage);
         let state = session.state.clone();
         self.desk.update(cx, |desk, cx| desk.enter(&state, cx));
-    }
-
-    /// The prompt, with the footage picked for it and Start.
-    fn start_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let footage = self.footage.len();
-        let mut prompt = Input::new(&self.prompt).bg(t::P).rounded(t::RADIUS);
-        if footage > 0 {
-            prompt = prompt.suffix(meta(match footage {
-                1 => "1 item".to_owned(),
-                n => format!("{n} items"),
-            }));
-        }
-        h_flex()
-            .gap(px(6.))
-            .child(div().flex_1().min_w_0().child(prompt))
-            .child(
-                Button::new("agent-footage")
-                    .ghost()
-                    .icon(IconName::Paperclip)
-                    .tooltip("Add footage")
-                    .accent(footage > 0)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_footage(cx))),
-            )
-            .child(
-                Button::new("agent-start")
-                    .icon(IconName::ArrowUp)
-                    .label("Start")
-                    .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
-            )
     }
 
     /// A tile's header: how its agent stands, the project's name and
@@ -281,9 +236,9 @@ impl Welcome {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if std::mem::take(&mut self.clear_prompt) {
-            self.prompt
-                .update(cx, |prompt, cx| prompt.set_value("", window, cx));
+        let composer = self.composer(window, cx);
+        if let Some(prompt) = self.restore.take() {
+            composer.update(cx, |composer, cx| composer.restore(&prompt, window, cx));
         }
         let working = self.desk.read(cx).agents_working(cx);
         let size = tile_size(sessions.len(), window);
@@ -307,7 +262,7 @@ impl Welcome {
                         row.child(meta(format!("{working} working")))
                     }),
             )
-            .child(self.start_row(cx))
+            .child(composer)
             .when(!tiles.is_empty(), |board| {
                 board.child(
                     div()
@@ -338,8 +293,9 @@ fn tile_size(count: usize, window: &Window) -> Size<Pixels> {
     let gaps = |n: usize| px(GAP * (n as f32 - 1.));
     // The scrollbar's lane stays free, so the last column never wraps.
     let across = viewport.width - px(BESIDE_TILES) - px(12.);
-    // Over the tiles: the bars, the page's padding, "Agents" and the prompt.
-    let above = t::TITLE_BAR + t::STATUS_BAR + px(2. * 24. + 32. + 8. + 26. + 12.);
+    // Over the tiles: the bars, the page's padding, "Agents" and the
+    // composer with an empty message.
+    let above = t::TITLE_BAR + t::STATUS_BAR + px(2. * 24. + 32. + 8. + COMPOSER + 12.);
     let down = viewport.height - above;
     size(
         ((across - gaps(columns)) / columns as f32).max(px(340.)),

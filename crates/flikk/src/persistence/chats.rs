@@ -100,6 +100,12 @@ fn legacy_chats(project: ProjectId) -> Chats {
 
 /// Save the project's chats. A demo's are not kept: like its project, they
 /// would never be opened again.
+/// Remove the chats saved for `project`: a draft's, once the project it
+/// was written for is made.
+pub fn forget_chats(project: ProjectId) {
+    let _ = std::fs::remove_file(chats_path(project));
+}
+
 pub fn save_chats(project: ProjectId, chats: &Chats) {
     if crate::demo::enabled() {
         return;

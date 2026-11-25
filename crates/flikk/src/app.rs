@@ -158,7 +158,7 @@ pub struct Flikk {
 }
 
 /// What a project made from the home page starts with: the agent's first
-/// message and the footage to import before it is sent.
+/// message and what was attached to it, imported before it is sent.
 struct Starting {
     prompt: String,
     footage: Vec<PathBuf>,
@@ -398,7 +398,15 @@ impl Flikk {
                     let name = crate::ui::welcome::name_from(prompt, footage);
                     let flikk = cx.entity().downgrade();
                     let on_cancel = move |cx: &mut App| {
-                        let _ = flikk.update(cx, |this, _| this.starting = None);
+                        let _ = flikk.update(cx, |this, cx| {
+                            // The message goes back where it was written.
+                            let Some(start) = this.starting.take() else {
+                                return;
+                            };
+                            if let Some(page) = &this.home {
+                                page.update(cx, |page, cx| page.restore_prompt(start.prompt, cx));
+                            }
+                        });
                     };
                     projects::new_project_named(&self.state, Some(name), on_cancel, window, cx);
                 }
@@ -418,11 +426,17 @@ impl Flikk {
             page.update(cx, |page, cx| page.agent_started(cx));
         }
         let Starting { prompt, footage } = start;
+        // What was attached to the message: the agent may read it, and
+        // the media in it is the project's footage.
+        let state = self.state.clone();
+        state.update(cx, |s, cx| {
+            let (project, chat) = (s.bus.project().id, s.active_chat().to_owned());
+            s.attach(project, &chat, footage.clone(), cx);
+        });
         let imported = (!footage.is_empty()).then(|| {
             self.media_pool
                 .update(cx, |pool, cx| pool.importing(footage, None, cx))
         });
-        let state = self.state.clone();
         cx.spawn(async move |_, cx| {
             if let Some(imported) = imported {
                 imported.await;
