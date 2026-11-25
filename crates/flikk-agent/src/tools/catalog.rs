@@ -593,14 +593,15 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "list_fx",
             Some(ReadProject),
-            "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text.",
+            "Effects, transitions and generators you can use: built-ins and this project's own programs (GLSL or HTML), plus audio effect kinds. Filter by kind, language, category or text. A long list comes in parts; pass `offset` for the next.",
             object(
                 json!({
                     "kind": one_of(&["effect", "transition", "generator", "audio"], "Only this kind"),
                     "language": one_of(&["glsl", "html"], "Only this language"),
                     "category": string("Library group, e.g. Blur"),
                     "text": string("Words in the name or description"),
-                    "params": boolean("Include full parameter specs (types, ranges, defaults); default names only, as is a list too long for them")
+                    "params": boolean("Include full parameter specs (types, ranges, defaults); default names only"),
+                    "offset": number("First entry to list, from 1")
                 }),
                 &[],
             ),

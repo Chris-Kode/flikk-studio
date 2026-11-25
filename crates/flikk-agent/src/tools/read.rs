@@ -575,7 +575,7 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             .collect()
     };
     // The user's library, less what the project already has a copy of.
-    let mut library: Vec<Value> = if kind == Some("audio") {
+    let library: Vec<Value> = if kind == Some("audio") {
         Vec::new()
     } else {
         let lib = Library::load();
@@ -603,39 +603,35 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             })
             .collect()
     };
-    // Full parameter specs only while the list is short enough for them;
-    // then whatever of it fits.
-    let asked_specs = args.opt_bool("params")?.unwrap_or(false);
-    let (mut programs, mut audio) = (programs_with(asked_specs), audio_with(asked_specs));
-    let names_only = asked_specs && !parts::fits(&[&programs, &audio, &library]);
-    if names_only {
-        (programs, audio) = (programs_with(false), audio_with(false));
+    // The project's own programs first: they are listed nowhere else.
+    let specs = args.opt_bool("params")?.unwrap_or(false);
+    let (builtins, own): (Vec<Value>, Vec<Value>) = programs_with(specs)
+        .into_iter()
+        .partition(|p| p["builtin"] == true);
+    let entries: Vec<(&str, Value)> = [
+        ("programs", own),
+        ("programs", builtins),
+        ("audio_effects", audio_with(specs)),
+        ("library", library),
+    ]
+    .into_iter()
+    .flat_map(|(section, entries)| entries.into_iter().map(move |e| (section, e)))
+    .collect();
+    let (entries, more) = parts::listed(entries, &Window::of(args)?, |(_, entry)| entry);
+    let n = entries.len();
+    let mut out = json!({ "programs": [] });
+    for (section, entry) in entries {
+        match &mut out[section] {
+            Value::Array(listed) => listed.push(entry),
+            empty => *empty = json!([entry]),
+        }
     }
-    // The project's own programs are listed nowhere else, so they are the
-    // last to be cut.
-    let (mut builtins, mut own): (Vec<Value>, Vec<Value>) =
-        programs.into_iter().partition(|p| p["builtin"] == true);
-    let cut = parts::cut_to_fit(&mut [&mut own, &mut audio, &mut builtins, &mut library]);
-    let programs = [builtins, own].concat();
-    let n = programs.len() + audio.len() + library.len();
-    let mut out = json!({ "programs": programs });
-    if !audio.is_empty() {
-        out["audio_effects"] = json!(audio);
-    }
-    if !library.is_empty() {
-        out["library"] = json!(library);
+    if !out["library"].is_null() {
         out["library_note"] =
             json!("The user's own programs: use_library_fx copies one into this project.");
     }
-    if names_only {
-        out["params_note"] = json!(
-            "Parameter names only: the full specs of this many are too long. get_fx has one program's; or narrow with kind, language, category or text."
-        );
-    }
-    if cut > 0 {
-        out["truncated"] = json!(format!(
-            "{cut} more not listed; narrow with kind, language, category or text"
-        ));
+    if let Some(more) = more {
+        out["more"] = json!(more);
     }
     Ok(Done::json(format!("{n} effects"), &out).into())
 }
