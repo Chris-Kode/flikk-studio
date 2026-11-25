@@ -4,10 +4,11 @@
 //! and the status bar; or the home page in their place, at launch and
 //! whenever the user goes back to it.
 
+use crate::desk::{Desk, Session};
 use crate::notices::NoticeAction;
 use crate::projects::{self, NewProject, OpenProject, ProjectSettings, SaveProject, SaveProjectAs};
 use crate::state::EditorState;
-use crate::ui::caption_style::{CaptionStylePanel, Target};
+use crate::ui::caption_style::CaptionStylePanel;
 use crate::ui::editor_settings::{EditorSettings, SettingsTab};
 use crate::ui::kit::theme as t;
 use crate::ui::kit::{
@@ -97,6 +98,9 @@ enum LeftTab {
 }
 
 pub struct Flikk {
+    /// The open projects. The fields below are those of the one in the
+    /// editor ([`Self::adopt`]).
+    desk: Entity<Desk>,
     state: Entity<EditorState>,
     timeline: Entity<TimelinePanel>,
     viewer: Entity<ViewerPanel>,
@@ -149,6 +153,7 @@ pub struct Flikk {
     provider_ask: Option<crate::ui::kit::DialogId>,
     _observe: Subscription,
     _observe_asks: Subscription,
+    _desk: Subscription,
     _home: Option<Subscription>,
 }
 
@@ -161,13 +166,12 @@ struct Starting {
 
 impl Flikk {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state = cx.new(EditorState::new);
-        if crate::demo::enabled() {
-            state.update(cx, crate::demo::seed);
-        }
-        let _observe = cx.observe(&state, |this, _, cx| this.state_changed(cx));
-        let _observe_asks = cx.observe_in(&state, window, |this, _, window, cx| {
-            this.ask_about_provider(window, cx)
+        let desk = Desk::start(window, cx);
+        let session = desk.read(cx).editor().clone();
+        let state = session.state.clone();
+        let (_observe, _observe_asks) = Self::observe(&state, window, cx);
+        let _desk = cx.observe_in(&desk, window, |this, _, window, cx| {
+            this.desk_changed(window, cx)
         });
         // Every launch starts on the welcome page, unless the app was
         // started for a file or a demo; and while a model is missing,
@@ -202,19 +206,18 @@ impl Flikk {
             }
         });
         let mut this = Self {
-            timeline: cx.new(|cx| TimelinePanel::new(state.clone(), window, cx)),
-            viewer: cx.new(|cx| ViewerPanel::new(state.clone(), window, cx)),
-            media_pool: cx.new(|cx| MediaPoolPanel::new(state.clone(), window, cx)),
-            inspector: cx.new(|cx| InspectorPanel::new(state.clone(), window, cx)),
-            transcript: cx.new(|cx| TranscriptPanel::new(state.clone(), window, cx)),
-            caption_style: cx
-                .new(|cx| CaptionStylePanel::new(state.clone(), Target::Active, window, cx)),
-            deliver: cx.new(|cx| DeliverPanel::new(state.clone(), window, cx)),
-            chat: cx.new(|cx| ChatPanel::new(state.clone(), window, cx)),
-            scopes: cx.new(|cx| ScopesPanel::new(state.clone(), window, cx)),
-            mixer: cx.new(|cx| MixerPanel::new(state.clone(), window, cx)),
-            library: cx.new(|cx| LibraryPanel::new(state.clone(), window, cx)),
-            code_editor: cx.new(|cx| CodeEditorPanel::new(state.clone(), window, cx)),
+            timeline: session.timeline,
+            viewer: session.viewer,
+            media_pool: session.media_pool,
+            inspector: session.inspector,
+            transcript: session.transcript,
+            caption_style: session.caption_style,
+            deliver: session.deliver,
+            chat: session.chat,
+            scopes: session.scopes,
+            mixer: session.mixer,
+            library: session.library,
+            code_editor: session.code_editor,
             settings,
             agent_open: true,
             notices_open: false,
@@ -234,15 +237,90 @@ impl Flikk {
             starting: None,
             footage: None,
             provider_ask: None,
+            desk,
             state,
             _observe,
             _observe_asks,
+            _desk,
             _home: None,
         };
         if at_home {
             this.show_home(window, cx);
         }
         this
+    }
+
+    /// Follow `state`: the status bar and title bar redraw with it, and the
+    /// question about its new media opens.
+    fn observe(
+        state: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Subscription, Subscription) {
+        (
+            cx.observe(state, |this, _, cx| this.state_changed(cx)),
+            cx.observe_in(state, window, |this, _, window, cx| {
+                this.ask_about_provider(window, cx)
+            }),
+        )
+    }
+
+    /// Show `session` in the editor: its panels take the window's slots,
+    /// and Settings and the quick-command bar act on its project.
+    fn adopt(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
+        (self._observe, self._observe_asks) = Self::observe(&session.state, window, cx);
+        self.settings = cx.new(|cx| EditorSettings::new(session.state.clone(), window, cx));
+        EditorSettings::register(&self.settings, cx);
+        session
+            .chat
+            .update(cx, |chat, cx| chat.take_quick_commands(cx));
+        self.state = session.state;
+        self.timeline = session.timeline;
+        self.viewer = session.viewer;
+        self.media_pool = session.media_pool;
+        self.inspector = session.inspector;
+        self.transcript = session.transcript;
+        self.caption_style = session.caption_style;
+        self.deliver = session.deliver;
+        self.chat = session.chat;
+        self.scopes = session.scopes;
+        self.mixer = session.mixer;
+        self.library = session.library;
+        self.code_editor = session.code_editor;
+        self.ask_about_provider(window, cx);
+    }
+
+    /// The open projects changed: show the one in the editor now, and
+    /// leave the home page once the user opened a project from it,
+    /// importing the footage it was started from. A project made for an
+    /// agent to start on keeps the page: its agent starts instead. Footage
+    /// is only still held here when the project came from the New project
+    /// dialog it opened, which already named it after a dropped folder.
+    fn desk_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (session, opened) = {
+            let desk = self.desk.read(cx);
+            (desk.editor().clone(), desk.times_opened())
+        };
+        if session.state != self.state {
+            self.adopt(session, window, cx);
+        }
+        if self.at_home.is_some_and(|at| at != opened) {
+            match self.starting.take() {
+                Some(start) => {
+                    self.at_home = Some(opened);
+                    self.start_agent(start, cx);
+                }
+                None => {
+                    let footage = self.footage.take();
+                    self.leave_home();
+                    if let Some(paths) = footage {
+                        self.media_pool
+                            .update(cx, |pool, cx| pool.import(paths, None, cx));
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Show the home page in place of the editor. The project there stays
@@ -255,12 +333,12 @@ impl Flikk {
         match &self.home {
             Some(page) => page.update(cx, |page, cx| page.shown(window, cx)),
             None => {
-                let page = cx.new(|cx| Welcome::new(self.state.clone(), window, cx));
+                let page = cx.new(|cx| Welcome::new(self.desk.clone(), window, cx));
                 self._home = Some(cx.subscribe_in(&page, window, Self::on_home));
                 self.home = Some(page);
             }
         }
-        self.at_home = Some(self.state.read(cx).times_opened());
+        self.at_home = Some(self.desk.read(cx).times_opened());
         self.notices_open = false;
         self.jobs_open = false;
         cx.notify();
@@ -284,7 +362,7 @@ impl Flikk {
     ) {
         match ev {
             WelcomeEvent::Continue => {
-                self.state.update(cx, |s, cx| s.list_project(cx));
+                self.state.update(cx, |s, cx| s.list(cx));
                 self.leave_home();
             }
             WelcomeEvent::Create(paths) => {
@@ -333,10 +411,9 @@ impl Flikk {
         cx.notify();
     }
 
-    /// The project just made from the home page is open: import its
-    /// footage, then send its agent the prompt it was made for.
+    /// The project just made from the home page is in the editor: import
+    /// its footage, then send its agent the prompt it was made for.
     fn start_agent(&mut self, start: Starting, cx: &mut Context<Self>) {
-        let project = self.state.read(cx).bus.project().id;
         if let Some(page) = &self.home {
             page.update(cx, |page, cx| page.agent_started(cx));
         }
@@ -350,38 +427,16 @@ impl Flikk {
             if let Some(imported) = imported {
                 imported.await;
             }
-            state.update(cx, |s, cx| s.send_unattended(project, prompt, cx));
+            state.update(cx, |s, cx| s.send_chat(prompt, cx));
         })
         .detach();
     }
 
-    /// Leave the home page once the user opened a project from it,
-    /// importing the footage it was started from, or once the last model
-    /// is on disk when the app was started for a file. A project made for
-    /// an agent to start on keeps the page: its agent starts instead.
-    /// Footage is only still held here when the project came from the New
-    /// project dialog it opened, which already named it after a dropped
-    /// folder.
+    /// The project in the editor changed. Once the last model is on disk
+    /// when the app was started for a file, the home page gives way to it.
     fn state_changed(&mut self, cx: &mut Context<Self>) {
-        let opened = self.state.read(cx).times_opened();
         if self.file_waiting && !self.state.read(cx).projects_wait() {
             self.leave_home();
-        }
-        if self.at_home.is_some_and(|at| at != opened) {
-            match self.starting.take() {
-                Some(start) => {
-                    self.at_home = Some(opened);
-                    self.start_agent(start, cx);
-                }
-                None => {
-                    let footage = self.footage.take();
-                    self.leave_home();
-                    if let Some(paths) = footage {
-                        self.media_pool
-                            .update(cx, |pool, cx| pool.import(paths, None, cx));
-                    }
-                }
-            }
         }
         cx.notify();
     }
@@ -944,7 +999,8 @@ impl Flikk {
         };
         // The agents of the projects behind this one: its own shows in
         // the chat.
-        let elsewhere = agents_line(s.agents_working() - usize::from(s.agent_busy()));
+        let working = self.desk.read(cx).agents_working(cx);
+        let elsewhere = agents_line(working - usize::from(s.agent_busy()));
         let status = s.status.clone();
         let syncing = s.syncing;
         if rendering.is_some() {
@@ -1030,17 +1086,28 @@ impl Flikk {
     }
 }
 
-/// The status bar under the home page: the status line when it says
-/// something (why a project did not open), else how many projects are open
-/// and how many of their agents work.
-fn home_status(s: &EditorState) -> impl IntoElement {
-    let status = s.status.clone();
-    let open = match s.open_projects().len() {
-        0 => "No project open".to_owned(),
-        1 => "1 project open".to_owned(),
-        n => format!("{n} projects open"),
-    };
-    let working = agents_line(s.agents_working());
+impl Flikk {
+    /// The status bar under the home page: the status line when it says
+    /// something (why a project did not open), else how many projects are
+    /// open and how many of their agents work.
+    fn home_status(&self, cx: &App) -> impl IntoElement {
+        let status = self.state.read(cx).status.clone();
+        let desk = self.desk.read(cx);
+        let open = match desk.listed(cx).len() {
+            0 => "No project open".to_owned(),
+            1 => "1 project open".to_owned(),
+            n => format!("{n} projects open"),
+        };
+        let working = agents_line(desk.agents_working(cx));
+        home_status_bar(status, open, working)
+    }
+}
+
+fn home_status_bar(
+    status: Option<String>,
+    open: String,
+    working: Option<String>,
+) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(t::STATUS_BAR)
@@ -1120,7 +1187,13 @@ impl Render for Flikk {
                     this.state.update(cx, |s, cx| s.redo(cx))
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleAgent, _, cx| this.toggle_agent(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAgent, _, cx| {
+                // The home page shows every chat in full: there is no
+                // dock to fold.
+                if this.at_home.is_none() {
+                    this.toggle_agent(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(None, window, cx)
             }))
@@ -1166,7 +1239,7 @@ impl Render for Flikk {
                 |root| match self.home.clone().filter(|_| self.at_home.is_some()) {
                     Some(page) => root
                         .child(div().flex_1().min_h_0().child(page))
-                        .child(home_status(self.state.read(cx))),
+                        .child(self.home_status(cx)),
                     None => root
                         .child(div().flex_1().min_h_0().child(self.workspace(cx)))
                         .child(self.status_bar(cx)),

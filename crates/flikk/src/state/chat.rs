@@ -401,8 +401,38 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Where a project's agent is with its chat, for a place that shows the
+/// agents of several projects at a glance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentStatus {
+    /// Nothing under way.
+    Idle,
+    /// A message is queued or its turn under way.
+    Working,
+    /// The agent asked something and waits for the answer, or requests of
+    /// its turn wait for approval.
+    Waiting,
+    /// The last turn failed.
+    Failed,
+}
+
 // --- chat
 impl EditorState {
+    /// Where the agent is with the open chat.
+    pub fn agent_status(&self) -> AgentStatus {
+        if !self.agent.pending_approvals().is_empty() {
+            AgentStatus::Waiting
+        } else if self.agent_busy() {
+            AgentStatus::Working
+        } else if self.chat.agent_error().is_some() {
+            AgentStatus::Failed
+        } else if self.chat.open_question().is_some() {
+            AgentStatus::Waiting
+        } else {
+            AgentStatus::Idle
+        }
+    }
+
     /// Messages of the active chat session, oldest first.
     pub fn chat(&self) -> &[ChatMessage] {
         self.chat.messages()
@@ -450,9 +480,6 @@ impl EditorState {
         if self.agent_busy() {
             return;
         }
-        // Sent from the chat, the turn asks and proposes as usual; the
-        // home page marks its own after sending.
-        self.unattended = false;
         let history = self.chat.history();
         let style = self
             .settings

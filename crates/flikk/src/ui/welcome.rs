@@ -10,6 +10,7 @@ mod board;
 
 pub(crate) use board::name_from;
 
+use crate::desk::Desk;
 use crate::projects;
 use crate::state::{EditorState, SetupStatus};
 use crate::ui::kit::{
@@ -107,7 +108,7 @@ enum Agents {
 }
 
 pub struct Welcome {
-    state: Entity<EditorState>,
+    desk: Entity<Desk>,
     agents: Agents,
     /// Numbers each look for the agent CLIs.
     agents_asked: u64,
@@ -125,18 +126,19 @@ pub struct Welcome {
     footage: Vec<PathBuf>,
     /// The prompt's agent started: the prompt empties on the next draw.
     clear_prompt: bool,
-    /// The field that writes to each open project's agent.
-    replies: std::collections::HashMap<flikk_core::ProjectId, board::Reply>,
     focus: FocusHandle,
     _search: Subscription,
     _prompt: Subscription,
-    _state: Subscription,
+    _desk: Subscription,
+    /// Redraws with the project in the editor, whose setup, status and
+    /// unsaved changes the page shows.
+    _state: (EntityId, Subscription),
 }
 
 impl EventEmitter<WelcomeEvent> for Welcome {}
 
 impl Welcome {
-    pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(desk: Entity<Desk>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
         let _search = cx.subscribe(&search, |this, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -150,11 +152,19 @@ impl Welcome {
             .collect();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let _state = cx.observe(&state, |_, _, cx| cx.notify());
+        let _desk = cx.observe(&desk, |this, _, cx| {
+            this.follow_editor(cx);
+            cx.notify();
+        });
+        let state = desk.read(cx).editor().state.clone();
+        let _state = (
+            state.entity_id(),
+            cx.observe(&state, |_, _, cx| cx.notify()),
+        );
         let prompt = Self::prompt_input(window, cx);
         let _prompt = Self::watch_prompt(&prompt, window, cx);
         Self {
-            state,
+            desk,
             agents: Agents::Unchecked,
             agents_asked: 0,
             download_poll: None,
@@ -165,11 +175,28 @@ impl Welcome {
             prompt,
             footage: Vec::new(),
             clear_prompt: false,
-            replies: Default::default(),
             focus,
             _search,
             _prompt,
+            _desk,
             _state,
+        }
+    }
+
+    /// The state of the project in the editor: what the page asks about
+    /// the app as a whole (the models, the engines) it asks there.
+    fn state(&self, cx: &App) -> Entity<EditorState> {
+        self.desk.read(cx).editor().state.clone()
+    }
+
+    /// Another project took the editor: redraw with that one.
+    fn follow_editor(&mut self, cx: &mut Context<Self>) {
+        let state = self.state(cx);
+        if self._state.0 != state.entity_id() {
+            self._state = (
+                state.entity_id(),
+                cx.observe(&state, |_, _, cx| cx.notify()),
+            );
         }
     }
 
@@ -221,14 +248,14 @@ impl Welcome {
     /// The rows matching the search, in order.
     fn visible(&self, cx: &App) -> Vec<Row> {
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         if s.projects_wait() {
             return Vec::new();
         }
         // Once gone into, it shows with the open projects instead.
         let recovered = s.file().is_none()
             && s.is_dirty()
-            && !s.project_listed()
+            && !s.is_listed()
             && s.bus.project().name.to_lowercase().contains(&query);
         let recent = (0..self.recent.len()).filter(|&i| {
             let r = &self.recent[i];
@@ -258,10 +285,10 @@ impl Welcome {
         // The list is read once; the file can have gone since.
         if r.missing || !r.path.exists() {
             self.locate(ix, window, cx);
-        } else if self.state.read(cx).file() == Some(r.path.as_path()) {
+        } else if self.state(cx).read(cx).file() == Some(r.path.as_path()) {
             cx.emit(WelcomeEvent::Continue);
         } else {
-            projects::open(&self.state, r.path.clone(), window, cx);
+            projects::open(&self.state(cx), r.path.clone(), window, cx);
         }
     }
 
@@ -276,7 +303,7 @@ impl Welcome {
             multiple: false,
             prompt: None,
         });
-        let state = self.state.clone();
+        let state = self.state(cx);
         window
             .spawn(cx, async move |cx| {
                 let Ok(Ok(Some(paths))) = paths.await else {
@@ -297,7 +324,7 @@ impl Welcome {
 
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         self.dropping = None;
-        if self.state.read(cx).projects_wait() {
+        if self.state(cx).read(cx).projects_wait() {
             cx.notify();
             return;
         }
@@ -306,7 +333,7 @@ impl Welcome {
             && file.extension().is_some_and(|e| e == EXTENSION)
         {
             cx.emit(WelcomeEvent::ForgetFootage);
-            projects::open(&self.state, file.clone(), window, cx);
+            projects::open(&self.state(cx), file.clone(), window, cx);
         } else if !paths.is_empty() {
             cx.emit(WelcomeEvent::Create(paths));
         }
@@ -314,7 +341,10 @@ impl Welcome {
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.writing(window, cx) {
+        // The keys are the list's while it or its search has them: a chat
+        // and the prompt keep their own.
+        let search = self.search.read(cx).focus_handle(cx).is_focused(window);
+        if !search && !self.focus.is_focused(window) {
             return;
         }
         let rows = self.visible(cx);
@@ -361,7 +391,7 @@ impl Welcome {
                 .kbd(format!("{} N", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::new_project(&this.state, window, cx)
+                    projects::new_project(&this.state(cx), window, cx)
                 }))))
             .child(big(Button::new("welcome-open")
                 .disabled(waiting)
@@ -371,7 +401,7 @@ impl Welcome {
                 .kbd(format!("{} O", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::open_dialog(&this.state, window, cx)
+                    projects::open_dialog(&this.state(cx), window, cx)
                 }))))
     }
 
@@ -422,7 +452,7 @@ impl Welcome {
             .when(waiting, |zone| zone.opacity(0.5))
             .on_drag_move(
                 cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let waiting = this.state.read(cx).projects_wait();
+                    let waiting = this.state(cx).read(cx).projects_wait();
                     let over = (!waiting && ev.bounds.contains(&ev.event.position))
                         .then(|| ev.drag(cx).paths().to_vec());
                     if over != this.dropping {
@@ -518,7 +548,7 @@ impl Welcome {
     }
 
     fn recovered_row(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self.state.read(cx).bus.project().name.clone();
+        let name = self.state(cx).read(cx).bus.project().name.clone();
         Self::frame(
             "welcome-recovered".into(),
             selected,
@@ -668,7 +698,7 @@ impl Welcome {
     /// The setup list: one row each for the models, the transcription
     /// size and the agent, then FFmpeg and a browser when missing.
     fn setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let ffmpeg = s
             .services
             .media
@@ -709,7 +739,7 @@ impl Welcome {
     /// Every model as one download: its total size and Download, then its
     /// progress with Cancel, or why it failed with Retry.
     fn models_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let labels: Vec<&str> = ModelTask::ALL.iter().map(|t| t.label()).collect();
         let count = div()
             .id("welcome-models-count")
@@ -718,7 +748,7 @@ impl Welcome {
             .text_color(t::T3)
             .child(format!("{} models", labels.len()))
             .tooltip(Tooltip::text(labels.join(", ")));
-        let state = self.state.clone();
+        let state = self.state(cx);
         let control = match s.setup_status() {
             SetupStatus::Complete => Icon::new(IconName::CircleCheck)
                 .size(px(14.))
@@ -781,7 +811,7 @@ impl Welcome {
     /// Whisper small or large, each with its size. Held while the models
     /// download, so the total stays what is fetched.
     fn transcription_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let downloading = matches!(s.setup_status(), SetupStatus::Downloading { .. });
         let picked = s.picked_model(ModelTask::Transcription);
         let sizes: Vec<_> = crate::ui::editor_settings::transcription_sizes().collect();
@@ -800,7 +830,7 @@ impl Welcome {
         for ix in 0..sizes.len() {
             choice = choice.disabled_item(ix, downloading && ix != selected);
         }
-        let state = self.state.clone();
+        let state = self.state(cx);
         setup_row(
             "Transcription",
             choice.on_click(move |ix, _, cx| {
@@ -852,34 +882,44 @@ impl Render for Welcome {
         if self.dropping.is_some() && !cx.has_active_drag() {
             self.dropping = None;
         }
-        let waiting = self.state.read(cx).projects_wait();
+        let waiting = self.state(cx).read(cx).projects_wait();
         if waiting && matches!(self.agents, Agents::Unchecked) {
             self.check_agents(cx);
         }
-        if waiting && self.download_poll.is_none() && self.state.read(cx).models.busy() {
+        if waiting && self.download_poll.is_none() && self.state(cx).read(cx).models.busy() {
             self.download_poll = Some(crate::ui::repaint_while(
                 cx,
                 DOWNLOAD_POLL,
-                |this, cx| this.state.read(cx).models.busy(),
+                |this, cx| this.state(cx).read(cx).models.busy(),
                 |this| this.download_poll = None,
             ));
         }
         let version = env!("CARGO_PKG_VERSION");
+        let sessions = self.desk.read(cx).listed(cx);
+        // With projects open the page is theirs: their tiles take the
+        // window's width, the rest keeps to the side and below.
+        let wide = !waiting && !sessions.is_empty();
         let lists = (!waiting).then(|| {
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .gap(px(24.))
-                .child(self.board(window, cx))
+                .child(self.board(&sessions, window, cx))
                 .child(self.recent(cx))
         });
         let page = h_flex()
-            .w(px(1080.))
+            .map(|page| {
+                if wide {
+                    page.w_full()
+                } else {
+                    page.w(px(1080.))
+                }
+            })
             .max_w_full()
             .py(px(24.))
             .px(px(24.))
             .items_stretch()
-            .gap(px(56.))
+            .gap(px(if wide { 32. } else { 56. }))
             .child(
                 v_flex()
                     .w(px(340.))
@@ -922,9 +962,9 @@ impl Render for Welcome {
                     .child(
                         div()
                             .flex()
-                            .items_center()
                             .justify_center()
                             .min_h_full()
+                            .map(|centre| if wide { centre } else { centre.items_center() })
                             .child(page),
                     ),
             )

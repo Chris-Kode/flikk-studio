@@ -1,25 +1,29 @@
-//! The agents on the home page: a line that starts a new project with an
-//! agent at work on it, and a card for each open project, with what its
-//! agent is doing, a field to write to it, Stop and Close. A card opens its
-//! project in the editor; the Home button there comes back.
-//!
-//! Turns started here run unattended (`EditorState::send_unattended`).
+//! The agents on the home page: a prompt that starts a new project with an
+//! agent at work on it, and the open projects side by side, each as it is
+//! in the editor: its picture, and its agent's chat with the thread, the
+//! requests waiting on the user and the composer (style, skills, model and
+//! thinking level). A tile's header saves its project, renders it, opens it
+//! in the editor and closes it.
 
 use super::{Welcome, WelcomeEvent, aspect, meta};
+use crate::desk::Session;
 use crate::projects;
-use crate::state::{AgentState, Doing, OpenProject};
-use crate::ui::kit::{Button, Icon, IconName, Input, Spinner, h_flex, theme as t, v_flex};
-use flikk_core::ProjectId;
+use crate::state::AgentStatus;
+use crate::ui::kit::{
+    Button, DialogExt as _, Icon, IconName, Input, Spinner, h_flex, theme as t, v_flex,
+};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
 
-/// The field that writes to one open project's agent.
-pub(super) struct Reply {
-    input: Entity<InputState>,
-    _sent: Subscription,
-}
+/// The gap between tiles, and between the tiles and what is around them.
+const GAP: f32 = 12.;
+/// The least a tile is high: its picture and a few lines of chat over the
+/// composer.
+const TILE_MIN_HEIGHT: f32 = 460.;
+/// The part of a tile's height its picture takes.
+const PICTURE: f32 = 0.34;
 
 impl Welcome {
     /// The field a new agent's first message is written in.
@@ -40,20 +44,12 @@ impl Welcome {
         })
     }
 
-    /// Whether the keys go to the prompt or a reply field: Enter sends
-    /// there, and is not the list's.
-    pub(super) fn writing(&self, window: &Window, cx: &App) -> bool {
-        let focused =
-            |input: &Entity<InputState>| input.read(cx).focus_handle(cx).is_focused(window);
-        focused(&self.prompt) || self.replies.values().any(|reply| focused(&reply.input))
-    }
-
     /// Ask the window for a new project whose agent starts on the prompt,
     /// with the footage picked for it. The prompt stays until the project
     /// is made (see [`Self::agent_started`]): New project can be cancelled.
     fn start(&mut self, cx: &mut Context<Self>) {
         let prompt = self.prompt.read(cx).value().trim().to_owned();
-        if prompt.is_empty() || self.state.read(cx).projects_wait() {
+        if prompt.is_empty() || self.state(cx).read(cx).projects_wait() {
             return;
         }
         cx.emit(WelcomeEvent::Start {
@@ -90,54 +86,11 @@ impl Welcome {
         .detach();
     }
 
-    /// Keep a reply field for each open project, and none for a closed
-    /// one; empty the prompt once its agent started.
-    fn sync_fields(&mut self, open: &[OpenProject], window: &mut Window, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.clear_prompt) {
-            self.prompt
-                .update(cx, |prompt, cx| prompt.set_value("", window, cx));
-        }
-        self.replies
-            .retain(|id, _| open.iter().any(|project| project.id == *id));
-        for project in open {
-            let id = project.id;
-            if self.replies.contains_key(&id) {
-                continue;
-            }
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
-            let _sent = cx.subscribe_in(
-                &input,
-                window,
-                move |this, input, ev: &InputEvent, window, cx| {
-                    if !matches!(ev, InputEvent::PressEnter { .. }) {
-                        return;
-                    }
-                    let text = input.read(cx).value().trim().to_owned();
-                    if text.is_empty() || !this.write_to(id, text, cx) {
-                        return;
-                    }
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                },
-            );
-            self.replies.insert(id, Reply { input, _sent });
-        }
-    }
-
-    /// Send `text` to `project`'s agent, unless it is busy. Whether it
-    /// went.
-    fn write_to(&mut self, project: ProjectId, text: String, cx: &mut Context<Self>) -> bool {
-        let busy = (self.state.read(cx).open_projects().iter())
-            .any(|open| open.id == project && matches!(open.agent, AgentState::Working(_)));
-        if !busy {
-            self.state
-                .update(cx, |s, cx| s.send_unattended(project, text, cx));
-        }
-        !busy
-    }
-
-    fn enter(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+    /// Open `session`'s project in the editor.
+    fn enter(&mut self, session: &Session, cx: &mut Context<Self>) {
         cx.emit(WelcomeEvent::ForgetFootage);
-        self.state.update(cx, |s, cx| s.enter_project(project, cx));
+        let state = session.state.clone();
+        self.desk.update(cx, |desk, cx| desk.enter(&state, cx));
     }
 
     /// The prompt, with the footage picked for it and Start.
@@ -169,144 +122,173 @@ impl Welcome {
             )
     }
 
-    /// An open project: what its agent is doing, a field to write to it,
-    /// Stop while it works, and Close.
-    fn card(&self, ix: usize, open: &OpenProject, cx: &mut Context<Self>) -> AnyElement {
-        let id = open.id;
-        let working = matches!(open.agent, AgentState::Working(_));
-        let glyph = match &open.agent {
-            AgentState::Working(_) => Spinner::new().size(px(14.)).into_any_element(),
-            AgentState::Asking { .. } => Icon::new(IconName::MessageCircleQuestionMark)
+    /// A tile's header: how its agent stands, the project's name and
+    /// format, then Save, Render, Open and Close.
+    fn tile_header(
+        &self,
+        ix: usize,
+        session: &Session,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let s = session.state.read(cx);
+        let project = s.bus.project();
+        let glyph = match s.agent_status() {
+            AgentStatus::Working => Spinner::new().size(px(14.)).into_any_element(),
+            AgentStatus::Waiting => Icon::new(IconName::MessageCircleQuestionMark)
                 .color(t::T1)
                 .into_any_element(),
-            AgentState::Failed { .. } => Icon::new(IconName::TriangleAlert)
+            AgentStatus::Failed => Icon::new(IconName::TriangleAlert)
                 .color(t::WARN)
                 .into_any_element(),
-            AgentState::Idle { .. } => Icon::new(IconName::Clapperboard)
+            AgentStatus::Idle => Icon::new(IconName::Clapperboard)
                 .color(t::T3)
                 .into_any_element(),
         };
-        let line = match &open.agent {
-            AgentState::Working(Doing::Thinking) => div().text_color(t::T3).child("Thinking"),
-            AgentState::Working(Doing::Tool(tool)) => {
-                div().font_family(t::mono()).child(tool.clone())
-            }
-            AgentState::Working(Doing::Writing(text)) => div().child(text.clone()),
-            AgentState::Asking { question, .. } => div().text_color(t::T1).child(question.clone()),
-            AgentState::Failed { message } => div().text_color(t::ERR_TX).child(message.clone()),
-            AgentState::Idle { last: Some(last) } => div().child(last.clone()),
-            AgentState::Idle { last: None } => div().text_color(t::T3).child("No messages"),
-        };
-        let choices = match &open.agent {
-            AgentState::Asking { choices, .. } => choices.clone(),
-            _ => Vec::new(),
-        };
-        let s = &open.sequence;
-        let format = format!("{} · {}p", aspect(s.width, s.height), s.width.min(s.height));
-        let head = v_flex()
-            .id(("open-project", ix))
-            .flex_1()
-            .min_w_0()
-            .gap(px(4.))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.enter(id, cx)))
+        let edited = s.is_dirty();
+        let format = &project.timeline.settings;
+        let format = format!(
+            "{} · {}p",
+            aspect(format.width, format.height),
+            format.width.min(format.height)
+        );
+        let duration = crate::ui::format::clock_padded(project.timeline.duration());
+        let (open, save, render, close) = (
+            session.clone(),
+            session.state.clone(),
+            session.deliver.clone(),
+            session.state.clone(),
+        );
+        h_flex()
+            .flex_none()
+            .h(t::PANEL_HEADER)
+            .pl(px(10.))
+            .pr(px(4.))
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(t::LN)
             .child(
                 h_flex()
-                    .gap(px(8.))
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .w(px(14.))
-                            .justify_center()
-                            .child(glyph),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t::T1)
-                            .child(open.name.clone()),
-                    )
-                    .when(open.edited, |row| {
-                        row.child(div().flex_none().text_color(t::T3).child("Edited"))
-                    })
-                    .child(div().flex_1())
-                    .child(meta(format))
-                    .child(meta(crate::ui::format::clock_padded(open.duration)).text_color(t::T2)),
+                    .flex_none()
+                    .w(px(14.))
+                    .justify_center()
+                    .child(glyph),
             )
-            // Under the name, past the glyph's column.
-            .child(div().pl(px(22.)).truncate().text_color(t::T2).child(line));
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t::T1)
+                    .child(project.name.clone()),
+            )
+            .when(edited, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(t::T3)
+                        .child("Edited"),
+                )
+            })
+            .child(div().flex_1())
+            .child(meta(format))
+            .child(meta(duration).text_color(t::T2))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(2.))
+                    .child(
+                        Button::new(("session-save", ix))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Save)
+                            .tooltip("Save")
+                            .disabled(!edited)
+                            .on_click(move |_, window, cx| projects::save(&save, window, cx)),
+                    )
+                    .child(
+                        Button::new(("session-render", ix))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Upload)
+                            .tooltip("Render")
+                            .on_click(move |_, window, cx| {
+                                let deliver = render.clone();
+                                window.open_dialog(cx, move |dialog, _, _| {
+                                    dialog
+                                        .title("Render")
+                                        .w(px(440.))
+                                        .child(div().h(px(560.)).child(deliver.clone()))
+                                })
+                            }),
+                    )
+                    .child(
+                        Button::new(("session-open", ix))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Maximize2)
+                            .tooltip("Open in the editor")
+                            .on_click(cx.listener(move |this, _, _, cx| this.enter(&open, cx))),
+                    )
+                    .child(
+                        Button::new(("session-close", ix))
+                            .ghost()
+                            .small()
+                            .icon(IconName::X)
+                            .tooltip("Close")
+                            .on_click(move |_, window, cx| projects::close(&close, window, cx)),
+                    ),
+            )
+    }
+
+    /// An open project as it is in the editor: its picture over its
+    /// agent's chat.
+    fn session_tile(
+        &self,
+        ix: usize,
+        session: &Session,
+        size: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         v_flex()
-            .gap(px(8.))
-            .p(px(10.))
+            .flex_none()
+            .w(size.width)
+            .h(size.height)
+            .overflow_hidden()
             .rounded(px(6.))
             .border_1()
             .border_color(t::LN)
             .bg(t::P)
-            .text_size(px(11.))
+            .child(self.tile_header(ix, session, cx))
             .child(
-                h_flex().items_start().gap(px(8.)).child(head).child(
-                    h_flex()
-                        .flex_none()
-                        .gap(px(2.))
-                        .when(working, |row| {
-                            row.child(
-                                Button::new(("open-stop", ix))
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Square)
-                                    .tooltip("Stop")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.state.update(cx, |s, cx| s.stop_agent(id, cx))
-                                    })),
-                            )
-                        })
-                        .child(
-                            Button::new(("open-close", ix))
-                                .ghost()
-                                .small()
-                                .icon(IconName::X)
-                                .tooltip("Close")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    projects::close(&this.state, id, window, cx)
-                                })),
-                        ),
-                ),
-            )
-            .when(!choices.is_empty(), |card| {
-                card.child(h_flex().pl(px(22.)).gap(px(6.)).flex_wrap().children(
-                    choices.into_iter().enumerate().map(|(n, choice)| {
-                        let answer = choice.clone();
-                        Button::new(("open-choice", ix * 16 + n))
-                            .small()
-                            .label(choice)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.write_to(id, answer.clone(), cx);
-                            }))
-                    }),
-                ))
-            })
-            .children(self.replies.get(&id).map(|reply| {
                 div()
-                    .pl(px(22.))
-                    .child(Input::new(&reply.input).small().disabled(working))
-            }))
+                    .flex_none()
+                    .h(size.height * PICTURE)
+                    .border_b_1()
+                    .border_color(t::LN)
+                    .child(session.viewer.clone()),
+            )
+            .child(div().flex_1().min_h_0().child(session.chat.clone()))
             .into_any_element()
     }
 
-    /// The agents: the line that starts one, then the open projects.
+    /// The agents: the prompt that starts one, then the open projects
+    /// side by side. One or two fill the window's height; more make rows
+    /// of two or three, half as high, and the page scrolls.
     pub(super) fn board(
         &mut self,
+        sessions: &[Session],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = self.state.read(cx).open_projects();
-        self.sync_fields(&open, window, cx);
-        let working = self.state.read(cx).agents_working();
-        let cards: Vec<_> = (open.iter().enumerate())
-            .map(|(ix, project)| self.card(ix, project, cx))
+        if std::mem::take(&mut self.clear_prompt) {
+            self.prompt
+                .update(cx, |prompt, cx| prompt.set_value("", window, cx));
+        }
+        let working = self.desk.read(cx).agents_working(cx);
+        let size = tile_size(sessions.len(), window);
+        let tiles: Vec<_> = (sessions.iter().enumerate())
+            .map(|(ix, session)| self.session_tile(ix, session, size, cx))
             .collect();
         v_flex()
             .gap(px(8.))
@@ -326,8 +308,43 @@ impl Welcome {
                     }),
             )
             .child(self.start_row(cx))
-            .child(v_flex().gap(px(6.)).children(cards))
+            .when(!tiles.is_empty(), |board| {
+                board.child(
+                    div()
+                        .mt(px(4.))
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(GAP))
+                        .children(tiles),
+                )
+            })
     }
+}
+
+/// How wide the page's two columns are beside the tiles: the actions on
+/// the left, the gap after them and the page's padding.
+pub(super) const BESIDE_TILES: f32 = 340. + 32. + 2. * 24.;
+
+/// The size of each of `count` tiles in the window: two or three in a
+/// row, filling the height in one row or two.
+fn tile_size(count: usize, window: &Window) -> Size<Pixels> {
+    let viewport = window.viewport_size();
+    let columns = match count {
+        0 | 1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let rows = if count > columns { 2 } else { 1 };
+    let gaps = |n: usize| px(GAP * (n as f32 - 1.));
+    // The scrollbar's lane stays free, so the last column never wraps.
+    let across = viewport.width - px(BESIDE_TILES) - px(12.);
+    // Over the tiles: the bars, the page's padding, "Agents" and the prompt.
+    let above = t::TITLE_BAR + t::STATUS_BAR + px(2. * 24. + 32. + 8. + 26. + 12.);
+    let down = viewport.height - above;
+    size(
+        ((across - gaps(columns)) / columns as f32).max(px(340.)),
+        ((down - gaps(rows)) / rows as f32).max(px(TILE_MIN_HEIGHT)),
+    )
 }
 
 /// A project name from the prompt its agent starts on: its first words.

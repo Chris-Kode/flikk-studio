@@ -6,6 +6,7 @@ mod agent_link;
 mod app;
 mod bundled_ffmpeg;
 mod demo;
+mod desk;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod notices;

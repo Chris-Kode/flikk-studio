@@ -284,6 +284,7 @@ impl EditorState {
             self.invalidate_voices(cx);
         }
         self.refresh_key_notice();
+        cx.emit(super::SharedChange::Providers);
         cx.notify();
     }
 
@@ -332,6 +333,7 @@ impl EditorState {
             self.transcription_changed();
         }
         self.refresh_key_notice();
+        cx.emit(super::SharedChange::Providers);
         cx.notify();
     }
 
@@ -479,13 +481,9 @@ impl EditorState {
                 match result {
                     Ok(item) => {
                         this.generating.retain(|g| g.id != id);
-                        if this.bus.project().id == owner {
-                            let made = this.add_generated(item, cx);
-                            if let Some((then, made)) = then.zip(made) {
-                                then(this, made, cx);
-                            }
-                        } else {
-                            this.keep_for(owner, item, Author::User);
+                        let made = this.add_generated(item, cx);
+                        if let Some((then, made)) = then.zip(made) {
+                            then(this, made, cx);
                         }
                     }
                     // Stopped: however the provider ended it, it didn't fail.
@@ -636,61 +634,9 @@ impl EditorState {
         Some(id)
     }
 
-    /// Keep `item`, made for `project` after it was closed, for when it is
-    /// opened again, when it is added as `author`.
-    pub(super) fn keep_for(
-        &mut self,
-        project: flikk_core::ProjectId,
-        item: MediaItem,
-        author: Author,
-    ) {
-        self.kept.push((project, item, author));
-    }
-
     /// The agent, as what it asked for is added.
     pub(super) fn agent_author(&self) -> Author {
         Author::Agent
-    }
-
-    /// Add what was made for the project just opened while it was closed.
-    pub(super) fn add_kept(&mut self, cx: &mut Context<Self>) {
-        let open = self.bus.project().id;
-        let (ours, others) = std::mem::take(&mut self.kept)
-            .into_iter()
-            .partition::<Vec<_>, _>(|(p, _, _)| *p == open);
-        self.kept = others;
-        let n = ours
-            .into_iter()
-            .filter_map(|(_, item, author)| self.add_generated_as(item, author, cx))
-            .count();
-        if n > 0 {
-            self.status = Some(match n {
-                1 => "Added 1 item made while the project was closed".into(),
-                n => format!("Added {n} items made while the project was closed"),
-            });
-        }
-    }
-
-    /// An approved generation finished after its project was closed: keep
-    /// what it made for that project, and tell the agent.
-    pub(super) fn keep_approved(
-        &mut self,
-        id: u64,
-        project: flikk_core::ProjectId,
-        item: MediaItem,
-        summary: &str,
-    ) -> ApprovalOutcome {
-        let name = approve::file_name(&item.path);
-        let author = self.agent_author();
-        self.keep_for(project, item, author);
-        self.agent.report_outcome(
-            id,
-            format!(
-                "approved: {summary}; made {name}, but its project was closed meanwhile; it \
-                 goes into that project's media pool when it is opened again"
-            ),
-        );
-        ApprovalOutcome::Done(name)
     }
 
     /// Take what is in the pool now as looked at: a project just opened
@@ -871,9 +817,6 @@ impl EditorState {
                 } else {
                     self.post_change_set(set);
                 }
-            }
-            if self.unattended {
-                self.accept_agent_edits(cx);
             }
         }
         cx.notify();

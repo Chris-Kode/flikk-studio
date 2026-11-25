@@ -211,23 +211,14 @@ impl EditorState {
             presets.caption_styles = Presets::default().caption_styles;
         }
         self.clear_live();
-        // The style new captions use follows the editor's project, also
-        // while a parked one is served.
-        let project = match self.parked.last() {
-            Some(editor) if self.visiting => editor.project(),
-            _ => self.bus.project(),
-        };
         self.captions
-            .load(presets, project, &mut self.services.lettering);
+            .load(presets, self.bus.project(), &mut self.services.lettering);
         self.share_caption_styles();
     }
 
-    /// Hand every open project's agent the caption styles as saved.
+    /// Hand the agent the caption styles as saved.
     fn share_caption_styles(&mut self) {
         let styles = self.captions.presets.caption_styles.clone();
-        for parked in self.parked_mut() {
-            parked.agent_mut().set_caption_styles(styles.clone());
-        }
         self.agent.set_caption_styles(styles);
     }
 
@@ -261,6 +252,7 @@ impl EditorState {
         if let Some(notice) = persistence::take_notice() {
             self.status = Some(notice);
         }
+        cx.emit(super::SharedChange::Presets);
         cx.notify();
     }
 
@@ -277,11 +269,7 @@ impl EditorState {
 
     /// Follow the caption track's saved style, e.g. after a project loads.
     pub fn sync_caption_style(&mut self) {
-        // The style new captions use is the editor's, whose project it
-        // follows also while a parked one is served.
-        if !self.visiting {
-            self.captions.follow(self.bus.project());
-        }
+        self.captions.follow(self.bus.project());
     }
 
     /// Caption styles as the viewer shows them: with the one being dragged.

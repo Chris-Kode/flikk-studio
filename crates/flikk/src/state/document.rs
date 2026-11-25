@@ -1,4 +1,4 @@
-//! The open project as a document: the file it is saved in, whether it has
+//! The project as a document: the file it is saved in, whether it has
 //! unsaved changes, and what the autosaver holds of them for crash
 //! recovery. Unsaved means "not at the undo position last saved", so
 //! undoing back to the save makes it clean again.
@@ -138,6 +138,12 @@ impl EditorState {
         self.document.is_dirty(&self.bus)
     }
 
+    /// Unsaved changes the user has not let go: closing the project would
+    /// lose them unasked.
+    pub fn is_unsettled(&self) -> bool {
+        self.document.unsettled(&self.bus)
+    }
+
     /// Recently opened project files that still exist, newest first.
     pub fn recent_projects(&self) -> Vec<PathBuf> {
         persistence::recent()
@@ -150,51 +156,6 @@ impl EditorState {
     pub(super) fn autosave(&mut self) {
         if let Some(failure) = self.document.autosave(&self.bus) {
             self.status = Some(failure);
-        }
-    }
-
-    /// Bring a new project saved at `path`, which names it, into the
-    /// editor, with a sequence of `settings`. The project there stays
-    /// open. Whether it saved.
-    pub fn create_project(
-        &mut self,
-        path: PathBuf,
-        settings: flikk_core::model::SequenceSettings,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let name = flikk_store::project_file::name_of(&path);
-        self.switch_to(persistence::new_project(&name, settings), cx);
-        self.save_project(path, cx)
-    }
-
-    /// Bring the project in a file into the editor, the one there staying
-    /// open: read from the file, or the open project that is saved there.
-    /// Whether it is in the editor now.
-    pub fn open_project(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
-        if let Some(open) = self.open_in(path) {
-            self.enter_project(open, cx);
-            return true;
-        }
-        match persistence::open(path) {
-            // A copy of an open project's file: they are one project, and
-            // only one of them can be open.
-            Some(loaded) if self.is_open(loaded.project.id) => {
-                self.enter_project(loaded.project.id, cx);
-                self.say("This project is already open, from another file", cx);
-                true
-            }
-            Some(loaded) => {
-                self.switch_to(loaded, cx);
-                true
-            }
-            None => {
-                if !path.exists() {
-                    persistence::forget_recent(path);
-                }
-                self.status = persistence::take_notice();
-                cx.notify();
-                false
-            }
         }
     }
 

@@ -1,10 +1,13 @@
-//! Shared editor state. One entity per window; panels observe it and call
-//! its methods instead of touching the bus directly, so every change goes
-//! through the same path whether it came from a button or the agent.
+//! Editor state. One entity per open project; its panels observe it and
+//! call its methods instead of touching the bus directly, so every change
+//! goes through the same path whether it came from a button or the agent.
 //!
-//! Several projects can be open at once, each with its own agent. The
-//! fields here are those of the project in the editor; the others are
-//! parked beside it (see [`open`]).
+//! Several projects are open at once (`crate::desk`), each with a state of
+//! its own and an agent of its own, which goes on working whichever
+//! project is in the editor. They share the engines, the providers, the
+//! model downloads and the render queue ([`Shared`]); what one changes for
+//! every project (settings, the library, presets, keys) the others read
+//! again ([`SharedChange`]).
 
 mod agent;
 mod approvals;
@@ -27,8 +30,9 @@ mod update;
 pub mod voices;
 
 pub use approvals::ApprovalOutcome;
+pub use chat::AgentStatus;
 pub use cloud::{Check, Generating, ProviderStatus};
-pub use open::{AgentState, Doing, OpenProject};
+pub use open::{Shared, SharedChange};
 pub use setup::{SetupStatus, full_size};
 pub use source::Source;
 
@@ -113,23 +117,12 @@ pub struct EditorState {
     /// timeline, inspector, transcript…): token text and chip label.
     pending_mentions: Vec<(String, SharedString)>,
     agent: AgentLink,
-    /// The agent's turn was started from the home page: what it asks
-    /// approval for is approved as it asks, and its edits are applied.
-    unattended: bool,
-    /// The project shows on the home page: any but the one the app started
-    /// on, until the user goes into that one.
+    /// The project shows with the open projects on the home page: any but
+    /// the one the app started on, until the user goes into that one.
     listed: bool,
-    /// Orders the open projects by when each was opened.
-    opened_at: u64,
-    /// The open projects that are not in the editor, their agents at work.
-    parked: Vec<open::Parked>,
-    /// A parked project stands in the editor's place for the length of a
-    /// call (see `in_project`): what belongs to the editor alone is left.
-    visiting: bool,
-    /// The last `opened_at` handed out.
-    next_opened: u64,
-    /// See [`Self::times_opened`].
-    opened: u64,
+    /// It is the project in the editor: the others' agents work, but what
+    /// only the editor needs (the background render cache) waits.
+    in_editor: bool,
     _pump: Task<()>,
     // --- chat
     /// Requests the user settled since their last message, and what came of them.
@@ -175,13 +168,6 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
-    /// What was made for a project closed before it was done, added to its
-    /// pool when it is opened again as the author with it.
-    kept: Vec<(
-        flikk_core::ProjectId,
-        flikk_core::model::MediaItem,
-        flikk_core::bus::Author,
-    )>,
     /// Pool items already looked at for analysis: those of the project
     /// when it opened, and each added since.
     media_seen: HashSet<flikk_core::MediaId>,
@@ -203,30 +189,56 @@ pub struct EditorState {
 }
 
 impl EditorState {
+    /// The state the app starts on: the session's first project (see
+    /// `persistence::load_session`), on engines made for the window.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let loaded = persistence::load_session();
+        // Before analysis is wired, so it runs on the models the user picked.
+        flikk_models::restore_picks(
+            &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
+        );
+        let cloud = Arc::new(flikk_cloud::Cloud::new(
+            persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
+        ));
+        let shared = Shared {
+            services: services(&cloud),
+            cloud,
+            models: flikk_models::Downloads::default(),
+            render_queue: flikk_deliver::RenderQueue::new(),
+            agent_models: HashMap::new(),
+        };
+        let mut this = Self::open(loaded, shared, cx);
+        // Started for a file or a demo, the app opens in the editor.
+        this.listed = persistence::launched_with_file() || crate::demo::enabled();
+        this
+    }
+
+    /// A state for `loaded`, a project opened or made beside those already
+    /// open, on what they share.
+    pub fn open(loaded: persistence::Loaded, shared: Shared, cx: &mut Context<Self>) -> Self {
         let persistence::Loaded {
             project,
             settings,
             file,
             recovered,
-        } = persistence::load_session();
-        // Before analysis is wired, so it runs on the models the user picked.
-        flikk_models::restore_picks(
-            &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
-        );
+        } = loaded;
+        let Shared {
+            services,
+            cloud,
+            models,
+            render_queue,
+            agent_models,
+        } = shared;
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
         // Brings back the proposals left waiting for review too.
         let chat = ChatLog::load(persistence::load_chats(&mut bus));
         let document = Document::opened(file, recovered, &bus);
-        let cloud = Arc::new(flikk_cloud::Cloud::new(
-            persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
-        ));
         let model_tasks = flikk_analysis::LocalAnalysis::model_tasks();
         let mut this = Self {
             bus,
             document,
-            services: services(&cloud),
+            services,
             workspace: Workspace::default(),
             playhead: Time::ZERO,
             in_out: None,
@@ -251,20 +263,14 @@ impl EditorState {
             editing_fx: None,
             library: flikk_core::library::Library::load(),
             agent: AgentLink::new(),
-            unattended: false,
-            // Started for a file or a demo, the app opens in the editor.
-            listed: persistence::launched_with_file() || crate::demo::enabled(),
-            opened_at: 0,
-            parked: Vec::new(),
-            visiting: false,
-            next_opened: 0,
-            opened: 0,
-            _pump: Self::every(cx, AGENT_PUMP, Self::pump_agents),
+            listed: true,
+            in_editor: false,
+            _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
             settled: Vec::new(),
-            render_queue: flikk_deliver::RenderQueue::new(),
+            render_queue,
             models_seen: (Vec::new(), 0),
             model_tasks,
-            models: flikk_models::Downloads::default(),
+            models,
             setup: setup::Setup::new(),
             switching: None,
             notices: Notices::default(),
@@ -272,13 +278,13 @@ impl EditorState {
             _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),
             _offline_poll: Self::poll_offline(cx),
             _subjects_poll: Self::every(cx, SUBJECTS_POLL, Self::poll_subjects),
-            agent_models: HashMap::new(),
-            models_asked: HashSet::new(),
+            // Asked once a run, whichever project asked.
+            models_asked: agent_models.keys().copied().collect(),
+            agent_models,
             cloud,
             providers: HashMap::new(),
             generating: Vec::new(),
             next_generation: 1,
-            kept: Vec::new(),
             media_seen: HashSet::new(),
             provider_asks: Vec::new(),
             account_voices: Default::default(),
@@ -287,7 +293,6 @@ impl EditorState {
             updater: update::Updater::default(),
             _update_watch: Self::watch_for_updates(cx),
         };
-        this.agent.publish();
         this.mark_media_seen();
         this.configure_analysis();
         this.analyze_sounds(cx);
@@ -302,7 +307,6 @@ impl EditorState {
         cx.on_app_quit(|this, _| {
             this.render_queue.shutdown();
             this.proposals.sync(&this.bus);
-            this.parked_mut().for_each(open::Parked::sync_proposals);
             async {}
         })
         .detach();
@@ -534,8 +538,8 @@ impl EditorState {
     }
 
     /// Stop the background analysis and camera path measuring of those of
-    /// `items` that left the project, unless an item of an open project or
-    /// a library sound still has the same file. One that comes back (an
+    /// `items` that left the project, unless an item of the project or a
+    /// library sound still has the same file. One that comes back (an
     /// undo or a redo) is new again, analyzed as it lands; renders measure
     /// for themselves.
     fn cancel_left(&mut self, items: &[flikk_core::model::MediaItem]) {
@@ -546,12 +550,9 @@ impl EditorState {
             }
         }
         let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
-        // Another open project's agent may be working on the same file.
-        let parked = self.parked().flat_map(|p| &p.project().media);
         let kept: HashSet<_> = project
             .media
             .iter()
-            .chain(parked)
             .map(|m| &m.fingerprint)
             .chain(sounds)
             .flatten()

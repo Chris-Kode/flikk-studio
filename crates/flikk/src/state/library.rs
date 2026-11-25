@@ -9,6 +9,7 @@ impl EditorState {
     pub fn reload_library(&mut self, cx: &mut Context<Self>) {
         self.library = flikk_core::library::Library::load();
         self.analyze_sounds(cx);
+        cx.emit(super::SharedChange::Library);
         cx.notify();
     }
 

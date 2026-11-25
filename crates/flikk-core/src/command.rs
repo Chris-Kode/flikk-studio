@@ -81,7 +81,7 @@ impl ToolCategory {
 
     /// Whether these spend the user's money or credits with a provider.
     /// Each call is then theirs to approve: it is asked every time, or
-    /// off, and no setting lets it run unasked.
+    /// off, unless they set the category to be accepted.
     pub fn costs(self) -> bool {
         self == Self::Generate
     }

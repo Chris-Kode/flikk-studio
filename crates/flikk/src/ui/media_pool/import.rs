@@ -4,6 +4,7 @@
 //! would transcribe them.
 
 use super::{MediaPoolPanel, hdr};
+use flikk_core::command::Command;
 use flikk_core::model::{MediaItem, MediaKind};
 use flikk_core::services::MediaService;
 use flikk_core::{BinId, MediaId};
@@ -33,8 +34,7 @@ impl MediaPoolPanel {
     }
 
     /// Like [`Self::import`], for a caller that waits for the media to be
-    /// in the pool: the task ends once it is. It goes into the project in
-    /// the editor now, also when another is there by then.
+    /// in the pool: the task ends once it is.
     pub(crate) fn importing(
         &mut self,
         paths: Vec<PathBuf>,
@@ -42,7 +42,6 @@ impl MediaPoolPanel {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let state = self.state.read(cx);
-        let project = state.bus.project().id;
         let media = state.services.media.clone();
         let known: Vec<PathBuf> = state
             .bus
@@ -64,22 +63,24 @@ impl MediaPoolPanel {
                 .await;
             this.update(cx, |this, cx| {
                 for item in items {
-                    this.add(project, item, cx);
+                    this.add(item, cx);
                 }
             })
             .ok();
         })
     }
 
-    /// Put `item` in open project `project`'s pool. Selecting it and
-    /// making its proxy are for the project in the editor; one that left
-    /// gets its proxies when it is back.
-    fn add(&mut self, project: flikk_core::ProjectId, item: MediaItem, cx: &mut Context<Self>) {
+    fn add(&mut self, item: MediaItem, cx: &mut Context<Self>) {
         let services = self.state.read(cx).services.clone();
-        let applied = self
-            .state
-            .update(cx, |s, cx| s.import_media(project, item.clone(), cx));
-        if !applied || self.state.read(cx).bus.project().id != project {
+        let applied = self.state.update(cx, |s, cx| {
+            s.execute(
+                Command::ImportMedia {
+                    media: item.clone(),
+                },
+                cx,
+            )
+        });
+        if applied.is_none() {
             return;
         }
         // Just the new item, so Delete removes only it.

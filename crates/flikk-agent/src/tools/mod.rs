@@ -335,9 +335,18 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         ToolCategory::Skills => skills::asks(tool, permission),
         _ => permission == Permission::NeedsApproval,
     };
-    // Caption styles are saved by the UI, so even allowed ones go there
-    // as a request it carries out at once.
-    if ask || category == ToolCategory::CaptionStyles {
+    // What only the UI can carry out (caption styles, memory, renders,
+    // generations, deleting a skill) goes there as a request even when the
+    // user need not be asked: it carries it out at once.
+    let by_ui = match category {
+        ToolCategory::CaptionStyles
+        | ToolCategory::ProjectMemory
+        | ToolCategory::Deliver
+        | ToolCategory::Generate => true,
+        ToolCategory::Skills => tool.starts_with("delete_"),
+        _ => false,
+    };
+    if ask || by_ui {
         return approval::request(ctx, tool, category, &args, !ask).map(Into::into);
     }
     match internal(tool, &args)? {

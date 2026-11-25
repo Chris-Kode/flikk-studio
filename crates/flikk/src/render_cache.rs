@@ -241,7 +241,10 @@ fn poll(state: &mut EditorState, cx: &mut Context<EditorState>) {
         live: state.live_version,
         globals: globals(state),
     };
-    let busy = state.is_playing()
+    // Only the project in the editor is cached ahead: the others would
+    // take the GPU from it.
+    let busy = !state.in_editor()
+        || state.is_playing()
         || state.source.as_ref().is_some_and(|s| s.is_playing())
         || state.render_queue.is_busy();
     let playhead = state.playhead;

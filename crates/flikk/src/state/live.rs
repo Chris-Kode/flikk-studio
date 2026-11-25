@@ -49,10 +49,7 @@ impl EditorState {
         if self.live.take().is_some() {
             self.live_version += 1;
         }
-        // The caption style being dragged is the editor's own.
-        if !self.visiting {
-            self.captions.clear_live();
-        }
+        self.captions.clear_live();
     }
 
     pub fn set_preview(&mut self, preview: Option<ChangeSetId>, cx: &mut Context<Self>) {

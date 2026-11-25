@@ -150,6 +150,13 @@ impl ChatPanel {
     }
 
     /// Send a message; the agent also gets its references resolved.
+    /// The quick-command bar acts on this chat's project from now on: it
+    /// is the one in the editor.
+    pub fn take_quick_commands(&mut self, cx: &mut Context<Self>) {
+        quick::register(&self.state, cx);
+        quick::register_composer(&self.composer, cx);
+    }
+
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let block =

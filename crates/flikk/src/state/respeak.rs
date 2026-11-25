@@ -6,7 +6,6 @@
 use super::cloud::Generating;
 use super::{ApprovalOutcome, EditorState};
 use crate::agent_link::approve;
-use flikk_core::bus::Author;
 use flikk_core::cloud::{CloudError, GenerationTask, Reading};
 use flikk_core::library::{self, SavedVoice, VoiceSpeaker};
 use flikk_core::respeak::{self, Fix};
@@ -64,12 +63,6 @@ impl EditorState {
             let result = made.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    // Its project was closed: the words go into its pool,
-                    // to cut in by hand.
-                    Ok(item) if this.bus.project().id != owner => {
-                        this.generating.retain(|g| g.id != id);
-                        this.keep_for(owner, item, Author::User);
-                    }
                     // Stopped too late: what was made is paid for, so it
                     // goes into the pool, but isn't cut in.
                     Ok(item) if stopped.cancelled() => {
