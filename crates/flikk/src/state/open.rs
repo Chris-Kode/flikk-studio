@@ -10,7 +10,6 @@
 
 use super::chat::ChatLog;
 use super::document::Document;
-use super::offline::OfflineMedia;
 use super::{ApprovalOutcome, EditorState};
 use crate::agent_link::AgentLink;
 use crate::persistence;
@@ -47,7 +46,6 @@ pub(super) struct Parked {
     provider_asks: Vec<MediaId>,
     media_seen: HashSet<MediaId>,
     status: Option<String>,
-    offline: OfflineMedia,
 }
 
 impl Parked {
@@ -82,7 +80,6 @@ impl Parked {
             provider_asks: Vec::new(),
             media_seen,
             status: persistence::take_notice(),
-            offline: OfflineMedia::default(),
         }
     }
 
@@ -135,8 +132,9 @@ pub struct OpenProject {
 /// Where a project's agent is with its chat.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentState {
-    /// Nothing under way; the agent's last reply, if it wrote one.
-    Idle { reply: Option<String> },
+    /// Nothing under way; the chat's last line, the agent's rather than
+    /// the user's, if anything was written.
+    Idle { last: Option<String> },
     /// A turn is under way.
     Working(Doing),
     /// The agent asked something and waits for the answer.
@@ -195,13 +193,12 @@ fn listing(
             choices: asked.choices.clone(),
         }
     } else {
+        let written = |role: ChatRole| {
+            let mut by_role = chat.messages().iter().rev().filter(move |m| m.role == role);
+            by_role.find_map(|m| line(&m.text))
+        };
         AgentState::Idle {
-            reply: chat
-                .messages()
-                .iter()
-                .rev()
-                .filter(|m| m.role == ChatRole::Agent)
-                .find_map(|m| line(&m.text)),
+            last: written(ChatRole::Agent).or_else(|| written(ChatRole::User)),
         }
     };
     OpenProject {
@@ -333,7 +330,6 @@ impl EditorState {
         swap(&mut self.provider_asks, &mut other.provider_asks);
         swap(&mut self.media_seen, &mut other.media_seen);
         swap(&mut self.status, &mut other.status);
-        swap(&mut self.offline, &mut other.offline);
     }
 
     /// Run `f` with open project `project` in the editor's place; `None`
@@ -478,9 +474,7 @@ impl EditorState {
         self.agent.publish();
         self.pending_mentions.clear();
         self.depth_pick = None;
-        // The notice is the editor's: it now lists this project's media.
-        self.offline = OfflineMedia::default();
-        self.check_offline();
+        self.offline.follow(self.bus.project(), &mut self.notices);
         self.load_presets();
         self.add_kept(cx);
         cx.notify();

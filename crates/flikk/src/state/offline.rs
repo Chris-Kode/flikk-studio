@@ -17,8 +17,8 @@ const POLL: Duration = Duration::from_secs(2);
 /// Key of the notice listing the offline media.
 const NOTICE: &str = "offline-media";
 
-/// Which media of the open project are offline, and the media paths that
-/// was worked out for.
+/// Which media of the project in the editor are offline, and the media
+/// paths that was worked out for.
 #[derive(Default)]
 pub(super) struct OfflineMedia {
     offline: HashSet<MediaId>,
@@ -45,6 +45,18 @@ impl OfflineMedia {
         }
         self.offline = missing_media(&paths);
         self.paths = paths;
+        self.notice(project, notices);
+    }
+
+    /// `project` took the editor: work out its missing sources afresh, and
+    /// make the notice about them its own, gone when it has none.
+    pub(super) fn follow(&mut self, project: &Project, notices: &mut Notices) {
+        self.paths = project
+            .media
+            .iter()
+            .map(|m| (m.id, m.path.clone()))
+            .collect();
+        self.offline = missing_media(&self.paths);
         self.notice(project, notices);
     }
 

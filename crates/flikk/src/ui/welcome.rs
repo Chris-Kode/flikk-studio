@@ -865,64 +865,68 @@ impl Render for Welcome {
             ));
         }
         let version = env!("CARGO_PKG_VERSION");
+        let lists = (!waiting).then(|| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(24.))
+                .child(self.board(window, cx))
+                .child(self.recent(cx))
+        });
+        let page = h_flex()
+            .w(px(1080.))
+            .max_w_full()
+            .py(px(24.))
+            .px(px(24.))
+            .items_stretch()
+            .gap(px(56.))
+            .child(
+                v_flex()
+                    .w(px(340.))
+                    .flex_none()
+                    .child(
+                        div()
+                            .text_size(px(30.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Flikk"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .font_family(t::mono())
+                            .text_color(t::T3)
+                            .child(version),
+                    )
+                    .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
+                    .child(self.drop_zone(waiting, cx)),
+            )
+            .map(|page| match lists {
+                Some(lists) => page.child(lists),
+                None => page.child(self.setup(cx)),
+            });
         div()
             .id("welcome")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .relative()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
             .bg(t::G)
             .child(glow())
+            // Centred while it fits; with many agents and recent projects
+            // the page is taller than the window and scrolls.
             .child(
-                h_flex()
-                    .w(px(1080.))
-                    .max_w_full()
-                    .max_h_full()
-                    .py(px(24.))
-                    .px(px(24.))
-                    .items_stretch()
-                    .gap(px(56.))
+                div()
+                    .id("welcome-page")
+                    .size_full()
+                    .overflow_y_scrollbar()
                     .child(
-                        v_flex()
-                            .w(px(340.))
-                            .flex_none()
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Flikk"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(4.))
-                                    .font_family(t::mono())
-                                    .text_color(t::T3)
-                                    .child(version),
-                            )
-                            .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
-                            .child(self.drop_zone(waiting, cx)),
-                    )
-                    .map(|page| {
-                        if waiting {
-                            return page.child(self.setup(cx));
-                        }
-                        // The lists scroll once they are taller than the
-                        // window; the actions beside them stay.
-                        page.child(
-                            v_flex()
-                                .id("welcome-lists")
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .gap(px(24.))
-                                .overflow_y_scrollbar()
-                                .child(self.board(window, cx))
-                                .child(self.recent(cx)),
-                        )
-                    }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_h_full()
+                            .child(page),
+                    ),
             )
     }
 }

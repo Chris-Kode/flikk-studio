@@ -194,8 +194,8 @@ impl Welcome {
             AgentState::Working(Doing::Writing(text)) => div().child(text.clone()),
             AgentState::Asking { question, .. } => div().text_color(t::T1).child(question.clone()),
             AgentState::Failed { message } => div().text_color(t::ERR_TX).child(message.clone()),
-            AgentState::Idle { reply: Some(reply) } => div().child(reply.clone()),
-            AgentState::Idle { reply: None } => div().text_color(t::T3).child("No messages"),
+            AgentState::Idle { last: Some(last) } => div().child(last.clone()),
+            AgentState::Idle { last: None } => div().text_color(t::T3).child("No messages"),
         };
         let choices = match &open.agent {
             AgentState::Asking { choices, .. } => choices.clone(),
