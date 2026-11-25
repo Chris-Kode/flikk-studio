@@ -2,9 +2,12 @@
 //! size budget and says how to ask for the next ones, so no result is too
 //! big for the CLI that carries it. Claude Code moves a text result of more
 //! than 50,000 characters into a file, which the agent has no tool to open
-//! here, and Codex cuts one that is past its token budget.
+//! here, and Codex cuts one that is past its token budget. Lists are cut to
+//! the same budget ([`cut_to_fit`]), and the agent changes long text by
+//! replacing pieces of it ([`edited`]) rather than sending it whole again.
 
-use crate::args::{Args, ToolResultOf};
+use crate::args::{Args, ToolError, ToolResultOf, fail};
+use serde_json::Value;
 use std::fmt::Write as _;
 
 /// Lines in a part unless the call asks for fewer.
@@ -79,6 +82,77 @@ fn part(text: &str, window: &Window, prefix: impl Fn(usize) -> String) -> String
         );
     }
     out
+}
+
+/// Whether `lists` fit one part together, as the JSON the agent reads.
+pub(crate) fn fits(lists: &[&[Value]]) -> bool {
+    lists.iter().copied().flatten().map(size).sum::<usize>() <= BUDGET
+}
+
+/// Cuts `lists` to what fits one part together: each in turn keeps its
+/// first items while there is room. Returns how many items were cut.
+pub(crate) fn cut_to_fit(lists: &mut [&mut Vec<Value>]) -> usize {
+    let mut room = BUDGET;
+    let mut cut = 0;
+    for list in lists {
+        let kept = list
+            .iter()
+            .take_while(|item| {
+                let fits = size(item) <= room;
+                if fits {
+                    room -= size(item);
+                }
+                fits
+            })
+            .count();
+        cut += list.len() - kept;
+        list.truncate(kept);
+    }
+    cut
+}
+
+/// Bytes `item` takes in a list, with its comma.
+fn size(item: &Value) -> usize {
+    item.to_string().len() + 1
+}
+
+/// `text` after `edits` (`[{old, new}]`) made in order: each `old` is found
+/// exactly once in the text as the edits before it left it. Fails, naming
+/// the edit, when one is not; nothing is changed then.
+pub(crate) fn edited(text: &str, edits: &Value) -> ToolResultOf<String> {
+    let edits = edits
+        .as_array()
+        .filter(|list| !list.is_empty())
+        .ok_or_else(|| ToolError("`edits` is a list of {old, new}".into()))?;
+    // Parts show text line by line, so `old` joins lines with `\n` whatever
+    // the text was saved with.
+    let mut text = text.replace("\r\n", "\n");
+    for (i, edit) in edits.iter().enumerate() {
+        let n = i + 1;
+        let piece = |key: &str| {
+            edit.get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError(format!("edit {n} needs `{key}` as text")))
+        };
+        let (old, new) = (piece("old")?, piece("new")?);
+        if old.is_empty() {
+            return fail(format!("edit {n}: `old` is empty"));
+        }
+        match text.matches(old).count() {
+            1 => text = text.replacen(old, new, 1),
+            0 => {
+                return fail(format!(
+                    "edit {n}: `old` is not there. Copy it as you read it, without line numbers. Nothing was changed."
+                ));
+            }
+            times => {
+                return fail(format!(
+                    "edit {n}: `old` is there {times} times; take in the lines around it until it is there once. Nothing was changed."
+                ));
+            }
+        }
+    }
+    Ok(text)
 }
 
 /// `line`, or its first `width` characters and an ellipsis when it is

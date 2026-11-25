@@ -524,7 +524,6 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
     let language = args.opt_str("language")?;
     let category = args.opt_str("category")?.map(str::to_lowercase);
     let text = args.opt_str("text")?.map(str::to_lowercase);
-    let specs = args.opt_bool("params")?.unwrap_or(false);
     let wanted_kind = match kind {
         None | Some("audio") => None,
         Some("effect") => Some(FxKind::Effect),
@@ -542,9 +541,10 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         text.as_ref()
             .is_none_or(|t| hay.iter().any(|h| h.to_lowercase().contains(t.as_str())))
     };
-    let programs: Vec<Value> = if kind == Some("audio") {
-        Vec::new()
-    } else {
+    let programs_with = |specs: bool| -> Vec<Value> {
+        if kind == Some("audio") {
+            return Vec::new();
+        }
         fx::library(project)
             .filter(|a| wanted_kind.is_none_or(|k| a.kind == k))
             .filter(|a| wanted_language.is_none_or(|l| a.language == l))
@@ -557,7 +557,10 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             .map(|a| asset_json(a, specs))
             .collect()
     };
-    let audio: Vec<Value> = if kind.is_none_or(|k| k == "audio") && language.is_none() {
+    let audio_with = |specs: bool| -> Vec<Value> {
+        if !(kind.is_none_or(|k| k == "audio") && language.is_none()) {
+            return Vec::new();
+        }
         AudioFxKind::ALL
             .into_iter()
             .filter(|k| matches_text(&[k.name(), k.label()]))
@@ -570,11 +573,9 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
                 json!({ "kind": k.name(), "name": k.label(), "params": params })
             })
             .collect()
-    } else {
-        Vec::new()
     };
     // The user's library, less what the project already has a copy of.
-    let library: Vec<Value> = if kind == Some("audio") {
+    let mut library: Vec<Value> = if kind == Some("audio") {
         Vec::new()
     } else {
         let lib = Library::load();
@@ -602,6 +603,20 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
             })
             .collect()
     };
+    // Full parameter specs only while the list is short enough for them;
+    // then whatever of it fits.
+    let asked_specs = args.opt_bool("params")?.unwrap_or(false);
+    let (mut programs, mut audio) = (programs_with(asked_specs), audio_with(asked_specs));
+    let names_only = asked_specs && !parts::fits(&[&programs, &audio, &library]);
+    if names_only {
+        (programs, audio) = (programs_with(false), audio_with(false));
+    }
+    // The project's own programs are listed nowhere else, so they are the
+    // last to be cut.
+    let (mut builtins, mut own): (Vec<Value>, Vec<Value>) =
+        programs.into_iter().partition(|p| p["builtin"] == true);
+    let cut = parts::cut_to_fit(&mut [&mut own, &mut audio, &mut builtins, &mut library]);
+    let programs = [builtins, own].concat();
     let n = programs.len() + audio.len() + library.len();
     let mut out = json!({ "programs": programs });
     if !audio.is_empty() {
@@ -611,6 +626,16 @@ pub fn list_fx(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         out["library"] = json!(library);
         out["library_note"] =
             json!("The user's own programs: use_library_fx copies one into this project.");
+    }
+    if names_only {
+        out["params_note"] = json!(
+            "Parameter names only: the full specs of this many are too long. get_fx has one program's; or narrow with kind, language, category or text."
+        );
+    }
+    if cut > 0 {
+        out["truncated"] = json!(format!(
+            "{cut} more not listed; narrow with kind, language, category or text"
+        ));
     }
     Ok(Done::json(format!("{n} effects"), &out).into())
 }

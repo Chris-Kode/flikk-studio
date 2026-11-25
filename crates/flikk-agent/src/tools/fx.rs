@@ -626,7 +626,7 @@ pub fn author(ctx: &mut ToolCtx, tool: &str, args: &Args) -> Result<Step, ToolEr
         match (args.opt_str("code")?, args.value("edits")) {
             (Some(_), Some(_)) => return fail("Pass `code` or `edits`, not both."),
             (Some(code), None) => asset.code = code.to_owned(),
-            (None, Some(edits)) => asset.code = edited(&asset.code, edits)?,
+            (None, Some(edits)) => asset.code = parts::edited(&asset.code, edits)?,
             (None, None) => {}
         }
         asset
@@ -715,45 +715,6 @@ fn check(ctx: &ToolCtx, asset: &FxAsset) -> Result<bool, String> {
             None => Ok(false),
         },
     }
-}
-
-/// `code` after `edits` (`[{old, new}]`) made in order: each `old` is text
-/// found exactly once in the code as the edits before it left it. Fails,
-/// naming the edit, when one is not.
-fn edited(code: &str, edits: &Value) -> ToolResultOf<String> {
-    let edits = edits
-        .as_array()
-        .filter(|list| !list.is_empty())
-        .ok_or_else(|| ToolError("`edits` is a list of {old, new}".into()))?;
-    // get_fx shows the code line by line, so `old` joins lines with `\n`
-    // whatever the program was saved with.
-    let mut code = code.replace("\r\n", "\n");
-    for (i, edit) in edits.iter().enumerate() {
-        let n = i + 1;
-        let text = |key: &str| {
-            edit.get(key)
-                .and_then(Value::as_str)
-                .ok_or_else(|| ToolError(format!("edit {n} needs `{key}` as text")))
-        };
-        let (old, new) = (text("old")?, text("new")?);
-        if old.is_empty() {
-            return fail(format!("edit {n}: `old` is empty"));
-        }
-        match code.matches(old).count() {
-            1 => code = code.replacen(old, new, 1),
-            0 => {
-                return fail(format!(
-                    "edit {n}: `old` is not in the code. Copy it from get_fx as written, without the line numbers. Nothing was changed."
-                ));
-            }
-            times => {
-                return fail(format!(
-                    "edit {n}: `old` is in the code {times} times; take in the lines around it until it is there once. Nothing was changed."
-                ));
-            }
-        }
-    }
-    Ok(code)
 }
 
 /// What a failed compile shows of the code it was given, numbered as the

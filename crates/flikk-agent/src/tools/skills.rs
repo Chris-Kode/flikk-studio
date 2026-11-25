@@ -94,15 +94,40 @@ impl Change {
         let kind = kind_of(tool);
         let name = args.str("name")?.trim().trim_start_matches('/').to_owned();
         let existing = find(kind, &name).ok();
+        // `instructions` writes the entry anew; `edits` change the one
+        // there, which keeps the description it has unless given another.
+        let (instructions, kept_description) =
+            match (args.opt_str("instructions")?, args.value("edits")) {
+                (Some(_), Some(_)) => {
+                    return Err(ToolError(
+                        "Pass `instructions` or `edits`, not both.".into(),
+                    ));
+                }
+                (Some(instructions), None) => (instructions.to_owned(), None),
+                (None, Some(edits)) => {
+                    let entry = existing.as_ref().ok_or_else(|| {
+                        ToolError(format!("there is no {} named {name} to edit", kind.noun()))
+                    })?;
+                    let instructions = parts::edited(&entry.instructions, edits)?;
+                    (instructions, Some(entry.description.as_str()))
+                }
+                (None, None) => {
+                    return Err(ToolError("`instructions` or `edits` is required".into()));
+                }
+            };
         let draft = Draft {
-            name,
             description: match kind {
-                Kind::Skill => args.opt_str("description")?.unwrap_or_default().to_owned(),
+                Kind::Skill => args
+                    .opt_str("description")?
+                    .or(kept_description)
+                    .unwrap_or_default()
+                    .to_owned(),
                 Kind::Style => String::new(),
             },
-            instructions: args.str("instructions")?.trim().to_owned(),
+            instructions: instructions.trim().to_owned(),
             // A change keeps who made it; a new one is the agent's.
             by_agent: existing.as_ref().is_none_or(|e| e.by_agent),
+            name,
         };
         if draft.instructions.is_empty() {
             return Err(ToolError("`instructions` is empty".into()));
