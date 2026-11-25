@@ -285,6 +285,34 @@ pub(crate) fn list(
         .collect()
 }
 
+/// The tools an external MCP client sees: every tool of a project, each
+/// taking the open project it acts on, and the app's own
+/// ([`crate::front`]).
+pub(crate) fn list_external(
+    bus: &CommandBus,
+    settings: &AgentSettings,
+    services: &Services,
+) -> Vec<Value> {
+    let mut tools = list(bus, None, settings, services);
+    let project = serde_json::json!({
+        "type": "string",
+        "description": "The open project to act on, by id or name (list_projects). Default: the one in the editor",
+    });
+    for tool in &mut tools {
+        if let Some(properties) = tool.pointer_mut("/inputSchema/properties")
+            && let Some(properties) = properties.as_object_mut()
+        {
+            properties.insert(crate::front::PROJECT.to_owned(), project.clone());
+        }
+    }
+    let app = crate::front::specs();
+    let app = app
+        .iter()
+        .filter(|t| t.category.is_none_or(|c| visible(bus, c)));
+    tools.extend(app.map(ToolSpec::to_mcp));
+    tools
+}
+
 pub(crate) fn visible(bus: &CommandBus, category: ToolCategory) -> bool {
     bus.check(&Author::Agent, category).is_ok() && category != ToolCategory::Media
 }
@@ -335,9 +363,18 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         ToolCategory::Skills => skills::asks(tool, permission),
         _ => permission == Permission::NeedsApproval,
     };
-    // Caption styles are saved by the UI, so even allowed ones go there
-    // as a request it carries out at once.
-    if ask || category == ToolCategory::CaptionStyles {
+    // What only the UI can carry out (caption styles, memory, renders,
+    // generations, deleting a skill) goes there as a request even when the
+    // user need not be asked: it carries it out at once.
+    let by_ui = match category {
+        ToolCategory::CaptionStyles
+        | ToolCategory::ProjectMemory
+        | ToolCategory::Deliver
+        | ToolCategory::Generate => true,
+        ToolCategory::Skills => tool.starts_with("delete_"),
+        _ => false,
+    };
+    if ask || by_ui {
         return approval::request(ctx, tool, category, &args, !ask).map(Into::into);
     }
     match internal(tool, &args)? {

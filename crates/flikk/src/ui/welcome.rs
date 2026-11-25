@@ -1,14 +1,21 @@
-//! The welcome page the app opens on: New project, Open…, a drop zone that
-//! starts a project from footage, and the recent projects. While a model
-//! is missing, the setup list takes the recent projects' place and no
-//! project opens: the models to download as one, the transcription size,
-//! the agent CLIs found, and FFmpeg and a browser when they are not.
+//! The home page the app opens on, and comes back to from the editor: New
+//! project, Open…, a drop zone that starts a project from footage, the
+//! agents at work on the open projects ([`board`]) and the recent
+//! projects. While a model is missing, the setup list takes the agents'
+//! and recent projects' place and no project opens: the models to download
+//! as one, the transcription size, the agent CLIs found, and FFmpeg and a
+//! browser when they are not.
 
+mod board;
+
+pub(crate) use board::name_from;
+
+use crate::desk::Desk;
 use crate::projects;
 use crate::state::{EditorState, SetupStatus};
 use crate::ui::kit::{
-    Button, Icon, IconName, Input, Kbd, Progress, Segmented, Spinner, Tooltip, h_flex, theme as t,
-    v_flex,
+    Button, Icon, IconName, Input, Kbd, Progress, ScrollableElement as _, Segmented, Spinner,
+    Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_core::agent::Backend;
 use flikk_models::Task as ModelTask;
@@ -36,6 +43,12 @@ pub enum WelcomeEvent {
     Continue,
     /// Start a new project from these files and folders.
     Create(Vec<PathBuf>),
+    /// Start a new project with these files and folders whose agent works
+    /// on `prompt`, staying on the page.
+    Start {
+        prompt: String,
+        footage: Vec<PathBuf>,
+    },
     /// Another project is being started or opened: footage held from an
     /// earlier `Create` (whose dialog was cancelled) must not go into it.
     ForgetFootage,
@@ -95,7 +108,7 @@ enum Agents {
 }
 
 pub struct Welcome {
-    state: Entity<EditorState>,
+    desk: Entity<Desk>,
     agents: Agents,
     /// Numbers each look for the agent CLIs.
     agents_asked: u64,
@@ -107,15 +120,24 @@ pub struct Welcome {
     selected: usize,
     /// Files from outside held over the drop zone.
     dropping: Option<Vec<PathBuf>>,
+    /// What the next agent is asked in, made when the agents first show
+    /// (see `board`), and its subscription.
+    composer: Option<(Entity<crate::ui::chat::Composer>, Subscription)>,
+    /// A message whose project was not made after all: it goes back into
+    /// the composer on the next draw.
+    restore: Option<String>,
     focus: FocusHandle,
     _search: Subscription,
-    _state: Subscription,
+    _desk: Subscription,
+    /// Redraws with the project in the editor, whose setup, status and
+    /// unsaved changes the page shows.
+    _state: (EntityId, Subscription),
 }
 
 impl EventEmitter<WelcomeEvent> for Welcome {}
 
 impl Welcome {
-    pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(desk: Entity<Desk>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
         let _search = cx.subscribe(&search, |this, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -129,9 +151,17 @@ impl Welcome {
             .collect();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let _state = cx.observe(&state, |_, _, cx| cx.notify());
+        let _desk = cx.observe(&desk, |this, _, cx| {
+            this.follow_editor(cx);
+            cx.notify();
+        });
+        let state = desk.read(cx).editor().state.clone();
+        let _state = (
+            state.entity_id(),
+            cx.observe(&state, |_, _, cx| cx.notify()),
+        );
         Self {
-            state,
+            desk,
             agents: Agents::Unchecked,
             agents_asked: 0,
             download_poll: None,
@@ -139,10 +169,51 @@ impl Welcome {
             recent,
             selected: 0,
             dropping: None,
+            composer: None,
+            restore: None,
             focus,
             _search,
+            _desk,
             _state,
         }
+    }
+
+    /// The state of the project in the editor: what the page asks about
+    /// the app as a whole (the models, the engines) it asks there.
+    fn state(&self, cx: &App) -> Entity<EditorState> {
+        self.desk.read(cx).editor().state.clone()
+    }
+
+    /// Another project took the editor: redraw with that one.
+    fn follow_editor(&mut self, cx: &mut Context<Self>) {
+        let state = self.state(cx);
+        if self._state.0 != state.entity_id() {
+            self._state = (
+                state.entity_id(),
+                cx.observe(&state, |_, _, cx| cx.notify()),
+            );
+        }
+    }
+
+    /// The page shows again, back from the editor: list the recent
+    /// projects as they are now and take the keys.
+    pub fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut listed = std::mem::take(&mut self.recent);
+        self.recent = crate::persistence::recent()
+            .into_iter()
+            .map(|path| {
+                // A file not saved since it was read is not read again.
+                let saved = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                let same = |r: &Recent| r.path == path && r.saved == saved && !r.missing;
+                match listed.iter().position(same) {
+                    Some(ix) => listed.swap_remove(ix),
+                    None => Recent::read(path),
+                }
+            })
+            .collect();
+        self.selected = 0;
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// Look for Claude and Codex, and their versions, off the UI thread.
@@ -172,12 +243,14 @@ impl Welcome {
     /// The rows matching the search, in order.
     fn visible(&self, cx: &App) -> Vec<Row> {
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         if s.projects_wait() {
             return Vec::new();
         }
+        // Once gone into, it shows with the open projects instead.
         let recovered = s.file().is_none()
             && s.is_dirty()
+            && !s.is_listed()
             && s.bus.project().name.to_lowercase().contains(&query);
         let recent = (0..self.recent.len()).filter(|&i| {
             let r = &self.recent[i];
@@ -207,10 +280,10 @@ impl Welcome {
         // The list is read once; the file can have gone since.
         if r.missing || !r.path.exists() {
             self.locate(ix, window, cx);
-        } else if self.state.read(cx).file() == Some(r.path.as_path()) {
+        } else if self.state(cx).read(cx).file() == Some(r.path.as_path()) {
             cx.emit(WelcomeEvent::Continue);
         } else {
-            projects::open(&self.state, r.path.clone(), window, cx);
+            projects::open(&self.state(cx), r.path.clone(), window, cx);
         }
     }
 
@@ -225,7 +298,7 @@ impl Welcome {
             multiple: false,
             prompt: None,
         });
-        let state = self.state.clone();
+        let state = self.state(cx);
         window
             .spawn(cx, async move |cx| {
                 let Ok(Ok(Some(paths))) = paths.await else {
@@ -246,7 +319,7 @@ impl Welcome {
 
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         self.dropping = None;
-        if self.state.read(cx).projects_wait() {
+        if self.state(cx).read(cx).projects_wait() {
             cx.notify();
             return;
         }
@@ -255,7 +328,7 @@ impl Welcome {
             && file.extension().is_some_and(|e| e == EXTENSION)
         {
             cx.emit(WelcomeEvent::ForgetFootage);
-            projects::open(&self.state, file.clone(), window, cx);
+            projects::open(&self.state(cx), file.clone(), window, cx);
         } else if !paths.is_empty() {
             cx.emit(WelcomeEvent::Create(paths));
         }
@@ -263,6 +336,12 @@ impl Welcome {
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The keys are the list's while it or its search has them: a chat
+        // and the prompt keep their own.
+        let search = self.search.read(cx).focus_handle(cx).is_focused(window);
+        if !search && !self.focus.is_focused(window) {
+            return;
+        }
         let rows = self.visible(cx);
         // As the list shows it: rows can go without a search, as the
         // recovered one does once its project is saved.
@@ -307,7 +386,7 @@ impl Welcome {
                 .kbd(format!("{} N", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::new_project(&this.state, window, cx)
+                    projects::new_project(&this.state(cx), window, cx)
                 }))))
             .child(big(Button::new("welcome-open")
                 .disabled(waiting)
@@ -317,7 +396,7 @@ impl Welcome {
                 .kbd(format!("{} O", crate::app::MOD))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::open_dialog(&this.state, window, cx)
+                    projects::open_dialog(&this.state(cx), window, cx)
                 }))))
     }
 
@@ -368,7 +447,7 @@ impl Welcome {
             .when(waiting, |zone| zone.opacity(0.5))
             .on_drag_move(
                 cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let waiting = this.state.read(cx).projects_wait();
+                    let waiting = this.state(cx).read(cx).projects_wait();
                     let over = (!waiting && ev.bounds.contains(&ev.event.position))
                         .then(|| ev.drag(cx).paths().to_vec());
                     if over != this.dropping {
@@ -464,7 +543,7 @@ impl Welcome {
     }
 
     fn recovered_row(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self.state.read(cx).bus.project().name.clone();
+        let name = self.state(cx).read(cx).bus.project().name.clone();
         Self::frame(
             "welcome-recovered".into(),
             selected,
@@ -559,8 +638,7 @@ impl Welcome {
         let rows = self.visible(cx);
         let selected = self.selected.min(rows.len().saturating_sub(1));
         v_flex()
-            .flex_1()
-            .min_w_0()
+            .flex_none()
             .gap(px(8.))
             .child(
                 h_flex()
@@ -615,7 +693,7 @@ impl Welcome {
     /// The setup list: one row each for the models, the transcription
     /// size and the agent, then FFmpeg and a browser when missing.
     fn setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let ffmpeg = s
             .services
             .media
@@ -656,7 +734,7 @@ impl Welcome {
     /// Every model as one download: its total size and Download, then its
     /// progress with Cancel, or why it failed with Retry.
     fn models_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let labels: Vec<&str> = ModelTask::ALL.iter().map(|t| t.label()).collect();
         let count = div()
             .id("welcome-models-count")
@@ -665,7 +743,7 @@ impl Welcome {
             .text_color(t::T3)
             .child(format!("{} models", labels.len()))
             .tooltip(Tooltip::text(labels.join(", ")));
-        let state = self.state.clone();
+        let state = self.state(cx);
         let control = match s.setup_status() {
             SetupStatus::Complete => Icon::new(IconName::CircleCheck)
                 .size(px(14.))
@@ -728,7 +806,7 @@ impl Welcome {
     /// Whisper small or large, each with its size. Held while the models
     /// download, so the total stays what is fetched.
     fn transcription_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
+        let s = self.state(cx).read(cx);
         let downloading = matches!(s.setup_status(), SetupStatus::Downloading { .. });
         let picked = s.picked_model(ModelTask::Transcription);
         let sizes: Vec<_> = crate::ui::editor_settings::transcription_sizes().collect();
@@ -747,7 +825,7 @@ impl Welcome {
         for ix in 0..sizes.len() {
             choice = choice.disabled_item(ix, downloading && ix != selected);
         }
-        let state = self.state.clone();
+        let state = self.state(cx);
         setup_row(
             "Transcription",
             choice.on_click(move |ix, _, cx| {
@@ -795,69 +873,95 @@ impl Welcome {
 }
 
 impl Render for Welcome {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.dropping.is_some() && !cx.has_active_drag() {
             self.dropping = None;
         }
-        let waiting = self.state.read(cx).projects_wait();
+        let waiting = self.state(cx).read(cx).projects_wait();
         if waiting && matches!(self.agents, Agents::Unchecked) {
             self.check_agents(cx);
         }
-        if waiting && self.download_poll.is_none() && self.state.read(cx).models.busy() {
+        if waiting && self.download_poll.is_none() && self.state(cx).read(cx).models.busy() {
             self.download_poll = Some(crate::ui::repaint_while(
                 cx,
                 DOWNLOAD_POLL,
-                |this, cx| this.state.read(cx).models.busy(),
+                |this, cx| this.state(cx).read(cx).models.busy(),
                 |this| this.download_poll = None,
             ));
         }
         let version = env!("CARGO_PKG_VERSION");
+        let sessions = self.desk.read(cx).listed(cx);
+        // With projects open the page is theirs: their tiles take the
+        // window's width, the rest keeps to the side and below.
+        let wide = !waiting && !sessions.is_empty();
+        let lists = (!waiting).then(|| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(24.))
+                .child(self.board(&sessions, window, cx))
+                .child(self.recent(cx))
+        });
+        let page = h_flex()
+            .map(|page| {
+                if wide {
+                    page.w_full()
+                } else {
+                    page.w(px(1080.))
+                }
+            })
+            .max_w_full()
+            .py(px(24.))
+            .px(px(24.))
+            .items_stretch()
+            .gap(px(if wide { 32. } else { 56. }))
+            .child(
+                v_flex()
+                    .w(px(340.))
+                    .flex_none()
+                    .child(
+                        div()
+                            .text_size(px(30.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Flikk"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .font_family(t::mono())
+                            .text_color(t::T3)
+                            .child(version),
+                    )
+                    .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
+                    .child(self.drop_zone(waiting, cx)),
+            )
+            .map(|page| match lists {
+                Some(lists) => page.child(lists),
+                None => page.child(self.setup(cx)),
+            });
         div()
             .id("welcome")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .relative()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
             .bg(t::G)
             .child(glow())
+            // Centred while it fits; with many agents and recent projects
+            // the page is taller than the window and scrolls.
             .child(
-                h_flex()
-                    .w(px(1080.))
-                    .max_w_full()
-                    .mt(px(-20.))
-                    .px(px(24.))
-                    .items_stretch()
-                    .gap(px(56.))
+                div()
+                    .id("welcome-page")
+                    .size_full()
+                    .overflow_y_scrollbar()
                     .child(
-                        v_flex()
-                            .w(px(340.))
-                            .flex_none()
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Flikk"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(4.))
-                                    .font_family(t::mono())
-                                    .text_color(t::T3)
-                                    .child(version),
-                            )
-                            .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
-                            .child(self.drop_zone(waiting, cx)),
-                    )
-                    .map(|page| {
-                        if waiting {
-                            page.child(self.setup(cx))
-                        } else {
-                            page.child(self.recent(cx))
-                        }
-                    }),
+                        div()
+                            .flex()
+                            .justify_center()
+                            .min_h_full()
+                            .map(|centre| if wide { centre } else { centre.items_center() })
+                            .child(page),
+                    ),
             )
     }
 }

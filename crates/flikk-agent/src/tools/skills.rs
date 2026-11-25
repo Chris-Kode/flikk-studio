@@ -20,9 +20,10 @@ pub const TOOLS: [&str; 6] = [
 ];
 
 /// Whether `tool` waits for the user under `permission`: saves unless the
-/// user allowed them, deletes always, reads never.
+/// user allowed them, deletes unless they set skills to be accepted, reads
+/// never.
 pub fn asks(tool: &str, permission: Permission) -> bool {
-    tool.starts_with("delete_")
+    (tool.starts_with("delete_") && permission != Permission::Accept)
         || (tool.starts_with("save_") && permission == Permission::NeedsApproval)
 }
 

@@ -1,6 +1,13 @@
-//! Shared editor state. One entity per window; panels observe it and call
-//! its methods instead of touching the bus directly, so every change goes
-//! through the same path whether it came from a button or the agent.
+//! Editor state. One entity per open project; its panels observe it and
+//! call its methods instead of touching the bus directly, so every change
+//! goes through the same path whether it came from a button or the agent.
+//!
+//! Several projects are open at once (`crate::desk`), each with a state of
+//! its own and an agent of its own, which goes on working whichever
+//! project is in the editor. They share the engines, the providers, the
+//! model downloads and the render queue ([`Shared`]); what one changes for
+//! every project (settings, the library, presets, keys) the others read
+//! again ([`SharedChange`]).
 
 mod agent;
 mod approvals;
@@ -13,6 +20,7 @@ mod live;
 mod models;
 mod music_fit;
 mod offline;
+mod open;
 mod playback;
 mod respeak;
 mod setup;
@@ -22,7 +30,9 @@ mod update;
 pub mod voices;
 
 pub use approvals::ApprovalOutcome;
+pub use chat::AgentStatus;
 pub use cloud::{Check, Generating, ProviderStatus};
+pub use open::{Shared, SharedChange};
 pub use setup::{SetupStatus, full_size};
 pub use source::Source;
 
@@ -107,6 +117,12 @@ pub struct EditorState {
     /// timeline, inspector, transcript…): token text and chip label.
     pending_mentions: Vec<(String, SharedString)>,
     agent: AgentLink,
+    /// The project shows with the open projects on the home page: any but
+    /// the one the app started on, until the user goes into that one.
+    listed: bool,
+    /// It is the project in the editor: the others' agents work, but what
+    /// only the editor needs (the background render cache) waits.
+    in_editor: bool,
     _pump: Task<()>,
     // --- chat
     /// Requests the user settled since their last message, and what came of them.
@@ -152,13 +168,6 @@ pub struct EditorState {
     /// Music and sound effects being made from the media pool.
     pub generating: Vec<Generating>,
     next_generation: u64,
-    /// What was made for a project closed before it was done, added to its
-    /// pool when it is opened again as the author with it.
-    kept: Vec<(
-        flikk_core::ProjectId,
-        flikk_core::model::MediaItem,
-        flikk_core::bus::Author,
-    )>,
     /// Pool items already looked at for analysis: those of the project
     /// when it opened, and each added since.
     media_seen: HashSet<flikk_core::MediaId>,
@@ -180,30 +189,56 @@ pub struct EditorState {
 }
 
 impl EditorState {
+    /// The state the app starts on: the session's first project (see
+    /// `persistence::load_session`), on engines made for the window.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let loaded = persistence::load_session();
+        // Before analysis is wired, so it runs on the models the user picked.
+        flikk_models::restore_picks(
+            &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
+        );
+        let cloud = Arc::new(flikk_cloud::Cloud::new(
+            persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
+        ));
+        let shared = Shared {
+            services: services(&cloud),
+            cloud,
+            models: flikk_models::Downloads::default(),
+            render_queue: flikk_deliver::RenderQueue::new(),
+            agent_models: HashMap::new(),
+        };
+        let mut this = Self::open(loaded, shared, cx);
+        // Started for a file or a demo, the app opens in the editor.
+        this.listed = persistence::launched_with_file() || crate::demo::enabled();
+        this
+    }
+
+    /// A state for `loaded`, a project opened or made beside those already
+    /// open, on what they share.
+    pub fn open(loaded: persistence::Loaded, shared: Shared, cx: &mut Context<Self>) -> Self {
         let persistence::Loaded {
             project,
             settings,
             file,
             recovered,
-        } = persistence::load_session();
-        // Before analysis is wired, so it runs on the models the user picked.
-        flikk_models::restore_picks(
-            &persistence::with_store(|s| s.model_picks()).unwrap_or_default(),
-        );
+        } = loaded;
+        let Shared {
+            services,
+            cloud,
+            models,
+            render_queue,
+            agent_models,
+        } = shared;
         let mut bus = CommandBus::new(project);
         bus.set_permissions(settings.permissions.clone());
         // Brings back the proposals left waiting for review too.
         let chat = ChatLog::load(persistence::load_chats(&mut bus));
         let document = Document::opened(file, recovered, &bus);
-        let cloud = Arc::new(flikk_cloud::Cloud::new(
-            persistence::with_store(|s| s.cloud_settings()).unwrap_or_default(),
-        ));
         let model_tasks = flikk_analysis::LocalAnalysis::model_tasks();
         let mut this = Self {
             bus,
             document,
-            services: services(&cloud),
+            services,
             workspace: Workspace::default(),
             playhead: Time::ZERO,
             in_out: None,
@@ -228,12 +263,14 @@ impl EditorState {
             editing_fx: None,
             library: flikk_core::library::Library::load(),
             agent: AgentLink::new(),
+            listed: true,
+            in_editor: false,
             _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
             settled: Vec::new(),
-            render_queue: flikk_deliver::RenderQueue::new(),
+            render_queue,
             models_seen: (Vec::new(), 0),
             model_tasks,
-            models: flikk_models::Downloads::default(),
+            models,
             setup: setup::Setup::new(),
             switching: None,
             notices: Notices::default(),
@@ -241,13 +278,13 @@ impl EditorState {
             _models_poll: Self::every(cx, MODELS_POLL, Self::poll_models),
             _offline_poll: Self::poll_offline(cx),
             _subjects_poll: Self::every(cx, SUBJECTS_POLL, Self::poll_subjects),
-            agent_models: HashMap::new(),
-            models_asked: HashSet::new(),
+            // Asked once a run, whichever project asked.
+            models_asked: agent_models.keys().copied().collect(),
+            agent_models,
             cloud,
             providers: HashMap::new(),
             generating: Vec::new(),
             next_generation: 1,
-            kept: Vec::new(),
             media_seen: HashSet::new(),
             provider_asks: Vec::new(),
             account_voices: Default::default(),
@@ -539,45 +576,6 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.selection.words = words;
-        cx.notify();
-    }
-
-    /// Replace everything tied to the open project; engines stay. Undo
-    /// history does not carry over.
-    fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
-        let left = self.bus.project().media.clone();
-        self.set_playing(false, cx);
-        self.agent.cancel();
-        self.agent.close_project(self.bus.project().id);
-        self.save_chat();
-        self.proposals.sync(&self.bus);
-        self.bus = CommandBus::new(loaded.project);
-        self.proposals = persistence::Proposals::default();
-        self.chat = ChatLog::load(persistence::load_chats(&mut self.bus));
-        // What the new project has too goes on.
-        self.cancel_left(&left);
-        self.bus
-            .set_permissions(loaded.settings.permissions.clone());
-        self.mark_media_seen();
-        // Asked about for the project that closed.
-        self.provider_asks.clear();
-        self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
-        self.settings = loaded.settings;
-        self.playhead = Time::ZERO;
-        self.in_out = None;
-        self.selection = Selection::default();
-        self.selected_transition = None;
-        self.source = None;
-        self.preview = None;
-        self.clear_live();
-        self.focused_change = None;
-        self.editing_fx = None;
-        self.reset_chat_view();
-        self.status = persistence::take_notice();
-        self.check_offline();
-        self.load_agent_memory();
-        self.load_presets();
-        self.add_kept(cx);
         cx.notify();
     }
 }

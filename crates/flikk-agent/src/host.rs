@@ -6,9 +6,11 @@
 //! the end of the turn the host emits `ChangeSetReady` if it has items, then
 //! `TurnDone`.
 //!
-//! External MCP clients (Claude Code, Codex… running `flikk mcp`
-//! against the published `bridge.json`) are served between and during
-//! turns. They act as the agent with the same permissions,
+//! External MCP clients (Claude Code, Codex… running `flikk mcp`) come in
+//! through the app's [`crate::front::Front`], which hands the calls for
+//! this host's project over ([`AgentHost::serve_external`]); they are
+//! served between and during turns. They act as the agent with the same
+//! permissions,
 //! under their own author, so their proposals collect in a separate
 //! "External agent" change set. That set is offered for review when the
 //! client disconnects or after [`EXTERNAL_IDLE`] without a call (a client
@@ -20,6 +22,7 @@
 
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
+use crate::front::ProjectCall;
 use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
 use crate::{prompt, session};
@@ -36,6 +39,7 @@ use flikk_core::{ChangeSetId, ProjectId};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -47,6 +51,15 @@ pub(crate) fn external_author() -> Author {
     Author::External {
         name: "External agent".into(),
     }
+}
+
+/// Numbers the approval requests of every host in the process: the editor
+/// runs one host per open project, and a request is told apart by its id
+/// alone.
+static NEXT_APPROVAL: AtomicU64 = AtomicU64::new(1);
+
+fn next_approval() -> u64 {
+    NEXT_APPROVAL.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Calls' jobs running at once; the others wait their turn, the order
@@ -66,7 +79,8 @@ struct External {
     connections: HashSet<u64>,
     last_call: Option<Instant>,
     jobs: usize,
-    /// Editor context and settings of the latest turn, used for their calls.
+    /// The editor context and settings their calls are served with: as
+    /// they were at the latest one.
     context: EditorContext,
     settings: AgentSettings,
     /// Never stopped: a client stops its own calls.
@@ -197,7 +211,10 @@ struct JobResult {
 }
 
 pub struct AgentHost {
+    /// Where the `flikk-mcp` of this host's own turns connects.
     bridge: Option<BridgeServer>,
+    /// External clients' calls handed over, served on the next pump.
+    inbox: Vec<Incoming>,
     /// Chat session whose backend conversation the next turn continues.
     chat: String,
     memory: Memory,
@@ -209,7 +226,6 @@ pub struct AgentHost {
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
     approvals: Vec<PendingApproval>,
-    next_approval: u64,
     /// Replies of the calls waiting on an approval, by its id: the call
     /// stays open until the user decides, so the turn carries on with what
     /// came of it.
@@ -240,6 +256,7 @@ impl AgentHost {
         let (jobs_tx, jobs_rx) = mpsc::channel();
         Self {
             bridge: None,
+            inbox: Vec::new(),
             chat: session::MAIN_CHAT.to_owned(),
             memory: Memory::default(),
             queued: None,
@@ -249,7 +266,6 @@ impl AgentHost {
             jobs_tx,
             jobs_rx,
             approvals: Vec::new(),
-            next_approval: 1,
             held: HashMap::new(),
             asked: HashMap::new(),
             outcomes: Vec::new(),
@@ -260,20 +276,29 @@ impl AgentHost {
         }
     }
 
-    /// Start the bridge now (rather than with the first turn) and publish
-    /// it in `bridge.json`, so external MCP clients can reach the editor.
-    pub fn start_bridge(&mut self) -> std::io::Result<PathBuf> {
-        if self.bridge.is_none() {
-            self.bridge = Some(BridgeServer::start()?);
-        }
-        self.bridge.as_mut().unwrap().publish()
+    /// Serve `call`, which an external client made for this host's
+    /// project, on the next [`pump`](Self::pump): with `context`, where
+    /// the editor is in the project, and the user's `settings`.
+    pub fn serve_external(
+        &mut self,
+        call: ProjectCall,
+        context: EditorContext,
+        settings: &AgentSettings,
+    ) {
+        // Attachments are for the chat's own turns, never other clients.
+        self.external.context = EditorContext {
+            attachments: Vec::new(),
+            ..context
+        };
+        self.external.settings = settings.clone();
+        self.inbox.push(call.incoming);
     }
 
-    /// Withdraw `bridge.json` (on exit; best-effort).
-    pub fn stop_bridge(&mut self) {
-        if let Some(b) = self.bridge.as_mut() {
-            b.unpublish();
-        }
+    /// External client `client` disconnected: its proposals go to review,
+    /// and nobody waits for what it asked the user any more.
+    pub fn external_left(&mut self, client: u64) {
+        self.external.connections.remove(&client);
+        self.release_held(Origin::External(client));
     }
 
     /// Whether a message is queued, its turn under way or being stopped.
@@ -311,12 +336,6 @@ impl AgentHost {
             });
             return;
         }
-        // Attachments are for this chat's own turns, never other clients.
-        self.external.context = EditorContext {
-            attachments: Vec::new(),
-            ..context.clone()
-        };
-        self.external.settings = settings.clone();
         self.queued = Some(Queued {
             message,
             context,
@@ -354,26 +373,6 @@ impl AgentHost {
             .collect()
     }
 
-    /// The user opened another project: withdraw the requests `project`'s
-    /// turns left waiting. Its chats' agents are told on their next turn.
-    pub fn close_project(&mut self, project: ProjectId) {
-        let (gone, kept) = std::mem::take(&mut self.approvals)
-            .into_iter()
-            .partition(|a| a.project == project);
-        self.approvals = kept;
-        for approval in gone {
-            let PendingApproval { id, request, .. } = approval;
-            self.report_outcome(
-                id,
-                format!(
-                    "withdrawn: {} (the user opened another project before deciding)",
-                    request.summary
-                ),
-                true,
-            );
-        }
-    }
-
     /// Remove a request once the user approved or denied it.
     pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {
         let ix = self.approvals.iter().position(|a| a.id == id)?;
@@ -383,8 +382,7 @@ impl AgentHost {
     /// Demo only: `request` waiting on the user for `project`, as a turn's
     /// call leaves one, with no call waiting on its outcome.
     pub fn seed_approval(&mut self, request: ApprovalRequest, project: ProjectId) {
-        let id = self.next_approval;
-        self.next_approval += 1;
+        let id = next_approval();
         self.approvals.push(PendingApproval {
             id,
             request,
@@ -751,20 +749,20 @@ impl AgentHost {
     // ------------------------------------------------------------- tool calls
 
     fn serve_calls(&mut self, bus: &mut CommandBus, services: &Services) {
-        let Some(bridge) = self.bridge.as_ref() else {
-            return;
-        };
+        let mut incoming = std::mem::take(&mut self.inbox);
+        if let Some(bridge) = self.bridge.as_ref() {
+            incoming.extend(bridge.drain());
+        }
         for Incoming {
             origin,
             request,
             reply,
-        } in bridge.drain()
+        } in incoming
         {
             match (origin, request) {
                 (_, IncomingKind::Closed) => {
                     if let Origin::External(id) = origin {
-                        self.external.connections.remove(&id);
-                        self.release_held(origin);
+                        self.external_left(id);
                     }
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
@@ -778,7 +776,7 @@ impl AgentHost {
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, None, &self.external.settings, services));
+                    reply.tools(tools::list_external(bus, &self.external.settings, services));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
@@ -824,7 +822,6 @@ impl AgentHost {
                     }
                 }
                 (Origin::External(id), IncomingKind::Call { tool, args }) => {
-                    let (tool, args) = groups::unwrap_run(tool, args);
                     self.external.connections.insert(id);
                     self.external.last_call = Some(Instant::now());
                     let mut ctx = ToolCtx {
@@ -1062,8 +1059,7 @@ impl AgentHost {
         // A request for approval keeps its call waiting for the user.
         match done.approval {
             Some(request) => {
-                let id = self.next_approval;
-                self.next_approval += 1;
+                let id = next_approval();
                 let chat = match origin {
                     Origin::Turn => Some(
                         self.turn

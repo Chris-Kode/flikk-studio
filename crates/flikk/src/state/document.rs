@@ -1,4 +1,4 @@
-//! The open project as a document: the file it is saved in, whether it has
+//! The project as a document: the file it is saved in, whether it has
 //! unsaved changes, and what the autosaver holds of them for crash
 //! recovery. Unsaved means "not at the undo position last saved", so
 //! undoing back to the save makes it clean again.
@@ -46,6 +46,14 @@ impl Document {
     /// project of `bus`.
     pub(super) fn is_dirty(&self, bus: &CommandBus) -> bool {
         self.saved != Some(undo_position(bus))
+    }
+
+    /// Changes not saved that the user has not let go either, for the
+    /// project of `bus`: closing it would lose them unasked.
+    pub(super) fn unsettled(&self, bus: &CommandBus) -> bool {
+        let position = undo_position(bus);
+        self.saved != Some(position)
+            && !matches!(self.autosaved, Autosaved::Discarded(at) if at == position)
     }
 
     /// Hand the unsaved changes of `bus`'s project to the autosaver, for
@@ -130,6 +138,12 @@ impl EditorState {
         self.document.is_dirty(&self.bus)
     }
 
+    /// Unsaved changes the user has not let go: closing the project would
+    /// lose them unasked.
+    pub fn is_unsettled(&self) -> bool {
+        self.document.unsettled(&self.bus)
+    }
+
     /// Recently opened project files that still exist, newest first.
     pub fn recent_projects(&self) -> Vec<PathBuf> {
         persistence::recent()
@@ -142,42 +156,6 @@ impl EditorState {
     pub(super) fn autosave(&mut self) {
         if let Some(failure) = self.document.autosave(&self.bus) {
             self.status = Some(failure);
-        }
-    }
-
-    /// Replace the open project with a new one saved at `path`, which names
-    /// it, with a sequence of `settings`. Unsaved changes must be settled
-    /// first (see `crate::projects`). Whether it saved.
-    pub fn create_project(
-        &mut self,
-        path: PathBuf,
-        settings: flikk_core::model::SequenceSettings,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let name = flikk_store::project_file::name_of(&path);
-        self.switch_to(persistence::new_project(&name, settings), cx);
-        self.save_project(path, cx)
-    }
-
-    /// Open a project file in place of the open project; unsaved changes
-    /// must be settled first. Whether it opened.
-    pub fn open_project(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
-        if self.file() == Some(path) {
-            return true;
-        }
-        match persistence::open(path) {
-            Some(loaded) => {
-                self.switch_to(loaded, cx);
-                true
-            }
-            None => {
-                if !path.exists() {
-                    persistence::forget_recent(path);
-                }
-                self.status = persistence::take_notice();
-                cx.notify();
-                false
-            }
         }
     }
 

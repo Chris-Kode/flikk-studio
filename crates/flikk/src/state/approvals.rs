@@ -52,7 +52,6 @@ impl EditorState {
             return;
         };
         let summary = pending.request.summary.clone();
-        let owner = self.bus.project().id;
         let mut settings = self.settings.clone();
         let started = approve::start(
             &pending.request,
@@ -124,26 +123,16 @@ impl EditorState {
                 self.settle_later(id, summary, work, done, cx)
             }
             Ok(approve::Started::Respeak(work)) => {
-                let what = summary.clone();
                 let done =
                     move |this: &mut Self, made: approve::Respoken, cx: &mut Context<Self>| {
-                        if this.bus.project().id != owner {
-                            this.keep_approved(id, owner, made.item, &what)
-                        } else {
-                            this.place_respoken(id, made, cx)
-                        }
+                        this.place_respoken(id, made, cx)
                     };
                 self.settle_later(id, summary, work, done, cx)
             }
             Ok(approve::Started::Generate(work)) => {
-                let what = summary.clone();
                 let done =
                     move |this: &mut Self, made: approve::Generated, cx: &mut Context<Self>| {
-                        if this.bus.project().id != owner {
-                            this.keep_approved(id, owner, made.item, &what)
-                        } else {
-                            this.place_generated(id, made, cx)
-                        }
+                        this.place_generated(id, made, cx)
                     };
                 self.settle_later(id, summary, work, done, cx)
             }
@@ -201,6 +190,19 @@ impl EditorState {
         self.agent
             .report_failure(id, format!("approved but failed: {summary}: {e:#}"));
         ApprovalOutcome::Failed(format!("{e:#}"))
+    }
+
+    /// The renders started from the chat that it still shows, as the queue
+    /// sees them now.
+    pub fn chat_renders(&self) -> Vec<flikk_deliver::RenderJob> {
+        let jobs = self
+            .settled
+            .iter()
+            .filter_map(|(_, outcome)| match outcome {
+                ApprovalOutcome::Rendering { job, .. } => self.render_job(*job),
+                _ => None,
+            });
+        jobs.collect()
     }
 
     /// A render started from the chat, as the queue sees it now.

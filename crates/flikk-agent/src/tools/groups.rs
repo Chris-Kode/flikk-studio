@@ -94,6 +94,7 @@ pub fn key(group: ToolCategory) -> &'static str {
         ToolCategory::Media => "media",
         ToolCategory::Files => "files",
         ToolCategory::Skills => "skills",
+        ToolCategory::Projects => "projects",
     }
 }
 

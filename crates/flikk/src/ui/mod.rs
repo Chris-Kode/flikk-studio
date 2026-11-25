@@ -5,6 +5,7 @@
 pub mod blockout;
 pub mod caption_style;
 pub mod chat;
+pub mod clients_ask;
 pub mod code_editor;
 pub mod deliver;
 pub mod editor_settings;

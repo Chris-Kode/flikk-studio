@@ -252,6 +252,7 @@ impl EditorState {
         if let Some(notice) = persistence::take_notice() {
             self.status = Some(notice);
         }
+        cx.emit(super::SharedChange::Presets);
         cx.notify();
     }
 

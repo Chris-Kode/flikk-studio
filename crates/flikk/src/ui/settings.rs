@@ -205,18 +205,19 @@ impl SettingsPanel {
                     .text_size(px(11.))
                     .text_color(t::T3)
                     .child(match effective {
-                        Permission::Allowed => "Always",
+                        Permission::Allowed | Permission::Accept => "Always",
                         Permission::NeedsApproval => "Ask each time",
                         Permission::Off => "Never",
                         Permission::Propose => "Propose",
                     })
                     .into_any_element()
             } else {
+                // Ask: edits are proposed for review, the rest waits for
+                // approval call by call.
                 let label = |permission: &Permission| match permission {
-                    Permission::Off => "Off",
-                    Permission::NeedsApproval => "Ask",
-                    Permission::Allowed => "Allow",
-                    Permission::Propose => "Propose",
+                    Permission::Off => "Deny",
+                    Permission::NeedsApproval | Permission::Propose => "Ask",
+                    Permission::Allowed | Permission::Accept => "Accept",
                 };
                 Segmented::new(("perm", category as usize))
                     .compact()

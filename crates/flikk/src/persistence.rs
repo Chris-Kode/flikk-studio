@@ -22,7 +22,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 mod chats;
 mod proposals;
 
-pub use chats::{ChatSession, Chats, load_chats, save_chats};
+pub use chats::{ChatSession, Chats, forget_chats, load_chats, save_chats};
 pub use proposals::Proposals;
 
 /// Everything needed to start editing a project.
@@ -304,6 +304,19 @@ pub fn recent() -> Vec<PathBuf> {
 
 pub fn forget_recent(path: &Path) {
     with_store(|s| s.remove_recent_project(path));
+}
+
+/// The folder the user set for new projects, while it exists: New project
+/// starts there, whichever project is open.
+pub fn projects_dir() -> Option<PathBuf> {
+    with_store(|s| s.projects_dir())
+        .flatten()
+        .filter(|dir| dir.is_dir())
+}
+
+/// Save new projects in `dir` from now on.
+pub fn set_projects_dir(dir: &Path) {
+    with_store(|s| s.save_projects_dir(dir));
 }
 
 /// Save settings edited in the UI, for the user. Errors are reported

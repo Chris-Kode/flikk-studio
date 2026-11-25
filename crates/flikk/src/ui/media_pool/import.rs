@@ -30,6 +30,17 @@ impl MediaPoolPanel {
         bin: Option<BinId>,
         cx: &mut Context<Self>,
     ) {
+        self.importing(paths, bin, cx).detach();
+    }
+
+    /// Like [`Self::import`], for a caller that waits for the media to be
+    /// in the pool: the task ends once it is.
+    pub(crate) fn importing(
+        &mut self,
+        paths: Vec<PathBuf>,
+        bin: Option<BinId>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let state = self.state.read(cx);
         let media = state.services.media.clone();
         let known: Vec<PathBuf> = state
@@ -57,7 +68,6 @@ impl MediaPoolPanel {
             })
             .ok();
         })
-        .detach();
     }
 
     fn add(&mut self, item: MediaItem, cx: &mut Context<Self>) {

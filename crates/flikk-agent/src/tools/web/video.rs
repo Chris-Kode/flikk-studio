@@ -14,6 +14,7 @@ use super::super::pool::{Analysed, Paid, Subject, Viewing, analyse, view_alone};
 use super::super::{ApprovalRequest, Done, Job, JobDone, Step, ToolCtx};
 use super::{address, http_agent, page};
 use crate::args::{Args, ToolError, ToolResultOf, fail};
+use flikk_core::bus::Permission;
 use flikk_core::cloud;
 use flikk_core::command::ToolCategory;
 use flikk_core::model::{Fingerprint, MediaItem};
@@ -59,6 +60,7 @@ pub(crate) fn serve(ctx: &mut ToolCtx, args: &Args) -> ToolResultOf<Step> {
         looking: args.0.clone(),
         media: ctx.services.media.clone(),
         viewing: Viewing::of(ctx),
+        paying: ctx.bus.check(&ctx.author, ToolCategory::Generate).ok(),
     };
     let job: Job = Box::new(move || call.run());
     Ok(Step::Job(job))
@@ -73,6 +75,9 @@ struct Call {
     looking: Map<String, Value>,
     media: Option<Arc<dyn MediaService>>,
     viewing: Viewing,
+    /// What the user set for what a provider does for money, which a
+    /// paid transcription is; `None` when they denied it.
+    paying: Option<Permission>,
 }
 
 impl Call {
@@ -135,14 +140,16 @@ impl Call {
     }
 
     /// What a look at `item` does when analysing it would pay a provider
-    /// to transcribe it: with `add`, or once the user was asked about it,
-    /// it is shown without its sound; otherwise the user is asked.
+    /// to transcribe it: with `add`, once the user was asked about it, or
+    /// when they denied what costs money, it is shown without its sound;
+    /// otherwise the user is asked, or, when they set what costs money to
+    /// be accepted, it is transcribed without asking.
     fn paid(&self, item: &MediaItem) -> Paid {
         let asked =
             (item.fingerprint.as_ref()).is_some_and(|fp| flikk_os::sync::lock(&ASKED).contains(fp));
-        if self.add || asked {
+        let Some(paying) = self.paying.filter(|_| !self.add && !asked) else {
             return Paid::Skip;
-        }
+        };
         let length = item.info.as_ref().map_or(String::new(), |i| {
             format!(" ({})", length_text(i.duration.as_secs_f64()))
         });
@@ -155,7 +162,7 @@ impl Call {
                 "Transcribe {}{length} with your transcription provider",
                 name_of(&self.url)
             ),
-            allowed: false,
+            allowed: paying == Permission::Accept,
         })
     }
 }

@@ -9,10 +9,10 @@
 //! `flikk_agent::AgentHost`; this type adapts it to the editor. [`approve`]
 //! carries out the requests the user approves.
 //!
-//! The bridge starts with the editor and is published in
-//! `paths::home()/bridge.json`, so external MCP clients can drive it:
-//! `claude mcp add flikk -- flikk mcp` (or the `flikk-mcp` binary) finds
-//! the running editor through that file when `FLIKK_BRIDGE` is unset.
+//! Every open project has its own link, so their agents work at the same
+//! time. External MCP clients (`claude mcp add flikk -- flikk mcp`, or the
+//! `flikk-mcp` binary) come in through the desk, which hands each call to
+//! the link of the project it is for ([`AgentLink::serve_external`]).
 
 pub mod approve;
 
@@ -29,11 +29,25 @@ pub struct AgentLink {
 
 impl AgentLink {
     pub fn new() -> Self {
-        let mut host = AgentHost::new();
-        if let Err(e) = host.start_bridge() {
-            eprintln!("flikk: external agents can't connect: {e}");
+        Self {
+            host: AgentHost::new(),
         }
-        Self { host }
+    }
+
+    /// Serve `call`, which an external MCP client made for this link's
+    /// project, on the next pump.
+    pub fn serve_external(
+        &mut self,
+        call: flikk_agent::front::ProjectCall,
+        context: EditorContext,
+        settings: &AgentSettings,
+    ) {
+        self.host.serve_external(call, context, settings);
+    }
+
+    /// External MCP client `client` disconnected.
+    pub fn external_left(&mut self, client: u64) {
+        self.host.external_left(client);
     }
 
     /// Whether a message is queued or its turn under way.
@@ -73,17 +87,6 @@ impl AgentLink {
         self.host.pending_approvals()
     }
 
-    /// The user opened another project: withdraw the requests `project`
-    /// left waiting.
-    pub fn close_project(&mut self, project: flikk_core::ProjectId) {
-        self.host.close_project(project);
-    }
-
-    /// What the agent made for projects closed before it finished.
-    pub fn take_orphans(&mut self) -> Vec<(flikk_core::ProjectId, flikk_core::model::MediaItem)> {
-        self.host.take_orphans()
-    }
-
     /// Take a request off the list once the user approved (and the caller
     /// performed it) or denied it.
     pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {
@@ -115,12 +118,6 @@ impl AgentLink {
     /// [`report_outcome`](Self::report_outcome), as an error.
     pub fn report_failure(&mut self, id: u64, outcome: String) {
         self.host.report_outcome(id, outcome, true);
-    }
-}
-
-impl Drop for AgentLink {
-    fn drop(&mut self) {
-        self.host.stop_bridge();
     }
 }
 

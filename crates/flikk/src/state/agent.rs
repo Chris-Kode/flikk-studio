@@ -3,9 +3,11 @@
 //! on the UI thread.
 
 use super::EditorState;
+use super::SharedChange;
 use crate::persistence;
 use flikk_core::ChangeSetId;
 use flikk_core::agent::{AgentEvent, AgentSettings};
+use flikk_core::changeset::ChangeSetState;
 use gpui_kit::*;
 
 impl EditorState {
@@ -79,6 +81,19 @@ impl EditorState {
         self.agent.set_memory(rules, facts);
     }
 
+    /// Serve `call`, which an external MCP client made for this project,
+    /// on the next pump.
+    pub fn serve_external(&mut self, call: flikk_agent::front::ProjectCall) {
+        self.agent
+            .serve_external(call, self.context(), &self.settings);
+    }
+
+    /// External MCP client `client` disconnected: nobody waits for what
+    /// it asked here any more.
+    pub fn external_left(&mut self, client: u64) {
+        self.agent.external_left(client);
+    }
+
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
         self.agent.cancel();
         cx.notify();
@@ -97,19 +112,37 @@ impl EditorState {
         if backend_changed {
             self.load_agent_models(cx);
         }
+        cx.emit(SharedChange::Settings);
         cx.notify();
+    }
+
+    /// Apply the edits the agent proposed in categories the user set to be
+    /// accepted, without a review: each pump's as one undo step. The rest
+    /// of a change set stays for review.
+    fn accept_allowed_edits(&mut self, cx: &mut Context<Self>) {
+        let permissions = self.bus.permissions();
+        let accepted: Vec<(ChangeSetId, Vec<flikk_core::ChangeItemId>)> = (self.bus.change_sets())
+            .iter()
+            .filter(|set| !set.author.is_user() && set.state != ChangeSetState::Resolved)
+            .map(|set| {
+                let items = set
+                    .pending_items()
+                    .filter(|item| permissions.accepts(item.command.category()))
+                    .map(|item| item.id);
+                (set.id, items.collect::<Vec<_>>())
+            })
+            .filter(|(_, items)| !items.is_empty())
+            .collect();
+        for (set, items) in accepted {
+            self.accept(set, Some(&items), cx);
+        }
     }
 
     pub(super) fn pump_agent(&mut self, cx: &mut Context<Self>) {
         let events = self.agent.pump(&mut self.bus, &self.services);
+        self.accept_allowed_edits(cx);
         // Proposals and closed sets; cheap while nothing changed.
         self.proposals.sync(&self.bus);
-        // What its jobs brought in for a project closed meanwhile comes in
-        // as its own.
-        for (project, item) in self.agent.take_orphans() {
-            let author = self.agent_author();
-            self.keep_for(project, item, author);
-        }
         // Requests the user allowed are carried out without asking; their
         // card still says what came of them.
         let allowed: Vec<u64> = self
@@ -148,6 +181,12 @@ impl EditorState {
         // the pool: save it, and analyze a video as any import is.
         self.autosave();
         self.analyze_new(cx);
+        // What the agent brought in waits for no question about a paid
+        // transcription when the user set what costs money to be accepted.
+        let paid = flikk_core::command::ToolCategory::Generate;
+        if !self.provider_asks.is_empty() && self.bus.permissions().accepts(paid) {
+            self.analyze_asked_with_provider(cx);
+        }
         cx.notify();
     }
 

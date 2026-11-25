@@ -19,7 +19,7 @@ use crate::ui::kit::{
     Button, DialogExt as _, Icon, IconName, Kbd, Panel, PanelHeader, ScrollableElement as _,
     Spinner, Tooltip, h_flex, theme as t, v_flex,
 };
-use composer::{Composer, ComposerEvent};
+pub(crate) use composer::{Composer, ComposerEvent};
 use flikk_core::agent::{ChatMessage, ChatRole};
 use flikk_core::changeset::ChangeSetState;
 use flikk_core::{ChangeItemId, ChangeSetId};
@@ -82,8 +82,9 @@ pub struct ChatPanel {
     settled_scroll: ScrollHandle,
     /// What the rows were last measured for.
     signature: u64,
-    /// Chat session the rows show.
-    chat: String,
+    /// Chat session the rows show, and the project it is of: two projects
+    /// name their first chat alike.
+    chat: (flikk_core::ProjectId, String),
     /// The chat sessions show in place of the thread.
     sessions_open: bool,
     /// Change item last revealed for the timeline.
@@ -121,7 +122,10 @@ impl ChatPanel {
             }),
         ];
         let signature = signature(state.read(cx));
-        let chat = state.read(cx).active_chat().to_owned();
+        let chat = {
+            let s = state.read(cx);
+            (s.bus.project().id, s.active_chat().to_owned())
+        };
         let user_messages = user_messages(state.read(cx));
         Self {
             state,
@@ -146,6 +150,13 @@ impl ChatPanel {
     }
 
     /// Send a message; the agent also gets its references resolved.
+    /// The quick-command bar acts on this chat's project from now on: it
+    /// is the one in the editor.
+    pub fn take_quick_commands(&mut self, cx: &mut Context<Self>) {
+        quick::register(&self.state, cx);
+        quick::register_composer(&self.composer, cx);
+    }
+
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let block =
@@ -175,7 +186,7 @@ impl ChatPanel {
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
         let (count, sig, chat, users) = {
             let s = self.state.read(cx);
-            let chat = s.active_chat().to_owned();
+            let chat = (s.bus.project().id, s.active_chat().to_owned());
             (s.chat().len(), signature(s), chat, user_messages(s))
         };
         let changed = sig != self.signature;
@@ -689,6 +700,7 @@ fn user_messages(s: &EditorState) -> usize {
 /// states, previews.
 fn signature(s: &EditorState) -> u64 {
     let mut h = DefaultHasher::new();
+    s.bus.project().id.hash(&mut h);
     s.active_chat().hash(&mut h);
     s.chat().len().hash(&mut h);
     s.chat()

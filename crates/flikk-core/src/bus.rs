@@ -48,10 +48,15 @@ pub enum Permission {
     Allowed,
     /// Each call waits for the user (memory, deliver, generating).
     NeedsApproval,
+    /// The user set the category to be accepted: edits are applied as
+    /// they are proposed, and what would wait for them is carried out at
+    /// once, paid generation and renders included.
+    Accept,
 }
 
-/// Per-category permissions for non-user authors. Edit categories can only
-/// be `Off` or `Propose`: auto-apply is not offered (PRD "Agent configuration").
+/// Per-category permissions for non-user authors: denied, asked (edits are
+/// proposed for review, the rest waits for approval call by call) or
+/// accepted without asking.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Permissions(pub BTreeMap<ToolCategory, Permission>);
 
@@ -74,7 +79,8 @@ impl Permissions {
             | ToolCategory::Deliver
             | ToolCategory::Generate
             | ToolCategory::CaptionStyles
-            | ToolCategory::Skills => Permission::NeedsApproval,
+            | ToolCategory::Skills
+            | ToolCategory::Projects => Permission::NeedsApproval,
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
         }
@@ -91,9 +97,14 @@ impl Permissions {
             (ToolCategory::Media, _) => Permission::Off,
             (_, Permission::Off) => Permission::Off,
             (c, _) if c.is_read() => Permission::Allowed,
-            (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
-            // What costs money is asked each time, whatever was saved: a
-            // setting from before this was so reads as asking.
+            // Their choice, made in Settings, for any category.
+            (_, Permission::Accept) => Permission::Accept,
+            (ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Projects, _) => {
+                Permission::NeedsApproval
+            }
+            // What costs money is asked each time unless they chose to
+            // accept it: an `Allowed` saved before that choice existed
+            // reads as asking.
             (c, _) if c.costs() => Permission::NeedsApproval,
             // Caption styles, skills and styles are saved outside the
             // project where undo can't reach: asked each time unless they
@@ -108,17 +119,26 @@ impl Permissions {
         self.0.insert(category, permission);
     }
 
-    /// What the user can set `category` to, the most restrictive first;
-    /// none where no setting changes it.
+    /// What the user can set `category` to: deny, ask, accept, in that
+    /// order; none where no setting changes it.
     pub fn choices(category: ToolCategory) -> &'static [Permission] {
-        use Permission::{Allowed, NeedsApproval, Off, Propose};
+        use Permission::{Accept, Allowed, NeedsApproval, Off, Propose};
         match category {
             c if c.is_read() => &[],
-            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Media => &[],
-            c if c.costs() => &[Off, NeedsApproval],
+            ToolCategory::Media => &[],
+            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Projects => {
+                &[Off, NeedsApproval, Accept]
+            }
+            c if c.costs() => &[Off, NeedsApproval, Accept],
             c if c.can_allow() => &[Off, NeedsApproval, Allowed],
-            _ => &[Off, Propose],
+            _ => &[Off, Propose, Accept],
         }
+    }
+
+    /// Whether the user set `category` to be accepted: its edits are
+    /// applied as they are proposed, and what it would ask is not asked.
+    pub fn accepts(&self, category: ToolCategory) -> bool {
+        self.get(category) == Permission::Accept
     }
 }
 
@@ -462,7 +482,11 @@ impl CommandBus {
             return self.apply_user(vec![command], label);
         }
         match self.check(&author, command.category())? {
-            Permission::Propose => self.propose(command, author, reason, since, call),
+            // Accepted edits are proposed too: the editor applies them at
+            // once, as one undo step a tool call.
+            Permission::Propose | Permission::Accept => {
+                self.propose(command, author, reason, since, call)
+            }
             _ => Err(CoreError::PermissionDenied(command.category())),
         }
     }

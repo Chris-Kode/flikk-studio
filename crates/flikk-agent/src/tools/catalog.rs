@@ -1885,9 +1885,15 @@ pub fn catalog() -> Vec<ToolSpec> {
         spec(
             "queue_render",
             Some(Deliver),
-            "Ask the user to approve a render.",
+            "Ask the user to approve a render. The answer names the file it is written to.",
             object(
-                json!({ "preset": string("Preset name, e.g. youtube_1080p"), "range": range("Timeline range (default: whole timeline)"), "encoder": one_of(&["auto", "hardware", "software"], "H.264/HEVC encoder (default: the user's choice in Deliver)") }),
+                json!({
+                    "preset": string("Preset name, e.g. youtube_1080p"),
+                    "range": range("Timeline range (default: whole timeline)"),
+                    "encoder": one_of(&["auto", "hardware", "software"], "H.264/HEVC encoder (default: the user's choice in Deliver)"),
+                    "folder": string("Absolute path of the folder the file is written in, made if missing (default: the user's videos folder)"),
+                    "name": string("The file's name without its extension (default: the project's name)")
+                }),
                 &["preset"],
             ),
         ),

@@ -42,10 +42,14 @@ pub enum ToolCategory {
     Files,
     /// Creating, changing and deleting the user's skills and styles.
     Skills,
+    /// What another app asks of Flikk over MCP beyond the project it works
+    /// in: starting a project with an agent on a message, messaging an
+    /// open project's agent, saving a project and closing it.
+    Projects,
 }
 
 impl ToolCategory {
-    pub const ALL: [ToolCategory; 17] = [
+    pub const ALL: [ToolCategory; 18] = [
         Self::ReadProject,
         Self::ReadAnalysis,
         Self::View,
@@ -62,6 +66,7 @@ impl ToolCategory {
         Self::Skills,
         Self::ProjectMemory,
         Self::Deliver,
+        Self::Projects,
         Self::Media,
     ];
 
@@ -81,7 +86,7 @@ impl ToolCategory {
 
     /// Whether these spend the user's money or credits with a provider.
     /// Each call is then theirs to approve: it is asked every time, or
-    /// off, and no setting lets it run unasked.
+    /// off, unless they set the category to be accepted.
     pub fn costs(self) -> bool {
         self == Self::Generate
     }
@@ -105,6 +110,7 @@ impl ToolCategory {
             Self::Generate => "Generate media",
             Self::Files => "Attached files",
             Self::Skills => "Skills and styles",
+            Self::Projects => "Projects, from other apps",
         }
     }
 }
