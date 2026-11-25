@@ -134,6 +134,13 @@ pub(crate) enum BridgeResponse {
         id: u64,
         result: ToolResult,
     },
+    /// The call with this `id` is still under way: how far it is, in a
+    /// number that only grows, and in words. Its result follows.
+    Progress {
+        id: u64,
+        progress: f64,
+        message: String,
+    },
 }
 
 /// One request waiting on the UI thread.
@@ -162,6 +169,15 @@ pub(crate) struct Reply {
 impl Reply {
     pub(crate) fn tools(self, tools: Vec<Value>) {
         let _ = self.tx.send(BridgeResponse::Tools { id: self.id, tools });
+    }
+
+    /// Say how far the call is, any number of times before its result.
+    pub(crate) fn progress(&self, progress: f64, message: String) {
+        let _ = self.tx.send(BridgeResponse::Progress {
+            id: self.id,
+            progress,
+            message,
+        });
     }
 
     pub(crate) fn result(self, result: ToolResult) {

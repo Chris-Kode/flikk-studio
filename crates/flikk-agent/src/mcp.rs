@@ -12,7 +12,7 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-const INSTRUCTIONS: &str = "Tools of Flikk, the video editor running on this machine. Each acts on one open project: the one `project` names (an id or name from list_projects), else the one in the editor. To have Flikk make videos, call start_project once for each with its brief (and the same `style` when they should match): every project gets an agent of its own and they work at the same time. Then wait_for_projects, read what each agent said, message_project to correct one or answer it, and when a project is right queue_render it (`folder` is where its file goes), wait_for_projects again for the renders, and save_project. What the user has not set to be accepted waits for them in Flikk: tell them what waits rather than calling again. Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"; ids are the 8-character ids the tools return. Edits are proposals: they collect in a change set the user reviews in the editor, unless they set them to be accepted. Effects, transitions and generators are GLSL or HTML programs: list_fx, then reuse one or create_fx, preview_fx to look at it, iterate, then apply.";
+const INSTRUCTIONS: &str = "Tools of Flikk, the video editor running on this machine. Each acts on one open project: the one `project` names (an id or name from list_projects), else the one in the editor. To have Flikk make videos, call start_project once for each with its brief (and the same `style` when they should match): every project gets an agent of its own and they work at the same time. Then wait_for_projects (once, with a long `timeout` if your client lets a call run that long), read what each agent said, message_project to correct one or answer it, and when a project is right queue_render it (`folder` is where its file goes), wait_for_projects again for the renders, and save_project. What the user has not set to be accepted waits for them in Flikk: tell them what waits rather than calling again. Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"; ids are the 8-character ids the tools return. Edits are proposals: they collect in a change set the user reviews in the editor, unless they set them to be accepted. Effects, transitions and generators are GLSL or HTML programs: list_fx, then reuse one or create_fx, preview_fx to look at it, iterate, then apply.";
 
 /// Newest first; the first is offered when the client asks for something else.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -23,10 +23,18 @@ type Waiting = Arc<Mutex<Pending>>;
 /// The requests sent on one connection that the editor hasn't answered.
 #[derive(Default)]
 struct Pending {
-    calls: HashMap<u64, (Value, Kind)>,
+    calls: HashMap<u64, Call>,
     /// The editor closed it: nothing more will be answered, and nothing
     /// more may be sent.
     closed: bool,
+}
+
+/// A request the editor has not answered: the client's id for it, and the
+/// token it wants progress reported under, if it asked for progress.
+struct Call {
+    rpc_id: Value,
+    kind: Kind,
+    progress_token: Option<Value>,
 }
 
 /// One connection to the editor, and what it owes.
@@ -157,6 +165,7 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 let bridge_id = next_id;
                 next_id += 1;
+                let progress_token = message.pointer("/params/_meta/progressToken").cloned();
                 let request = if method == "tools/list" {
                     BridgeRequest::List { id: bridge_id }
                 } else {
@@ -188,7 +197,15 @@ pub fn run() -> anyhow::Result<()> {
                         reply_error(&out, id, -32603, "lost the connection to the editor");
                         continue;
                     }
-                    pending.calls.insert(bridge_id, (id.clone(), kind));
+                    let rpc_id = id.clone();
+                    pending.calls.insert(
+                        bridge_id,
+                        Call {
+                            rpc_id,
+                            kind,
+                            progress_token,
+                        },
+                    );
                 }
                 let stream = &mut link.stream;
                 if writeln!(stream, "{line}")
@@ -225,10 +242,30 @@ fn connect(addr: &str, token: &str, out: Out) -> io::Result<Editor> {
             let (bridge_id, result) = match response {
                 BridgeResponse::Tools { id, tools } => (id, json!({ "tools": tools })),
                 BridgeResponse::Result { id, result } => (id, json!(result)),
+                BridgeResponse::Progress {
+                    id,
+                    progress,
+                    message,
+                } => {
+                    // Only for a client that asked, under its token.
+                    let calls = &pending.lock().unwrap().calls;
+                    let token = calls.get(&id).and_then(|call| call.progress_token.clone());
+                    if let Some(token) = token {
+                        send(
+                            &out,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": { "progressToken": token, "progress": progress, "message": message }
+                            }),
+                        );
+                    }
+                    continue;
+                }
             };
             let answered = pending.lock().unwrap().calls.remove(&bridge_id);
-            if let Some((rpc_id, _)) = answered {
-                reply(&out, rpc_id, result);
+            if let Some(call) = answered {
+                reply(&out, call.rpc_id, result);
             }
         }
         // The editor went away: fail whatever is still waiting, and have
@@ -238,7 +275,7 @@ fn connect(addr: &str, token: &str, out: Out) -> io::Result<Editor> {
             pending.closed = true;
             std::mem::take(&mut pending.calls)
         };
-        for (_, (rpc_id, kind)) in lost {
+        for Call { rpc_id, kind, .. } in lost.into_values() {
             match kind {
                 Kind::List => reply_error(&out, rpc_id, -32603, "the editor closed"),
                 Kind::Call => reply(

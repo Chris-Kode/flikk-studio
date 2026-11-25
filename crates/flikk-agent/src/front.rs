@@ -40,7 +40,10 @@ const TOOLS: [&str; 6] = [LIST, START, MESSAGE, WAIT, SAVE, CLOSE];
 /// How long `wait_for_projects` waits unless told: under the minute many
 /// clients give a call.
 const WAIT_DEFAULT: Duration = Duration::from_secs(45);
-const WAIT_MAX: Duration = Duration::from_secs(600);
+/// The longest it waits: a night's work. A client that lets a call run
+/// this long (Claude Code moves it to the background, and its answer wakes
+/// the model) is told when the projects are done rather than asking again.
+const WAIT_MAX: Duration = Duration::from_secs(12 * 3600);
 
 /// The least and most a sequence is wide or high.
 const SIDE: std::ops::RangeInclusive<u32> = 128..=8192;
@@ -163,6 +166,15 @@ impl AppReply {
         self.client
     }
 
+    /// Tell the client the call is still under way, `waited` so far, and
+    /// in `message` what it waits for. A client that asked for progress
+    /// shows it, and does not take the silence for a call that hangs.
+    pub fn progress(&self, waited: Duration, message: String) {
+        // To the millisecond: it still grows from one report to the next.
+        let seconds = waited.as_millis() as f64 / 1000.;
+        self.reply.progress(seconds, message);
+    }
+
     pub fn done(self, result: &Value) {
         self.reply.result(ToolResult::json(result));
     }
@@ -242,11 +254,11 @@ fn parse(tool: &str, args: &Value) -> ToolResultOf<Request> {
             message: said(&args, "message")?,
         },
         WAIT => {
-            let asked = args.opt_f64("timeout")?.map(|s| s.clamp(1., 3600.));
-            let timeout = asked.map_or(WAIT_DEFAULT, Duration::from_secs_f64);
+            let asked = args.opt_f64("timeout")?;
+            let asked = asked.map(|s| s.clamp(1., WAIT_MAX.as_secs_f64()));
             Request::Wait {
                 projects: args.strings("projects")?,
-                timeout: timeout.min(WAIT_MAX),
+                timeout: asked.map_or(WAIT_DEFAULT, Duration::from_secs_f64),
             }
         }
         SAVE => Request::Save {
@@ -401,11 +413,11 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         spec(
             WAIT,
             true,
-            "Wait until no agent and no render of the projects is at work, then return them as list_projects does. Returns after `timeout` seconds at the latest, with what is still at work: call it again then.",
+            "Wait until no agent and no render of the projects is at work, then return them as list_projects does: call it once after starting projects or renders, rather than list_projects again and again. Returns after `timeout` seconds at the latest, with what is still at work: call it again then. Give a long `timeout` (7200 for two hours) when your client lets a call run that long, as Claude Code does: the call goes on in the background and its answer comes when the work is done.",
             object(
                 json!({
                     "projects": { "type": "array", "items": { "type": "string" }, "description": "Ids or names (default: every open project)" },
-                    "timeout": { "type": "number", "description": "Seconds to wait at most (default 45, at most 600)" }
+                    "timeout": { "type": "number", "description": "Seconds to wait at most (default 45, for clients that give up on a call after a minute; at most 43200)" }
                 }),
                 &[],
             ),

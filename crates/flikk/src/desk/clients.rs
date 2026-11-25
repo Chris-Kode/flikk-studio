@@ -56,11 +56,20 @@ pub struct Ask {
     pub detail: Option<String>,
 }
 
+/// The longest a wait goes without telling its client how far it is.
+const PROGRESS_EVERY: Duration = Duration::from_secs(30);
+
+/// The most projects still at work a wait's progress names.
+const NAMED_MAX: usize = 3;
+
 /// A `wait_for_projects` not answered yet.
 struct Wait {
     projects: Vec<Entity<EditorState>>,
+    since: Instant,
     until: Instant,
     reply: AppReply,
+    /// What its client was last told is still at work, and when.
+    told: Option<(Vec<EntityId>, Instant)>,
 }
 
 impl Clients {
@@ -278,10 +287,13 @@ impl Desk {
                 };
                 match named {
                     Ok(projects) => {
+                        let since = Instant::now();
                         self.clients.waits.push(Wait {
                             projects,
-                            until: Instant::now() + timeout,
+                            since,
+                            until: since + timeout,
                             reply,
+                            told: None,
                         });
                         return;
                     }
@@ -393,20 +405,45 @@ impl Desk {
     }
 
     /// Answer the waits whose projects are all at rest (a closed one is),
-    /// and those out of time.
+    /// and those out of time. The others tell their client what is still
+    /// at work, when that changes and every [`PROGRESS_EVERY`].
     fn end_waits(&mut self, cx: &mut Context<Self>) {
         if self.clients.waits.is_empty() {
             return;
         }
         let now = Instant::now();
-        let (over, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.clients.waits)
-            .into_iter()
-            .partition(|wait| {
-                let working = |state: &Entity<EditorState>| {
-                    self.session(state).is_some() && self.at_work(state, cx)
+        let mut over = Vec::new();
+        let mut waiting = Vec::new();
+        for mut wait in std::mem::take(&mut self.clients.waits) {
+            let open = wait.projects.iter();
+            let working: Vec<_> = open
+                .filter(|state| self.session(state).is_some() && self.at_work(state, cx))
+                .collect();
+            if now >= wait.until || working.is_empty() {
+                over.push(wait);
+                continue;
+            }
+            let ids: Vec<EntityId> = working.iter().map(|state| state.entity_id()).collect();
+            let news = wait
+                .told
+                .as_ref()
+                .is_none_or(|(told, at)| *told != ids || now.duration_since(*at) >= PROGRESS_EVERY);
+            if news {
+                let names = working.iter().take(NAMED_MAX);
+                let names: Vec<_> = names
+                    .map(|state| state.read(cx).bus.project().name.clone())
+                    .collect();
+                let more = match working.len() - names.len() {
+                    0 => String::new(),
+                    more => format!(" and {more} more"),
                 };
-                now >= wait.until || !wait.projects.iter().any(working)
-            });
+                let (done, all) = (wait.projects.len() - working.len(), wait.projects.len());
+                let message = format!("{done} of {all} done; at work: {}{more}", names.join(", "));
+                wait.reply.progress(now.duration_since(wait.since), message);
+                wait.told = Some((ids, now));
+            }
+            waiting.push(wait);
+        }
         self.clients.waits = waiting;
         for wait in over {
             let open: Vec<_> = (wait.projects.into_iter())
