@@ -10,8 +10,10 @@
 //!
 //! Other apps work here too, over MCP ([`clients`]): they start projects
 //! with an agent on a message, and their calls go to the open project
-//! each names.
+//! each names. When something here waits for the user while they are in
+//! another app, a system notification tells them ([`attention`]).
 
+mod attention;
 mod clients;
 
 use crate::persistence;
@@ -87,6 +89,8 @@ pub struct Desk {
     opened: u64,
     /// What other apps ask over MCP.
     clients: clients::Clients,
+    /// What the user was told waits for them.
+    attention: attention::Attention,
 }
 
 struct TheDesk(Entity<Desk>);
@@ -109,6 +113,7 @@ impl Desk {
                 draft: None,
                 opened: 0,
                 clients: clients::Clients::open(window, cx),
+                attention: attention::Attention::start(window, cx),
             }
         });
         cx.set_global(TheDesk(desk.clone()));

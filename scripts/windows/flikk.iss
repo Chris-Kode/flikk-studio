@@ -54,8 +54,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Flikk"; Filename: "{app}\flikk.exe"
-Name: "{autodesktop}\Flikk"; Filename: "{app}\flikk.exe"; Tasks: desktopicon
+; The id Flikk gives its process (`set_app_identity` in main.rs): with it
+; a pinned shortcut and the running window share one taskbar button, and
+; notifications show as Flikk's.
+Name: "{autoprograms}\Flikk"; Filename: "{app}\flikk.exe"; AppUserModelID: "studio.flikk.Flikk"
+Name: "{autodesktop}\Flikk"; Filename: "{app}\flikk.exe"; Tasks: desktopicon; AppUserModelID: "studio.flikk.Flikk"
 
 ; .flikk projects open in Flikk (`flikk Film.flikk`); HKA is the user's
 ; own classes in a per-user install.

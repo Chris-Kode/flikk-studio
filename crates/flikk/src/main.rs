@@ -66,6 +66,9 @@ fn main() {
             ui::kit::init(cx);
             app::bind_keys(cx);
             ui::chat::init(cx);
+            // Who system notifications come from, and on Windows what the
+            // installer's shortcuts name too (scripts/windows/flikk.iss).
+            cx.set_app_identity("studio.flikk.Flikk", "Flikk");
             cx.on_app_quit(|_| async {
                 agent_link::unpublish_bridge();
                 persistence::shutdown();
