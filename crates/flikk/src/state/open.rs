@@ -94,11 +94,10 @@ impl EditorState {
         self.in_editor
     }
 
-    /// The project took the editor: external MCP clients drive it now, and
-    /// it shows on the home page from here on.
+    /// The project took the editor: external MCP clients' calls that name
+    /// no project are for it now.
     pub fn enter_editor(&mut self, cx: &mut Context<Self>) {
         self.in_editor = true;
-        self.agent.publish();
         cx.notify();
     }
 
@@ -125,7 +124,6 @@ impl EditorState {
         // The pool item in the viewer plays on its own clock.
         self.source = None;
         self.clear_live();
-        self.agent.unpublish();
         cx.notify();
     }
 

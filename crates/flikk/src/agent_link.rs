@@ -10,11 +10,9 @@
 //! carries out the requests the user approves.
 //!
 //! Every open project has its own link, so their agents work at the same
-//! time. The link of the project in the editor is published in
-//! `paths::home()/bridge.json` ([`AgentLink::publish`]), so external MCP
-//! clients can drive it: `claude mcp add flikk -- flikk mcp` (or the
-//! `flikk-mcp` binary) finds the running editor through that file when
-//! `FLIKK_BRIDGE` is unset.
+//! time. External MCP clients (`claude mcp add flikk -- flikk mcp`, or the
+//! `flikk-mcp` binary) come in through the desk, which hands each call to
+//! the link of the project it is for ([`AgentLink::serve_external`]).
 
 pub mod approve;
 
@@ -36,18 +34,20 @@ impl AgentLink {
         }
     }
 
-    /// External MCP clients drive this link's project from now on: the
-    /// project in the editor.
-    pub fn publish(&mut self) {
-        if let Err(e) = self.host.start_bridge() {
-            eprintln!("flikk: external agents can't connect: {e}");
-        }
+    /// Serve `call`, which an external MCP client made for this link's
+    /// project, on the next pump.
+    pub fn serve_external(
+        &mut self,
+        call: flikk_agent::front::ProjectCall,
+        context: EditorContext,
+        settings: &AgentSettings,
+    ) {
+        self.host.serve_external(call, context, settings);
     }
 
-    /// Stop offering this link to external MCP clients: its project left
-    /// the editor.
-    pub fn unpublish(&mut self) {
-        self.host.stop_bridge();
+    /// External MCP client `client` disconnected.
+    pub fn external_left(&mut self, client: u64) {
+        self.host.external_left(client);
     }
 
     /// Whether a message is queued or its turn under way.
@@ -118,12 +118,6 @@ impl AgentLink {
     /// [`report_outcome`](Self::report_outcome), as an error.
     pub fn report_failure(&mut self, id: u64, outcome: String) {
         self.host.report_outcome(id, outcome, true);
-    }
-}
-
-impl Drop for AgentLink {
-    fn drop(&mut self) {
-        self.host.stop_bridge();
     }
 }
 

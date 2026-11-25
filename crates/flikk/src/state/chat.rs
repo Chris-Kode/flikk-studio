@@ -468,6 +468,14 @@ impl EditorState {
         self.send_chat_with_context(text, None, cx);
     }
 
+    /// [`Self::send_chat`], in the style with id `style` rather than the
+    /// one selected, which stays selected.
+    pub fn send_chat_in_style(&mut self, text: String, style: String, cx: &mut Context<Self>) {
+        let selected = self.settings.style.replace(style);
+        self.send_chat(text, cx);
+        self.settings.style = selected;
+    }
+
     /// Send `text` as the user's message, like [`Self::send_chat`] (nothing
     /// while the agent is busy); the agent also reads `context` after it (the resolved `@` references), which
     /// the chat neither shows nor stores.

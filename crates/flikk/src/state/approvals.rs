@@ -192,6 +192,19 @@ impl EditorState {
         ApprovalOutcome::Failed(format!("{e:#}"))
     }
 
+    /// The renders started from the chat that it still shows, as the queue
+    /// sees them now.
+    pub fn chat_renders(&self) -> Vec<flikk_deliver::RenderJob> {
+        let jobs = self
+            .settled
+            .iter()
+            .filter_map(|(_, outcome)| match outcome {
+                ApprovalOutcome::Rendering { job, .. } => self.render_job(*job),
+                _ => None,
+            });
+        jobs.collect()
+    }
+
     /// A render started from the chat, as the queue sees it now.
     pub fn render_job(&self, job: flikk_core::JobId) -> Option<flikk_deliver::RenderJob> {
         self.render_queue.jobs().into_iter().find(|j| j.id == job)

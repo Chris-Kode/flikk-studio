@@ -97,7 +97,20 @@ pub fn request(
             if let Some(encoder) = args.opt_str("encoder")? {
                 json["encoder"] = json!(encoder);
             }
-            (format!("Render {preset} ({range})"), json)
+            if let Some(name) = args.opt_str("name")?.map(str::trim) {
+                json["name"] = json!(name);
+            }
+            let mut summary = format!("Render {preset} ({range})");
+            if let Some(folder) = args.opt_str("folder")?.map(str::trim) {
+                if !std::path::Path::new(folder).is_absolute() {
+                    return Err(ToolError(format!(
+                        "`folder` takes an absolute path, not `{folder}`"
+                    )));
+                }
+                json["folder"] = json!(folder);
+                summary.push_str(&format!(" to {folder}"));
+            }
+            (summary, json)
         }
         "save_fx_to_library" => {
             let asset = super::fx::fx_asset(project, args.str("fx")?, None)?;

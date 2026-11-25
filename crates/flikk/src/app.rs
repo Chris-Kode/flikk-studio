@@ -151,6 +151,8 @@ pub struct Flikk {
     /// The question whether new media may be analyzed with the provider
     /// picked to transcribe, while it is open.
     provider_ask: Option<crate::ui::kit::DialogId>,
+    /// The question about what other apps asked, while it is open.
+    clients_ask: Option<crate::ui::kit::DialogId>,
     _observe: Subscription,
     _observe_asks: Subscription,
     _desk: Subscription,
@@ -237,6 +239,7 @@ impl Flikk {
             starting: None,
             footage: None,
             provider_ask: None,
+            clients_ask: None,
             desk,
             state,
             _observe,
@@ -304,6 +307,7 @@ impl Flikk {
         if session.state != self.state {
             self.adopt(session, window, cx);
         }
+        self.ask_about_clients(window, cx);
         if self.at_home.is_some_and(|at| at != opened) {
             match self.starting.take() {
                 Some(start) => {
@@ -426,24 +430,9 @@ impl Flikk {
             page.update(cx, |page, cx| page.agent_started(cx));
         }
         let Starting { prompt, footage } = start;
-        // What was attached to the message: the agent may read it, and
-        // the media in it is the project's footage.
         let state = self.state.clone();
-        state.update(cx, |s, cx| {
-            let (project, chat) = (s.bus.project().id, s.active_chat().to_owned());
-            s.attach(project, &chat, footage.clone(), cx);
-        });
-        let imported = (!footage.is_empty()).then(|| {
-            self.media_pool
-                .update(cx, |pool, cx| pool.importing(footage, None, cx))
-        });
-        cx.spawn(async move |_, cx| {
-            if let Some(imported) = imported {
-                imported.await;
-            }
-            state.update(cx, |s, cx| s.send_chat(prompt, cx));
-        })
-        .detach();
+        self.desk
+            .update(cx, |desk, cx| desk.brief(&state, prompt, footage, None, cx));
     }
 
     /// The project in the editor changed. Once the last model is on disk
@@ -467,6 +456,23 @@ impl Flikk {
             Some(id) if !waiting => {
                 window.close_dialog_id(id, cx);
                 self.provider_ask = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Ask about what other apps asked of Flikk while some of it waits for
+    /// the user, and stop asking once none does (they answered, or the
+    /// app that asked left).
+    fn ask_about_clients(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = !self.desk.read(cx).asks().is_empty();
+        match self.clients_ask {
+            None if waiting => {
+                self.clients_ask = Some(crate::ui::clients_ask::open(&self.desk, window, cx));
+            }
+            Some(id) if !waiting => {
+                window.close_dialog_id(id, cx);
+                self.clients_ask = None;
             }
             _ => {}
         }

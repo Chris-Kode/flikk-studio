@@ -517,7 +517,7 @@ fn settings_note() -> impl IntoElement {
 }
 
 /// `base`, or "`base` 2" and on when `dir` already has one.
-fn free_name(dir: &Path, base: &str) -> String {
+pub(crate) fn free_name(dir: &Path, base: &str) -> String {
     (1..)
         .map(|n| match n {
             1 => base.to_owned(),

@@ -89,7 +89,9 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
                 .and_then(Value::as_str)
                 .and_then(flikk_deliver::Encoder::parse)
                 .unwrap_or_else(crate::ui::deliver::saved_encoder);
-            let output = free_output(inputs.project, settings.extension());
+            let folder = args.get("folder").and_then(Value::as_str);
+            let name = args.get("name").and_then(Value::as_str);
+            let output = free_output(inputs.project, folder, name, settings.extension())?;
             let id = inputs.queue.enqueue(RenderRequest {
                 project: inputs.project.clone(),
                 settings,
@@ -249,7 +251,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         }
         "export_otio" => {
             let project = inputs.project.clone();
-            let path = free_output(&project, "otio");
+            let path = free_output(&project, None, None, "otio")?;
             Ok(Started::Background(Box::new(move || {
                 flikk_deliver::export_otio(&project, &path)?;
                 Ok(file_name(&path))
@@ -264,7 +266,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
             let project = inputs.project.clone();
             let styles = inputs.caption_styles.to_vec();
             let services = inputs.services.clone();
-            let path = free_output(&project, "png");
+            let path = free_output(&project, None, None, "png")?;
             Ok(Started::Background(Box::new(move || {
                 flikk_deliver::export_frame(&project, t, &styles, &services, &path)?;
                 Ok(file_name(&path))
@@ -441,16 +443,27 @@ fn preset(name: &str) -> RenderSettings {
         })
 }
 
-/// `<project name>.<ext>` in the user's video folder, numbered if taken.
-fn free_output(project: &Project, ext: &str) -> PathBuf {
-    let stem: String = project
-        .name
-        .trim()
-        .chars()
-        .map(|c| if r#"/\:*?"<>|"#.contains(c) { '_' } else { c })
-        .collect();
-    let stem = if stem.is_empty() { "Untitled" } else { &stem };
-    flikk_deliver::free_name(&output_dir().join(format!("{stem}.{ext}")))
+/// `<name>.<ext>` in `folder`, numbered if taken: named after the project
+/// and in the user's video folder unless given. The folder is made when
+/// missing.
+fn free_output(
+    project: &Project,
+    folder: Option<&str>,
+    name: Option<&str>,
+    ext: &str,
+) -> Result<PathBuf> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    let stem = flikk_store::project_file::sanitize(name.unwrap_or(&project.name));
+    let dir = match folder {
+        Some(folder) => {
+            let dir = PathBuf::from(folder);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| anyhow!("could not make {}: {e}", dir.display()))?;
+            dir
+        }
+        None => output_dir(),
+    };
+    Ok(flikk_deliver::free_name(&dir.join(format!("{stem}.{ext}"))))
 }
 
 fn output_dir() -> PathBuf {

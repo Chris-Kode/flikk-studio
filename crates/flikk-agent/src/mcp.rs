@@ -1,5 +1,6 @@
 //! `flikk-mcp`: a stdio MCP server (JSON-RPC 2.0, one message per line) that
-//! exposes the editor tools. It holds no state of its own: `tools/list` and
+//! exposes the editor tools, and to other apps the app's own
+//! ([`crate::front`]). It holds no state of its own: `tools/list` and
 //! `tools/call` are forwarded to the editor over the [`crate::bridge`], and
 //! answers are written back as they arrive, so calls may overlap.
 
@@ -11,7 +12,7 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-const INSTRUCTIONS: &str = "Tools of the Flikk project that is open. Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"; ids are the 8-character ids the tools return. Edits are proposals: they collect in a change set the user reviews in the editor. Effects, transitions and generators are GLSL or HTML programs: list_fx, then reuse one or create_fx, preview_fx to look at it, iterate, then apply.";
+const INSTRUCTIONS: &str = "Tools of Flikk, the video editor running on this machine. Each acts on one open project: the one `project` names (an id or name from list_projects), else the one in the editor. To have Flikk make videos, call start_project once for each with its brief (and the same `style` when they should match): every project gets an agent of its own and they work at the same time. Then wait_for_projects, read what each agent said, message_project to correct one or answer it, and when a project is right queue_render it (`folder` is where its file goes), wait_for_projects again for the renders, and save_project. What the user has not set to be accepted waits for them in Flikk: tell them what waits rather than calling again. Times are timeline seconds, \"M:SS.mmm\", timecode \"HH:MM:SS:FF\" or frames \"f:1234\"; ids are the 8-character ids the tools return. Edits are proposals: they collect in a change set the user reviews in the editor, unless they set them to be accepted. Effects, transitions and generators are GLSL or HTML programs: list_fx, then reuse one or create_fx, preview_fx to look at it, iterate, then apply.";
 
 /// Newest first; the first is offered when the client asks for something else.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];

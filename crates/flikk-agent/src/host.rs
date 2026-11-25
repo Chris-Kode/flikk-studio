@@ -6,9 +6,11 @@
 //! the end of the turn the host emits `ChangeSetReady` if it has items, then
 //! `TurnDone`.
 //!
-//! External MCP clients (Claude Code, Codex… running `flikk mcp`
-//! against the published `bridge.json`) are served between and during
-//! turns. They act as the agent with the same permissions,
+//! External MCP clients (Claude Code, Codex… running `flikk mcp`) come in
+//! through the app's [`crate::front::Front`], which hands the calls for
+//! this host's project over ([`AgentHost::serve_external`]); they are
+//! served between and during turns. They act as the agent with the same
+//! permissions,
 //! under their own author, so their proposals collect in a separate
 //! "External agent" change set. That set is offered for review when the
 //! client disconnects or after [`EXTERNAL_IDLE`] without a call (a client
@@ -20,6 +22,7 @@
 
 use crate::backend::{self, BackendEvent, McpLaunch, RunningTurn, TurnSpec};
 use crate::bridge::{self, BridgeServer, Incoming, IncomingKind, Origin, Reply};
+use crate::front::ProjectCall;
 use crate::tools::groups::{self, Usage};
 use crate::tools::{self, ApprovalRequest, Done, JobDone, Memory, Step, Stop, ToolCtx};
 use crate::{prompt, session};
@@ -76,7 +79,8 @@ struct External {
     connections: HashSet<u64>,
     last_call: Option<Instant>,
     jobs: usize,
-    /// Editor context and settings of the latest turn, used for their calls.
+    /// The editor context and settings their calls are served with: as
+    /// they were at the latest one.
     context: EditorContext,
     settings: AgentSettings,
     /// Never stopped: a client stops its own calls.
@@ -207,7 +211,10 @@ struct JobResult {
 }
 
 pub struct AgentHost {
+    /// Where the `flikk-mcp` of this host's own turns connects.
     bridge: Option<BridgeServer>,
+    /// External clients' calls handed over, served on the next pump.
+    inbox: Vec<Incoming>,
     /// Chat session whose backend conversation the next turn continues.
     chat: String,
     memory: Memory,
@@ -249,6 +256,7 @@ impl AgentHost {
         let (jobs_tx, jobs_rx) = mpsc::channel();
         Self {
             bridge: None,
+            inbox: Vec::new(),
             chat: session::MAIN_CHAT.to_owned(),
             memory: Memory::default(),
             queued: None,
@@ -268,21 +276,29 @@ impl AgentHost {
         }
     }
 
-    /// Start the bridge now (rather than with the first turn) and publish
-    /// it in `bridge.json`, so external MCP clients reach this host: of the
-    /// hosts in the process, the one that published last.
-    pub fn start_bridge(&mut self) -> std::io::Result<PathBuf> {
-        if self.bridge.is_none() {
-            self.bridge = Some(BridgeServer::start()?);
-        }
-        self.bridge.as_mut().unwrap().publish()
+    /// Serve `call`, which an external client made for this host's
+    /// project, on the next [`pump`](Self::pump): with `context`, where
+    /// the editor is in the project, and the user's `settings`.
+    pub fn serve_external(
+        &mut self,
+        call: ProjectCall,
+        context: EditorContext,
+        settings: &AgentSettings,
+    ) {
+        // Attachments are for the chat's own turns, never other clients.
+        self.external.context = EditorContext {
+            attachments: Vec::new(),
+            ..context
+        };
+        self.external.settings = settings.clone();
+        self.inbox.push(call.incoming);
     }
 
-    /// Withdraw `bridge.json` (on exit; best-effort).
-    pub fn stop_bridge(&mut self) {
-        if let Some(b) = self.bridge.as_mut() {
-            b.unpublish();
-        }
+    /// External client `client` disconnected: its proposals go to review,
+    /// and nobody waits for what it asked the user any more.
+    pub fn external_left(&mut self, client: u64) {
+        self.external.connections.remove(&client);
+        self.release_held(Origin::External(client));
     }
 
     /// Whether a message is queued, its turn under way or being stopped.
@@ -320,12 +336,6 @@ impl AgentHost {
             });
             return;
         }
-        // Attachments are for this chat's own turns, never other clients.
-        self.external.context = EditorContext {
-            attachments: Vec::new(),
-            ..context.clone()
-        };
-        self.external.settings = settings.clone();
         self.queued = Some(Queued {
             message,
             context,
@@ -739,20 +749,20 @@ impl AgentHost {
     // ------------------------------------------------------------- tool calls
 
     fn serve_calls(&mut self, bus: &mut CommandBus, services: &Services) {
-        let Some(bridge) = self.bridge.as_ref() else {
-            return;
-        };
+        let mut incoming = std::mem::take(&mut self.inbox);
+        if let Some(bridge) = self.bridge.as_ref() {
+            incoming.extend(bridge.drain());
+        }
         for Incoming {
             origin,
             request,
             reply,
-        } in bridge.drain()
+        } in incoming
         {
             match (origin, request) {
                 (_, IncomingKind::Closed) => {
                     if let Origin::External(id) = origin {
-                        self.external.connections.remove(&id);
-                        self.release_held(origin);
+                        self.external_left(id);
                     }
                 }
                 (Origin::Turn, IncomingKind::List) => match self.turn.as_mut() {
@@ -766,7 +776,7 @@ impl AgentHost {
                 },
                 (Origin::External(id), IncomingKind::List) => {
                     self.external.connections.insert(id);
-                    reply.tools(tools::list(bus, None, &self.external.settings, services));
+                    reply.tools(tools::list_external(bus, &self.external.settings, services));
                 }
                 (Origin::Turn, IncomingKind::Call { tool, args }) => {
                     let Some(turn) = self.turn.as_mut().filter(|t| !t.stopping()) else {
@@ -812,7 +822,6 @@ impl AgentHost {
                     }
                 }
                 (Origin::External(id), IncomingKind::Call { tool, args }) => {
-                    let (tool, args) = groups::unwrap_run(tool, args);
                     self.external.connections.insert(id);
                     self.external.last_call = Some(Instant::now());
                     let mut ctx = ToolCtx {

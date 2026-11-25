@@ -79,7 +79,8 @@ impl Permissions {
             | ToolCategory::Deliver
             | ToolCategory::Generate
             | ToolCategory::CaptionStyles
-            | ToolCategory::Skills => Permission::NeedsApproval,
+            | ToolCategory::Skills
+            | ToolCategory::Projects => Permission::NeedsApproval,
             ToolCategory::Media => Permission::Off,
             _ => Permission::Propose,
         }
@@ -98,7 +99,9 @@ impl Permissions {
             (c, _) if c.is_read() => Permission::Allowed,
             // Their choice, made in Settings, for any category.
             (_, Permission::Accept) => Permission::Accept,
-            (ToolCategory::ProjectMemory | ToolCategory::Deliver, _) => Permission::NeedsApproval,
+            (ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Projects, _) => {
+                Permission::NeedsApproval
+            }
             // What costs money is asked each time unless they chose to
             // accept it: an `Allowed` saved before that choice existed
             // reads as asking.
@@ -123,7 +126,9 @@ impl Permissions {
         match category {
             c if c.is_read() => &[],
             ToolCategory::Media => &[],
-            ToolCategory::ProjectMemory | ToolCategory::Deliver => &[Off, NeedsApproval, Accept],
+            ToolCategory::ProjectMemory | ToolCategory::Deliver | ToolCategory::Projects => {
+                &[Off, NeedsApproval, Accept]
+            }
             c if c.costs() => &[Off, NeedsApproval, Accept],
             c if c.can_allow() => &[Off, NeedsApproval, Allowed],
             _ => &[Off, Propose, Accept],

@@ -7,6 +7,12 @@
 //! unsaved changes first). There is always a session in the editor: the one
 //! the app started on, and a new "Untitled" once the last project closes,
 //! neither of which shows on the home page until the user goes into it.
+//!
+//! Other apps work here too, over MCP ([`clients`]): they start projects
+//! with an agent on a message, and their calls go to the open project
+//! each names.
+
+mod clients;
 
 use crate::persistence;
 use crate::state::{EditorState, SharedChange};
@@ -79,6 +85,8 @@ pub struct Desk {
     draft: Option<(Entity<EditorState>, Subscription)>,
     /// See [`Self::times_opened`].
     opened: u64,
+    /// What other apps ask over MCP.
+    clients: clients::Clients,
 }
 
 struct TheDesk(Entity<Desk>);
@@ -100,6 +108,7 @@ impl Desk {
                 editor: state,
                 draft: None,
                 opened: 0,
+                clients: clients::Clients::open(window, cx),
             }
         });
         cx.set_global(TheDesk(desk.clone()));
@@ -260,6 +269,51 @@ impl Desk {
         let state = cx.new(|cx| EditorState::open(loaded, shared, cx));
         self.sessions.push(Session::new(state.clone(), window, cx));
         state
+    }
+
+    /// Put the agent of open project `state` to work on `prompt`, once
+    /// `footage` is attached to its chat and in its pool: in `style` (a
+    /// style's id) when one is given, else in the style selected.
+    pub fn brief(
+        &mut self,
+        state: &Entity<EditorState>,
+        prompt: String,
+        footage: Vec<PathBuf>,
+        style: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(state).cloned() else {
+            return;
+        };
+        // What is attached to the message the agent may read, and the
+        // media in it is the project's footage.
+        state.update(cx, |s, cx| {
+            let (project, chat) = (s.bus.project().id, s.active_chat().to_owned());
+            s.attach(project, &chat, footage.clone(), cx);
+        });
+        let imported = (!footage.is_empty()).then(|| {
+            let pool = &session.media_pool;
+            pool.update(cx, |pool, cx| pool.importing(footage, None, cx))
+        });
+        self.clients.briefing(state);
+        let state = state.clone();
+        cx.spawn(async move |desk, cx| {
+            if let Some(imported) = imported {
+                imported.await;
+            }
+            let _ = desk.update(cx, |desk, cx| {
+                desk.clients.briefed(&state);
+                // Closed while its footage came in: its agent stays stopped.
+                if desk.session(&state).is_none() {
+                    return;
+                }
+                state.update(cx, |s, cx| match style {
+                    Some(style) => s.send_chat_in_style(prompt, style, cx),
+                    None => s.send_chat(prompt, cx),
+                });
+            });
+        })
+        .detach();
     }
 
     /// Go into open project `state`: it takes the editor, and shows on the

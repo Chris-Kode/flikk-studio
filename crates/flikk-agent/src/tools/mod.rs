@@ -285,6 +285,34 @@ pub(crate) fn list(
         .collect()
 }
 
+/// The tools an external MCP client sees: every tool of a project, each
+/// taking the open project it acts on, and the app's own
+/// ([`crate::front`]).
+pub(crate) fn list_external(
+    bus: &CommandBus,
+    settings: &AgentSettings,
+    services: &Services,
+) -> Vec<Value> {
+    let mut tools = list(bus, None, settings, services);
+    let project = serde_json::json!({
+        "type": "string",
+        "description": "The open project to act on, by id or name (list_projects). Default: the one in the editor",
+    });
+    for tool in &mut tools {
+        if let Some(properties) = tool.pointer_mut("/inputSchema/properties")
+            && let Some(properties) = properties.as_object_mut()
+        {
+            properties.insert(crate::front::PROJECT.to_owned(), project.clone());
+        }
+    }
+    let app = crate::front::specs();
+    let app = app
+        .iter()
+        .filter(|t| t.category.is_none_or(|c| visible(bus, c)));
+    tools.extend(app.map(ToolSpec::to_mcp));
+    tools
+}
+
 pub(crate) fn visible(bus: &CommandBus, category: ToolCategory) -> bool {
     bus.check(&Author::Agent, category).is_ok() && category != ToolCategory::Media
 }

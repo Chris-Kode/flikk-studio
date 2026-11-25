@@ -81,6 +81,19 @@ impl EditorState {
         self.agent.set_memory(rules, facts);
     }
 
+    /// Serve `call`, which an external MCP client made for this project,
+    /// on the next pump.
+    pub fn serve_external(&mut self, call: flikk_agent::front::ProjectCall) {
+        self.agent
+            .serve_external(call, self.context(), &self.settings);
+    }
+
+    /// External MCP client `client` disconnected: nobody waits for what
+    /// it asked here any more.
+    pub fn external_left(&mut self, client: u64) {
+        self.agent.external_left(client);
+    }
+
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
         self.agent.cancel();
         cx.notify();

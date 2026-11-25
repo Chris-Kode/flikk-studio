@@ -12,12 +12,17 @@
 //! * [`tools`] is the catalog (one JSON schema per PRD tool) and the code that
 //!   runs each tool against the `CommandBus` as `Author::Agent`.
 //!
+//! Other apps reach the editor through the same `flikk-mcp`, which then
+//! connects to the app's [`front::Front`]: it routes their calls to the
+//! host of the open project each names, and to the app for the rest.
+//!
 //! Beside the turns, [`reblock`] changes a blockout by asking: one backend
 //! run without tools.
 
 mod args;
 pub mod backend;
 pub mod bridge;
+pub mod front;
 pub mod host;
 pub mod mcp;
 mod prompt;
