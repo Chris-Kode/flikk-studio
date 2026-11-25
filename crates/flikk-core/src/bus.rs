@@ -130,9 +130,9 @@ impl Permissions {
         }
     }
 
-    /// Whether the user set `category`'s edits to be applied as they are
-    /// proposed, without a review.
-    pub fn accepts_edits(&self, category: ToolCategory) -> bool {
+    /// Whether the user set `category` to be accepted: its edits are
+    /// applied as they are proposed, and what it would ask is not asked.
+    pub fn accepts(&self, category: ToolCategory) -> bool {
         self.get(category) == Permission::Accept
     }
 }

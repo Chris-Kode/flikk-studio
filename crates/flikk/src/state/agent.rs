@@ -114,7 +114,7 @@ impl EditorState {
             .map(|set| {
                 let items = set
                     .pending_items()
-                    .filter(|item| permissions.accepts_edits(item.command.category()))
+                    .filter(|item| permissions.accepts(item.command.category()))
                     .map(|item| item.id);
                 (set.id, items.collect::<Vec<_>>())
             })
@@ -168,6 +168,12 @@ impl EditorState {
         // the pool: save it, and analyze a video as any import is.
         self.autosave();
         self.analyze_new(cx);
+        // What the agent brought in waits for no question about a paid
+        // transcription when the user set what costs money to be accepted.
+        let paid = flikk_core::command::ToolCategory::Generate;
+        if !self.provider_asks.is_empty() && self.bus.permissions().accepts(paid) {
+            self.analyze_asked_with_provider(cx);
+        }
         cx.notify();
     }
 
