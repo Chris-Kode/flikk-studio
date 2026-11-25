@@ -11,7 +11,7 @@
 use super::Desk;
 use crate::persistence;
 use crate::state::{AgentStatus, EditorState};
-use flikk_agent::front::{AppCall, AppReply, Asked, Front, Request, Start};
+use flikk_agent::front::{AppCall, AppReply, Asked, Front, Request, Start, Until};
 use flikk_core::agent::ChatRole;
 use flikk_core::bus::Permission;
 use flikk_core::changeset::ChangeSetState;
@@ -65,8 +65,11 @@ const NAMED_MAX: usize = 3;
 /// A `wait_for_projects` not answered yet.
 struct Wait {
     projects: Vec<Entity<EditorState>>,
+    /// Those of them at work when it was asked.
+    were_at_work: Vec<Entity<EditorState>>,
+    until: Until,
     since: Instant,
-    until: Instant,
+    deadline: Instant,
     reply: AppReply,
     /// What its client was last told is still at work, and when.
     told: Option<(Vec<EntityId>, Instant)>,
@@ -278,7 +281,11 @@ impl Desk {
                 state.update(cx, |s, cx| s.send_chat(message, cx));
                 self.told(&state, cx)
             }),
-            Request::Wait { projects, timeout } => {
+            Request::Wait {
+                projects,
+                until,
+                timeout,
+            } => {
                 let named: Result<Vec<_>, String> = if projects.is_empty() {
                     Ok(self.shown(cx))
                 } else {
@@ -288,10 +295,13 @@ impl Desk {
                 match named {
                     Ok(projects) => {
                         let since = Instant::now();
+                        let at_work = projects.iter().filter(|state| self.at_work(state, cx));
                         self.clients.waits.push(Wait {
+                            were_at_work: at_work.cloned().collect(),
                             projects,
+                            until,
                             since,
-                            until: since + timeout,
+                            deadline: since + timeout,
                             reply,
                             told: None,
                         });
@@ -404,9 +414,10 @@ impl Desk {
             || self.clients.briefing.contains(&state.entity_id())
     }
 
-    /// Answer the waits whose projects are all at rest (a closed one is),
-    /// and those out of time. The others tell their client what is still
-    /// at work, when that changes and every [`PROGRESS_EVERY`].
+    /// Answer the waits whose projects came to rest as they asked (a
+    /// closed one is at rest), and those out of time. The others tell
+    /// their client what is still at work, when that changes and every
+    /// [`PROGRESS_EVERY`].
     fn end_waits(&mut self, cx: &mut Context<Self>) {
         if self.clients.waits.is_empty() {
             return;
@@ -419,8 +430,21 @@ impl Desk {
             let working: Vec<_> = open
                 .filter(|state| self.session(state).is_some() && self.at_work(state, cx))
                 .collect();
-            if now >= wait.until || working.is_empty() {
-                over.push(wait);
+            let rested = match wait.until {
+                Until::All => working.is_empty(),
+                Until::Any => !wait
+                    .were_at_work
+                    .iter()
+                    .all(|state| working.contains(&state)),
+            };
+            // With nothing at work when it was asked, there is nothing to
+            // wait for.
+            if rested || wait.were_at_work.is_empty() {
+                over.push((wait, false));
+                continue;
+            }
+            if now >= wait.deadline {
+                over.push((wait, true));
                 continue;
             }
             let ids: Vec<EntityId> = working.iter().map(|state| state.entity_id()).collect();
@@ -445,11 +469,21 @@ impl Desk {
             waiting.push(wait);
         }
         self.clients.waits = waiting;
-        for wait in over {
+        for (wait, timed_out) in over {
             let open: Vec<_> = (wait.projects.into_iter())
                 .filter(|state| self.session(state).is_some())
                 .collect();
-            wait.reply.done(&self.told_all(&open, cx));
+            let mut told = self.told_all(&open, cx);
+            let finished = wait.were_at_work.iter();
+            let finished: Vec<_> = finished
+                .filter(|state| open.contains(state) && !self.at_work(state, cx))
+                .map(|state| state.read(cx).bus.project().name.clone())
+                .collect();
+            told["finished"] = json!(finished);
+            if timed_out {
+                told["timed_out"] = json!(true);
+            }
+            wait.reply.done(&told);
         }
     }
 

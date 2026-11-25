@@ -195,10 +195,12 @@ pub enum Request {
         project: String,
         message: String,
     },
-    /// Answer once none of `projects` (all the open ones when empty) has
-    /// an agent or a render at work, or after `timeout`.
+    /// Answer once `projects` (all the open ones when empty) have come to
+    /// rest as `until` says, with no agent or render at work, or after
+    /// `timeout`.
     Wait {
         projects: Vec<String>,
+        until: Until,
         timeout: Duration,
     },
     /// Save `project` (the one in the editor without) to its file.
@@ -208,6 +210,16 @@ pub enum Request {
     Close {
         project: String,
     },
+}
+
+/// When a wait for projects is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Until {
+    /// One of those at work when it was asked came to rest: its client
+    /// goes on with that project while the others work.
+    Any,
+    /// None is at work any more.
+    All,
 }
 
 impl Request {
@@ -256,8 +268,14 @@ fn parse(tool: &str, args: &Value) -> ToolResultOf<Request> {
         WAIT => {
             let asked = args.opt_f64("timeout")?;
             let asked = asked.map(|s| s.clamp(1., WAIT_MAX.as_secs_f64()));
+            let until = match args.opt_str("until")? {
+                None | Some("any") => Until::Any,
+                Some("all") => Until::All,
+                Some(other) => return fail(format!("`until` is any or all, not `{other}`")),
+            };
             Request::Wait {
                 projects: args.strings("projects")?,
+                until,
                 timeout: asked.map_or(WAIT_DEFAULT, Duration::from_secs_f64),
             }
         }
@@ -413,10 +431,11 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         spec(
             WAIT,
             true,
-            "Wait until no agent and no render of the projects is at work, then return them as list_projects does: call it once after starting projects or renders, rather than list_projects again and again. Returns after `timeout` seconds at the latest, with what is still at work: call it again then. Give a long `timeout` (7200 for two hours) when your client lets a call run that long, as Claude Code does: the call goes on in the background and its answer comes when the work is done.",
+            "Wait for projects whose agent or render is at work, rather than calling list_projects again and again. Returns as soon as one of them is done or needs the user (`finished` names it), with all of them as list_projects gives them: go on with that project, then call this again for the ones still at work. With `until` \"all\" it returns only once none is at work. Returns after `timeout` seconds at the latest (`timed_out`): call it again then. Give a long `timeout` (7200 for two hours) when your client lets a call run that long, as Claude Code does: the call goes on in the background and its answer comes when the work is done.",
             object(
                 json!({
                     "projects": { "type": "array", "items": { "type": "string" }, "description": "Ids or names (default: every open project)" },
+                    "until": { "type": "string", "enum": ["any", "all"], "description": "any (default): the first project to come to rest; all: every one" },
                     "timeout": { "type": "number", "description": "Seconds to wait at most (default 45, for clients that give up on a call after a minute; at most 43200)" }
                 }),
                 &[],
