@@ -374,12 +374,7 @@ pub fn open_new(
     if window.has_active_dialog(cx) {
         return;
     }
-    let dir = state
-        .read(cx)
-        .file()
-        .and_then(|f| f.parent())
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::ui::deliver::default_dir);
+    let dir = new_project_dir(state, cx);
     let name = free_name(&dir, name.as_deref().unwrap_or("Untitled"));
     let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
     input.update(cx, |i, cx| {
@@ -433,6 +428,17 @@ pub fn open_new(
             })
             .confirm_disabled(!ready)
     });
+}
+
+/// The folder New project starts in: the one set in Settings → Storage,
+/// else beside the project in the editor, else the user's videos folder.
+pub(crate) fn new_project_dir(state: &Entity<EditorState>, cx: &App) -> PathBuf {
+    crate::persistence::projects_dir()
+        .or_else(|| {
+            let file = state.read(cx).file()?;
+            file.parent().map(PathBuf::from)
+        })
+        .unwrap_or_else(crate::ui::deliver::default_dir)
 }
 
 /// Project settings: the open project's sequence, applied as one undoable

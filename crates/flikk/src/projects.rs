@@ -1,11 +1,14 @@
-//! Project files from the user's side: New, Open, Save and Save As, and the
-//! "Save changes?" question before anything replaces or closes a project
-//! with unsaved changes. The files themselves are `persistence`'s. While a
-//! model is missing no project is created or opened, however it is asked
-//! for: the welcome page's setup list comes first.
+//! Project files from the user's side: New, Open, Save, Save As and
+//! Close, and the "Save changes?" question before anything closes a project
+//! with unsaved changes. Several projects are open at once: a new or
+//! opened one joins them, so only closing one, or quitting, asks. The
+//! files themselves are `persistence`'s. While a model is missing no
+//! project is created or opened, however it is asked for: the welcome
+//! page's setup list comes first.
 
 use crate::state::EditorState;
 use crate::ui::kit::DialogExt as _;
+use flikk_core::ProjectId;
 use flikk_core::model::SequenceSettings;
 use flikk_store::project_file::{EXTENSION, sanitize};
 use gpui_kit::*;
@@ -38,11 +41,13 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// What replaces or closes the open project once its changes are settled.
+/// What to do once the unsaved changes it would lose are settled.
 #[derive(Clone)]
 enum Then {
     Create(PathBuf, SequenceSettings),
     Open(PathBuf),
+    /// Close this open project.
+    Close(ProjectId),
     Quit,
     /// Quit and start the version an update installed.
     Restart,
@@ -109,8 +114,8 @@ pub fn settings(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) 
     crate::ui::project_settings::open_settings(state, window, cx);
 }
 
-/// Make a project saved at `path` with a sequence of `settings`, once the
-/// open project's changes are settled.
+/// Make a project saved at `path` with a sequence of `settings` and bring
+/// it into the editor.
 pub fn create(
     state: &Entity<EditorState>,
     path: PathBuf,
@@ -174,13 +179,18 @@ pub fn save_as(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Quit, asking about unsaved changes first.
+/// Close open project `project`, asking about its unsaved changes first.
+pub fn close(state: &Entity<EditorState>, project: ProjectId, window: &mut Window, cx: &mut App) {
+    settle(state, Then::Close(project), window, cx);
+}
+
+/// Quit, asking about every open project's unsaved changes first.
 pub fn quit(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
     settle(state, Then::Quit, window, cx);
 }
 
-/// Quit, asking about unsaved changes first, and start the version an
-/// update installed.
+/// Quit, asking about every open project's unsaved changes first, and
+/// start the version an update installed.
 pub fn restart(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
     settle(state, Then::Restart, window, cx);
 }
@@ -188,15 +198,16 @@ pub fn restart(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
 /// For the window's close button: close at once when there is nothing to
 /// save, else ask and quit once settled.
 pub fn should_close(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) -> bool {
-    if !state.read(cx).is_dirty() {
+    if state.read(cx).unsettled_project().is_none() {
         return true;
     }
     settle(state, Then::Quit, window, cx);
     false
 }
 
-/// Save, then (when it saved) do `then`. `token` marks the save under way
-/// until it ends.
+/// Save the project in the editor, then (when it saved) go on to `then`,
+/// which may have more to settle. `token` marks the save under way until
+/// it ends.
 fn save_then(
     state: &Entity<EditorState>,
     then: Option<Then>,
@@ -206,18 +217,16 @@ fn save_then(
 ) {
     if let Some(path) = state.read(cx).file().map(|f| f.to_path_buf()) {
         let saved = state.update(cx, |s, cx| s.save_project(path, cx));
-        drop(token);
         if saved && let Some(then) = then {
-            run(state, then, window, cx);
+            ask(state, then, token, window, cx);
         }
         return;
     }
     let target = state.clone();
     ask_path(state, window, cx, move |path, window, cx| {
         let saved = target.update(cx, |s, cx| s.save_project(path, cx));
-        drop(token);
         if saved && let Some(then) = then {
-            run(&target, then, window, cx);
+            ask(&target, then, token, window, cx);
         }
     });
 }
@@ -253,38 +262,64 @@ fn ask_path(
     .detach();
 }
 
-/// Do `then` once unsaved changes are saved or let go, asking first. The
-/// question opens over any other dialog; while it or its save is under way,
-/// another ask does nothing.
+/// The open project whose unsaved changes `then` would lose, the next one
+/// to ask about. A project made or opened loses none: the others stay open.
+fn at_stake(state: &Entity<EditorState>, then: &Then, cx: &App) -> Option<ProjectId> {
+    let s = state.read(cx);
+    match then {
+        Then::Create(..) | Then::Open(_) => None,
+        Then::Close(project) => s.is_unsettled(*project).then_some(*project),
+        Then::Quit | Then::Restart => s.unsettled_project(),
+    }
+}
+
+/// Do `then` once the unsaved changes it would lose are saved or let go,
+/// asking first. The question opens over any other dialog; while it or its
+/// save is under way, another ask does nothing.
 fn settle(state: &Entity<EditorState>, then: Then, window: &mut Window, cx: &mut App) {
     if matches!(then, Then::Create(..) | Then::Open(_)) && waiting(state, cx) {
         return;
     }
-    if !state.read(cx).is_dirty() {
+    if at_stake(state, &then, cx).is_none() {
         run(state, then, window, cx);
         return;
     }
     if settling(cx) {
         return;
     }
-    // The dialog holds the token until it closes; Save hands it on.
     let token = begin_settling(cx);
+    ask(state, then, token, window, cx);
+}
+
+/// Ask about the next project `then` would lose changes of, one question
+/// a project, and do `then` once none is left. Each question holds `token`
+/// until it closes; Save and Don't save hand it on to the next.
+fn ask(state: &Entity<EditorState>, then: Then, token: Rc<()>, window: &mut Window, cx: &mut App) {
+    let Some(project) = at_stake(state, &then, cx) else {
+        drop(token);
+        run(state, then, window, cx);
+        return;
+    };
+    // The question and a save's file prompt are about the project in the
+    // editor, which also shows what is being asked about.
+    state.update(cx, |s, cx| s.front_project(project, cx));
     let name = state.read(cx).bus.project().name.clone();
     let state = state.clone();
     window.open_confirm(cx, move |dialog, _, _| {
         let (save_state, discard_state) = (state.clone(), state.clone());
         let (save_then_do, discard_then_do) = (then.clone(), then.clone());
-        let token = token.clone();
+        let (save_token, discard_token) = (token.clone(), token.clone());
         dialog
             .title(format!("Save changes to “{name}”?"))
             .secondary("Don't save", move |window, cx| {
                 discard_state.update(cx, |s, _| s.discard_changes());
-                run(&discard_state, discard_then_do.clone(), window, cx);
+                let (then, token) = (discard_then_do.clone(), discard_token.clone());
+                ask(&discard_state, then, token, window, cx);
                 true
             })
             .confirm("Save", move |window, cx| {
-                let token = token.clone();
-                save_then(&save_state, Some(save_then_do.clone()), token, window, cx);
+                let (then, token) = (save_then_do.clone(), save_token.clone());
+                save_then(&save_state, Some(then), token, window, cx);
                 true
             })
     });
@@ -298,6 +333,7 @@ fn run(state: &Entity<EditorState>, then: Then, _: &mut Window, cx: &mut App) {
         Then::Open(path) => {
             state.update(cx, |s, cx| s.open_project(&path, cx));
         }
+        Then::Close(project) => state.update(cx, |s, cx| s.close_project(project, cx)),
         Then::Quit => cx.quit(),
         Then::Restart => {
             crate::update::relaunch_on_quit();

@@ -7,12 +7,15 @@ use flikk_core::agent::AgentSettings;
 use flikk_core::cloud::CloudSettings;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::path::{Path, PathBuf};
 
 const USER_SETTINGS: &str = "agent_settings";
 /// The models the user picked over each task's default, by id.
 const MODEL_PICKS: &str = "model_picks";
 /// The provider picked for each capability (never its key).
 const CLOUD_SETTINGS: &str = "cloud_settings";
+/// The folder new projects are saved in.
+const PROJECTS_DIR: &str = "projects_dir";
 
 impl Store {
     /// User settings; the defaults on first run.
@@ -50,6 +53,16 @@ impl Store {
 
     pub fn save_cloud_settings(&self, settings: &CloudSettings) -> Result<()> {
         self.set_meta(CLOUD_SETTINGS, settings)
+    }
+
+    /// The folder the user set for new projects in Settings → Storage;
+    /// `None` until they set one.
+    pub fn projects_dir(&self) -> Result<Option<PathBuf>> {
+        self.meta(PROJECTS_DIR)
+    }
+
+    pub fn save_projects_dir(&self, dir: &Path) -> Result<()> {
+        self.set_meta(PROJECTS_DIR, dir)
     }
 }
 

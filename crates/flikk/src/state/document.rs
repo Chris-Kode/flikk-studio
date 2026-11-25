@@ -48,6 +48,14 @@ impl Document {
         self.saved != Some(undo_position(bus))
     }
 
+    /// Changes not saved that the user has not let go either, for the
+    /// project of `bus`: closing it would lose them unasked.
+    pub(super) fn unsettled(&self, bus: &CommandBus) -> bool {
+        let position = undo_position(bus);
+        self.saved != Some(position)
+            && !matches!(self.autosaved, Autosaved::Discarded(at) if at == position)
+    }
+
     /// Hand the unsaved changes of `bus`'s project to the autosaver, for
     /// crash recovery, unless it holds them already or the user threw them
     /// away. Undone back to the save, the stale autosave is dropped. The
@@ -145,9 +153,9 @@ impl EditorState {
         }
     }
 
-    /// Replace the open project with a new one saved at `path`, which names
-    /// it, with a sequence of `settings`. Unsaved changes must be settled
-    /// first (see `crate::projects`). Whether it saved.
+    /// Bring a new project saved at `path`, which names it, into the
+    /// editor, with a sequence of `settings`. The project there stays
+    /// open. Whether it saved.
     pub fn create_project(
         &mut self,
         path: PathBuf,
@@ -159,13 +167,22 @@ impl EditorState {
         self.save_project(path, cx)
     }
 
-    /// Open a project file in place of the open project; unsaved changes
-    /// must be settled first. Whether it opened.
+    /// Bring the project in a file into the editor, the one there staying
+    /// open: read from the file, or the open project that is saved there.
+    /// Whether it is in the editor now.
     pub fn open_project(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
-        if self.file() == Some(path) {
+        if let Some(open) = self.open_in(path) {
+            self.enter_project(open, cx);
             return true;
         }
         match persistence::open(path) {
+            // A copy of an open project's file: they are one project, and
+            // only one of them can be open.
+            Some(loaded) if self.is_open(loaded.project.id) => {
+                self.enter_project(loaded.project.id, cx);
+                self.say("This project is already open, from another file", cx);
+                true
+            }
             Some(loaded) => {
                 self.switch_to(loaded, cx);
                 true

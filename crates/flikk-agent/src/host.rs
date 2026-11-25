@@ -36,6 +36,7 @@ use flikk_core::{ChangeSetId, ProjectId};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,15 @@ pub(crate) fn external_author() -> Author {
     Author::External {
         name: "External agent".into(),
     }
+}
+
+/// Numbers the approval requests of every host in the process: the editor
+/// runs one host per open project, and a request is told apart by its id
+/// alone.
+static NEXT_APPROVAL: AtomicU64 = AtomicU64::new(1);
+
+fn next_approval() -> u64 {
+    NEXT_APPROVAL.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Calls' jobs running at once; the others wait their turn, the order
@@ -209,7 +219,6 @@ pub struct AgentHost {
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
     approvals: Vec<PendingApproval>,
-    next_approval: u64,
     /// Replies of the calls waiting on an approval, by its id: the call
     /// stays open until the user decides, so the turn carries on with what
     /// came of it.
@@ -249,7 +258,6 @@ impl AgentHost {
             jobs_tx,
             jobs_rx,
             approvals: Vec::new(),
-            next_approval: 1,
             held: HashMap::new(),
             asked: HashMap::new(),
             outcomes: Vec::new(),
@@ -261,7 +269,8 @@ impl AgentHost {
     }
 
     /// Start the bridge now (rather than with the first turn) and publish
-    /// it in `bridge.json`, so external MCP clients can reach the editor.
+    /// it in `bridge.json`, so external MCP clients reach this host: of the
+    /// hosts in the process, the one that published last.
     pub fn start_bridge(&mut self) -> std::io::Result<PathBuf> {
         if self.bridge.is_none() {
             self.bridge = Some(BridgeServer::start()?);
@@ -354,26 +363,6 @@ impl AgentHost {
             .collect()
     }
 
-    /// The user opened another project: withdraw the requests `project`'s
-    /// turns left waiting. Its chats' agents are told on their next turn.
-    pub fn close_project(&mut self, project: ProjectId) {
-        let (gone, kept) = std::mem::take(&mut self.approvals)
-            .into_iter()
-            .partition(|a| a.project == project);
-        self.approvals = kept;
-        for approval in gone {
-            let PendingApproval { id, request, .. } = approval;
-            self.report_outcome(
-                id,
-                format!(
-                    "withdrawn: {} (the user opened another project before deciding)",
-                    request.summary
-                ),
-                true,
-            );
-        }
-    }
-
     /// Remove a request once the user approved or denied it.
     pub fn resolve_approval(&mut self, id: u64) -> Option<PendingApproval> {
         let ix = self.approvals.iter().position(|a| a.id == id)?;
@@ -383,8 +372,7 @@ impl AgentHost {
     /// Demo only: `request` waiting on the user for `project`, as a turn's
     /// call leaves one, with no call waiting on its outcome.
     pub fn seed_approval(&mut self, request: ApprovalRequest, project: ProjectId) {
-        let id = self.next_approval;
-        self.next_approval += 1;
+        let id = next_approval();
         self.approvals.push(PendingApproval {
             id,
             request,
@@ -1062,8 +1050,7 @@ impl AgentHost {
         // A request for approval keeps its call waiting for the user.
         match done.approval {
             Some(request) => {
-                let id = self.next_approval;
-                self.next_approval += 1;
+                let id = next_approval();
                 let chat = match origin {
                     Origin::Turn => Some(
                         self.turn

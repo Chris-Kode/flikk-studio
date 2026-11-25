@@ -1,14 +1,20 @@
-//! The welcome page the app opens on: New project, Open…, a drop zone that
-//! starts a project from footage, and the recent projects. While a model
-//! is missing, the setup list takes the recent projects' place and no
-//! project opens: the models to download as one, the transcription size,
-//! the agent CLIs found, and FFmpeg and a browser when they are not.
+//! The home page the app opens on, and comes back to from the editor: New
+//! project, Open…, a drop zone that starts a project from footage, the
+//! agents at work on the open projects ([`board`]) and the recent
+//! projects. While a model is missing, the setup list takes the agents'
+//! and recent projects' place and no project opens: the models to download
+//! as one, the transcription size, the agent CLIs found, and FFmpeg and a
+//! browser when they are not.
+
+mod board;
+
+pub(crate) use board::name_from;
 
 use crate::projects;
 use crate::state::{EditorState, SetupStatus};
 use crate::ui::kit::{
-    Button, Icon, IconName, Input, Kbd, Progress, Segmented, Spinner, Tooltip, h_flex, theme as t,
-    v_flex,
+    Button, Icon, IconName, Input, Kbd, Progress, ScrollableElement as _, Segmented, Spinner,
+    Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_core::agent::Backend;
 use flikk_models::Task as ModelTask;
@@ -36,6 +42,12 @@ pub enum WelcomeEvent {
     Continue,
     /// Start a new project from these files and folders.
     Create(Vec<PathBuf>),
+    /// Start a new project with these files and folders whose agent works
+    /// on `prompt`, staying on the page.
+    Start {
+        prompt: String,
+        footage: Vec<PathBuf>,
+    },
     /// Another project is being started or opened: footage held from an
     /// earlier `Create` (whose dialog was cancelled) must not go into it.
     ForgetFootage,
@@ -107,8 +119,17 @@ pub struct Welcome {
     selected: usize,
     /// Files from outside held over the drop zone.
     dropping: Option<Vec<PathBuf>>,
+    /// What the next agent is asked for.
+    prompt: Entity<InputState>,
+    /// The files and folders the next agent's project starts with.
+    footage: Vec<PathBuf>,
+    /// The prompt's agent started: the prompt empties on the next draw.
+    clear_prompt: bool,
+    /// The field that writes to each open project's agent.
+    replies: std::collections::HashMap<flikk_core::ProjectId, board::Reply>,
     focus: FocusHandle,
     _search: Subscription,
+    _prompt: Subscription,
     _state: Subscription,
 }
 
@@ -130,6 +151,8 @@ impl Welcome {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let _state = cx.observe(&state, |_, _, cx| cx.notify());
+        let prompt = Self::prompt_input(window, cx);
+        let _prompt = Self::watch_prompt(&prompt, window, cx);
         Self {
             state,
             agents: Agents::Unchecked,
@@ -139,10 +162,36 @@ impl Welcome {
             recent,
             selected: 0,
             dropping: None,
+            prompt,
+            footage: Vec::new(),
+            clear_prompt: false,
+            replies: Default::default(),
             focus,
             _search,
+            _prompt,
             _state,
         }
+    }
+
+    /// The page shows again, back from the editor: list the recent
+    /// projects as they are now and take the keys.
+    pub fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut listed = std::mem::take(&mut self.recent);
+        self.recent = crate::persistence::recent()
+            .into_iter()
+            .map(|path| {
+                // A file not saved since it was read is not read again.
+                let saved = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                let same = |r: &Recent| r.path == path && r.saved == saved && !r.missing;
+                match listed.iter().position(same) {
+                    Some(ix) => listed.swap_remove(ix),
+                    None => Recent::read(path),
+                }
+            })
+            .collect();
+        self.selected = 0;
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// Look for Claude and Codex, and their versions, off the UI thread.
@@ -176,8 +225,10 @@ impl Welcome {
         if s.projects_wait() {
             return Vec::new();
         }
+        // Once gone into, it shows with the open projects instead.
         let recovered = s.file().is_none()
             && s.is_dirty()
+            && !s.project_listed()
             && s.bus.project().name.to_lowercase().contains(&query);
         let recent = (0..self.recent.len()).filter(|&i| {
             let r = &self.recent[i];
@@ -263,6 +314,9 @@ impl Welcome {
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.writing(window, cx) {
+            return;
+        }
         let rows = self.visible(cx);
         // As the list shows it: rows can go without a search, as the
         // recovered one does once its project is saved.
@@ -559,8 +613,7 @@ impl Welcome {
         let rows = self.visible(cx);
         let selected = self.selected.min(rows.len().saturating_sub(1));
         v_flex()
-            .flex_1()
-            .min_w_0()
+            .flex_none()
             .gap(px(8.))
             .child(
                 h_flex()
@@ -795,7 +848,7 @@ impl Welcome {
 }
 
 impl Render for Welcome {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.dropping.is_some() && !cx.has_active_drag() {
             self.dropping = None;
         }
@@ -827,7 +880,8 @@ impl Render for Welcome {
                 h_flex()
                     .w(px(1080.))
                     .max_w_full()
-                    .mt(px(-20.))
+                    .max_h_full()
+                    .py(px(24.))
                     .px(px(24.))
                     .items_stretch()
                     .gap(px(56.))
@@ -853,10 +907,21 @@ impl Render for Welcome {
                     )
                     .map(|page| {
                         if waiting {
-                            page.child(self.setup(cx))
-                        } else {
-                            page.child(self.recent(cx))
+                            return page.child(self.setup(cx));
                         }
+                        // The lists scroll once they are taller than the
+                        // window; the actions beside them stay.
+                        page.child(
+                            v_flex()
+                                .id("welcome-lists")
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .gap(px(24.))
+                                .overflow_y_scrollbar()
+                                .child(self.board(window, cx))
+                                .child(self.recent(cx)),
+                        )
                     }),
             )
     }

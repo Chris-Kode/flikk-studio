@@ -82,8 +82,9 @@ pub struct ChatPanel {
     settled_scroll: ScrollHandle,
     /// What the rows were last measured for.
     signature: u64,
-    /// Chat session the rows show.
-    chat: String,
+    /// Chat session the rows show, and the project it is of: two projects
+    /// name their first chat alike.
+    chat: (flikk_core::ProjectId, String),
     /// The chat sessions show in place of the thread.
     sessions_open: bool,
     /// Change item last revealed for the timeline.
@@ -121,7 +122,10 @@ impl ChatPanel {
             }),
         ];
         let signature = signature(state.read(cx));
-        let chat = state.read(cx).active_chat().to_owned();
+        let chat = {
+            let s = state.read(cx);
+            (s.bus.project().id, s.active_chat().to_owned())
+        };
         let user_messages = user_messages(state.read(cx));
         Self {
             state,
@@ -175,7 +179,7 @@ impl ChatPanel {
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
         let (count, sig, chat, users) = {
             let s = self.state.read(cx);
-            let chat = s.active_chat().to_owned();
+            let chat = (s.bus.project().id, s.active_chat().to_owned());
             (s.chat().len(), signature(s), chat, user_messages(s))
         };
         let changed = sig != self.signature;
@@ -689,6 +693,7 @@ fn user_messages(s: &EditorState) -> usize {
 /// states, previews.
 fn signature(s: &EditorState) -> u64 {
     let mut h = DefaultHasher::new();
+    s.bus.project().id.hash(&mut h);
     s.active_chat().hash(&mut h);
     s.chat().len().hash(&mut h);
     s.chat()

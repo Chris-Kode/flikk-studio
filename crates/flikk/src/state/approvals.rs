@@ -169,7 +169,9 @@ impl EditorState {
 
     /// Run approved request `id`'s `work` off the UI thread: its card shows
     /// it working until `done` turns what it made into the outcome (or it
-    /// failed, which the agent is told).
+    /// failed, which the agent is told). `done` runs for the project that
+    /// asked while it is open, in the editor or not; closed meanwhile, it
+    /// runs for the one in the editor and tells by the project's id.
     fn settle_later<T: Send + 'static>(
         &mut self,
         id: u64,
@@ -178,17 +180,22 @@ impl EditorState {
         done: impl FnOnce(&mut Self, T, &mut Context<Self>) -> ApprovalOutcome + 'static,
         cx: &mut Context<Self>,
     ) -> ApprovalOutcome {
+        let owner = self.bus.project().id;
         let task = cx.background_executor().spawn(async move { work() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let outcome = match result {
-                    Ok(made) => done(this, made, cx),
-                    Err(e) => this.approval_failed(id, &summary, e),
-                };
-                if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
-                    entry.1 = outcome;
-                }
+                this.in_project_or_here(owner, cx, |this, cx| {
+                    let outcome = match result {
+                        Ok(made) => done(this, made, cx),
+                        // Its project closed: its agent is gone with it.
+                        Err(_) if this.bus.project().id != owner => return,
+                        Err(e) => this.approval_failed(id, &summary, e),
+                    };
+                    if let Some(entry) = this.settled.iter_mut().find(|(p, _)| p.id == id) {
+                        entry.1 = outcome;
+                    }
+                });
                 cx.notify();
             });
         })

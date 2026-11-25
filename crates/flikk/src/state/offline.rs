@@ -111,7 +111,11 @@ impl EditorState {
     /// Work out which sources are missing when the media list changed, and
     /// keep the notice about them current.
     pub(super) fn check_offline(&mut self) {
-        self.offline.check(self.bus.project(), &mut self.notices);
+        // The notice lists the media of the project in the editor; a
+        // parked one's are looked at when it comes in.
+        if !self.visiting {
+            self.offline.check(self.bus.project(), &mut self.notices);
+        }
     }
 
     /// Look for every media file on disk every [`POLL`], off the UI thread:

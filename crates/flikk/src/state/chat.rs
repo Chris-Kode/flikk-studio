@@ -450,6 +450,9 @@ impl EditorState {
         if self.agent_busy() {
             return;
         }
+        // Sent from the chat, the turn asks and proposes as usual; the
+        // home page marks its own after sending.
+        self.unattended = false;
         let history = self.chat.history();
         let style = self
             .settings

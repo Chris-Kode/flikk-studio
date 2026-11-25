@@ -1,4 +1,5 @@
-//! Settings → Storage: the user-data folders a user has a stake in, each
+//! Settings → Storage: the folder new projects are saved in, which the
+//! user picks, then the user-data folders a user has a stake in, each
 //! with its folder to open: the cache as one (everything the editor makes
 //! again by itself), with Clear, then models, the library (effects,
 //! presets, sounds and voices), what providers and Codex generated, and
@@ -40,6 +41,9 @@ enum Place {
 const KEPT: [&str; 2] = ["analysis", "render"];
 
 const LABEL_W: f32 = 150.;
+/// The column of each row's own action (Clear, Choose…), so the folder
+/// buttons before it line up.
+const ACTION_W: f32 = 64.;
 
 impl Place {
     const ALL: [Place; 5] = [
@@ -170,6 +174,8 @@ pub struct StorageTab {
     /// By place, as last measured.
     sizes: Vec<Option<u64>>,
     render: flikk_store::RenderCacheSettings,
+    /// Where New project starts, as last set or read.
+    projects: PathBuf,
     _measure: Option<Task<()>>,
 }
 
@@ -178,8 +184,63 @@ impl StorageTab {
         Self {
             sizes: vec![None; Place::ALL.len()],
             render: render_cache::settings(),
+            projects: projects_dir(),
             _measure: None,
         }
+    }
+
+    /// Ask for the folder new projects are saved in.
+    fn choose_projects(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(dir) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                crate::persistence::set_projects_dir(&dir);
+                this.projects = projects_dir();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Where New project starts, with the folder to open and Choose….
+    fn projects_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let dir = self.projects.clone();
+        row("New projects", LABEL_W)
+            .child(
+                meta(tilde(&dir))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.)),
+            )
+            .child(
+                Button::new("storage-projects-open")
+                    .ghost()
+                    .small()
+                    .icon(IconName::FolderOpen)
+                    .tooltip("Show in folder")
+                    .on_click(move |_, _, cx| cx.reveal_path(&dir)),
+            )
+            .child(
+                h_flex().w(px(ACTION_W)).flex_none().justify_end().child(
+                    Button::new("storage-projects")
+                        .small()
+                        .label("Choose…")
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_projects(cx))),
+                ),
+            )
+            .into_any_element()
     }
 
     fn set_render(&mut self, settings: flikk_store::RenderCacheSettings, cx: &mut Context<Self>) {
@@ -260,38 +321,36 @@ impl StorageTab {
 
 impl Render for StorageTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut rows: Vec<_> = Place::ALL
-            .iter()
-            .enumerate()
-            .map(|(ix, &place)| {
-                let size = match self.sizes[ix] {
-                    Some(0) => "0 KB".to_owned(),
-                    Some(bytes) => size_label(bytes),
-                    None => String::new(),
-                };
-                row(place.label(), LABEL_W)
-                    .child(meta(size).flex_1().text_size(px(11.)))
-                    .child(
-                        Button::new(("storage-open", ix))
-                            .ghost()
+        let mut rows = vec![self.projects_row(cx)];
+        let places = Place::ALL.iter().enumerate().map(|(ix, &place)| {
+            let size = match self.sizes[ix] {
+                Some(0) => "0 KB".to_owned(),
+                Some(bytes) => size_label(bytes),
+                None => String::new(),
+            };
+            row(place.label(), LABEL_W)
+                .child(meta(size).flex_1().text_size(px(11.)))
+                .child(
+                    Button::new(("storage-open", ix))
+                        .ghost()
+                        .small()
+                        .icon(IconName::FolderOpen)
+                        .tooltip("Show in folder")
+                        .on_click(move |_, _, cx| cx.reveal_path(&place.dir())),
+                )
+                // A slot for Clear on every row, so the folder buttons
+                // line up.
+                .child(h_flex().w(px(ACTION_W)).flex_none().justify_end().children(
+                    place.clearable().then(|| {
+                        Button::new(("storage-clear", ix))
                             .small()
-                            .icon(IconName::FolderOpen)
-                            .tooltip("Show in folder")
-                            .on_click(move |_, _, cx| cx.reveal_path(&place.dir())),
-                    )
-                    // A slot for Clear on every row, so the folder buttons
-                    // line up.
-                    .child(h_flex().w(px(52.)).flex_none().justify_end().children(
-                        place.clearable().then(|| {
-                            Button::new(("storage-clear", ix))
-                                .small()
-                                .label("Clear")
-                                .on_click(cx.listener(move |this, _, _, cx| this.clear(place, cx)))
-                        }),
-                    ))
-                    .into_any_element()
-            })
-            .collect();
+                            .label("Clear")
+                            .on_click(cx.listener(move |this, _, _, cx| this.clear(place, cx)))
+                    }),
+                ))
+                .into_any_element()
+        });
+        rows.extend(places);
         rows.push(
             row("Background rendering", LABEL_W)
                 .child(div().flex_1())
@@ -315,14 +374,24 @@ impl Render for StorageTab {
 
 /// The user-data folder, with the home folder as `~`.
 fn home_label() -> String {
-    let dir = paths::home();
+    tilde(&paths::home())
+}
+
+/// `dir` with the home folder as `~`.
+fn tilde(dir: &Path) -> String {
     std::env::var_os("HOME")
         .and_then(|home| {
             dir.strip_prefix(home)
                 .ok()
                 .map(|rest| Path::new("~").join(rest))
         })
-        .unwrap_or(dir)
+        .unwrap_or_else(|| dir.to_path_buf())
         .display()
         .to_string()
+}
+
+/// The folder New project starts in when no project is open beside it:
+/// the one set here, else the user's videos folder.
+fn projects_dir() -> PathBuf {
+    crate::persistence::projects_dir().unwrap_or_else(crate::ui::deliver::default_dir)
 }

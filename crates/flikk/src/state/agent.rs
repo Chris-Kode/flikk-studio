@@ -3,10 +3,54 @@
 //! on the UI thread.
 
 use super::EditorState;
+use super::chat::ChatLog;
+use crate::agent_link::AgentLink;
 use crate::persistence;
 use flikk_core::ChangeSetId;
 use flikk_core::agent::{AgentEvent, AgentSettings};
+use flikk_core::bus::CommandBus;
+use flikk_core::changeset::ChangeSetState;
 use gpui_kit::*;
+
+/// Hand `agent` what it works from on the project of `bus`: the open chat
+/// of `chat`, the approved rules of the style profile selected in
+/// `settings`, and the facts about the project's sources.
+pub(super) fn hand_memory(
+    settings: &AgentSettings,
+    bus: &mut CommandBus,
+    chat: &ChatLog,
+    agent: &mut AgentLink,
+) {
+    agent.set_chat(chat.active());
+    bus.set_chat(chat.active());
+    use flikk_core::memory::{FactStatus, RuleStatus};
+    use flikk_store::{FactFilter, RuleFilter};
+    let rules = settings
+        .style_profile
+        .and_then(|profile| {
+            let filter = RuleFilter {
+                status: Some(RuleStatus::Approved),
+                ..Default::default()
+            };
+            persistence::with_store(|s| s.rules(profile, &filter))
+        })
+        .unwrap_or_default();
+    let fingerprints: Vec<_> = (bus.project().media.iter())
+        .filter_map(|m| m.fingerprint.clone())
+        .collect();
+    let facts = fingerprints
+        .into_iter()
+        .flat_map(|fingerprint| {
+            let filter = FactFilter {
+                fingerprint: Some(fingerprint),
+                ..Default::default()
+            };
+            persistence::with_store(|s| s.facts(&filter)).unwrap_or_default()
+        })
+        .filter(|f| f.status != FactStatus::Suspended)
+        .collect();
+    agent.set_memory(rules, facts);
+}
 
 impl EditorState {
     /// Ask the backend's CLI which models it offers, once per run. Until it
@@ -40,43 +84,14 @@ impl EditorState {
         .detach();
     }
 
-    /// Hand the agent the approved rules of the selected style profile and
-    /// the facts about this project's sources.
+    /// Hand every open project's agent the approved rules of the selected
+    /// style profile and the facts about its own project's sources.
     pub(super) fn load_agent_memory(&mut self) {
-        self.agent.set_chat(self.chat.active());
-        self.bus.set_chat(self.chat.active());
-        use flikk_core::memory::{FactStatus, RuleStatus};
-        use flikk_store::{FactFilter, RuleFilter};
-        let rules = self
-            .settings
-            .style_profile
-            .and_then(|profile| {
-                let filter = RuleFilter {
-                    status: Some(RuleStatus::Approved),
-                    ..Default::default()
-                };
-                persistence::with_store(|s| s.rules(profile, &filter))
-            })
-            .unwrap_or_default();
-        let fingerprints: Vec<_> = self
-            .bus
-            .project()
-            .media
-            .iter()
-            .filter_map(|m| m.fingerprint.clone())
-            .collect();
-        let facts = fingerprints
-            .into_iter()
-            .flat_map(|fingerprint| {
-                let filter = FactFilter {
-                    fingerprint: Some(fingerprint),
-                    ..Default::default()
-                };
-                persistence::with_store(|s| s.facts(&filter)).unwrap_or_default()
-            })
-            .filter(|f| f.status != FactStatus::Suspended)
-            .collect();
-        self.agent.set_memory(rules, facts);
+        hand_memory(&self.settings, &mut self.bus, &self.chat, &mut self.agent);
+        let settings = self.settings.clone();
+        for parked in self.parked_mut() {
+            parked.hand_memory(&settings);
+        }
     }
 
     pub fn cancel_agent(&mut self, cx: &mut Context<Self>) {
@@ -86,6 +101,11 @@ impl EditorState {
 
     pub fn set_settings(&mut self, settings: AgentSettings, cx: &mut Context<Self>) {
         self.bus.set_permissions(settings.permissions.clone());
+        for parked in self.parked_mut() {
+            parked
+                .bus_mut()
+                .set_permissions(settings.permissions.clone());
+        }
         persistence::save_settings(&settings);
         let profile_changed = settings.style_profile != self.settings.style_profile;
         let backend_changed = settings.backend != self.settings.backend;
@@ -110,15 +130,22 @@ impl EditorState {
             let author = self.agent_author();
             self.keep_for(project, item, author);
         }
-        // Requests the user allowed are carried out without asking; their
-        // card still says what came of them.
+        // Requests the user allowed are carried out without asking, and so
+        // is every request of an unattended turn; their card still says
+        // what came of them.
+        let unattended = self.unattended;
         let allowed: Vec<u64> = self
             .agent
             .pending_approvals()
             .into_iter()
-            .filter(|p| p.request.allowed)
+            .filter(|p| p.request.allowed || unattended)
             .map(|p| p.id)
             .collect();
+        if unattended && !allowed.is_empty() {
+            // What is approved works on the project as the agent left it:
+            // a render must show the edits of the turn that asked for it.
+            self.accept_agent_edits(cx);
+        }
         for id in allowed {
             self.approve(id, cx);
         }
@@ -129,7 +156,12 @@ impl EditorState {
             match event {
                 AgentEvent::TextDelta { text } => self.chat.append_text(text),
                 AgentEvent::Question { text, choices } => self.chat.ask(text, choices),
-                AgentEvent::ChangeSetReady { change_set } => self.post_change_set(change_set),
+                AgentEvent::ChangeSetReady { change_set } => {
+                    self.post_change_set(change_set);
+                    if unattended {
+                        self.accept_agent_edits(cx);
+                    }
+                }
                 AgentEvent::Activity { entry } => self.chat.push_tool(entry),
                 AgentEvent::ToolStarted { entry, .. } => self.chat.push_tool(entry),
                 AgentEvent::ToolFinished { call, entry } => self.chat.finish_tool(call, entry),
@@ -148,7 +180,25 @@ impl EditorState {
         // the pool: save it, and analyze a video as any import is.
         self.autosave();
         self.analyze_new(cx);
+        if unattended && !self.provider_asks.is_empty() {
+            self.analyze_asked_with_provider(cx);
+        }
         cx.notify();
+    }
+
+    /// Apply the edits the agent proposed so far, each change set as one
+    /// undo step: an unattended turn's edits wait for no review. Items
+    /// that conflict stay for review.
+    pub(super) fn accept_agent_edits(&mut self, cx: &mut Context<Self>) {
+        let waiting: Vec<ChangeSetId> = (self.bus.change_sets().iter())
+            .filter(|set| set.author.is_agent() && set.state != ChangeSetState::Resolved)
+            .filter(|set| set.pending_items().next().is_some())
+            .map(|set| set.id)
+            .collect();
+        for set in waiting {
+            self.bus.close_change_set(set);
+            self.accept(set, None, cx);
+        }
     }
 
     /// Close `change_set` for review. Its card sits above the composer

@@ -18,7 +18,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -180,6 +180,8 @@ pub(crate) struct BridgeServer {
     rx: Receiver<Incoming>,
     /// `bridge.json`, while this server has it published.
     published: Option<Discovery>,
+    /// Set when the server is dropped: its listener stops accepting.
+    closed: Arc<AtomicBool>,
 }
 
 impl BridgeServer {
@@ -191,10 +193,15 @@ impl BridgeServer {
         let (tx, rx) = mpsc::channel();
         let tokens = Arc::new((token.clone(), external_token.clone()));
         let next_conn = Arc::new(AtomicU64::new(1));
+        let closed = Arc::new(AtomicBool::new(false));
+        let stop = closed.clone();
         thread::Builder::new()
             .name("flikk-bridge".into())
             .spawn(move || {
                 for stream in listener.incoming().flatten() {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let (tx, tokens, next) = (tx.clone(), tokens.clone(), next_conn.clone());
                     let _ = thread::Builder::new()
                         .name("flikk-bridge-conn".into())
@@ -207,6 +214,7 @@ impl BridgeServer {
             external_token,
             rx,
             published: None,
+            closed,
         })
     }
 
@@ -249,6 +257,10 @@ impl BridgeServer {
 impl Drop for BridgeServer {
     fn drop(&mut self) {
         self.unpublish();
+        // The listener thread waits in `accept`: a connection wakes it to
+        // see that the server is gone.
+        self.closed.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
     }
 }
 

@@ -872,6 +872,9 @@ impl EditorState {
                     self.post_change_set(set);
                 }
             }
+            if self.unattended {
+                self.accept_agent_edits(cx);
+            }
         }
         cx.notify();
         result

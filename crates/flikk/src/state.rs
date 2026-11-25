@@ -1,6 +1,10 @@
 //! Shared editor state. One entity per window; panels observe it and call
 //! its methods instead of touching the bus directly, so every change goes
 //! through the same path whether it came from a button or the agent.
+//!
+//! Several projects can be open at once, each with its own agent. The
+//! fields here are those of the project in the editor; the others are
+//! parked beside it (see [`open`]).
 
 mod agent;
 mod approvals;
@@ -13,6 +17,7 @@ mod live;
 mod models;
 mod music_fit;
 mod offline;
+mod open;
 mod playback;
 mod respeak;
 mod setup;
@@ -23,6 +28,7 @@ pub mod voices;
 
 pub use approvals::ApprovalOutcome;
 pub use cloud::{Check, Generating, ProviderStatus};
+pub use open::{AgentState, Doing, OpenProject};
 pub use setup::{SetupStatus, full_size};
 pub use source::Source;
 
@@ -107,6 +113,23 @@ pub struct EditorState {
     /// timeline, inspector, transcript…): token text and chip label.
     pending_mentions: Vec<(String, SharedString)>,
     agent: AgentLink,
+    /// The agent's turn was started from the home page: what it asks
+    /// approval for is approved as it asks, and its edits are applied.
+    unattended: bool,
+    /// The project shows on the home page: any but the one the app started
+    /// on, until the user goes into that one.
+    listed: bool,
+    /// Orders the open projects by when each was opened.
+    opened_at: u64,
+    /// The open projects that are not in the editor, their agents at work.
+    parked: Vec<open::Parked>,
+    /// A parked project stands in the editor's place for the length of a
+    /// call (see `in_project`): what belongs to the editor alone is left.
+    visiting: bool,
+    /// The last `opened_at` handed out.
+    next_opened: u64,
+    /// See [`Self::times_opened`].
+    opened: u64,
     _pump: Task<()>,
     // --- chat
     /// Requests the user settled since their last message, and what came of them.
@@ -228,7 +251,15 @@ impl EditorState {
             editing_fx: None,
             library: flikk_core::library::Library::load(),
             agent: AgentLink::new(),
-            _pump: Self::every(cx, AGENT_PUMP, Self::pump_agent),
+            unattended: false,
+            // Started for a file or a demo, the app opens in the editor.
+            listed: persistence::launched_with_file() || crate::demo::enabled(),
+            opened_at: 0,
+            parked: Vec::new(),
+            visiting: false,
+            next_opened: 0,
+            opened: 0,
+            _pump: Self::every(cx, AGENT_PUMP, Self::pump_agents),
             settled: Vec::new(),
             render_queue: flikk_deliver::RenderQueue::new(),
             models_seen: (Vec::new(), 0),
@@ -256,6 +287,7 @@ impl EditorState {
             updater: update::Updater::default(),
             _update_watch: Self::watch_for_updates(cx),
         };
+        this.agent.publish();
         this.mark_media_seen();
         this.configure_analysis();
         this.analyze_sounds(cx);
@@ -270,6 +302,7 @@ impl EditorState {
         cx.on_app_quit(|this, _| {
             this.render_queue.shutdown();
             this.proposals.sync(&this.bus);
+            this.parked_mut().for_each(open::Parked::sync_proposals);
             async {}
         })
         .detach();
@@ -501,8 +534,8 @@ impl EditorState {
     }
 
     /// Stop the background analysis and camera path measuring of those of
-    /// `items` that left the project, unless an item of the project or a
-    /// library sound still has the same file. One that comes back (an
+    /// `items` that left the project, unless an item of an open project or
+    /// a library sound still has the same file. One that comes back (an
     /// undo or a redo) is new again, analyzed as it lands; renders measure
     /// for themselves.
     fn cancel_left(&mut self, items: &[flikk_core::model::MediaItem]) {
@@ -513,9 +546,12 @@ impl EditorState {
             }
         }
         let sounds = self.library.sounds.iter().map(|s| &s.fingerprint);
+        // Another open project's agent may be working on the same file.
+        let parked = self.parked().flat_map(|p| &p.project().media);
         let kept: HashSet<_> = project
             .media
             .iter()
+            .chain(parked)
             .map(|m| &m.fingerprint)
             .chain(sounds)
             .flatten()
@@ -539,45 +575,6 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         self.selection.words = words;
-        cx.notify();
-    }
-
-    /// Replace everything tied to the open project; engines stay. Undo
-    /// history does not carry over.
-    fn switch_to(&mut self, loaded: persistence::Loaded, cx: &mut Context<Self>) {
-        let left = self.bus.project().media.clone();
-        self.set_playing(false, cx);
-        self.agent.cancel();
-        self.agent.close_project(self.bus.project().id);
-        self.save_chat();
-        self.proposals.sync(&self.bus);
-        self.bus = CommandBus::new(loaded.project);
-        self.proposals = persistence::Proposals::default();
-        self.chat = ChatLog::load(persistence::load_chats(&mut self.bus));
-        // What the new project has too goes on.
-        self.cancel_left(&left);
-        self.bus
-            .set_permissions(loaded.settings.permissions.clone());
-        self.mark_media_seen();
-        // Asked about for the project that closed.
-        self.provider_asks.clear();
-        self.document = Document::opened(loaded.file, loaded.recovered, &self.bus);
-        self.settings = loaded.settings;
-        self.playhead = Time::ZERO;
-        self.in_out = None;
-        self.selection = Selection::default();
-        self.selected_transition = None;
-        self.source = None;
-        self.preview = None;
-        self.clear_live();
-        self.focused_change = None;
-        self.editing_fx = None;
-        self.reset_chat_view();
-        self.status = persistence::take_notice();
-        self.check_offline();
-        self.load_agent_memory();
-        self.load_presets();
-        self.add_kept(cx);
         cx.notify();
     }
 }

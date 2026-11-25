@@ -9,10 +9,12 @@
 //! `flikk_agent::AgentHost`; this type adapts it to the editor. [`approve`]
 //! carries out the requests the user approves.
 //!
-//! The bridge starts with the editor and is published in
-//! `paths::home()/bridge.json`, so external MCP clients can drive it:
-//! `claude mcp add flikk -- flikk mcp` (or the `flikk-mcp` binary) finds
-//! the running editor through that file when `FLIKK_BRIDGE` is unset.
+//! Every open project has its own link, so their agents work at the same
+//! time. The link of the project in the editor is published in
+//! `paths::home()/bridge.json` ([`AgentLink::publish`]), so external MCP
+//! clients can drive it: `claude mcp add flikk -- flikk mcp` (or the
+//! `flikk-mcp` binary) finds the running editor through that file when
+//! `FLIKK_BRIDGE` is unset.
 
 pub mod approve;
 
@@ -29,11 +31,23 @@ pub struct AgentLink {
 
 impl AgentLink {
     pub fn new() -> Self {
-        let mut host = AgentHost::new();
-        if let Err(e) = host.start_bridge() {
+        Self {
+            host: AgentHost::new(),
+        }
+    }
+
+    /// External MCP clients drive this link's project from now on: the
+    /// project in the editor.
+    pub fn publish(&mut self) {
+        if let Err(e) = self.host.start_bridge() {
             eprintln!("flikk: external agents can't connect: {e}");
         }
-        Self { host }
+    }
+
+    /// Stop offering this link to external MCP clients: its project left
+    /// the editor.
+    pub fn unpublish(&mut self) {
+        self.host.stop_bridge();
     }
 
     /// Whether a message is queued or its turn under way.
@@ -71,12 +85,6 @@ impl AgentLink {
     /// Requests waiting for the user's approval in the open chat.
     pub fn pending_approvals(&self) -> Vec<PendingApproval> {
         self.host.pending_approvals()
-    }
-
-    /// The user opened another project: withdraw the requests `project`
-    /// left waiting.
-    pub fn close_project(&mut self, project: flikk_core::ProjectId) {
-        self.host.close_project(project);
     }
 
     /// What the agent made for projects closed before it finished.
