@@ -149,7 +149,12 @@ impl ChatPanel {
         }
     }
 
-    /// Send a message; the agent also gets its references resolved.
+    /// Put the caret in the message.
+    pub fn focus_composer(&self, window: &mut Window, cx: &mut App) {
+        let composer = self.composer.clone();
+        composer.update(cx, |composer, cx| composer.focus(window, cx));
+    }
+
     /// The quick-command bar acts on this chat's project from now on: it
     /// is the one in the editor.
     pub fn take_quick_commands(&mut self, cx: &mut Context<Self>) {
@@ -157,6 +162,7 @@ impl ChatPanel {
         quick::register_composer(&self.composer, cx);
     }
 
+    /// Send a message; the agent also gets its references resolved.
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let block =

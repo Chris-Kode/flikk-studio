@@ -16,6 +16,8 @@
 mod attention;
 mod clients;
 
+pub(crate) use attention::waits_in;
+
 use crate::persistence;
 use crate::state::{EditorState, SharedChange};
 use crate::ui::caption_style::{CaptionStylePanel, Target};

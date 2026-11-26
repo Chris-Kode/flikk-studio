@@ -1,10 +1,13 @@
 //! The home page the app opens on, and comes back to from the editor: New
 //! project, Open…, a drop zone that starts a project from footage, the
-//! agents at work on the open projects ([`board`]) and the recent
-//! projects. While a model is missing, the setup list takes the agents'
-//! and recent projects' place and no project opens: the models to download
-//! as one, the transcription size, the agent CLIs found, and FFmpeg and a
-//! browser when they are not.
+//! agents at work on the open projects ([`board`]) and the last few recent
+//! projects. Once a project is open the page is the agents': they take its
+//! width, New project and Open… move into their header with the recent
+//! projects as a menu, and a drop anywhere on the page starts a project.
+//! While a model is missing, the setup list takes the agents' and recent
+//! projects' place and no project opens: the models to download as one,
+//! the transcription size, the agent CLIs found, and FFmpeg and a browser
+//! when they are not.
 
 mod board;
 
@@ -14,8 +17,8 @@ use crate::desk::Desk;
 use crate::projects;
 use crate::state::{EditorState, SetupStatus};
 use crate::ui::kit::{
-    Button, Icon, IconName, Input, Kbd, Progress, ScrollableElement as _, Segmented, Spinner,
-    Tooltip, h_flex, theme as t, v_flex,
+    Button, DropdownMenu as _, Icon, IconName, Input, Kbd, PopupMenuItem, Progress,
+    ScrollableElement as _, Segmented, Spinner, Tooltip, h_flex, theme as t, v_flex,
 };
 use flikk_core::agent::Backend;
 use flikk_models::Task as ModelTask;
@@ -29,6 +32,9 @@ use std::time::{Duration, SystemTime};
 
 /// How often the setup list redraws while the models download.
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
+
+/// How many recent projects the page lists: the search reaches the rest.
+const RECENT_SHOWN: usize = 5;
 
 /// Where Claude Code is installed from, when no agent CLI is found.
 const AGENT_INSTALL: &str = "https://code.claude.com/docs/en/setup";
@@ -54,9 +60,11 @@ pub enum WelcomeEvent {
     ForgetFootage,
 }
 
-/// A row of the list.
+/// What Up, Down and Enter move over and open.
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
+    /// An open project, by its state: Enter opens it in the editor.
+    Session(EntityId),
     /// The project a crash left unsaved changes in, open underneath.
     Recovered,
     Recent(usize),
@@ -116,8 +124,11 @@ pub struct Welcome {
     download_poll: Option<Task<()>>,
     search: Entity<InputState>,
     recent: Vec<Recent>,
-    /// Index into the visible rows, for Up, Down and Enter.
-    selected: usize,
+    /// The row Up and Down last moved to, for Enter: the first one until
+    /// then, and when it no longer shows.
+    selected: Option<Row>,
+    /// The open project enlarged on the page (see `board`).
+    enlarged: Option<EntityId>,
     /// Files from outside held over the drop zone.
     dropping: Option<Vec<PathBuf>>,
     /// What the next agent is asked in, made when the agents first show
@@ -141,7 +152,7 @@ impl Welcome {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
         let _search = cx.subscribe(&search, |this, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
-                this.selected = 0;
+                this.selected = None;
                 cx.notify();
             }
         });
@@ -167,7 +178,8 @@ impl Welcome {
             download_poll: None,
             search,
             recent,
-            selected: 0,
+            selected: None,
+            enlarged: None,
             dropping: None,
             composer: None,
             restore: None,
@@ -211,7 +223,7 @@ impl Welcome {
                 }
             })
             .collect();
-        self.selected = 0;
+        self.selected = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -240,33 +252,77 @@ impl Welcome {
         .detach();
     }
 
-    /// The rows matching the search, in order.
+    /// Whether open projects show on the page. It is then theirs: the
+    /// recent projects and their search make way.
+    fn projects_open(&self, cx: &App) -> bool {
+        !self.ordered(cx).is_empty()
+    }
+
+    /// The rows the page shows, in order: the open projects, the recovered
+    /// one, then the last few recent ones the search matches. With
+    /// projects open no recent one shows; the recovered one does, having
+    /// no other way in.
     fn visible(&self, cx: &App) -> Vec<Row> {
-        let query = self.search.read(cx).value().trim().to_lowercase();
         let s = self.state(cx).read(cx);
         if s.projects_wait() {
             return Vec::new();
         }
+        let sessions = self.ordered(cx);
+        let searchable = sessions.is_empty();
+        // A search left in the field finds nothing while it is not shown.
+        let query = match searchable {
+            true => self.search.read(cx).value().trim().to_lowercase(),
+            false => String::new(),
+        };
         // Once gone into, it shows with the open projects instead.
         let recovered = s.file().is_none()
             && s.is_dirty()
             && !s.is_listed()
             && s.bus.project().name.to_lowercase().contains(&query);
-        let recent = (0..self.recent.len()).filter(|&i| {
-            let r = &self.recent[i];
-            query.is_empty()
-                || r.name.to_lowercase().contains(&query)
-                || r.path.to_string_lossy().to_lowercase().contains(&query)
-        });
-        recovered
-            .then_some(Row::Recovered)
-            .into_iter()
+        let listed = if searchable { self.recent.len() } else { 0 };
+        let recent = (0..listed)
+            .filter(|&i| {
+                let r = &self.recent[i];
+                query.is_empty()
+                    || r.name.to_lowercase().contains(&query)
+                    || r.path.to_string_lossy().to_lowercase().contains(&query)
+            })
+            .take(RECENT_SHOWN);
+        let sessions = sessions.iter().map(|s| Row::Session(s.state.entity_id()));
+        sessions
+            .chain(recovered.then_some(Row::Recovered))
             .chain(recent.map(Row::Recent))
             .collect()
     }
 
+    /// Where in `rows` Up, Down and Enter are.
+    fn selected(&self, rows: &[Row]) -> usize {
+        let selected = self
+            .selected
+            .and_then(|row| rows.iter().position(|r| *r == row));
+        selected.unwrap_or(0)
+    }
+
+    /// The open project Enter opens, while the page has the keys.
+    fn selected_session(&self, window: &Window, cx: &App) -> Option<EntityId> {
+        if !self.focus.is_focused(window) {
+            return None;
+        }
+        let rows = self.visible(cx);
+        match rows.get(self.selected(&rows))? {
+            Row::Session(id) => Some(*id),
+            Row::Recovered | Row::Recent(_) => None,
+        }
+    }
+
     fn pick(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
         match row {
+            Row::Session(id) => {
+                let open = |s: &crate::desk::Session| s.state.entity_id() == id;
+                if let Some(session) = self.ordered(cx).into_iter().find(open) {
+                    self.enter(&session, cx);
+                }
+            }
             Row::Recovered => cx.emit(WelcomeEvent::Continue),
             Row::Recent(ix) => self.open(ix, window, cx),
         }
@@ -284,6 +340,13 @@ impl Welcome {
             cx.emit(WelcomeEvent::Continue);
         } else {
             projects::open(&self.state(cx), r.path.clone(), window, cx);
+        }
+    }
+
+    /// Open the recent project saved at `path`, while it is still listed.
+    fn open_recent(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.recent.iter().position(|r| r.path == path) {
+            self.open(ix, window, cx);
         }
     }
 
@@ -336,28 +399,28 @@ impl Welcome {
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The keys are the list's while it or its search has them: a chat
-        // and the prompt keep their own.
+        if self.take_board_key(ev, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        // The keys are the rows' while the page or the search has them: a
+        // chat and the prompt keep their own.
         let search = self.search.read(cx).focus_handle(cx).is_focused(window);
         if !search && !self.focus.is_focused(window) {
             return;
         }
         let rows = self.visible(cx);
-        // As the list shows it: rows can go without a search, as the
-        // recovered one does once its project is saved.
-        self.selected = self.selected.min(rows.len().saturating_sub(1));
+        let at = self.selected(&rows);
         match ev.keystroke.key.as_str() {
-            "down" if !rows.is_empty() => {
-                self.selected = (self.selected + 1).min(rows.len() - 1);
-            }
-            "up" => self.selected = self.selected.saturating_sub(1),
+            "down" => self.selected = rows.get(at + 1).or(rows.last()).copied(),
+            "up" => self.selected = rows.get(at.saturating_sub(1)).copied(),
             "enter" => {
-                if let Some(&row) = rows.get(self.selected) {
+                if let Some(&row) = rows.get(at) {
                     self.pick(row, window, cx);
                 }
                 return;
             }
-            "/" if !self.search.read(cx).focus_handle(cx).is_focused(window) => {
+            "/" if !search && !self.projects_open(cx) => {
                 self.search.update(cx, |s, cx| s.focus(window, cx));
                 cx.stop_propagation();
             }
@@ -366,59 +429,94 @@ impl Welcome {
         cx.notify();
     }
 
-    /// New project and Open…, held while the models are missing.
+    fn new_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("welcome-new")
+            .icon(IconName::Plus)
+            .label("New project")
+            .kbd(format!("{} N", crate::app::MOD))
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.emit(WelcomeEvent::ForgetFootage);
+                projects::new_project(&this.state(cx), window, cx)
+            }))
+    }
+
+    fn open_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("welcome-open")
+            .icon(IconName::FolderOpen)
+            .label("Open…")
+            .kbd(format!("{} O", crate::app::MOD))
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.emit(WelcomeEvent::ForgetFootage);
+                projects::open_dialog(&this.state(cx), window, cx)
+            }))
+    }
+
+    /// The last few recent projects as a menu beside Open…, where their
+    /// list does not show.
+    fn recent_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let recent: Vec<_> = (self.recent.iter().take(RECENT_SHOWN))
+            .map(|r| (r.path.clone(), r.name.clone()))
+            .collect();
+        let page = cx.entity().downgrade();
+        Button::new("welcome-recent")
+            .icon(IconName::ChevronDown)
+            .tooltip("Recent")
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                if recent.is_empty() {
+                    return menu.item(PopupMenuItem::new("No recent projects").disabled(true));
+                }
+                recent.iter().fold(menu, |menu, (path, name)| {
+                    let (page, path) = (page.clone(), path.clone());
+                    menu.item(
+                        PopupMenuItem::new(name.clone()).on_click(move |_, window, cx| {
+                            let _ = page.update(cx, |page, cx| page.open_recent(&path, window, cx));
+                        }),
+                    )
+                })
+            })
+    }
+
+    /// New project and Open… as the page's side shows them, large and
+    /// held while the models are missing.
     fn actions(&self, waiting: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // The shortcut sits at the button's far end.
         let big = |b: Button| {
             b.h(px(38.))
                 .w_full()
                 .justify_start()
                 .px(px(14.))
                 .text_size(px(13.))
+                .child(div().flex_1())
+                .disabled(waiting)
         };
         v_flex()
             .gap(px(8.))
-            .child(big(Button::new("welcome-new")
-                .when(!waiting, |b| b.primary())
-                .disabled(waiting)
-                .icon(IconName::Plus)
-                .label("New project")
-                .child(div().flex_1())
-                .kbd(format!("{} N", crate::app::MOD))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::new_project(&this.state(cx), window, cx)
-                }))))
-            .child(big(Button::new("welcome-open")
-                .disabled(waiting)
-                .icon(IconName::FolderOpen)
-                .label("Open…")
-                .child(div().flex_1())
-                .kbd(format!("{} O", crate::app::MOD))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.emit(WelcomeEvent::ForgetFootage);
-                    projects::open_dialog(&this.state(cx), window, cx)
-                }))))
+            // The page's primary action, unless the models' download is.
+            .child(big(self.new_button(cx).when(!waiting, |b| b.primary())))
+            .child(big(self.open_button(cx)))
+    }
+
+    /// Files from outside are held over the element this listens on, or
+    /// left it: hold them for the drop, while a project can be made.
+    fn drag_moved(
+        &mut self,
+        ev: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.state(cx).read(cx).projects_wait();
+        let over = (!waiting && ev.bounds.contains(&ev.event.position))
+            .then(|| ev.drag(cx).paths().to_vec());
+        if over != self.dropping {
+            self.dropping = over;
+            cx.notify();
+        }
     }
 
     fn drop_zone(&self, waiting: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let dropping = self.dropping.as_ref().filter(|_| !waiting);
         let (title, hint): (SharedString, SharedString) = match dropping {
-            Some(paths) => {
-                let hint = match paths.as_slice() {
-                    [one] => {
-                        let name = one
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        match std::fs::read_dir(one) {
-                            Ok(dir) => format!("{name} · {} files", dir.count()),
-                            Err(_) => name,
-                        }
-                    }
-                    many => format!("{} items", many.len()),
-                };
-                ("Drop to create a project".into(), hint.into())
-            }
+            Some(paths) => ("Drop to create a project".into(), drop_hint(paths).into()),
             None => (
                 "Drop a folder of footage".into(),
                 "MOV · MP4 · WAV · PNG · .flikk".into(),
@@ -445,17 +543,7 @@ impl Welcome {
                 pattern_slash(t::alpha(t::T1, 0.012), 8., 8.)
             })
             .when(waiting, |zone| zone.opacity(0.5))
-            .on_drag_move(
-                cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let waiting = this.state(cx).read(cx).projects_wait();
-                    let over = (!waiting && ev.bounds.contains(&ev.event.position))
-                        .then(|| ev.drag(cx).paths().to_vec());
-                    if over != this.dropping {
-                        this.dropping = over;
-                        cx.notify();
-                    }
-                }),
-            )
+            .on_drag_move(cx.listener(Self::drag_moved))
             .on_drop(cx.listener(Self::drop_files))
             .child(
                 div()
@@ -634,60 +722,69 @@ impl Welcome {
         .on_click(cx.listener(move |this, _, window, cx| this.open(ix, window, cx)))
     }
 
-    fn recent(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.visible(cx);
-        let selected = self.selected.min(rows.len().saturating_sub(1));
-        v_flex()
-            .flex_none()
+    /// "Recent", how many rows show and the search.
+    fn recent_header(&self, shown: usize) -> impl IntoElement {
+        h_flex()
+            .h(px(32.))
+            .px(px(10.))
             .gap(px(8.))
             .child(
-                h_flex()
-                    .h(px(32.))
-                    .px(px(10.))
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Recent"),
-                    )
-                    .child(
-                        div()
-                            .font_family(t::mono())
-                            .text_size(px(11.))
-                            .text_color(t::T3)
-                            .child(rows.len().to_string()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div().w(px(220.)).child(
-                            Input::new(&self.search)
-                                .search()
-                                .kbd("/")
-                                .bg(t::P)
-                                .rounded(t::RADIUS),
-                        ),
-                    ),
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Recent"),
             )
-            .child({
-                let mut list = v_flex().gap(px(2.));
-                for (n, &row) in rows.iter().enumerate() {
-                    list = list.child(match row {
-                        Row::Recovered => self.recovered_row(n == selected, cx).into_any_element(),
-                        Row::Recent(ix) => self.row(ix, n == selected, cx).into_any_element(),
-                    });
-                }
-                if rows.is_empty() {
-                    list = list.child(
-                        div()
-                            .px(px(10.))
-                            .py(px(8.))
-                            .text_color(t::T3)
-                            .child("No recent projects"),
-                    );
-                }
-                list
-            })
+            .child(meta(shown.to_string()))
+            .child(div().flex_1())
+            .child(
+                div().w(px(220.)).child(
+                    Input::new(&self.search)
+                        .search()
+                        .kbd("/")
+                        .bg(t::P)
+                        .rounded(t::RADIUS),
+                ),
+            )
+    }
+
+    /// The recent projects under their header and search. With projects
+    /// open there is no section: a recovered project's row stands alone,
+    /// and without one nothing shows.
+    fn recent(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let rows = self.visible(cx);
+        let section = !self.projects_open(cx);
+        let selected = self.selected(&rows);
+        let mut list = v_flex().gap(px(2.));
+        let mut listed = 0;
+        for (n, &row) in rows.iter().enumerate() {
+            let row = match row {
+                // The agents show it.
+                Row::Session(_) => continue,
+                Row::Recovered => self.recovered_row(n == selected, cx).into_any_element(),
+                Row::Recent(ix) => self.row(ix, n == selected, cx).into_any_element(),
+            };
+            list = list.child(row);
+            listed += 1;
+        }
+        if listed == 0 && !section {
+            return None;
+        }
+        if listed == 0 {
+            list = list.child(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_color(t::T3)
+                    .child("No recent projects"),
+            );
+        }
+        Some(
+            v_flex()
+                .flex_none()
+                .gap(px(8.))
+                .when(section, |recent| recent.child(self.recent_header(listed)))
+                .child(list),
+        )
     }
 
     /// The setup list: one row each for the models, the transcription
@@ -889,56 +986,14 @@ impl Render for Welcome {
                 |this| this.download_poll = None,
             ));
         }
-        let version = env!("CARGO_PKG_VERSION");
-        let sessions = self.desk.read(cx).listed(cx);
-        // With projects open the page is theirs: their tiles take the
-        // window's width, the rest keeps to the side and below.
-        let wide = !waiting && !sessions.is_empty();
-        let lists = (!waiting).then(|| {
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(24.))
-                .child(self.board(&sessions, window, cx))
-                .child(self.recent(cx))
-        });
-        let page = h_flex()
-            .map(|page| {
-                if wide {
-                    page.w_full()
-                } else {
-                    page.w(px(1080.))
-                }
-            })
-            .max_w_full()
-            .py(px(24.))
-            .px(px(24.))
-            .items_stretch()
-            .gap(px(if wide { 32. } else { 56. }))
-            .child(
-                v_flex()
-                    .w(px(340.))
-                    .flex_none()
-                    .child(
-                        div()
-                            .text_size(px(30.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Flikk"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .font_family(t::mono())
-                            .text_color(t::T3)
-                            .child(version),
-                    )
-                    .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
-                    .child(self.drop_zone(waiting, cx)),
-            )
-            .map(|page| match lists {
-                Some(lists) => page.child(lists),
-                None => page.child(self.setup(cx)),
-            });
+        let sessions = self.ordered(cx);
+        // With projects open the page is theirs: see `agents_page`.
+        let wide = !sessions.is_empty();
+        let page = match wide {
+            true => self.agents_page(&sessions, window, cx).into_any_element(),
+            false => self.start_page(waiting, window, cx).into_any_element(),
+        };
+        let dropping = wide && self.dropping.is_some();
         div()
             .id("welcome")
             .track_focus(&self.focus)
@@ -959,10 +1014,115 @@ impl Render for Welcome {
                             .flex()
                             .justify_center()
                             .min_h_full()
-                            .map(|centre| if wide { centre } else { centre.items_center() })
+                            .map(|centre| match wide {
+                                // A chat's composer keeps what is dropped on it.
+                                true => centre
+                                    .on_drag_move(cx.listener(Self::drag_moved))
+                                    .on_drop(cx.listener(Self::drop_files)),
+                                false => centre.items_center(),
+                            })
                             .child(page),
                     ),
             )
+            .when(dropping, |welcome| welcome.child(drop_outline()))
+    }
+}
+
+impl Welcome {
+    /// The page with no project open: the name, New project, Open… and the
+    /// drop zone on its side, beside the prompt that starts an agent and
+    /// the recent projects, or the setup list while the models are missing.
+    fn start_page(
+        &mut self,
+        waiting: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let version = env!("CARGO_PKG_VERSION");
+        let side = v_flex()
+            .w(px(340.))
+            .flex_none()
+            .child(
+                div()
+                    .text_size(px(30.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Flikk"),
+            )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .font_family(t::mono())
+                    .text_color(t::T3)
+                    .child(version),
+            )
+            .child(div().mt(px(32.)).child(self.actions(waiting, cx)))
+            .child(self.drop_zone(waiting, cx));
+        let lists = match waiting {
+            true => self.setup(cx).into_any_element(),
+            false => v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(24.))
+                .child(self.board(&[], window, cx))
+                .children(self.recent(cx))
+                .into_any_element(),
+        };
+        h_flex()
+            .w(px(1080.))
+            .max_w_full()
+            .p(px(board::PAGE_PADDING))
+            .items_stretch()
+            .gap(px(56.))
+            .child(side)
+            .child(lists)
+    }
+
+    /// The page with projects open, which is their agents': they take its
+    /// width, their header starts and opens projects, and a recovered
+    /// project keeps its row under them.
+    fn agents_page(
+        &mut self,
+        sessions: &[crate::desk::Session],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        v_flex()
+            .w_full()
+            .max_w_full()
+            .p(px(board::PAGE_PADDING))
+            .gap(px(24.))
+            .child(self.board(sessions, window, cx))
+            .children(self.recent(cx))
+    }
+}
+
+/// The dashed line around the page while files are held over it: a drop
+/// anywhere starts a project.
+fn drop_outline() -> impl IntoElement {
+    div()
+        .absolute()
+        .inset(px(8.))
+        .rounded(t::RADIUS_LG)
+        .border_1()
+        .border_dashed()
+        .border_color(t::AC)
+}
+
+/// What is held over a drop: the one file or folder by name, a folder with
+/// how many files it holds, else how many items.
+fn drop_hint(paths: &[PathBuf]) -> String {
+    match paths {
+        [one] => {
+            let name = one
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match std::fs::read_dir(one) {
+                Ok(dir) => format!("{name} · {} files", dir.count()),
+                Err(_) => name,
+            }
+        }
+        many => format!("{} items", many.len()),
     }
 }
 
