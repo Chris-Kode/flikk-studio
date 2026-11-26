@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "flikk"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-agent"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-analysis"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "flikk-core",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-cloud"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "base64 0.22.1",
  "flikk-core",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-core"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "flikk-os",
  "serde",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-deliver"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "cosmic-text",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-gpu"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "flikk-core",
@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-html"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-media"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "flikk-models"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "flikk-core",
@@ -1964,11 +1964,11 @@ dependencies = [
 
 [[package]]
 name = "flikk-os"
-version = "0.1.31"
+version = "0.1.32"
 
 [[package]]
 name = "flikk-store"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "chrono",
