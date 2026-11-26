@@ -1,8 +1,9 @@
 //! The home page the app opens on, and comes back to from the editor: New
 //! project, Open…, a drop zone that starts a project from footage, the
-//! agents at work on the open projects ([`board`]) and the recent
-//! projects. While a model is missing, the setup list takes the agents'
-//! and recent projects' place and no project opens: the models to download
+//! agents at work on the open projects ([`board`]) and the last few recent
+//! projects, which make way once a project is open. While a model is
+//! missing, the setup list takes the agents' and recent projects' place
+//! and no project opens: the models to download
 //! as one, the transcription size, the agent CLIs found, and FFmpeg and a
 //! browser when they are not.
 
@@ -29,6 +30,9 @@ use std::time::{Duration, SystemTime};
 
 /// How often the setup list redraws while the models download.
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
+
+/// How many recent projects the page lists: the search reaches the rest.
+const RECENT_SHOWN: usize = 5;
 
 /// Where Claude Code is installed from, when no agent CLI is found.
 const AGENT_INSTALL: &str = "https://code.claude.com/docs/en/setup";
@@ -240,24 +244,40 @@ impl Welcome {
         .detach();
     }
 
-    /// The rows matching the search, in order.
+    /// Whether open projects show on the page. It is then theirs: the
+    /// recent projects and their search make way.
+    fn projects_open(&self, cx: &App) -> bool {
+        !self.desk.read(cx).listed(cx).is_empty()
+    }
+
+    /// The rows the list shows, in order: the recovered project, then the
+    /// last few recent ones the search matches. With projects open, only
+    /// the recovered one, which has no other way in.
     fn visible(&self, cx: &App) -> Vec<Row> {
-        let query = self.search.read(cx).value().trim().to_lowercase();
         let s = self.state(cx).read(cx);
         if s.projects_wait() {
             return Vec::new();
         }
+        let searchable = !self.projects_open(cx);
+        // A search left in the field finds nothing while it is not shown.
+        let query = match searchable {
+            true => self.search.read(cx).value().trim().to_lowercase(),
+            false => String::new(),
+        };
         // Once gone into, it shows with the open projects instead.
         let recovered = s.file().is_none()
             && s.is_dirty()
             && !s.is_listed()
             && s.bus.project().name.to_lowercase().contains(&query);
-        let recent = (0..self.recent.len()).filter(|&i| {
-            let r = &self.recent[i];
-            query.is_empty()
-                || r.name.to_lowercase().contains(&query)
-                || r.path.to_string_lossy().to_lowercase().contains(&query)
-        });
+        let listed = if searchable { self.recent.len() } else { 0 };
+        let recent = (0..listed)
+            .filter(|&i| {
+                let r = &self.recent[i];
+                query.is_empty()
+                    || r.name.to_lowercase().contains(&query)
+                    || r.path.to_string_lossy().to_lowercase().contains(&query)
+            })
+            .take(RECENT_SHOWN);
         recovered
             .then_some(Row::Recovered)
             .into_iter()
@@ -357,7 +377,7 @@ impl Welcome {
                 }
                 return;
             }
-            "/" if !self.search.read(cx).focus_handle(cx).is_focused(window) => {
+            "/" if !search && !self.projects_open(cx) => {
                 self.search.update(cx, |s, cx| s.focus(window, cx));
                 cx.stop_propagation();
             }
@@ -634,60 +654,66 @@ impl Welcome {
         .on_click(cx.listener(move |this, _, window, cx| this.open(ix, window, cx)))
     }
 
-    fn recent(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.visible(cx);
-        let selected = self.selected.min(rows.len().saturating_sub(1));
-        v_flex()
-            .flex_none()
+    /// "Recent", how many rows show and the search.
+    fn recent_header(&self, shown: usize) -> impl IntoElement {
+        h_flex()
+            .h(px(32.))
+            .px(px(10.))
             .gap(px(8.))
             .child(
-                h_flex()
-                    .h(px(32.))
-                    .px(px(10.))
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Recent"),
-                    )
-                    .child(
-                        div()
-                            .font_family(t::mono())
-                            .text_size(px(11.))
-                            .text_color(t::T3)
-                            .child(rows.len().to_string()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div().w(px(220.)).child(
-                            Input::new(&self.search)
-                                .search()
-                                .kbd("/")
-                                .bg(t::P)
-                                .rounded(t::RADIUS),
-                        ),
-                    ),
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Recent"),
             )
-            .child({
-                let mut list = v_flex().gap(px(2.));
-                for (n, &row) in rows.iter().enumerate() {
-                    list = list.child(match row {
-                        Row::Recovered => self.recovered_row(n == selected, cx).into_any_element(),
-                        Row::Recent(ix) => self.row(ix, n == selected, cx).into_any_element(),
-                    });
-                }
-                if rows.is_empty() {
-                    list = list.child(
-                        div()
-                            .px(px(10.))
-                            .py(px(8.))
-                            .text_color(t::T3)
-                            .child("No recent projects"),
-                    );
-                }
-                list
-            })
+            .child(meta(shown.to_string()))
+            .child(div().flex_1())
+            .child(
+                div().w(px(220.)).child(
+                    Input::new(&self.search)
+                        .search()
+                        .kbd("/")
+                        .bg(t::P)
+                        .rounded(t::RADIUS),
+                ),
+            )
+    }
+
+    /// The recent projects under their header and search. With projects
+    /// open there is no section: a recovered project's row stands alone,
+    /// and without one nothing shows.
+    fn recent(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let rows = self.visible(cx);
+        let section = !self.projects_open(cx);
+        if rows.is_empty() && !section {
+            return None;
+        }
+        let selected = self.selected.min(rows.len().saturating_sub(1));
+        let mut list = v_flex().gap(px(2.));
+        for (n, &row) in rows.iter().enumerate() {
+            list = list.child(match row {
+                Row::Recovered => self.recovered_row(n == selected, cx).into_any_element(),
+                Row::Recent(ix) => self.row(ix, n == selected, cx).into_any_element(),
+            });
+        }
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_color(t::T3)
+                    .child("No recent projects"),
+            );
+        }
+        Some(
+            v_flex()
+                .flex_none()
+                .gap(px(8.))
+                .when(section, |recent| {
+                    recent.child(self.recent_header(rows.len()))
+                })
+                .child(list),
+        )
     }
 
     /// The setup list: one row each for the models, the transcription
@@ -900,7 +926,7 @@ impl Render for Welcome {
                 .min_w_0()
                 .gap(px(24.))
                 .child(self.board(&sessions, window, cx))
-                .child(self.recent(cx))
+                .children(self.recent(cx))
         });
         let page = h_flex()
             .map(|page| {
