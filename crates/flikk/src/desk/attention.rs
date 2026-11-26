@@ -143,7 +143,7 @@ impl Desk {
 /// What waits for the user in a project, in one line: the approvals its
 /// agent asked for, else its question, else the changes left to review
 /// once it is done.
-fn waits_in(s: &EditorState) -> Option<String> {
+pub(crate) fn waits_in(s: &EditorState) -> Option<String> {
     let approvals = s.pending_approvals();
     let mut asked = approvals.iter().filter(|p| !p.request.allowed);
     if let Some(first) = asked.next() {
