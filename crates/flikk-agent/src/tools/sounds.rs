@@ -9,7 +9,7 @@ use super::{Done, Job, JobDone, Step, ToolCtx};
 use crate::args::{Args, ToolError, range_json, secs, short, strip_token, track_id};
 use flikk_core::cloud::GenerationInfo;
 use flikk_core::library::{self, Library, sound_category};
-use flikk_core::model::{Fingerprint, MediaKind, Project, TrackKind};
+use flikk_core::model::{Fingerprint, MediaItem, MediaKind, Project, TrackKind};
 use flikk_core::{Time, TimeRange};
 use serde_json::{Value, json};
 
@@ -193,6 +193,32 @@ pub fn use_sound(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         .find(|s| s.id.to_string() == text || s.id.0.to_string() == text)
         .or_else(|| lib.sounds.iter().find(|s| s.name.to_lowercase() == text))
         .ok_or_else(|| ToolError(format!("no library sound `{text}`; find_sounds lists them")))?;
+    let text = add_to_pool(ctx, args, sound.item())?;
+    Ok(Done::text(format!("sound {}", sound.name), text).into())
+}
+
+/// Add `item`, a library sound or video, to the pool as the user's edit
+/// (one on the same file is reused) and, with `at`, propose it on `track`
+/// or a free track of its kind. What happened, for the model.
+pub(super) fn add_to_pool(
+    ctx: &mut ToolCtx,
+    args: &Args,
+    item: MediaItem,
+) -> Result<String, ToolError> {
+    let (kind, tracks, label, tool) = match item.kind {
+        MediaKind::Video => (
+            TrackKind::Video,
+            "a video",
+            "Add video",
+            "use_library_video",
+        ),
+        _ => (
+            TrackKind::Audio,
+            "an audio",
+            "Add sound",
+            "use_library_sound",
+        ),
+    };
     let project = ctx.project();
     let track = args
         .opt_str("track")?
@@ -202,21 +228,21 @@ pub fn use_sound(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         && project
             .timeline
             .track(track)
-            .is_some_and(|t| t.kind != TrackKind::Audio)
+            .is_some_and(|t| t.kind != kind)
     {
-        return Err(ToolError("`track` must be an audio track".into()));
+        return Err(ToolError(format!("`track` must be {tracks} track")));
     }
     let placement = args.opt_time("at")?.map(|at| Placement { at, track });
     let reason = args
         .opt_str("reason")?
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .unwrap_or("use_library_sound")
+        .unwrap_or(tool)
         .to_owned();
-    let (media, commands) = library::sound_media(ctx.bus.project(), sound);
+    let (media, commands) = library::pool_media(ctx.bus.project(), item);
     if !commands.is_empty() {
         ctx.bus
-            .execute_shared_as(commands, "Add sound", ctx.author.clone())
+            .execute_shared_as(commands, label, ctx.author.clone())
             .map_err(|e| ToolError(e.to_string()))?;
     }
     let mut text = format!("In the pool as media {}.", short(media));
@@ -226,5 +252,5 @@ pub fn use_sound(ctx: &mut ToolCtx, args: &Args) -> Result<Step, ToolError> {
         text.push(' ');
         text.push_str(&placed);
     }
-    Ok(Done::text(format!("sound {}", sound.name), text).into())
+    Ok(text)
 }

@@ -124,11 +124,20 @@ pub fn request(
                 json!({ "fx": asset.id.to_string() }),
             )
         }
-        "save_sound_to_library" => {
+        "save_sound_to_library" | "save_video_to_library" => {
             let id = media_id(project, args.str("media")?)?;
-            let item = project.media(id);
-            let Some(item) = item.filter(|m| m.kind == MediaKind::Audio) else {
-                return Err(ToolError("only audio goes to the library".into()));
+            let (kind, refusal) = match tool {
+                "save_video_to_library" => (
+                    MediaKind::Video,
+                    "that is not a video; audio goes with save_sound_to_library",
+                ),
+                _ => (
+                    MediaKind::Audio,
+                    "that is not audio; a video goes with save_video_to_library",
+                ),
+            };
+            let Some(item) = project.media(id).filter(|m| m.kind == kind) else {
+                return Err(ToolError(refusal.into()));
             };
             let name = item.path.file_name().unwrap_or_default().to_string_lossy();
             (

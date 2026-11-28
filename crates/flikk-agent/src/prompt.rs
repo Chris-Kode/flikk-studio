@@ -157,6 +157,14 @@ there before making new audio. When audio in the pool is worth keeping for \
 other projects, offer `save_sound_to_library`; it waits for the user's \
 approval.
 
+Videos kept to reuse: `list_library_videos` (edit group) lists the videos \
+in the user's library, shared by every project: intros, outros, overlays, \
+logo stings. `use_library_video` adds one to the pool and, with `at`, \
+proposes it on a video track, its sound on an audio track. Look there when \
+they ask for their intro, logo or usual footage, and before making a new \
+video. When a video in the pool is worth keeping for other projects, offer \
+`save_video_to_library`; it waits for the user's approval.
+
 Making music, sound effects and voiceovers: `generate_audio` (generate \
 group) has the provider the user set up make one, into the pool's Music \
 Generated, Sound Effects Generated or Voiceover Generated bin; with `range` \

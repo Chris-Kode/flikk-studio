@@ -34,6 +34,7 @@ mod stabilize;
 mod sync;
 pub mod upscale;
 pub mod video;
+mod videos;
 mod view;
 pub mod voices;
 pub mod web;
@@ -415,6 +416,8 @@ fn serve_inner(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Step, Tool
         "use_library_fx" => fx::use_library(ctx, &args),
         "find_sounds" => sounds::find(ctx, &args),
         "use_library_sound" => sounds::use_sound(ctx, &args),
+        "list_library_videos" => videos::list(ctx, &args),
+        "use_library_video" => videos::use_video(ctx, &args),
         "find_voices" => voices::find_voices(ctx, &args),
         "stabilize" => stabilize::stabilize(ctx, &args),
         "get_shake" => stabilize::get_shake(ctx, &args),

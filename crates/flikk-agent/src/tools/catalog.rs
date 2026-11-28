@@ -579,6 +579,18 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         ),
         spec(
+            "list_library_videos",
+            Some(ReadProject),
+            "Videos in the user's library, shared by every project: intros, overlays, logo stings and other footage kept to reuse. `text` matches names, tags and what generated ones were asked to be; without it, lists them. list_media lists this project's pool instead.",
+            object(
+                json!({
+                    "text": string("What it is, in a few words"),
+                    "limit": number("Most videos (default 20)")
+                }),
+                &[],
+            ),
+        ),
+        spec(
             "get_clip",
             Some(ReadProject),
             "Everything about one clip: source, name, color, speed, enabled, transform (position, scale, stretch, rotation, skew, anchor, opacity, crop, flip, blend), keyframes, grade and curves, effects with their values and keyframes, transitions (and where they play), generator values, audio and audio effects. Values at their neutral default are left out.",
@@ -1910,6 +1922,12 @@ pub fn catalog() -> Vec<ToolSpec> {
             object(json!({ "media": string("Media id") }), &["media"]),
         ),
         spec(
+            "save_video_to_library",
+            Some(ProjectMemory),
+            "Ask the user to approve saving a video from the pool to their library, so other projects can use it.",
+            object(json!({ "media": string("Media id") }), &["media"]),
+        ),
+        spec(
             "save_fx_to_library",
             Some(ProjectMemory),
             "Ask the user to approve saving one of this project's FX programs to their library, so other projects can use it.",
@@ -1972,6 +1990,20 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "reason": reason()
                 }),
                 &["sound"],
+            ),
+        ),
+        spec(
+            "use_library_video",
+            Some(EditTimeline),
+            "Add a video from the user's library (list_library_videos) to the pool's Library bin, and propose it on a video track with `at`, its sound on an audio track. A video the project has is reused.",
+            object(
+                json!({
+                    "video": string("Library id or name"),
+                    "at": time("Propose it on the timeline from here; leave out to only add it to the pool"),
+                    "track": string("Video track id (default: one free over its length, else a new one)"),
+                    "reason": reason()
+                }),
+                &["video"],
             ),
         ),
         // ---- generate (money or credits: approved each time)

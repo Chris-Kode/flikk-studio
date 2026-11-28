@@ -112,6 +112,7 @@ pub fn group_of(spec: &ToolSpec) -> Option<ToolCategory> {
             ToolCategory::Audio
         }
         "find_voices" | super::video::PREVIEW => ToolCategory::Generate,
+        "list_library_videos" => ToolCategory::EditTimeline,
         "get_shake" => ToolCategory::Transform,
         "list_caption_styles" => ToolCategory::Captions,
         _ => match spec.category? {

@@ -78,7 +78,8 @@ impl EditorState {
                         crate::ui::library::shared::link_to_library(self, fx, cx);
                     }
                 }
-                if pending.request.tool == "save_sound_to_library" {
+                let tool = pending.request.tool.as_str();
+                if matches!(tool, "save_sound_to_library" | "save_video_to_library") {
                     self.reload_library(cx);
                 }
                 ApprovalOutcome::Done(line)

@@ -80,7 +80,7 @@ pub fn start(request: &ApprovalRequest, inputs: Inputs) -> Result<Started> {
         "save_skill" | "save_style" => save_entry(args),
         "delete_skill" | "delete_style" => delete_entry(args),
         "save_fx_to_library" => save_fx(args, inputs.project),
-        "save_sound_to_library" => save_sound(args, inputs.project),
+        "save_sound_to_library" | "save_video_to_library" => save_media(args, inputs.project),
         "queue_render" => {
             let mut settings = preset(str_arg(args, "preset")?);
             settings.range = args.get("range").and_then(range);
@@ -395,15 +395,22 @@ fn save_fx(args: &Value, project: &Project) -> Result<Started> {
     Ok(Started::Done("Saved to the library".into()))
 }
 
-/// Save audio from the pool to the user's library.
-fn save_sound(args: &Value, project: &Project) -> Result<Started> {
+/// Save audio or a video from the pool to the user's library, as a sound
+/// or a video.
+fn save_media(args: &Value, project: &Project) -> Result<Started> {
     let text = str_arg(args, "media")?;
     let item = uuid::Uuid::parse_str(text)
         .ok()
         .and_then(|id| project.media(flikk_core::MediaId(id)))
         .ok_or_else(|| anyhow!("media {text} is no longer in the project"))?;
     let lib = flikk_core::library::Library::load();
-    flikk_core::library::save_sound(&lib, item).map_err(|e| anyhow!(e))?;
+    match item.kind {
+        flikk_core::model::MediaKind::Video => {
+            flikk_core::library::save_video(&lib, item).map(|_| ())
+        }
+        _ => flikk_core::library::save_sound(&lib, item).map(|_| ()),
+    }
+    .map_err(|e| anyhow!(e))?;
     Ok(Started::Done("Saved to the library".into()))
 }
 
