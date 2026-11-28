@@ -1,10 +1,11 @@
 //! Effects library (Resolve-style): video effects, transitions, shader
 //! generators, HTML titles and motion graphics, audio effects, the
 //! project's own programs and the user's library of programs, presets,
-//! sounds and voices shared by every project, grouped by category and
-//! searchable. Items drag onto the timeline and the chat; double-click
-//! applies to the selection, places a sound at the playhead, or opens the
-//! voiceover form on a voice. A voice gone from the account shows dimmed.
+//! sounds, videos and voices shared by every project, grouped by category
+//! and searchable. Items drag onto the timeline and the chat; double-click
+//! applies to the selection, places a sound or a video at the playhead, or
+//! opens the voiceover form on a voice. A voice gone from the account shows
+//! dimmed.
 
 mod apply;
 mod glyphs;
@@ -22,14 +23,14 @@ use crate::ui::kit::{
     Input, PopupMenu, PopupMenuItem, ScrollableElement as _, Tab, Tabs, Tooltip, h_flex, v_flex,
 };
 use crate::ui::listen::listen_dot;
-use crate::ui::media_pool::import::is_audio;
-use crate::ui::{AudioFxDrag, FxDrag, SoundDrag};
+use crate::ui::media_pool::import::is_stock;
+use crate::ui::{AudioFxDrag, FxDrag, StockDrag};
 use apply::Starter;
 use flikk_core::LibraryId;
 use flikk_core::audiofx::AudioFxKind;
 use flikk_core::cloud::VoiceOrigin;
 use flikk_core::fx::{self, FxAsset, FxKind, FxLanguage, FxRef};
-use flikk_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, SavedVoice, Sound};
+use flikk_core::library::{Library, PRESET_EXT, PROGRAM_EXT, Preset, SavedVoice, Sound, Video};
 use flikk_core::model::Project;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -52,11 +53,12 @@ enum Section {
     Library,
     Presets,
     Sounds,
+    Videos,
     Voices,
 }
 
 impl Section {
-    const ALL: [Section; 10] = [
+    const ALL: [Section; 11] = [
         Self::Video,
         Self::Transitions,
         Self::Generators,
@@ -66,6 +68,7 @@ impl Section {
         Self::Library,
         Self::Presets,
         Self::Sounds,
+        Self::Videos,
         Self::Voices,
     ];
 
@@ -81,6 +84,7 @@ impl Section {
             Self::Library => "Library",
             Self::Presets => "Presets",
             Self::Sounds => "Sounds",
+            Self::Videos => "Videos",
             Self::Voices => "Voices",
         }
     }
@@ -97,6 +101,7 @@ impl Section {
             Self::Library => "Library",
             Self::Presets => "Presets",
             Self::Sounds => "Sounds",
+            Self::Videos => "Videos",
             Self::Voices => "Voices",
         }
     }
@@ -120,6 +125,7 @@ enum Item {
     Program(LibraryId),
     Preset(LibraryId),
     Sound(LibraryId),
+    Video(LibraryId),
     Voice(LibraryId),
 }
 
@@ -215,6 +221,22 @@ fn sound_entry(s: &Sound) -> Entry {
     }
 }
 
+/// What a provider was asked for shows on hover.
+fn video_entry(v: &Video) -> Entry {
+    let generated = v.generated.as_ref();
+    Entry {
+        item: Item::Video(v.id),
+        name: v.name.clone().into(),
+        category: generated.map_or("", |_| "Generated").into(),
+        description: generated
+            .map(|g| g.prompt.clone().into())
+            .unwrap_or_default(),
+        glyph: FxGlyph::Video,
+        kind: None,
+        meta: v.info.as_ref().map(|i| clock_rounded(i.duration).into()),
+    }
+}
+
 /// How it was made shows on hover.
 fn voice_entry(v: &SavedVoice) -> Entry {
     Entry {
@@ -272,6 +294,7 @@ fn entries(project: &Project, lib: &Library, section: Section) -> Vec<Entry> {
             .collect(),
         Section::Presets => lib.presets.iter().map(preset_entry).collect(),
         Section::Sounds => lib.sounds.iter().map(sound_entry).collect(),
+        Section::Videos => lib.videos.iter().map(video_entry).collect(),
         Section::Voices => lib.voices.iter().map(voice_entry).collect(),
         _ => fx::builtins()
             .iter()
@@ -310,7 +333,7 @@ pub struct LibraryPanel {
 impl LibraryPanel {
     pub fn new(state: Entity<EditorState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search effects, sounds, voices"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search effects, sounds, videos"));
         let name = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
@@ -347,7 +370,7 @@ impl LibraryPanel {
             Item::Audio(kind) => apply::apply_audio(s, *kind, cx),
             Item::Program(id) => shared::apply_program(s, *id, cx),
             Item::Preset(id) => shared::apply_preset(s, *id, cx),
-            Item::Sound(id) => shared::place_sound(s, *id, cx),
+            Item::Sound(id) | Item::Video(id) => shared::place_media(s, *id, cx),
             Item::Voice(_) => {}
         });
     }
@@ -359,6 +382,7 @@ impl LibraryPanel {
             .map(|p| p.asset.name.clone())
             .or_else(|| lib.preset(id).map(|p| p.name.clone()))
             .or_else(|| lib.sound(id).map(|s| s.name.clone()))
+            .or_else(|| lib.video(id).map(|v| v.name.clone()))
             .or_else(|| lib.voice(id).map(|v| v.name.clone()))
         else {
             return;
@@ -396,7 +420,7 @@ impl LibraryPanel {
                     .filter(|p| {
                         p.extension()
                             .is_some_and(|e| e == PROGRAM_EXT || e == PRESET_EXT)
-                            || is_audio(p)
+                            || is_stock(p)
                     })
                     .collect();
                 state.update(cx, |s, cx| shared::import(s, &paths, cx));
@@ -545,6 +569,7 @@ impl LibraryPanel {
             Item::Program(id) => format!("lib-{}", id.0),
             Item::Preset(id) => format!("preset-{}", id.0),
             Item::Sound(id) => format!("sound-{}", id.0),
+            Item::Video(id) => format!("video-{}", id.0),
             Item::Voice(id) => format!("voice-{}", id.0),
         }
         .into()
@@ -553,9 +578,11 @@ impl LibraryPanel {
     /// The library item `item` is being renamed, if it is.
     fn renaming(&self, item: &Item) -> bool {
         match item {
-            Item::Program(id) | Item::Preset(id) | Item::Sound(id) | Item::Voice(id) => {
-                self.renaming == Some(*id)
-            }
+            Item::Program(id)
+            | Item::Preset(id)
+            | Item::Sound(id)
+            | Item::Video(id)
+            | Item::Voice(id) => self.renaming == Some(*id),
             _ => false,
         }
     }
@@ -609,7 +636,7 @@ impl LibraryPanel {
         self.finish(el, &e, cx)
     }
 
-    /// An audio effect, preset, sound or voice as a row.
+    /// An audio effect, preset, sound, video or voice as a row.
     fn row(&self, e: Entry, cx: &mut Context<Self>) -> AnyElement {
         if self.renaming(&e.item) {
             return h_flex()
@@ -621,7 +648,7 @@ impl LibraryPanel {
         let selected = self.selected.as_ref() == Some(&e.item);
         let state = self.state.read(cx);
         let sample = match &e.item {
-            Item::Sound(id) => state.library.sound(*id).map(Sound::item),
+            Item::Sound(id) | Item::Video(id) => state.library.media_item(*id),
             Item::Voice(id) => state.library.voice(*id).and_then(SavedVoice::sample_item),
             _ => None,
         };
@@ -756,9 +783,9 @@ impl LibraryPanel {
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             ),
-            (Item::Sound(id), _) => el.on_drag(
-                SoundDrag {
-                    sound: *id,
+            (Item::Sound(id) | Item::Video(id), _) => el.on_drag(
+                StockDrag {
+                    item: *id,
                     name: e.name.clone(),
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
@@ -793,9 +820,9 @@ fn item_menu(
         return voice_menu(menu, panel, state, *id, cx);
     }
     let (p, it) = (panel.clone(), item.clone());
-    let sound = matches!(item, Item::Sound(_));
+    let stock = matches!(item, Item::Sound(_) | Item::Video(_));
     let menu = menu.item(
-        PopupMenuItem::new(if sound { "Add to Timeline" } else { "Apply" })
+        PopupMenuItem::new(if stock { "Add to Timeline" } else { "Apply" })
             .on_click(move |_, window, cx| p.update(cx, |this, cx| this.apply(&it, window, cx))),
     );
     let r = match item {
@@ -803,17 +830,17 @@ fn item_menu(
         Item::Audio(_) | Item::Voice(_) => return menu,
         Item::Program(id) => return library_menu(menu, panel, state, *id, true),
         Item::Preset(id) => return library_menu(menu, panel, state, *id, false),
-        Item::Sound(id) => {
+        Item::Sound(id) | Item::Video(id) => {
             let (id, s1, s2) = (*id, state.clone(), state.clone());
             let s = state.read(cx);
-            let sound = s.library.sound(id).map(Sound::item);
+            let stock = s.library.media_item(id);
             let preview = s.source.as_ref();
-            let playing = sound.zip(preview).is_some_and(|(sound, p)| p.plays(&sound));
+            let playing = stock.zip(preview).is_some_and(|(stock, p)| p.plays(&stock));
             let menu = menu
                 .item(
                     PopupMenuItem::new("Add to Project").on_click(move |_, _, cx| {
                         s1.update(cx, |s, cx| {
-                            shared::use_sound(s, id, cx);
+                            shared::use_media(s, id, cx);
                         })
                     }),
                 )
@@ -821,8 +848,8 @@ fn item_menu(
                     PopupMenuItem::new(if playing { "Pause" } else { "Play" }).on_click(
                         move |_, _, cx| {
                             s2.update(cx, |s, cx| {
-                                if let Some(sound) = s.library.sound(id).map(Sound::item) {
-                                    s.toggle_source(&sound, cx);
+                                if let Some(stock) = s.library.media_item(id) {
+                                    s.toggle_source(&stock, cx);
                                 }
                             })
                         },
@@ -1019,8 +1046,8 @@ fn library_menu(
     .item(
         PopupMenuItem::new("Show in Folder").on_click(move |_, _, cx| {
             let s = s3.read(cx);
-            let audio = s.library.sound(id).map(Sound::audio);
-            if let Some(path) = audio.or_else(|| shared::file_of(s, id)) {
+            let stock = s.library.media_item(id).map(|item| item.path);
+            if let Some(path) = stock.or_else(|| shared::file_of(s, id)) {
                 cx.reveal_path(&path);
             }
         }),

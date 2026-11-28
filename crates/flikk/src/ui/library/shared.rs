@@ -1,15 +1,15 @@
-//! The user's library from the editor: programs, presets and sounds every
-//! project can use (see `flikk_core::library`). Using a program copies it into
-//! the project first; saving one to the library links the project's copy to
-//! it. Using a sound adds it to the pool first.
+//! The user's library from the editor: programs, presets, sounds and videos
+//! every project can use (see `flikk_core::library`). Using a program copies
+//! it into the project first; saving one to the library links the project's
+//! copy to it. Using a sound or a video adds it to the pool first.
 
 use super::apply::{apply_fx, picture_clips, sound_clips};
 use crate::state::EditorState;
-use crate::ui::media_pool::import::{build_item, is_audio};
+use crate::ui::media_pool::import::{build_item, is_stock};
 use flikk_core::command::{Command, InsertMode};
 use flikk_core::fx::{self, FxRef};
 use flikk_core::library::{self, Preset};
-use flikk_core::model::{MediaItem, TrackKind};
+use flikk_core::model::{MediaItem, MediaKind, TrackKind};
 use flikk_core::{LibraryId, MediaId, Time, TimeRange, TrackId, model::Project};
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -143,6 +143,8 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
         library::rename_preset(&preset, name).map(|_| ())
     } else if let Some(sound) = s.library.sound(id).cloned() {
         library::rename_sound(&sound, name).map(|_| ())
+    } else if let Some(video) = s.library.video(id).cloned() {
+        library::rename_video(&video, name).map(|_| ())
     } else if s.library.voice(id).is_some() {
         return s.rename_saved_voice(id, name, cx);
     } else {
@@ -154,8 +156,9 @@ pub fn rename(s: &mut EditorState, id: LibraryId, name: &str, cx: &mut Context<E
     }
 }
 
-/// Remove a program, preset, sound or voice from the library. Projects keep
-/// their copies, sounds their audio, and voices stay on the account.
+/// Remove a program, preset, sound, video or voice from the library.
+/// Projects keep their copies, sounds and videos their files, and voices
+/// stay on the account.
 pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
     if s.library.voice(id).is_some() {
         return s.forget_voice(id, cx);
@@ -169,20 +172,21 @@ pub fn remove(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>)
     }
 }
 
-/// The file of a program, preset, sound or voice.
+/// The file of a program, preset, sound, video or voice.
 pub fn file_of(s: &EditorState, id: LibraryId) -> Option<PathBuf> {
     s.library
         .program(id)
         .map(|p| p.path.clone())
         .or_else(|| s.library.preset(id).map(|p| p.path.clone()))
         .or_else(|| s.library.sound(id).map(|p| p.path.clone()))
+        .or_else(|| s.library.video(id).map(|v| v.path.clone()))
         .or_else(|| s.library.voice(id).map(|v| v.path.clone()))
 }
 
-/// Copy `.flikkfx` and `.flikkpreset` files into the library, and audio files
-/// as sounds.
+/// Copy `.flikkfx` and `.flikkpreset` files into the library, and audio and
+/// video files as sounds and videos.
 pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorState>) {
-    let (audio, files): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|p| is_audio(p));
+    let (stock, files): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|p| is_stock(p));
     let errors: Vec<String> = files
         .iter()
         .filter_map(|p| library::import(&s.library, p).err())
@@ -191,13 +195,13 @@ pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorSta
     if !errors.is_empty() {
         fail(s, errors.join(" · "), cx);
     }
-    if !audio.is_empty() {
+    if !stock.is_empty() {
         let media = s.services.media.clone();
-        save_sounds(
+        save_stock(
             s,
             move || {
                 let build = |p| build_item(p, None, media.as_deref());
-                audio.into_iter().filter_map(build).collect()
+                stock.into_iter().filter_map(build).collect()
             },
             Vec::new(),
             cx,
@@ -208,38 +212,34 @@ pub fn import(s: &mut EditorState, paths: &[PathBuf], cx: &mut Context<EditorSta
 /// Pool items being copied into the library: the library lists them only
 /// once the copy is done, so until then they can't be saved again.
 #[derive(Default)]
-struct SavingSounds(HashSet<MediaId>);
+struct Saving(HashSet<MediaId>);
 
-impl Global for SavingSounds {}
+impl Global for Saving {}
 
-/// Save pool item `id` to the library.
-pub fn save_sound(s: &mut EditorState, id: MediaId, cx: &mut Context<EditorState>) {
-    if !can_save_sound(s, id, cx) {
+/// Save pool item `id` to the library, as a sound or a video.
+pub fn save_media(s: &mut EditorState, id: MediaId, cx: &mut Context<EditorState>) {
+    if !can_save_media(s, id, cx) {
         return;
     }
     if let Some(item) = s.bus.project().media(id).cloned() {
-        cx.default_global::<SavingSounds>().0.insert(id);
-        save_sounds(s, move || vec![item], vec![id], cx);
+        cx.default_global::<Saving>().0.insert(id);
+        save_stock(s, move || vec![item], vec![id], cx);
     }
 }
 
-/// Whether pool item `id` can go to the library: audio that is there to
-/// copy and not in it, or on its way, yet.
-pub fn can_save_sound(s: &EditorState, id: MediaId, cx: &App) -> bool {
-    let saving = cx
-        .try_global::<SavingSounds>()
-        .is_some_and(|g| g.0.contains(&id));
+/// Whether pool item `id` can go to the library: audio or video that is
+/// there to copy and not in it, or on its way, yet.
+pub fn can_save_media(s: &EditorState, id: MediaId, cx: &App) -> bool {
+    let saving = cx.try_global::<Saving>().is_some_and(|g| g.0.contains(&id));
     !saving
         && s.bus.project().media(id).is_some_and(|item| {
-            item.kind == flikk_core::model::MediaKind::Audio
-                && !s.is_offline(id)
-                && s.library.sound_of(item).is_none()
+            item.kind != MediaKind::Image && !s.is_offline(id) && !s.library.holds(item)
         })
 }
 
-/// Off the UI thread: the audio is copied in, then pool items `saving`
+/// Off the UI thread: the files are copied in, then pool items `saving`
 /// can be saved again.
-fn save_sounds(
+fn save_stock(
     s: &EditorState,
     items: impl FnOnce() -> Vec<MediaItem> + Send + 'static,
     saving: Vec<MediaId>,
@@ -247,20 +247,22 @@ fn save_sounds(
 ) {
     let lib = s.library.clone();
     let saved = cx.background_executor().spawn(async move {
+        // What is saved joins `lib`, so the same file twice is kept once.
         let mut lib = lib;
         let mut errors = Vec::new();
         for item in items() {
-            match library::save_sound(&lib, &item) {
-                Ok(sound) => lib.sounds.push(sound),
-                Err(e) => errors.push(e),
-            }
+            let saved = match item.kind {
+                MediaKind::Video => library::save_video(&lib, &item).map(|v| lib.videos.push(v)),
+                _ => library::save_sound(&lib, &item).map(|s| lib.sounds.push(s)),
+            };
+            errors.extend(saved.err());
         }
         errors
     });
     cx.spawn(async move |this, cx| {
         let errors = saved.await;
         let _ = this.update(cx, |s, cx| {
-            let pending = &mut cx.default_global::<SavingSounds>().0;
+            let pending = &mut cx.default_global::<Saving>().0;
             for id in &saving {
                 pending.remove(id);
             }
@@ -273,49 +275,73 @@ fn save_sounds(
     .detach();
 }
 
-/// The project's media item for library sound `id`, added to the pool now
-/// if needed.
-pub fn use_sound(
+/// The project's media item for library sound or video `id`, added to the
+/// pool now if needed.
+pub fn use_media(
     s: &mut EditorState,
     id: LibraryId,
     cx: &mut Context<EditorState>,
 ) -> Option<MediaId> {
-    let sound = s.library.sound(id)?.clone();
-    let (media, commands) = library::sound_media(s.bus.project(), &sound);
+    let item = s.library.media_item(id)?;
+    let label = add_label(&item);
+    let (media, commands) = library::pool_media(s.bus.project(), item);
     if commands.is_empty() {
         return Some(media);
     }
-    s.execute_batch(commands, "Add sound", cx).map(|_| media)
+    s.execute_batch(commands, label, cx).map(|_| media)
 }
 
-/// Place library sound `id` at the playhead, on an audio track with nothing
-/// over its length, else on a new one.
-pub fn place_sound(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
-    let Some(sound) = s.library.sound(id).cloned() else {
+/// Place library sound or video `id` at the playhead, on tracks with nothing
+/// over its length, else on new ones: a picture on a video track, sound on
+/// an audio track.
+pub fn place_media(s: &mut EditorState, id: LibraryId, cx: &mut Context<EditorState>) {
+    let Some(item) = s.library.media_item(id) else {
         return;
     };
-    let length = sound
-        .duration()
+    let info = item.info.as_ref();
+    let length = info
+        .map(|i| i.duration)
         .filter(|d| d.0 > 0)
         .unwrap_or(Time::from_secs_f64(5.));
     let at = s.playhead;
-    let Some(track) = free_audio_track(s, TimeRange::new(at, at + length), cx) else {
-        return;
-    };
-    let (media, mut commands) = library::sound_media(s.bus.project(), &sound);
-    commands.push(Command::InsertClip {
+    let span = TimeRange::new(at, at + length);
+    let picture = item.kind == MediaKind::Video;
+    let sound = !picture || info.is_none_or(|i| !i.audio.is_empty());
+    let kinds = [
+        picture.then_some(TrackKind::Video),
+        sound.then_some(TrackKind::Audio),
+    ];
+    let mut tracks = Vec::new();
+    for kind in kinds.into_iter().flatten() {
+        let Some(track) = free_track(s, kind, span, cx) else {
+            return;
+        };
+        tracks.push(track);
+    }
+    let label = add_label(&item);
+    let (media, mut commands) = library::pool_media(s.bus.project(), item);
+    commands.extend(tracks.into_iter().map(|track| Command::InsertClip {
         media,
         source: TimeRange::new(Time::ZERO, length),
         track,
         at,
         mode: InsertMode::Overwrite,
-    });
-    s.edit_batch(commands, "Add sound", cx);
+    }));
+    s.edit_batch(commands, label, cx);
 }
 
-/// An audio track free over `span`, added if there is none.
-fn free_audio_track(
+/// What adding library `item` to the project is called in the history.
+fn add_label(item: &MediaItem) -> &'static str {
+    match item.kind {
+        MediaKind::Video => "Add video",
+        _ => "Add sound",
+    }
+}
+
+/// A track of `kind` free over `span`, added if there is none.
+fn free_track(
     s: &mut EditorState,
+    kind: TrackKind,
     span: TimeRange,
     cx: &mut Context<EditorState>,
 ) -> Option<TrackId> {
@@ -323,16 +349,13 @@ fn free_audio_track(
     let before: Vec<TrackId> = tracks.iter().map(|t| t.id).collect();
     if let Some(track) = tracks
         .iter()
-        .filter(|t| t.kind == TrackKind::Audio && !t.locked)
+        .filter(|t| t.kind == kind && !t.locked)
         .find(|t| t.clips.iter().all(|c| !c.range().overlaps(&span)))
     {
         return Some(track.id);
     }
-    let command = Command::AddTrack {
-        kind: TrackKind::Audio,
-        index: before.len(),
-        name: s.bus.project().timeline.new_track_slot(TrackKind::Audio).1,
-    };
+    let (index, name) = s.bus.project().timeline.new_track_slot(kind);
+    let command = Command::AddTrack { kind, index, name };
     s.execute(command, cx)?;
     let tracks = &s.bus.project().timeline.tracks;
     tracks

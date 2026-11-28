@@ -105,10 +105,10 @@ pub(super) fn item_menu(
         );
     }
     let menu = move_menu(menu.separator(), panel, &group, &folders, window, cx);
-    let menu = if shared::can_save_sound(state.read(cx), id, cx) {
+    let menu = if shared::can_save_media(state.read(cx), id, cx) {
         menu.item(
             PopupMenuItem::new("Add to Library")
-                .on_click(move |_, _, cx| state.update(cx, |s, cx| shared::save_sound(s, id, cx))),
+                .on_click(move |_, _, cx| state.update(cx, |s, cx| shared::save_media(s, id, cx))),
         )
     } else {
         menu

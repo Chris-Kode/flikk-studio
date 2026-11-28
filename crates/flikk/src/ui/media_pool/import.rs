@@ -171,6 +171,12 @@ pub(crate) fn is_audio(path: &Path) -> bool {
     kind_of(path) == Some(MediaKind::Audio)
 }
 
+/// Whether `path` is audio or video: what the library keeps as a sound or
+/// a video.
+pub(crate) fn is_stock(path: &Path) -> bool {
+    matches!(kind_of(path), Some(MediaKind::Audio | MediaKind::Video))
+}
+
 fn kind_of(path: &Path) -> Option<MediaKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let ext = ext.as_str();

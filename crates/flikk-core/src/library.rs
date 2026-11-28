@@ -1,6 +1,6 @@
-//! The user's library: FX programs, presets, sounds and voices shared by
-//! every project, one file each under `paths::library()` (`.flikkfx`,
-//! `.flikkpreset`, `.flikksound`, `.flikkvoice`).
+//! The user's library: FX programs, presets, sounds, videos and voices
+//! shared by every project, one file each under `paths::library()`
+//! (`.flikkfx`, `.flikkpreset`, `.flikksound`, `.flikkvideo`, `.flikkvoice`).
 //!
 //! Projects never point into the library. Using a program copies it into
 //! the project ([`Project::fx`]) with [`FxAsset::origin`] naming the
@@ -9,9 +9,9 @@
 //! preset carries the project programs its effects use, so it applies in
 //! any project.
 //!
-//! A sound's audio lives in `paths::assets()`, and a project using it holds
-//! a media item on that file, as it does for any source. Removing a sound
-//! leaves the file, so projects using it stay online.
+//! A sound's or a video's file lives in `paths::assets()`, and a project
+//! using it holds a media item on that file, as it does for any source.
+//! Removing one leaves the file, so projects using it stay online.
 //!
 //! A voice lives on the provider's account; its file here remembers how it
 //! was made, how it reads best and a sample of it, so it is listed, heard
@@ -34,8 +34,9 @@ use std::path::{Path, PathBuf};
 pub const PROGRAM_EXT: &str = "flikkfx";
 pub const PRESET_EXT: &str = "flikkpreset";
 pub const SOUND_EXT: &str = "flikksound";
+pub const VIDEO_EXT: &str = "flikkvideo";
 pub const VOICE_EXT: &str = "flikkvoice";
-/// Name of the bin sounds from the library go into.
+/// Name of the bin sounds and videos from the library go into.
 pub const LIBRARY_BIN: &str = "Library";
 /// Bumped when an older file needs an upgrade step on load.
 const VERSION: u32 = 1;
@@ -77,6 +78,24 @@ pub struct Sound {
     pub id: LibraryId,
     pub name: String,
     /// The audio's file, relative to `paths::assets()`.
+    pub file: String,
+    pub fingerprint: Option<Fingerprint>,
+    pub info: Option<MediaInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// How a provider made it, when it was generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<Box<GenerationInfo>>,
+    #[serde(skip)]
+    pub path: PathBuf,
+}
+
+/// A video any project can use: an intro, an overlay, a logo sting.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Video {
+    pub id: LibraryId,
+    pub name: String,
+    /// The video's file, relative to `paths::assets()`.
     pub file: String,
     pub fingerprint: Option<Fingerprint>,
     pub info: Option<MediaInfo>,
@@ -173,7 +192,7 @@ struct ProgramFile {
     fx: FxAsset,
 }
 
-/// The files of presets, sounds and voices: their `format` and `version`,
+/// The files of presets, sounds, videos and voices: their `format` and `version`,
 /// then the item's own fields. One struct per kind, so a file that does
 /// not read is named as before ("expected struct PresetFile").
 macro_rules! item_files {
@@ -194,7 +213,7 @@ macro_rules! item_files {
     )*};
 }
 
-item_files!(PresetFile, SoundFile, VoiceFile);
+item_files!(PresetFile, SoundFile, VideoFile, VoiceFile);
 
 impl Header for ProgramFile {
     fn header(&self) -> (&str, u32) {
@@ -301,6 +320,40 @@ impl Stored for Sound {
     }
 }
 
+impl Stored for Video {
+    const EXT: &'static str = VIDEO_EXT;
+    const FORMAT: &'static str = "flikk-video";
+    type File = VideoFile<Self>;
+
+    fn file(&self) -> VideoFile<Self> {
+        VideoFile {
+            format: Self::FORMAT.into(),
+            version: VERSION,
+            item: self.clone(),
+        }
+    }
+
+    fn open(file: VideoFile<Self>, path: &Path) -> Result<Self> {
+        let video = file.item.at(path.to_path_buf());
+        if !video.file().is_file() {
+            return Err(format!("the video of {} is missing", name(path)));
+        }
+        Ok(video)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn at(self, path: PathBuf) -> Self {
+        Self { path, ..self }
+    }
+}
+
 impl Stored for SavedVoice {
     const EXT: &'static str = VOICE_EXT;
     const FORMAT: &'static str = "flikk-voice";
@@ -337,6 +390,7 @@ pub struct Library {
     pub programs: Vec<Program>,
     pub presets: Vec<Preset>,
     pub sounds: Vec<Sound>,
+    pub videos: Vec<Video>,
     pub voices: Vec<SavedVoice>,
 }
 
@@ -355,6 +409,7 @@ impl Library {
                 Some(PROGRAM_EXT) => read(&path).map(|p| lib.programs.push(p)),
                 Some(PRESET_EXT) => read(&path).map(|p| lib.presets.push(p)),
                 Some(SOUND_EXT) => read(&path).map(|s| lib.sounds.push(s)),
+                Some(VIDEO_EXT) => read(&path).map(|v| lib.videos.push(v)),
                 Some(VOICE_EXT) => read(&path).map(|v| lib.voices.push(v)),
                 _ => Ok(()),
             };
@@ -365,6 +420,7 @@ impl Library {
         lib.programs.sort_by_key(|p| p.asset.name.to_lowercase());
         lib.presets.sort_by_key(|p| p.name.to_lowercase());
         lib.sounds.sort_by_key(|s| s.name.to_lowercase());
+        lib.videos.sort_by_key(|v| v.name.to_lowercase());
         lib.voices.sort_by_key(|v| v.name.to_lowercase());
         lib
     }
@@ -379,6 +435,16 @@ impl Library {
 
     pub fn sound(&self, id: LibraryId) -> Option<&Sound> {
         self.sounds.iter().find(|s| s.id == id)
+    }
+
+    pub fn video(&self, id: LibraryId) -> Option<&Video> {
+        self.videos.iter().find(|v| v.id == id)
+    }
+
+    /// Sound or video `id` as a media item; not in a project or a bin yet.
+    pub fn media_item(&self, id: LibraryId) -> Option<MediaItem> {
+        let sound = self.sound(id).map(Sound::item);
+        sound.or_else(|| self.video(id).map(Video::item))
     }
 
     pub fn voice(&self, id: LibraryId) -> Option<&SavedVoice> {
@@ -403,7 +469,19 @@ impl Library {
     pub fn sound_of(&self, item: &MediaItem) -> Option<&Sound> {
         self.sounds
             .iter()
-            .find(|s| s.audio() == item.path || same_audio(&s.fingerprint, &item.fingerprint))
+            .find(|s| s.audio() == item.path || same_content(&s.fingerprint, &item.fingerprint))
+    }
+
+    /// The video holding the same file as `item`.
+    pub fn video_of(&self, item: &MediaItem) -> Option<&Video> {
+        self.videos
+            .iter()
+            .find(|v| v.file() == item.path || same_content(&v.fingerprint, &item.fingerprint))
+    }
+
+    /// Whether `item`'s file is in the library, as a sound or a video.
+    pub fn holds(&self, item: &MediaItem) -> bool {
+        self.sound_of(item).is_some() || self.video_of(item).is_some()
     }
 
     /// The library program a project program came from, if still there.
@@ -775,7 +853,7 @@ pub fn preset_commands(
 
 // -------------------------------------------------------------------- sounds
 
-fn same_audio(a: &Option<Fingerprint>, b: &Option<Fingerprint>) -> bool {
+fn same_content(a: &Option<Fingerprint>, b: &Option<Fingerprint>) -> bool {
     a.is_some() && a == b
 }
 
@@ -816,9 +894,13 @@ pub fn sound_category(generated: Option<&GenerationInfo>) -> &'static str {
     }
 }
 
-/// What to call `item` in the library: the start of what was asked of a
-/// provider, else its file name.
-fn sound_name(item: &MediaItem) -> String {
+/// What to call `item` in the library: its name in the pool when it was
+/// renamed there, else the start of what was asked of a provider, else its
+/// file name.
+fn media_name(item: &MediaItem) -> String {
+    if let Some(name) = &item.name {
+        return name.clone();
+    }
     match &item.generated {
         Some(g) => g
             .prompt
@@ -836,9 +918,9 @@ fn sound_name(item: &MediaItem) -> String {
     }
 }
 
-/// Copy `from` to `to`, kept if already there: the same audio. Slow for
-/// long audio.
-fn copy_audio(from: &Path, to: &Path) -> Result<()> {
+/// Copy `from` to `to`, kept if already there: the same content. Slow for
+/// a long file.
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
     if to.is_file() {
         return Ok(());
     }
@@ -847,11 +929,23 @@ fn copy_audio(from: &Path, to: &Path) -> Result<()> {
         std::io::copy(&mut source, file)?;
         // The copy keeps the source's permissions, as a plain copy does.
         file.set_permissions(source.metadata()?.permissions())?;
-        // On disk before it is named: sounds and samples are the user's
+        // On disk before it is named: sounds, videos and samples are the user's
         // data, which must survive a power cut.
         file.sync_all()
     })
     .map_err(|e| format!("can't copy {}: {e}", name(from)))
+}
+
+/// Copy `item`'s file into `paths::assets()`, under a folder named by its
+/// content (by `id` when that is unknown): the copy, relative to the assets.
+fn copy_in(item: &MediaItem, id: LibraryId) -> Result<String> {
+    let folder = item
+        .fingerprint
+        .as_ref()
+        .map_or_else(|| id.0.to_string(), |f| file_name_part(&f.0));
+    let file = format!("{folder}/{}", name(&item.path));
+    copy_file(&item.path, &paths::assets().join(&file))?;
+    Ok(file)
 }
 
 /// Put audio `item` in the library: its file copied in under a folder named
@@ -865,16 +959,10 @@ pub fn save_sound(lib: &Library, item: &MediaItem) -> Result<Sound> {
         return Ok(sound.clone());
     }
     let id = LibraryId::new();
-    let folder = item
-        .fingerprint
-        .as_ref()
-        .map_or_else(|| id.0.to_string(), |f| file_name_part(&f.0));
-    let file = format!("{folder}/{}", name(&item.path));
-    copy_audio(&item.path, &paths::assets().join(&file))?;
     store(&Sound {
         id,
-        name: sound_name(item),
-        file,
+        name: media_name(item),
+        file: copy_in(item, id)?,
         fingerprint: item.fingerprint.clone(),
         info: item.info.clone(),
         tags: item.tags.clone(),
@@ -893,16 +981,71 @@ pub fn rename_sound(sound: &Sound, name: &str) -> Result<Sound> {
 /// The project's media item for `sound`: one with the same audio, else a
 /// new one and the commands that add it to the [`LIBRARY_BIN`] bin.
 pub fn sound_media(project: &Project, sound: &Sound) -> (MediaId, Vec<Command>) {
-    let audio = sound.audio();
-    if let Some(item) = project
+    pool_media(project, sound.item())
+}
+
+/// The project's media item for `item`, a library sound or video
+/// ([`Library::media_item`]): one on the same file, else `item` and the
+/// commands that add it to the [`LIBRARY_BIN`] bin.
+pub fn pool_media(project: &Project, item: MediaItem) -> (MediaId, Vec<Command>) {
+    if let Some(pooled) = project
         .media
         .iter()
-        .find(|m| m.path == audio || same_audio(&m.fingerprint, &sound.fingerprint))
+        .find(|m| m.path == item.path || same_content(&m.fingerprint, &item.fingerprint))
     {
-        return (item.id, Vec::new());
+        return (pooled.id, Vec::new());
     }
-    let item = sound.item();
     (item.id, cloud::pool_commands(project, item, LIBRARY_BIN))
+}
+
+// -------------------------------------------------------------------- videos
+
+impl Video {
+    /// The video file.
+    pub fn file(&self) -> PathBuf {
+        paths::assets().join(&self.file)
+    }
+
+    /// A media item on its file; not in a project or a bin yet.
+    pub fn item(&self) -> MediaItem {
+        MediaItem {
+            fingerprint: self.fingerprint.clone(),
+            info: self.info.clone(),
+            tags: self.tags.clone(),
+            generated: self.generated.clone(),
+            ..MediaItem::new(self.file(), MediaKind::Video)
+        }
+    }
+}
+
+/// Put video `item` in the library: its file copied in under a folder named
+/// by its content, keeping the name the pool shows. A video with the same
+/// file is returned as it is.
+pub fn save_video(lib: &Library, item: &MediaItem) -> Result<Video> {
+    if item.kind != MediaKind::Video {
+        return Err(format!("{} is not a video", name(&item.path)));
+    }
+    if let Some(video) = lib.video_of(item) {
+        return Ok(video.clone());
+    }
+    let id = LibraryId::new();
+    store(&Video {
+        id,
+        name: media_name(item),
+        file: copy_in(item, id)?,
+        fingerprint: item.fingerprint.clone(),
+        info: item.info.clone(),
+        tags: item.tags.clone(),
+        generated: item.generated.clone(),
+        path: PathBuf::new(),
+    })
+}
+
+pub fn rename_video(video: &Video, name: &str) -> Result<Video> {
+    store(&Video {
+        name: name.trim().to_owned(),
+        ..video.clone()
+    })
 }
 
 // -------------------------------------------------------------------- voices
@@ -1006,7 +1149,7 @@ pub fn save_voice(
         );
         let to = paths::assets().join(&file);
         let _ = std::fs::remove_file(&to);
-        copy_audio(sample, &to)?;
+        copy_file(sample, &to)?;
         stored.sample = Some(file);
         stored.sample_info = item.info.clone();
     }

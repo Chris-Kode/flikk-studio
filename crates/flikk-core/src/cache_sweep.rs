@@ -134,7 +134,7 @@ fn leftovers(dir: &Path, now: SystemTime) {
 /// name until it is written. Nothing else there is touched: the library
 /// is the user's data.
 fn library_leftovers(dir: &Path, now: SystemTime) {
-    use crate::library::{PRESET_EXT, PROGRAM_EXT, SOUND_EXT, VOICE_EXT};
+    use crate::library::{PRESET_EXT, PROGRAM_EXT, SOUND_EXT, VIDEO_EXT, VOICE_EXT};
     for entry in read_dir(dir) {
         if entry.is_dir() {
             library_leftovers(&entry, now);
@@ -144,11 +144,9 @@ fn library_leftovers(dir: &Path, now: SystemTime) {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| flikk_os::fs::temp_owner(n).is_some());
-        let claim = entry
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| [PROGRAM_EXT, PRESET_EXT, SOUND_EXT, VOICE_EXT].contains(&e))
-            && fs::metadata(&entry).is_ok_and(|m| m.len() == 0);
+        let claim = entry.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            [PROGRAM_EXT, PRESET_EXT, SOUND_EXT, VIDEO_EXT, VOICE_EXT].contains(&e)
+        }) && fs::metadata(&entry).is_ok_and(|m| m.len() == 0);
         if (temp || claim) && age(&entry, now).is_some_and(|a| a > DAY) {
             let _ = fs::remove_file(&entry);
         }

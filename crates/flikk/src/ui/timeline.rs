@@ -464,10 +464,11 @@ impl TimelinePanel {
         }
     }
 
-    /// Add the sound to the pool, then drop it like pool media.
-    fn drop_sound(&mut self, drag: &super::SoundDrag, window: &Window, cx: &mut Context<Self>) {
+    /// Add the library's sound or video to the pool, then drop it like
+    /// pool media.
+    fn drop_stock(&mut self, drag: &super::StockDrag, window: &Window, cx: &mut Context<Self>) {
         let media = self.state.update(cx, |s, cx| {
-            super::library::shared::use_sound(s, drag.sound, cx)
+            super::library::shared::use_media(s, drag.item, cx)
         });
         let Some(media) = media else {
             self.drop = None;
@@ -954,12 +955,12 @@ impl Render for TimelinePanel {
                                 this.drop_media(drag, window, cx)
                             }))
                             .on_drag_move(cx.listener(
-                                |this, ev: &DragMoveEvent<super::SoundDrag>, _, cx| {
+                                |this, ev: &DragMoveEvent<super::StockDrag>, _, cx| {
                                     this.media_drag_moved(ev.event.position, ev.bounds, None, cx)
                                 },
                             ))
-                            .on_drop(cx.listener(|this, drag: &super::SoundDrag, window, cx| {
-                                this.drop_sound(drag, window, cx)
+                            .on_drop(cx.listener(|this, drag: &super::StockDrag, window, cx| {
+                                this.drop_stock(drag, window, cx)
                             }))
                             .on_drag_move(cx.listener(
                                 |this, ev: &DragMoveEvent<super::FxDrag>, _, cx| {

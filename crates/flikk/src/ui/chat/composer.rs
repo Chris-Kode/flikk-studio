@@ -15,7 +15,7 @@ use crate::ui::kit::{
     Button, DropdownMenu as _, Icon, IconName, Kbd, PopupMenuItem, ScrollableElement as _,
     Textarea, Tooltip, h_flex, theme as t, v_flex,
 };
-use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, SoundDrag};
+use crate::ui::{AudioFxDrag, FxDrag, MediaDrag, RefDrag, StockDrag};
 use flikk_core::agent::{
     AgentModel, Attachment, AttachmentKind, Backend, ModelChoice, effort_label,
 };
@@ -745,7 +745,7 @@ impl Composer {
             .drag_over::<MediaDrag>(move |s, _, _, _| show(s))
             .drag_over::<FxDrag>(move |s, _, _, _| show(s))
             .drag_over::<AudioFxDrag>(move |s, _, _, _| show(s))
-            .drag_over::<SoundDrag>(move |s, _, _, _| show(s))
+            .drag_over::<StockDrag>(move |s, _, _, _| show(s))
             // Not while the agent replies: see `EditorState::attach`.
             .when(can_attach, |el| {
                 el.drag_over::<ExternalPaths>(move |s, _, _, _| show(s))
@@ -773,9 +773,9 @@ impl Composer {
                     .collect();
                 this.insert_refs(refs, window, cx)
             }))
-            .on_drop(cx.listener(|this, drag: &SoundDrag, window, cx| {
+            .on_drop(cx.listener(|this, drag: &StockDrag, window, cx| {
                 let media = this.state.update(cx, |s, cx| {
-                    crate::ui::library::shared::use_sound(s, drag.sound, cx)
+                    crate::ui::library::shared::use_media(s, drag.item, cx)
                 });
                 let Some(media) = media else {
                     return;

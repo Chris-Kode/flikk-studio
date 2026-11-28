@@ -15,6 +15,8 @@ pub enum FxGlyph {
     Title,
     /// Audio effect: waveform lines.
     Audio,
+    /// A video in the library: a film strip.
+    Video,
     /// A project's own program: `</>`.
     Code,
 }
@@ -27,6 +29,7 @@ impl FxGlyph {
             Self::Generator => IconName::Shapes,
             Self::Title => IconName::Type,
             Self::Audio => IconName::AudioLines,
+            Self::Video => IconName::Film,
             Self::Code => IconName::CodeXml,
         }
     }

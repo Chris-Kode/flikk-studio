@@ -116,15 +116,15 @@ impl Render for FolderDrag {
     }
 }
 
-/// Drag payload for a sound from the library, added to the pool when
-/// dropped on the timeline or the chat.
+/// Drag payload for a sound or a video from the library, added to the pool
+/// when dropped on the timeline or the chat.
 #[derive(Clone, Debug)]
-pub struct SoundDrag {
-    pub sound: flikk_core::LibraryId,
+pub struct StockDrag {
+    pub item: flikk_core::LibraryId,
     pub name: SharedString,
 }
 
-impl Render for SoundDrag {
+impl Render for StockDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         drag_chip(self.name.clone())
     }
